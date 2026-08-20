@@ -420,7 +420,8 @@ fn convert_type(
     let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
         let left = typecheck::eval_const_expr(range.left(), constants)?;
         let right = typecheck::eval_const_expr(range.right(), constants)?;
-        acc.checked_mul(left.abs_diff(right) as usize + 1)
+        let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+        acc.checked_mul(width)
     });
     let resolved_width = packed_width.and_then(|width| width.checked_mul(unpacked_width?));
     (packed_ranges, unpacked_ranges, resolved_width)

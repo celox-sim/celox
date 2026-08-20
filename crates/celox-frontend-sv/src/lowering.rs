@@ -2172,7 +2172,8 @@ fn signal_type_from_sv(
                     constants,
                     parameter_types,
                 )?;
-                acc.checked_mul(left.abs_diff(right) as usize + 1)
+                let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+                acc.checked_mul(width)
             })
             .or_else(|| typ.resolved_width())
             .ok_or_else(|| {
@@ -2194,14 +2195,21 @@ fn signal_type_from_sv(
                 constants,
                 parameter_types,
             )?;
-            usize::try_from(left.abs_diff(right) + 1).ok()
+            usize::try_from(left.abs_diff(right))
+                .ok()
+                .and_then(|width| width.checked_add(1))
         })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| {
             sv::AnalyzerError::Unsupported("unresolved unpacked array dimension".to_string())
         })?;
+    let element_count = array_dims
+        .iter()
+        .copied()
+        .try_fold(1usize, usize::checked_mul)
+        .ok_or_else(|| sv::AnalyzerError::Unsupported("signal width overflow".to_string()))?;
     let width = packed_width
-        .checked_mul(array_dims.iter().copied().product())
+        .checked_mul(element_count)
         .ok_or_else(|| sv::AnalyzerError::Unsupported("signal width overflow".to_string()))?;
     let signed = typ.is_signed();
     let is_4state = !matches!(typ.kind(), sv::ir::TypeKind::Bit);
@@ -3095,10 +3103,12 @@ fn unpacked_element_width(variable: &SvVariable) -> Option<usize> {
     if variable.array_dims.is_empty() {
         return None;
     }
-    let element_count = variable.array_dims.iter().copied().product::<usize>();
-    (element_count != 0)
-        .then(|| variable.width.checked_div(element_count))
-        .flatten()
+    let element_count = variable
+        .array_dims
+        .iter()
+        .copied()
+        .try_fold(1usize, usize::checked_mul)?;
+    (element_count != 0).then(|| variable.width.checked_div(element_count))?
 }
 
 fn sv_memory_offset(variable: &SvVariable, bit_offset: usize, width: usize) -> SIROffset {

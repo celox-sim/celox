@@ -434,13 +434,34 @@ fn for_loop_initialization(
             let value = const_expr_from_expr(&assignment.2, syntax_tree)?;
             Some((name, value))
         }
-        sv_parser::ForInitialization::ListOfVariableAssignments(assignments) => {
-            let assignment = assignments.nodes.0.contents().into_iter().next()?;
-            let name = for_loop_variable_lvalue_name(&assignment.nodes.0, syntax_tree)?;
-            let value = const_expr_from_expr(&assignment.nodes.2, syntax_tree)?;
-            Some((name, value))
-        }
+        // An assignment-style initializer targets a variable in the enclosing
+        // procedural scope. Its initialization and loop steps are observable
+        // assignments, so it cannot be treated as a declaration-scoped
+        // compile-time unrolling constant.
+        sv_parser::ForInitialization::ListOfVariableAssignments(_) => None,
     }
+}
+
+fn integral_literal_is_zero(literal: &str) -> bool {
+    typecheck::parse_integral_literal(literal)
+        .is_some_and(|literal| literal.value == 0u8.into() && literal.mask == 0u8.into())
+}
+
+fn cast_is_zero_literal(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> bool {
+    matches!(
+        const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree),
+        Some(ConstExpr::Literal(literal)) if integral_literal_is_zero(&literal)
+    )
+}
+
+fn constant_cast_is_zero_literal(cast: &sv_parser::ConstantCast, syntax_tree: &SyntaxTree) -> bool {
+    matches!(
+        const_expr_from_ref_node(
+            RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
+            syntax_tree,
+        ),
+        Some(ConstExpr::Literal(literal)) if integral_literal_is_zero(&literal)
+    )
 }
 
 fn for_loop_variable_lvalue_name(
@@ -513,6 +534,12 @@ fn reject_silently_ignored_constructs(
             continue;
         }
         match child {
+            RefNode::Cast(cast) if !cast_is_zero_literal(cast, syntax_tree) => {
+                return Err(AnalyzerError::Unsupported("cast expression".to_string()));
+            }
+            RefNode::ConstantCast(cast) if !constant_cast_is_zero_literal(cast, syntax_tree) => {
+                return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
+            }
             RefNode::AnsiPortDeclarationNet(port) if port.nodes.3.is_some() => {
                 return Err(AnalyzerError::Unsupported(
                     "ANSI port default value".to_string(),
@@ -1940,7 +1967,7 @@ fn ports_from_module_node(
     syntax_tree: &SyntaxTree,
 ) -> Result<Vec<Port>, AnalyzerError> {
     let mut ports = Vec::new();
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let mut inherited_direction = PortDirection::Unspecified;
     let mut inherited_type = Type::implicit();
     for child in node {
@@ -2088,7 +2115,7 @@ fn signals_from_module_node(
     const_env: &HashMap<String, i128>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     for item in module_non_port_items(node) {
         signals_from_non_port_module_item(
             item,
@@ -2368,7 +2395,7 @@ fn signals_from_type_alias_instantiation(
 fn type_aliases_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
-) -> HashMap<String, Type> {
+) -> Result<HashMap<String, Type>, AnalyzerError> {
     let mut aliases = HashMap::default();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         if let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list {
@@ -2396,7 +2423,7 @@ fn type_aliases_from_module_node(
         };
         match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(declaration) => {
-                add_type_alias_from_data_declaration(declaration, syntax_tree, &mut aliases);
+                add_type_alias_from_data_declaration(declaration, syntax_tree, &mut aliases)?;
             }
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
                 add_type_aliases_from_localparam(&localparam.0, syntax_tree, &mut aliases);
@@ -2413,29 +2440,34 @@ fn type_aliases_from_module_node(
         };
         add_type_alias_from_type_assignment(assignment, syntax_tree, &mut aliases);
     }
-    aliases
+    Ok(aliases)
 }
 
 fn add_type_alias_from_data_declaration(
     declaration: &sv_parser::DataDeclaration,
     syntax_tree: &SyntaxTree,
     aliases: &mut HashMap<String, Type>,
-) {
+) -> Result<(), AnalyzerError> {
     let sv_parser::DataDeclaration::TypeDeclaration(declaration) = declaration else {
-        return;
+        return Ok(());
     };
     let sv_parser::TypeDeclaration::DataType(declaration) = &**declaration else {
-        return;
+        return Ok(());
     };
     let Some(name) = identifier_text(RefNode::TypeIdentifier(&declaration.nodes.2), syntax_tree)
     else {
-        return;
+        return Ok(());
     };
     let Some(r#type) = type_from_ref_node(RefNode::DataType(&declaration.nodes.1), syntax_tree)
     else {
-        return;
+        return Ok(());
     };
+    let r#type = type_with_unpacked_ranges(
+        r#type,
+        unpacked_ranges_from_variable_dimensions(&declaration.nodes.3, syntax_tree)?,
+    );
     aliases.insert(name, r#type);
+    Ok(())
 }
 
 fn add_type_aliases_from_parameter_port_list(
@@ -3382,7 +3414,7 @@ fn instances_from_module_node(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Instance>, AnalyzerError> {
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let mut instances = Vec::new();
     for item in module_non_port_items(node) {
         instances_from_non_port_module_item(
@@ -3643,6 +3675,11 @@ fn instances_from_module_instantiation(
         .map(|parameter| parameter.name().to_string())
         .collect();
     for instance in instantiation.nodes.2.contents() {
+        if !instance.nodes.0.nodes.1.is_empty() {
+            return Err(AnalyzerError::Unsupported(
+                "module instance array".to_string(),
+            ));
+        }
         let name = identifier_text(
             RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
             syntax_tree,
@@ -3800,7 +3837,7 @@ fn functions_from_module_node(
     packed_dimensions: &PackedDimensions,
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
     let mut functions = HashMap::default();
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
     for child in node {
         if inactive_nodes.iter().any(|inactive| inactive == &child) {
@@ -7620,9 +7657,9 @@ fn expr_from_primary_with_types(
         sv_parser::Primary::FunctionSubroutineCall(call) => {
             expr_from_function_subroutine_call(call, syntax_tree, packed_dimensions)
         }
-        sv_parser::Primary::Cast(cast) => {
+        sv_parser::Primary::Cast(cast) => cast_is_zero_literal(cast, syntax_tree).then(|| {
             expr_from_expression_with_types(&cast.nodes.2.nodes.1, syntax_tree, packed_dimensions)
-        }
+        })?,
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
@@ -8560,10 +8597,14 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                         .map(ConstExpr::Ident)
                 })
             }
-            sv_parser::ConstantPrimary::ConstantCast(cast) => const_expr_from_ref_node(
-                RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
-                syntax_tree,
-            ),
+            sv_parser::ConstantPrimary::ConstantCast(cast) => {
+                constant_cast_is_zero_literal(cast, syntax_tree).then(|| {
+                    const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
+                        syntax_tree,
+                    )
+                })?
+            }
             sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
                     const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)

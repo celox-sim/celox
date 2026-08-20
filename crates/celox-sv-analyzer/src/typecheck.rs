@@ -29,7 +29,7 @@ pub fn resolve_packed_width_with_env(
     ranges.iter().try_fold(1usize, |acc, range| {
         let left = eval_const_expr(range.left(), constants)?;
         let right = eval_const_expr(range.right(), constants)?;
-        let width = left.abs_diff(right) as usize + 1;
+        let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     })
 }

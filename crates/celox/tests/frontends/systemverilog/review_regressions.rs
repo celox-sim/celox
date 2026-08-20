@@ -1984,6 +1984,13 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "module instance array",
+            r#"
+            module Child(); endmodule
+            module Top(); Child child[1:0](); endmodule
+        "#,
+        ),
+        (
             "control flow inside always_comb",
             r#"
             module Top(input logic s, a, b, output logic y);
@@ -2288,6 +2295,17 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                integer i;
+                always_ff @(posedge clk) begin
+                    for (i = 0; i < 2; i = i + 1) q <= d;
+                end
+            endmodule
+        "#,
+        ),
+        (
             "delayed continuous assignment",
             r#"
             module Top(input logic a, output wire y); assign #5 y = a; endmodule
@@ -2315,6 +2333,22 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
                 assign y = {<<{a}};
+            endmodule
+        "#,
+        ),
+        (
+            "cast expression",
+            r#"
+            module Top(output logic [7:0] y);
+                assign y = 8'(16'h1234);
+            endmodule
+        "#,
+        ),
+        (
+            "cast expression",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                assign y = signed'(value);
             endmodule
         "#,
         ),
@@ -2668,6 +2702,15 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top #(parameter W = 2 ** 3)
                       (input logic [W-1:0] a, output logic [W-1:0] y);
                 assign y = a;
+            endmodule
+        "#,
+        ),
+        (
+            "signal width overflow",
+            r#"
+            module Top(output logic y);
+                logic [7:0] values [0:9223372036854775807][0:1];
+                assign y = values[0][0];
             endmodule
         "#,
         ),
