@@ -442,7 +442,7 @@ fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
         (
             "Fifo.sv",
             include_str!("../../../testdata/verilator/Fifo.sv"),
-            "cast expression",
+            "non-integer module parameter override `TYPE`",
         ),
         (
             "LinearSec.sv",

@@ -404,7 +404,10 @@ fn static_for_loop_iterations(
         .and_then(|(name, value)| Some((name, eval_ast_const_expr(&value, const_env)?)))?;
     i32::try_from(initial_value).ok()?;
     let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
-    let step = step.as_ref()?.nodes.0.contents().into_iter().next()?;
+    let steps = step.as_ref()?.nodes.0.contents();
+    let [step] = steps.as_slice() else {
+        return None;
+    };
 
     let mut values = Vec::new();
     let mut value = initial_value;
@@ -4088,13 +4091,19 @@ fn validate_function_return_type(
             let sv_parser::DataTypeOrVoid::DataType(data_type) = &**data_type else {
                 return Ok(());
             };
-            value_type_from_data_type(data_type, syntax_tree, const_env, type_aliases).is_none()
+            let r#type = type_from_ref_node(RefNode::DataType(data_type), syntax_tree)
+                .or_else(|| type_alias_from_data_type(data_type, syntax_tree, type_aliases));
+            r#type
+                .as_ref()
+                .is_some_and(|r#type| !r#type.unpacked_ranges().is_empty())
+                || value_type_from_data_type(data_type, syntax_tree, const_env, type_aliases)
+                    .is_none()
         }
         sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(_) => false,
     };
     if unsupported {
         Err(AnalyzerError::Unsupported(
-            "unsupported function return data type".to_string(),
+            "unsupported function return data type or unpacked dimension".to_string(),
         ))
     } else {
         Ok(())
@@ -4571,6 +4580,9 @@ fn function_local_types_from_block_item_iter<'a>(
             signals_from_data_declaration(&item.nodes.1, syntax_tree, type_aliases).ok()?;
         for signal in signals {
             let r#type = signal.r#type();
+            if !r#type.unpacked_ranges().is_empty() {
+                return None;
+            }
             let width = if r#type.packed_ranges().is_empty() {
                 1
             } else {
@@ -7827,7 +7839,30 @@ fn expr_from_primary_with_types(
                 .into_iter()
                 .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
                 .collect::<Option<Vec<_>>>()?;
-            (!parts.is_empty()).then_some(Expr::Concat(parts))
+            let base = (!parts.is_empty()).then_some(Expr::Concat(parts))?;
+            match concat.nodes.1.as_ref().map(|range| &range.nodes.1) {
+                None => Some(base),
+                Some(sv_parser::RangeExpression::PartSelectRange(range)) => {
+                    let sv_parser::PartSelectRange::ConstantRange(range) = &**range else {
+                        return None;
+                    };
+                    let msb = const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&range.nodes.0),
+                        syntax_tree,
+                    )?;
+                    let lsb = const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&range.nodes.2),
+                        syntax_tree,
+                    )?;
+                    Some(Expr::Select {
+                        expr: Box::new(base),
+                        msb,
+                        lsb,
+                        signed: false,
+                    })
+                }
+                Some(sv_parser::RangeExpression::Expression(_)) => None,
+            }
         }
         sv_parser::Primary::MultipleConcatenation(concat) => {
             let (count, repeated) = &concat.nodes.0.nodes.0.nodes.1;
@@ -7974,7 +8009,12 @@ fn expr_select_from_select(
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
         let Expr::Ident(name) = &base else {
-            return None;
+            return indices.is_empty().then_some(Expr::Select {
+                expr: Box::new(base),
+                msb,
+                lsb,
+                signed: false,
+            });
         };
         (msb, lsb) = flatten_select_range(name, &indices, msb, lsb, packed_dimensions)?;
         return Some(Expr::Select {
@@ -8105,6 +8145,13 @@ fn flatten_select_range(
     let Some(dimensions) = packed_dimensions.get(name) else {
         return indices.is_empty().then_some((msb, lsb));
     };
+    if indices.is_empty()
+        && dimensions.unpacked.is_empty()
+        && dimensions.packed.len() == 1
+        && !dimensions.packed[0].normalize_single
+    {
+        return Some((msb, lsb));
+    }
     let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     let dimension = dimensions.packed.get(packed_indices.len())?;
     msb = packed_index_offset(dimension, msb);
@@ -8640,7 +8687,9 @@ fn type_with_fallback_ranges(
 }
 
 fn type_with_unpacked_ranges(mut r#type: Type, ranges: Vec<UnpackedRange>) -> Type {
-    r#type.unpacked_ranges.extend(ranges);
+    let mut unpacked_ranges = ranges;
+    unpacked_ranges.extend(r#type.unpacked_ranges);
+    r#type.unpacked_ranges = unpacked_ranges;
     r#type
 }
 

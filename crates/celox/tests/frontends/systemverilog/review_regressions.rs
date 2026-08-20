@@ -2334,6 +2334,16 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                always_ff @(posedge clk) begin
+                    for (int i = 0; i < 4; i++, i++) q <= d;
+                end
+            endmodule
+        "#,
+        ),
+        (
             "delayed continuous assignment",
             r#"
             module Top(input logic a, output wire y); assign #5 y = a; endmodule
@@ -2388,6 +2398,30 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return values[1];
                 endfunction
                 assign y = pick('{default: value});
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function local data type",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                function automatic logic [7:0] pick(input logic [7:0] value);
+                    logic [7:0] tmp [2];
+                    return value;
+                endfunction
+                assign y = pick(value);
+            endmodule
+        "#,
+        ),
+        (
+            "unpacked dimension",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                typedef logic [7:0] pair_t [2];
+                function automatic pair_t make_pair();
+                    return value;
+                endfunction
+                assign y = value;
             endmodule
         "#,
         ),
@@ -3786,6 +3820,45 @@ fn remaps_trailing_part_select_bounds_in_ascending_packed_dimensions() {
 }
 
 #[test]
+fn preserves_declared_coordinates_for_non_array_packed_part_selects() {
+    let source = r#"
+        module Top(input logic [15:8] a, output logic [3:0] y);
+            assign y = a[15:12];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("non_array_packed_part_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xau8.into());
+}
+
+#[test]
+fn preserves_part_selects_on_concatenation_expressions() {
+    let source = r#"
+        module Top(input logic [7:0] value, output logic [3:0] y);
+            function automatic logic [7:0] get_word(input logic [7:0] value);
+                return value;
+            endfunction
+            assign y = {4'h0, get_word(value)}[3:0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("concatenation_part_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 0xabu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xbu8.into());
+}
+
+#[test]
 fn appends_use_site_packed_dimensions_to_typedefs() {
     let source = r#"
         module Top(input logic [7:0] value, output logic [7:0] y);
@@ -3804,6 +3877,38 @@ fn appends_use_site_packed_dimensions_to_typedefs() {
     let value = sim.signal("value");
     sim.modify(|io| io.set(value, 0xabu8)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0xabu8.into());
+}
+
+#[test]
+fn prepends_declarator_dimensions_to_typedef_dimensions() {
+    let source = r#"
+        module Top(
+            input logic [7:0] value,
+            output logic [47:0] all
+        );
+            typedef logic [7:0] row_t [0:2];
+            row_t matrix [0:1];
+
+            always_comb begin
+                matrix[0][0] = value;
+                matrix[0][1] = value + 1;
+                matrix[0][2] = value + 2;
+                matrix[1][0] = value + 3;
+                matrix[1][1] = value + 4;
+                matrix[1][2] = value + 5;
+            end
+            assign all = matrix;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typedef_dimension_order.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 0x10u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("all")), 0x151413121110u64.into());
 }
 
 #[test]
