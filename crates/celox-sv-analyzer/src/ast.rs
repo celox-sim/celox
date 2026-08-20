@@ -7565,6 +7565,12 @@ fn lvalue_from_select(
         .iter()
         .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
         .collect::<Option<Vec<_>>>()?;
+    if packed_dimensions
+        .get(&name)
+        .is_some_and(|dimensions| indices.len() < dimensions.unpacked.len())
+    {
+        return None;
+    }
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;
@@ -7643,6 +7649,12 @@ fn lvalue_from_constant_select(
             )
         })
         .collect::<Option<Vec<_>>>()?;
+    if packed_dimensions
+        .get(&name)
+        .is_some_and(|dimensions| indices.len() < dimensions.unpacked.len())
+    {
+        return None;
+    }
     if let Some(range) = &select.nodes.2 {
         let sv_parser::ConstantPartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;

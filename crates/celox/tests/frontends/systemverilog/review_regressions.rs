@@ -2019,6 +2019,15 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "continuous assignment lvalue",
+            r#"
+            module Top(input logic [23:0] row);
+                logic [7:0] values [2][3];
+                assign values[1] = row;
+            endmodule
+        "#,
+        ),
+        (
             "control flow inside always_comb",
             r#"
             module Top(input logic s, a, b, output logic y);
