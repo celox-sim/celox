@@ -3450,10 +3450,12 @@ fn write_copy_destination(
 
 /// Hex-word fallback used in traces until an AArch64 disassembler is added.
 pub fn disassemble(code: &[u8], base_addr: u64) -> String {
-    code.chunks_exact(4)
+    code.as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            let word = u32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
+            let word = u32::from_le_bytes(*bytes);
             format!("{:08x}: {word:08x}\n", base_addr + (index * 4) as u64)
         })
         .collect()
@@ -4432,8 +4434,10 @@ mod tests {
         let mut state = vec![0_u8; 32];
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         let actual = state
-            .chunks_exact(8)
-            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
         assert_eq!(actual, [44, 33, 33, 77]);
     }
