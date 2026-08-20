@@ -75,16 +75,17 @@ jobs:
             exit 1
           fi
 
-          for event_type in napi-release crates-release; do
-            jq -n \
-              --arg tag "$release_tag" \
-              --arg event_type "$event_type" \
-              '{event_type: $event_type, client_payload: {tag: $tag}}' \
-              | gh api \
-                  --method POST \
-                  "repos/$GITHUB_REPOSITORY/dispatches" \
-                  --input -
-          done
+          jq -n \
+            --arg tag "$release_tag" \
+            '{event_type: "napi-release", client_payload: {tag: $tag}}' \
+            | gh api \
+                --method POST \
+                "repos/$GITHUB_REPOSITORY/dispatches" \
+                --input -
+
+          gh workflow run publish-crates.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$release_tag"
 
   queue-release:
     name: Queue weekly release

@@ -53,8 +53,9 @@ release metadata, but tags are not deployment triggers.
 
 The same tagged stable release is published to crates.io. Nightly channels stay
 npm-only because crates.io has no mutable distribution tags. The release
-management workflow dispatches **Publish Rust Crates** after it verifies that the
-tag points at the current release commit and that the GitHub Release is public.
+management workflow dispatches **Publish Rust Crates** at that tag after it
+verifies that the tag points at the current release commit and that the GitHub
+Release is public.
 The Rust workflow repeats those checks, verifies every package archive, runs the
 external-frontend tests (including loading a separately built N-API addon), and
 then publishes in dependency order. A retry skips crate versions already present
@@ -67,13 +68,14 @@ rejects a release if any of those values differs from `VERSION`.
 Publication uses crates.io Trusted Publishing. The publish job has
 `id-token: write`, runs in the `crates-io` GitHub environment, and exchanges its
 GitHub OIDC identity for a temporary crates.io token. There is no persistent
-`CARGO_REGISTRY_TOKEN` Actions secret. The manual workflow requires an existing
-stable tag and published GitHub Release, so it is safe to use for a failed or
-partially completed publication retry.
+`CARGO_REGISTRY_TOKEN` Actions secret. A manual retry must select the existing
+stable tag as the workflow ref; the workflow has no free-form revision input.
+It also requires a published GitHub Release, so it is safe to use for a failed
+or partially completed publication retry.
 
 Create a GitHub environment named `crates-io` before the first release. Limit
-deployments to `master` and add required reviewers if publication should require
-a human approval.
+deployments to protected tags matching `v*` and add required reviewers if
+publication should require a human approval.
 
 ### First crates.io release
 

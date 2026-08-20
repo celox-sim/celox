@@ -1,21 +1,14 @@
 name: Publish Rust Crates
 
 on:
-  repository_dispatch:
-    types: [crates-release]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing v-prefixed stable release tag
-        required: true
-        type: string
 
 concurrency:
-  group: crates-publish-${{ github.event.client_payload.tag || inputs.tag }}
+  group: crates-publish-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+  RELEASE_TAG: ${{ github.ref_name }}
 
 permissions:
   contents: read
@@ -24,23 +17,17 @@ jobs:
   validate:
     name: Validate release
     runs-on: ubuntu-latest
-    outputs:
-      build_sha: ${{ steps.revision.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Resolve immutable release revision
-        id: revision
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Check release tag and version
         shell: bash
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "A v-prefixed stable release tag is required." >&2
+          if [[ "$GITHUB_REF_TYPE" != "tag" || ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Run this workflow from a v-prefixed stable release tag." >&2
             exit 1
           fi
           expected_tag="v$(tr -d '\r\n' < VERSION)"
@@ -75,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.validate.outputs.build_sha }}
+          ref: ${{ github.sha }}
 
       - uses: ./.github/actions/setup-rust
 
@@ -110,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.validate.outputs.build_sha }}
+          ref: ${{ github.sha }}
 
       - uses: ./.github/actions/setup-rust
 
