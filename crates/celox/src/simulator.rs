@@ -74,7 +74,8 @@ mod host {
     /// and an optional VCD writer. Provides low-level, event-driven control.
     ///
     /// The default type parameter `B = DefaultBackend` means that bare `Simulator`
-    /// uses the custom native backend on x86-64 and opt-in AArch64, and Cranelift elsewhere.
+    /// uses the custom native backend on a matching host and Cranelift for
+    /// cross-codegen builds or unsupported hosts.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
         pub(crate) program: RuntimeProgram,

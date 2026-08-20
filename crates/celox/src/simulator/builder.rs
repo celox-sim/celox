@@ -1577,20 +1577,19 @@ mod host {
         }
 
         /// Compiles the Veryl source and constructs the simulator.
-        /// Uses a custom native backend on x86-64 and opt-in AArch64, Cranelift elsewhere.
+        /// Uses a custom native backend when it matches the host, Cranelift
+        /// for cross-codegen builds.
         pub fn build(self) -> Result<Simulator<crate::DefaultBackend>, SimulatorError> {
             #[cfg(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             {
                 self.build_native()
             }
             #[cfg(not(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             {
                 self.build_cranelift()
@@ -1796,15 +1795,13 @@ mod host {
             self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
             #[cfg(not(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let program_res = compile_hdl_to_sir_with_layout_mode(
@@ -1836,9 +1833,8 @@ mod host {
                 }
 
                 #[cfg(any(
-                    target_arch = "x86_64",
-                    feature = "arm64-codegen",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", feature = "arm64-codegen")
                 ))]
                 let backend = if self.options.trace.mir
                     || !self.options.trace.native_profile_blocks.is_empty()
@@ -1857,9 +1853,8 @@ mod host {
                     crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
                 };
                 #[cfg(not(any(
-                    target_arch = "x86_64",
-                    feature = "arm64-codegen",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", feature = "arm64-codegen")
                 )))]
                 let backend = JitBackend::new(&laid_out, &self.options, None)?;
 
@@ -1945,15 +1940,13 @@ mod host {
             self.options.emit_triggers = true;
             self.enforce_native_force_optimizer();
             #[cfg(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
             #[cfg(not(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
@@ -1982,15 +1975,13 @@ mod host {
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             }
             #[cfg(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
             #[cfg(not(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 

@@ -590,6 +590,7 @@ dependencies = [
  "fxhash",
  "miette",
  "num-bigint",
+ "serde",
  "thiserror 2.0.20",
  "tracing",
 ]

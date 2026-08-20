@@ -1,6 +1,6 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(any(
-    target_arch = "x86_64",
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
     all(target_arch = "aarch64", feature = "experimental-arm64-backend")
 ))]
 
@@ -30,9 +30,8 @@ fn native_compilation_can_be_initialized_later() {
     assert_eq!(sim.get(sim.signal("o")), 0x5au64.into());
 }
 
-#[cfg(target_arch = "aarch64")]
 #[test]
-fn native_image_restores_runtime_without_source_compilation() {
+fn native_image_restores_runtime_metadata_without_source_compilation() {
     let code = r#"
         module Top (o: output logic<8>) {
             assign o = 8'ha5;
@@ -43,6 +42,9 @@ fn native_image_restores_runtime_without_source_compilation() {
         .compile_native()
         .unwrap()
         .into_program_image();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
     let output = image
         .reflection()
         .signals()
@@ -55,6 +57,11 @@ fn native_image_restores_runtime_without_source_compilation() {
         .build_native_from_image(image)
         .unwrap();
     assert_eq!(sim.get(output), 0xa5u64.into());
+    assert!(sim.named_signals().iter().any(|signal| signal.name == "o"));
+    assert_eq!(sim.named_hierarchy().module_name, "Top");
+    let child_output = sim.child_signal(&[], "o");
+    assert_eq!(sim.get(child_output), 0xa5u64.into());
+    assert!(!sim.build_vcd_descs(false).is_empty());
 }
 
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {

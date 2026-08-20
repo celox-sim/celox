@@ -349,6 +349,7 @@ pub struct NativeProgramImage {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
     reflection: DesignReflection,
+    frontend: crate::ir::FrontendLookup,
     initial_state: Vec<InitialStateValue<AbsoluteAddr>>,
     testbench: Option<TestbenchProgram<AbsoluteAddr>>,
     runtime_schema: NativeRuntimeSchema,
@@ -405,7 +406,7 @@ impl NativeProgramImage {
                 },
                 initial_state: self.initial_state.clone(),
             },
-            frontend: crate::ir::FrontendLookup::default(),
+            frontend: self.frontend.clone(),
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
@@ -527,6 +528,10 @@ struct CompiledNativeFunction {
     required_native_features: u8,
 }
 
+#[cfg_attr(
+    all(feature = "arm64-codegen", not(target_arch = "aarch64")),
+    allow(dead_code)
+)]
 pub(crate) struct NativeCodegenTrace {
     pub optimized_sir: String,
     pub mir: String,
@@ -1824,6 +1829,7 @@ fn compile_program(
             id_to_addr,
             id_to_event,
             reflection: sir.runtime().build_design_reflection(layout),
+            frontend: sir.runtime().frontend.clone(),
             initial_state: sir.runtime().design.initial_state.clone(),
             testbench: sir.runtime().testbench.clone(),
             runtime_schema: NativeRuntimeSchema {
@@ -1987,6 +1993,10 @@ impl NativeBackend {
         unsafe { Self::from_image(image) }
     }
 
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", feature = "arm64-codegen")
+    ))]
     pub(crate) fn new_with_codegen_trace(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,

@@ -214,6 +214,12 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--dump-ir-and-run requires --dump-ir-dir",
         });
     }
+    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
+    if opts.dump_ir_dir.is_some() {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--dump-ir-dir is unavailable when generating AArch64 code on x86-64",
+        });
+    }
     #[cfg(not(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -398,9 +404,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
             let testbench =
                 compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
             #[cfg(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             sim.start_native_execution_timing();
             let execute_cpu_start = process_cpu_time();
@@ -412,18 +417,16 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             #[cfg(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
                 .expect("native execution timing was started")
                 .elapsed();
             #[cfg(not(any(
-                target_arch = "x86_64",
-                feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let jit_execute_elapsed = Duration::ZERO;
             let execute_elapsed = execute_start.elapsed();
