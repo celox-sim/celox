@@ -64,7 +64,7 @@ tracing               = { workspace = true }
 celox-macros          = { workspace = true, optional = true }
 celox-backend-cranelift = { workspace = true, optional = true }
 celox-backend-arm64   = { workspace = true, optional = true }
-wasmtime              = { version = "47", optional = true }
+wasmtime              = { version = "48", optional = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 celox-backend-x86     = { workspace = true, optional = true }
