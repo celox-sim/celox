@@ -67,6 +67,7 @@ export type {
 	FrontendSimulatorHandle,
 	LoopBreak,
 	ModuleDefinition,
+	NativeFrontendSimulatorHandle,
 	NativeHandle,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
@@ -77,6 +78,7 @@ export type {
 	SimulatorOptions,
 	SourceFile,
 	TrueLoopSpec,
+	WasmFrontendSimulatorHandle,
 } from "./types.js";
 // 4-state helpers
 // Error types

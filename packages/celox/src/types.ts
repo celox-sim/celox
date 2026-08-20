@@ -81,27 +81,51 @@ export interface SignalLayout {
 // ---------------------------------------------------------------------------
 
 /**
- * Raw simulator handle returned by a frontend-owned native or WASM addon.
- * Frontend packages pass this to `Simulator.fromFrontendHandle`.
+ * Metadata shared by frontend-owned native and WASM simulator handles.
  */
-export interface FrontendSimulatorHandle {
+interface FrontendSimulatorHandleMetadata {
 	readonly layoutJson: string;
 	readonly eventsJson: string;
 	readonly hierarchyJson: string;
 	readonly warningsJson: string;
 	readonly stableSize: number;
 	readonly totalSize: number;
-	// Native (JIT) methods.
-	tick?(eventId: number): void;
-	tickN?(eventId: number, count: number): void;
-	evalComb?(): void;
-	dump?(timestamp: number): void;
-	sharedMemory?(): Uint8Array;
-	// WASM methods.
-	combWasmBytes?(): Uint8Array | number[];
-	eventWasmBytes?(name: string): Uint8Array | number[];
 	dispose(): void;
 }
+
+/** Raw simulator handle returned by a frontend-owned native addon. */
+export interface NativeFrontendSimulatorHandle
+	extends FrontendSimulatorHandleMetadata {
+	tick(eventId: number): void;
+	tickN(eventId: number, count: number): void;
+	evalComb(): void;
+	dump(timestamp: number): void;
+	sharedMemory(): Uint8Array;
+	initialMemoryBytes?: never;
+	combWasmBytes?: never;
+	eventWasmBytes?: never;
+}
+
+/** Raw simulator handle returned by a frontend-owned WASM addon. */
+export interface WasmFrontendSimulatorHandle
+	extends FrontendSimulatorHandleMetadata {
+	initialMemoryBytes(): Uint8Array | number[];
+	combWasmBytes(): Uint8Array | number[];
+	eventWasmBytes(name: string): Uint8Array | number[];
+	tick?: never;
+	tickN?: never;
+	evalComb?: never;
+	dump?: never;
+	sharedMemory?: never;
+}
+
+/**
+ * Raw simulator handle returned by a frontend-owned native or WASM addon.
+ * Frontend packages pass this to `Simulator.fromFrontendHandle`.
+ */
+export type FrontendSimulatorHandle =
+	| NativeFrontendSimulatorHandle
+	| WasmFrontendSimulatorHandle;
 
 /**
  * Opaque handle returned by NAPI for event-based simulation.

@@ -10,7 +10,11 @@
  * @module
  */
 
-import type { NativeSimulatorHandle } from "./types.js";
+import type {
+	FrontendSimulatorHandle,
+	NativeSimulatorHandle,
+	WasmFrontendSimulatorHandle,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Minimal WebAssembly type declarations for environments without DOM lib.
@@ -49,18 +53,7 @@ declare namespace WebAssembly {
  * Handle shape returned by a wasm32-compiled NativeSimulatorHandle.
  * Extends the standard metadata getters with WASM bytecode accessors.
  */
-export interface RawWasmSimulatorHandle {
-	readonly layoutJson: string;
-	readonly eventsJson: string;
-	readonly hierarchyJson: string;
-	readonly warningsJson: string;
-	readonly stableSize: number;
-	readonly totalSize: number;
-	initialMemoryBytes(): Uint8Array | number[];
-	combWasmBytes(): Uint8Array | number[];
-	eventWasmBytes(name: string): Uint8Array | number[];
-	dispose(): void;
-}
+export type RawWasmSimulatorHandle = WasmFrontendSimulatorHandle;
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -72,12 +65,17 @@ export interface RawWasmSimulatorHandle {
  * WASM handles expose `combWasmBytes()` instead of `tick()`.
  */
 export function isWasmHandle(
-	handle: unknown,
-): handle is RawWasmSimulatorHandle {
+	handle: FrontendSimulatorHandle,
+): handle is RawWasmSimulatorHandle;
+export function isWasmHandle(handle: unknown): boolean;
+export function isWasmHandle(handle: unknown): boolean {
 	return (
 		typeof handle === "object" &&
 		handle !== null &&
+		typeof (handle as Record<string, unknown>).initialMemoryBytes ===
+			"function" &&
 		typeof (handle as Record<string, unknown>).combWasmBytes === "function" &&
+		typeof (handle as Record<string, unknown>).eventWasmBytes === "function" &&
 		typeof (handle as Record<string, unknown>).tick !== "function"
 	);
 }

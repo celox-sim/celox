@@ -225,7 +225,7 @@ export class Simulator<P = Record<string, unknown>> {
 			buf = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
 		} else {
-			buf = raw.sharedMemory!().buffer;
+			buf = raw.sharedMemory().buffer;
 			handle = wrapDirectSimulatorHandle(raw);
 		}
 
@@ -309,7 +309,7 @@ export class Simulator<P = Record<string, unknown>> {
 			buffer = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
 		} else {
-			buffer = raw.sharedMemory!().buffer;
+			buffer = raw.sharedMemory().buffer;
 			handle = wrapDirectSimulatorHandle(raw);
 		}
 		const state: DirtyState = { dirty: isWasm };
@@ -382,7 +382,7 @@ export class Simulator<P = Record<string, unknown>> {
 			buf = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
 		} else {
-			buf = raw.sharedMemory!().buffer;
+			buf = raw.sharedMemory().buffer;
 			handle = wrapDirectSimulatorHandle(raw);
 		}
 

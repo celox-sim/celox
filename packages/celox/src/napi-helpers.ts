@@ -15,6 +15,7 @@ import type {
 	CreateResult,
 	FrontendSimulatorHandle,
 	LoopBreak,
+	NativeFrontendSimulatorHandle,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	PortInfo,
@@ -195,7 +196,7 @@ export interface RawNapiAddon {
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
 	};
-	NativeSimulationHandle: {
+	NativeSimulationHandle?: {
 		new (
 			sources: NapiSourceFile[],
 			top: string,
@@ -759,20 +760,20 @@ export function filterHierarchyForDse(
  * The buffer is shared between JS and Rust — no copies per tick.
  */
 export function wrapDirectSimulatorHandle(
-	raw: RawNapiSimulatorHandle,
+	raw: NativeFrontendSimulatorHandle,
 ): NativeSimulatorHandle {
 	return {
 		tick(eventId: number): void {
-			raw.tick!(eventId);
+			raw.tick(eventId);
 		},
 		tickN(eventId: number, count: number): void {
-			raw.tickN!(eventId, count);
+			raw.tickN(eventId, count);
 		},
 		evalComb(): void {
-			raw.evalComb!();
+			raw.evalComb();
 		},
 		dump(timestamp: number): void {
-			raw.dump!(timestamp);
+			raw.dump(timestamp);
 		},
 		dispose(): void {
 			raw.dispose();
@@ -875,7 +876,7 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 			buf = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
 		} else {
-			buf = raw.sharedMemory!().buffer;
+			buf = raw.sharedMemory().buffer;
 			handle = wrapDirectSimulatorHandle(raw);
 		}
 

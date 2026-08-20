@@ -844,13 +844,10 @@ impl NativeSimulatorHandle {
     /// This is a Rust-only adapter API. A frontend binding can accept its own
     /// artifact type in a `#[napi]` function, lower it with
     /// `celox-frontend-sdk`, build a [`celox::Simulator`], and pass the value
-    /// here without serializing an artifact to JSON.
-    pub fn from_simulator(
-        simulator: celox::Simulator,
-        four_state: bool,
-        vcd_path: Option<&str>,
-    ) -> Result<Self> {
-        Self::build_and_cache(simulator, four_state, vcd_path, None)
+    /// here without serializing an artifact to JSON. Signal metadata is always
+    /// derived from the simulator's actual memory layout.
+    pub fn from_simulator(simulator: celox::Simulator, vcd_path: Option<&str>) -> Result<Self> {
+        Self::build_and_cache(simulator, vcd_path, None)
     }
 
     /// Build an N-API handle directly from an in-memory frontend artifact.
@@ -866,7 +863,7 @@ impl NativeSimulatorHandle {
         let simulator = builder
             .build()
             .map_err(|error| Error::from_reason(error.to_string()))?;
-        Self::from_simulator(simulator, opts.four_state, opts.vcd.as_deref())
+        Self::from_simulator(simulator, opts.vcd.as_deref())
     }
 }
 
@@ -877,10 +874,10 @@ impl NativeSimulatorHandle {
     /// and return the handle with a JitBackend (and optional VcdWriter).
     fn build_and_cache(
         sim: celox::Simulator,
-        four_state: bool,
         vcd_path: Option<&str>,
         cache_key: Option<CacheKey>,
     ) -> Result<Self> {
+        let four_state = sim.layout().four_state;
         let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
         let events = sim.named_events();
@@ -1003,7 +1000,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.four_state, opts.vcd.as_deref(), Some(cache_key))
+        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
     }
 
     /// Create a simulator from a versioned external-frontend artifact.
@@ -1054,7 +1051,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.four_state, opts.vcd.as_deref(), Some(cache_key))
+        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
     }
 
     /// Returns the signal layout as a JSON string.
@@ -2969,6 +2966,23 @@ mod tests {
             .iter()
             .map(|(content, path)| (content.to_string(), std::path::PathBuf::from(path)))
             .collect()
+    }
+
+    #[test]
+    fn simulator_handle_derives_four_state_metadata_from_layout() {
+        let source = "module Top (a: input logic<1>) {}";
+        let path = std::path::Path::new("top.veryl");
+
+        for four_state in [false, true] {
+            let simulator = celox::Simulator::from_sources(vec![(source, path)], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+            let handle = NativeSimulatorHandle::from_simulator(simulator, None).unwrap();
+            let layout: serde_json::Value = serde_json::from_str(&handle.layout_json()).unwrap();
+
+            assert_eq!(layout["a"]["is_4state"].as_bool(), Some(four_state));
+        }
     }
 
     #[test]
