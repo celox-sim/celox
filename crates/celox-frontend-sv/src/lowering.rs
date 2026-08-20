@@ -1212,10 +1212,16 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             }
         }
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => expr.clone(),
-        sv::ir::Expr::Select { expr, msb, lsb } => sv::ir::Expr::Select {
+        sv::ir::Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => sv::ir::Expr::Select {
             expr: Box::new(expr_for_state_mode(expr, four_state)),
             msb: msb.clone(),
             lsb: lsb.clone(),
+            signed: *signed,
         },
         sv::ir::Expr::Concat(parts) => sv::ir::Expr::Concat(
             parts
@@ -1663,7 +1669,12 @@ fn lower_glue_parent_expr(
                 vec![id],
             ))
         }
-        sv::ir::Expr::Select { expr, msb, lsb } => {
+        sv::ir::Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
             let (inner, sources, source_ids) = lower_glue_parent_expr(
                 expr,
                 variables,
@@ -1689,8 +1700,13 @@ fn lower_glue_parent_expr(
                 .ok()?;
             let sources = select_sources(expr, sources, access)?;
             Some((
-                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
-                    .ok()?,
+                coerce_node_width(
+                    arena,
+                    node,
+                    context_width,
+                    context_signed.unwrap_or(*signed),
+                )
+                .ok()?,
                 sources,
                 source_ids,
             ))
@@ -2652,7 +2668,12 @@ fn lower_expr_with_context(
                 sources,
             ))
         }
-        sv::ir::Expr::Select { expr, msb, lsb } => {
+        sv::ir::Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
             let (inner, mut sources) = lower_expr(
                 expr,
                 variables,
@@ -2686,8 +2707,13 @@ fn lower_expr_with_context(
                 .ok()?;
             sources = select_sources(expr, sources, access)?;
             Some((
-                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
-                    .ok()?,
+                coerce_node_width(
+                    arena,
+                    node,
+                    context_width,
+                    context_signed.unwrap_or(*signed),
+                )
+                .ok()?,
                 sources,
             ))
         }
@@ -3756,10 +3782,10 @@ fn sv_glue_expr_is_signed(
             sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
-        sv::ir::Expr::Select { .. }
-        | sv::ir::Expr::Concat(_)
-        | sv::ir::Expr::RepeatConcat { .. }
-        | sv::ir::Expr::Call { .. } => false,
+        sv::ir::Expr::Select { signed, .. } => *signed,
+        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } | sv::ir::Expr::Call { .. } => {
+            false
+        }
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
@@ -3812,10 +3838,10 @@ fn sv_expr_is_signed_with_parameters(
             sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
-        sv::ir::Expr::Select { .. }
-        | sv::ir::Expr::Concat(_)
-        | sv::ir::Expr::RepeatConcat { .. }
-        | sv::ir::Expr::Call { .. } => false,
+        sv::ir::Expr::Select { signed, .. } => *signed,
+        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } | sv::ir::Expr::Call { .. } => {
+            false
+        }
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
@@ -4190,7 +4216,12 @@ fn lower_expr_to_sir_with_context(
                 context_signed.unwrap_or(signed),
             )
         }
-        sv::ir::Expr::Select { expr, msb, lsb } => {
+        sv::ir::Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
             let inner = lower_expr_to_sir_with_context(
                 builder,
                 expr,
@@ -4213,7 +4244,7 @@ fn lower_expr_to_sir_with_context(
                 builder,
                 reg,
                 context_width.unwrap_or(width),
-                context_signed.unwrap_or(false),
+                context_signed.unwrap_or(*signed),
             )
         }
         sv::ir::Expr::Resize {
@@ -4662,6 +4693,7 @@ mod tests {
             expr: Box::new(sv::ir::Expr::Ident("a".to_string())),
             msb: sv::ir::ConstExpr::Literal("15".to_string()),
             lsb: sv::ir::ConstExpr::Literal("8".to_string()),
+            signed: false,
         };
         let nested_sources = HashSet::from_iter([VarAtomBase::new(1u8, 8, 15)]);
         let narrowed = select_sources(&nested, nested_sources, BitAccess::new(0, 0)).unwrap();

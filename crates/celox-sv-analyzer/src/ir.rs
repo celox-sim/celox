@@ -706,6 +706,7 @@ pub enum Expr {
         expr: Box<Expr>,
         msb: ConstExpr,
         lsb: ConstExpr,
+        signed: bool,
     },
     Concat(Vec<Expr>),
     RepeatConcat {
@@ -896,10 +897,16 @@ impl From<ast::Expr> for Expr {
         match expr {
             ast::Expr::Ident(name) => Expr::Ident(name),
             ast::Expr::Literal(value) => Expr::Literal(value),
-            ast::Expr::Select { expr, msb, lsb } => Expr::Select {
+            ast::Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => Expr::Select {
                 expr: Box::new((*expr).into()),
                 msb: msb.into(),
                 lsb: lsb.into(),
+                signed,
             },
             ast::Expr::Concat(parts) => Expr::Concat(parts.into_iter().map(Into::into).collect()),
             ast::Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {

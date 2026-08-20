@@ -402,6 +402,7 @@ fn static_for_loop_iterations(
     let (initialization, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
     let (name, initial_value) = for_loop_initialization(initialization.as_ref()?, syntax_tree)
         .and_then(|(name, value)| Some((name, eval_ast_const_expr(&value, const_env)?)))?;
+    i32::try_from(initial_value).ok()?;
     let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
     let step = step.as_ref()?.nodes.0.contents().into_iter().next()?;
 
@@ -415,6 +416,7 @@ fn static_for_loop_iterations(
         }
         values.push(value);
         value = next_for_loop_value(step, &name, value, syntax_tree, &loop_env)?;
+        i32::try_from(value).ok()?;
     }
 
     let mut loop_env = const_env.clone();
@@ -429,6 +431,9 @@ fn for_loop_initialization(
     match initialization {
         sv_parser::ForInitialization::Declaration(declaration) => {
             let declaration = declaration.nodes.0.contents().into_iter().next()?;
+            if !for_loop_index_type_is_supported(&declaration.nodes.1) {
+                return None;
+            }
             let assignment = declaration.nodes.2.contents().into_iter().next()?;
             let name = identifier_text(RefNode::VariableIdentifier(&assignment.0), syntax_tree)?;
             let value = const_expr_from_expr(&assignment.2, syntax_tree)?;
@@ -442,15 +447,67 @@ fn for_loop_initialization(
     }
 }
 
-fn integral_literal_is_zero(literal: &str) -> bool {
-    typecheck::parse_integral_literal(literal)
-        .is_some_and(|literal| literal.value == 0u8.into() && literal.mask == 0u8.into())
+fn for_loop_index_type_is_supported(data_type: &sv_parser::DataType) -> bool {
+    matches!(
+        data_type,
+        sv_parser::DataType::Atom(data_type)
+            if matches!(
+                data_type.nodes.0,
+                sv_parser::IntegerAtomType::Int(_) | sv_parser::IntegerAtomType::Integer(_)
+            ) && !matches!(data_type.nodes.1, Some(sv_parser::Signing::Unsigned(_)))
+    )
+}
+
+fn cast_target_type(
+    casting_type: &sv_parser::CastingType,
+    syntax_tree: &SyntaxTree,
+) -> Option<ExprType> {
+    if let Some(r#type) = integer_atom_expr_type(RefNode::CastingType(casting_type)) {
+        return Some(r#type);
+    }
+    let sv_parser::CastingType::ConstantPrimary(primary) = casting_type else {
+        return None;
+    };
+    let width = eval_ast_const_expr(
+        &const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)?,
+        &HashMap::default(),
+    )?;
+    Some(ExprType {
+        width: usize::try_from(width).ok()?.max(1),
+        signed: false,
+    })
+}
+
+fn cast_target_is_named_type(
+    casting_type: &sv_parser::CastingType,
+    syntax_tree: &SyntaxTree,
+) -> bool {
+    if matches!(
+        casting_type,
+        sv_parser::CastingType::SimpleType(simple_type)
+            if matches!(
+                simple_type.as_ref(),
+                sv_parser::SimpleType::PsTypeIdentifier(_)
+            )
+    ) {
+        return true;
+    }
+    let sv_parser::CastingType::ConstantPrimary(primary) = casting_type else {
+        return false;
+    };
+    matches!(
+        const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree),
+        Some(ConstExpr::Ident(_))
+    )
 }
 
 fn cast_is_zero_literal(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> bool {
     matches!(
         const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree),
-        Some(ConstExpr::Literal(literal)) if integral_literal_is_zero(&literal)
+        Some(ConstExpr::Literal(literal))
+            if typecheck::parse_integral_literal(&literal).is_some_and(|literal| {
+                literal.value == 0u8.into() && literal.mask == 0u8.into()
+            })
     )
 }
 
@@ -460,7 +517,56 @@ fn constant_cast_is_zero_literal(cast: &sv_parser::ConstantCast, syntax_tree: &S
             RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
             syntax_tree,
         ),
-        Some(ConstExpr::Literal(literal)) if integral_literal_is_zero(&literal)
+        Some(ConstExpr::Literal(literal))
+            if typecheck::parse_integral_literal(&literal).is_some_and(|literal| {
+                literal.value == 0u8.into() && literal.mask == 0u8.into()
+            })
+    )
+}
+
+fn cast_is_supported(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> bool {
+    cast_zero_type(cast, syntax_tree).is_some()
+        || (cast_is_zero_literal(cast, syntax_tree)
+            && cast_target_is_named_type(&cast.nodes.0, syntax_tree))
+}
+
+fn constant_cast_is_supported(cast: &sv_parser::ConstantCast, syntax_tree: &SyntaxTree) -> bool {
+    constant_cast_zero_type(cast, syntax_tree).is_some()
+        || (constant_cast_is_zero_literal(cast, syntax_tree)
+            && cast_target_is_named_type(&cast.nodes.0, syntax_tree))
+}
+
+fn cast_zero_type(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> Option<ExprType> {
+    let ConstExpr::Literal(literal) = const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree)?
+    else {
+        return None;
+    };
+    let literal = typecheck::parse_integral_literal(&literal)?;
+    (literal.value == 0u8.into() && literal.mask == 0u8.into())
+        .then(|| cast_target_type(&cast.nodes.0, syntax_tree))?
+}
+
+fn constant_cast_zero_type(
+    cast: &sv_parser::ConstantCast,
+    syntax_tree: &SyntaxTree,
+) -> Option<ExprType> {
+    let ConstExpr::Literal(literal) = const_expr_from_ref_node(
+        RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
+        syntax_tree,
+    )?
+    else {
+        return None;
+    };
+    let literal = typecheck::parse_integral_literal(&literal)?;
+    (literal.value == 0u8.into() && literal.mask == 0u8.into())
+        .then(|| cast_target_type(&cast.nodes.0, syntax_tree))?
+}
+
+fn typed_zero_literal(r#type: ExprType) -> String {
+    format!(
+        "{}'{}d0",
+        r#type.width,
+        if r#type.signed { "s" } else { "" }
     )
 }
 
@@ -534,10 +640,10 @@ fn reject_silently_ignored_constructs(
             continue;
         }
         match child {
-            RefNode::Cast(cast) if !cast_is_zero_literal(cast, syntax_tree) => {
+            RefNode::Cast(cast) if !cast_is_supported(cast, syntax_tree) => {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
-            RefNode::ConstantCast(cast) if !constant_cast_is_zero_literal(cast, syntax_tree) => {
+            RefNode::ConstantCast(cast) if !constant_cast_is_supported(cast, syntax_tree) => {
                 return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
             }
             RefNode::AnsiPortDeclarationNet(port) if port.nodes.3.is_some() => {
@@ -1923,6 +2029,7 @@ pub enum Expr {
         expr: Box<Expr>,
         msb: ConstExpr,
         lsb: ConstExpr,
+        signed: bool,
     },
     Concat(Vec<Expr>),
     RepeatConcat {
@@ -2387,7 +2494,11 @@ fn signals_from_type_alias_instantiation(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
-        signals.push(Signal::new(name, r#type.clone()));
+        let signal_type = type_with_unpacked_ranges(
+            r#type.clone(),
+            unpacked_ranges_from_dimensions(&instance.nodes.0.nodes.1, syntax_tree)?,
+        );
+        signals.push(Signal::new(name, signal_type));
     }
     Ok(signals)
 }
@@ -2932,6 +3043,7 @@ fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             expr: Box::new(const_expr_to_expr(*expr)),
             msb: (*bit).clone(),
             lsb: *bit,
+            signed: false,
         },
         ConstExpr::Function { name, args } => Expr::Call {
             name,
@@ -3184,6 +3296,7 @@ struct UnpackedDimension {
 struct VariableDimensions {
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
+    signed: bool,
 }
 
 type PackedDimensions = HashMap<String, VariableDimensions>;
@@ -3199,6 +3312,7 @@ fn packed_dimensions_from_ports_and_signals(
             VariableDimensions {
                 packed: packed_dimension_widths(port.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
+                signed: port.r#type().is_signed(),
             },
         );
     }
@@ -3208,6 +3322,7 @@ fn packed_dimensions_from_ports_and_signals(
             VariableDimensions {
                 packed: packed_dimension_widths(signal.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
+                signed: signal.r#type().is_signed(),
             },
         );
     }
@@ -3415,6 +3530,30 @@ fn instances_from_module_node(
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
+    for child in node.clone() {
+        let RefNode::ModuleInstantiation(instantiation) = child else {
+            continue;
+        };
+        let module_name = identifier_text(
+            RefNode::ModuleIdentifier(&instantiation.nodes.0),
+            syntax_tree,
+        )
+        .ok_or_else(|| {
+            AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
+        })?;
+        if !type_aliases.contains_key(&module_name)
+            && instantiation
+                .nodes
+                .2
+                .contents()
+                .iter()
+                .any(|instance| !instance.nodes.0.nodes.1.is_empty())
+        {
+            return Err(AnalyzerError::Unsupported(
+                "module instance array".to_string(),
+            ));
+        }
+    }
     let mut instances = Vec::new();
     for item in module_non_port_items(node) {
         instances_from_non_port_module_item(
@@ -3675,11 +3814,6 @@ fn instances_from_module_instantiation(
         .map(|parameter| parameter.name().to_string())
         .collect();
     for instance in instantiation.nodes.2.contents() {
-        if !instance.nodes.0.nodes.1.is_empty() {
-            return Err(AnalyzerError::Unsupported(
-                "module instance array".to_string(),
-            ));
-        }
         let name = identifier_text(
             RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
             syntax_tree,
@@ -3978,6 +4112,19 @@ fn validate_function_formal_types(
             && value_type_from_data_type_or_implicit(node, syntax_tree, const_env, type_aliases)
                 .is_none()
     };
+    let has_unpacked_dimensions =
+        |node: &sv_parser::DataTypeOrImplicit, dimensions: &[sv_parser::VariableDimension]| {
+            !dimensions.is_empty()
+                || type_from_ref_node(RefNode::DataTypeOrImplicit(node), syntax_tree)
+                    .or_else(|| {
+                        type_alias_from_ref_node(
+                            RefNode::DataTypeOrImplicit(node),
+                            syntax_tree,
+                            type_aliases,
+                        )
+                    })
+                    .is_some_and(|r#type| !r#type.unpacked_ranges().is_empty())
+        };
     let invalid = match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => {
             body.nodes.3.nodes.1.as_ref().is_some_and(|ports| {
@@ -3989,7 +4136,12 @@ fn validate_function_formal_types(
                     // A type-only item can be the parser's representation of
                     // the shorthand `input logic a, b`; only validate entries
                     // that actually carry a formal identifier here.
-                    .any(|port| port.nodes.4.is_some() && unsupported(&port.nodes.3))
+                    .any(|port| {
+                        port.nodes.4.as_ref().is_some_and(|(_, dimensions, _)| {
+                            unsupported(&port.nodes.3)
+                                || has_unpacked_dimensions(&port.nodes.3, dimensions)
+                        })
+                    })
             })
         }
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => body.nodes.4.iter().any(|item| {
@@ -3997,11 +4149,19 @@ fn validate_function_formal_types(
                 return false;
             };
             unsupported(&port.nodes.3)
+                || port
+                    .nodes
+                    .4
+                    .nodes
+                    .0
+                    .contents()
+                    .iter()
+                    .any(|(_, dimensions, _)| has_unpacked_dimensions(&port.nodes.3, dimensions))
         }),
     };
     if invalid {
         Err(AnalyzerError::Unsupported(
-            "unsupported function formal data type".to_string(),
+            "unsupported function formal data type or unpacked dimension".to_string(),
         ))
     } else {
         Ok(())
@@ -4243,6 +4403,7 @@ fn function_from_declaration(
                     VariableDimensions {
                         packed: param.packed_dimensions.clone(),
                         unpacked: Vec::new(),
+                        signed: param.signed,
                     },
                 )
             }));
@@ -4298,6 +4459,7 @@ fn function_from_declaration(
                     VariableDimensions {
                         packed: param.packed_dimensions.clone(),
                         unpacked: Vec::new(),
+                        signed: param.signed,
                     },
                 )
             }));
@@ -4386,6 +4548,7 @@ fn function_local_packed_dimensions_from_block_item_iter<'a>(
                 VariableDimensions {
                     packed: function_packed_dimension_widths(signal.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
+                    signed: signal.r#type().is_signed(),
                 },
             )
         }));
@@ -5928,7 +6091,12 @@ fn substitute_expr_constants_with_parameter_literals(
             })
             .unwrap_or(Expr::Ident(name)),
         Expr::Literal(value) => Expr::Literal(value),
-        Expr::Select { expr, msb, lsb } => Expr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 *expr,
                 const_env,
@@ -5936,6 +6104,7 @@ fn substitute_expr_constants_with_parameter_literals(
             )),
             msb: substitute_const_expr_constants(msb, const_env),
             lsb: substitute_const_expr_constants(lsb, const_env),
+            signed,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
@@ -6115,7 +6284,8 @@ fn expr_signedness(
         Expr::Literal(literal) => {
             typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
         }
-        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),
+        Expr::Select { signed, .. } => Some(*signed),
+        Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),
         Expr::Resize { signed, .. } => Some(*signed),
         Expr::Unary { op, expr } => {
             if matches!(
@@ -6178,7 +6348,12 @@ fn expand_expr_calls(
     match expr {
         Expr::Ident(name) => Expr::Ident(name),
         Expr::Literal(value) => Expr::Literal(value),
-        Expr::Select { expr, msb, lsb } => Expr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
             expr: Box::new(expand_expr_calls(
                 *expr,
                 functions,
@@ -6188,6 +6363,7 @@ fn expand_expr_calls(
             )),
             msb,
             lsb,
+            signed,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
@@ -6378,10 +6554,16 @@ fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) -> Expr {
     match expr {
         Expr::Ident(name) => env.get(&name).cloned().unwrap_or(Expr::Ident(name)),
         Expr::Literal(value) => Expr::Literal(value),
-        Expr::Select { expr, msb, lsb } => Expr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
             expr: Box::new(substitute_expr_idents(*expr, env)),
             msb,
             lsb,
+            signed,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
@@ -7289,6 +7471,7 @@ fn expr_from_lvalue(lhs: &LValue) -> Expr {
             expr: Box::new(Expr::Ident(name.clone())),
             msb: msb.clone(),
             lsb: lsb.clone(),
+            signed: false,
         },
     }
 }
@@ -7539,10 +7722,16 @@ fn expr_from_expression_with_types_raw(
 fn guard_zero_divisions(expr: Expr) -> Expr {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => expr,
-        Expr::Select { expr, msb, lsb } => Expr::Select {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
             expr: Box::new(guard_zero_divisions(*expr)),
             msb,
             lsb,
+            signed,
         },
         Expr::Concat(parts) => Expr::Concat(parts.into_iter().map(guard_zero_divisions).collect()),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
@@ -7657,9 +7846,22 @@ fn expr_from_primary_with_types(
         sv_parser::Primary::FunctionSubroutineCall(call) => {
             expr_from_function_subroutine_call(call, syntax_tree, packed_dimensions)
         }
-        sv_parser::Primary::Cast(cast) => cast_is_zero_literal(cast, syntax_tree).then(|| {
-            expr_from_expression_with_types(&cast.nodes.2.nodes.1, syntax_tree, packed_dimensions)
-        })?,
+        sv_parser::Primary::Cast(cast) => {
+            let expr = expr_from_expression_with_types(
+                &cast.nodes.2.nodes.1,
+                syntax_tree,
+                packed_dimensions,
+            )?;
+            if let Some(r#type) = cast_zero_type(cast, syntax_tree) {
+                Some(Expr::Resize {
+                    expr: Box::new(expr),
+                    width: r#type.width,
+                    signed: r#type.signed,
+                })
+            } else {
+                cast_target_is_named_type(&cast.nodes.0, syntax_tree).then_some(expr)
+            }
+        }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
@@ -7779,6 +7981,7 @@ fn expr_select_from_select(
             expr: Box::new(base),
             msb,
             lsb,
+            signed: false,
         });
     }
 
@@ -7794,6 +7997,7 @@ fn expr_select_from_select(
                     expr: Box::new(base),
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
+                    signed: false,
                 });
             }
             if let Some(dimensions) = packed_dimensions.get(name)
@@ -7818,16 +8022,27 @@ fn expr_select_from_select(
                         },
                     ),
                     lsb: array_offset,
+                    signed: dimensions.signed,
                 });
             }
         }
     }
     if indices.len() == 1 {
+        let Expr::Ident(name) = &base else {
+            return None;
+        };
+        if packed_dimensions
+            .get(name)
+            .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
+        {
+            return None;
+        }
         let bit = indices[0].clone();
         return Some(Expr::Select {
             expr: Box::new(base),
             msb: bit.clone(),
             lsb: bit,
+            signed: false,
         });
     }
 
@@ -7847,6 +8062,13 @@ fn flatten_variable_select(
 
     let mut offset = ConstExpr::Literal("0".to_string());
     for (index, value) in indices[..unpacked_count].iter().enumerate() {
+        if const_expr_is_out_of_range(
+            value,
+            &dimensions.unpacked[index].left,
+            &dimensions.unpacked[index].right,
+        ) {
+            return None;
+        }
         let mut stride_parts = dimensions.unpacked[index + 1..]
             .iter()
             .map(|dimension| dimension.width.clone())
@@ -8021,6 +8243,17 @@ fn unpacked_index_offset(dimension: &UnpackedDimension, index: ConstExpr) -> Con
             right: Box::new(dimension.left.clone()),
         }),
     }
+}
+
+fn const_expr_is_out_of_range(index: &ConstExpr, left: &ConstExpr, right: &ConstExpr) -> bool {
+    let (Some(index), Some(left), Some(right)) = (
+        eval_ast_const_expr(index, &HashMap::default()),
+        eval_ast_const_expr(left, &HashMap::default()),
+        eval_ast_const_expr(right, &HashMap::default()),
+    ) else {
+        return false;
+    };
+    index < left.min(right) || index > left.max(right)
 }
 
 fn product_expr(parts: &[ConstExpr]) -> ConstExpr {
@@ -8598,12 +8831,16 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                 })
             }
             sv_parser::ConstantPrimary::ConstantCast(cast) => {
-                constant_cast_is_zero_literal(cast, syntax_tree).then(|| {
+                if let Some(r#type) = constant_cast_zero_type(cast, syntax_tree) {
+                    Some(ConstExpr::Literal(typed_zero_literal(r#type)))
+                } else if cast_target_is_named_type(&cast.nodes.0, syntax_tree) {
                     const_expr_from_ref_node(
                         RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
                         syntax_tree,
                     )
-                })?
+                } else {
+                    None
+                }
             }
             sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {

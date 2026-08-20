@@ -1991,6 +1991,24 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "continuous assignment",
+            r#"
+            module Top(output logic [23:0] row);
+                logic [7:0] values [0:1][0:2];
+                assign row = values[1];
+            endmodule
+        "#,
+        ),
+        (
+            "continuous assignment",
+            r#"
+            module Top(output logic y);
+                logic [7:0] values [0:1][0:2];
+                assign y = values[0][3];
+            endmodule
+        "#,
+        ),
+        (
             "control flow inside always_comb",
             r#"
             module Top(input logic s, a, b, output logic y);
@@ -2306,6 +2324,16 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                always_ff @(posedge clk) begin
+                    for (logic signed [1:0] i = 2; i < 0; i++) q <= d;
+                end
+            endmodule
+        "#,
+        ),
+        (
             "delayed continuous assignment",
             r#"
             module Top(input logic a, output wire y); assign #5 y = a; endmodule
@@ -2349,6 +2377,17 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [7:0] value, output logic [7:0] y);
                 assign y = signed'(value);
+            endmodule
+        "#,
+        ),
+        (
+            "unpacked dimension",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                function automatic logic [7:0] pick(input logic [7:0] values [2]);
+                    return values[1];
+                endfunction
+                assign y = pick('{default: value});
             endmodule
         "#,
         ),
@@ -2711,6 +2750,15 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output logic y);
                 logic [7:0] values [0:9223372036854775807][0:1];
                 assign y = values[0][0];
+            endmodule
+        "#,
+        ),
+        (
+            "continuous assignment",
+            r#"
+            module Top(output logic y);
+                logic [7:0] values [0:1][0:2];
+                assign y = values[1][3];
             endmodule
         "#,
         ),

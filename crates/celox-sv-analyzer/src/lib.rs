@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(assignments.len(), 1);
         assert!(matches!(
             assignments[0].rhs(),
-            ir::Expr::Select { expr, msb, lsb }
+            ir::Expr::Select { expr, msb, lsb, .. }
                 if matches!(&**expr, ir::Expr::Ident(name) if name == "o_val")
                     && typecheck::eval_const_expr(msb, &HashMap::default())
                         == Some(0)
