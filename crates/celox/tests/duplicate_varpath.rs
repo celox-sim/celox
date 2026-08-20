@@ -21,6 +21,7 @@ all_backends! {
 // The Veryl analyzer assigns different VarIds but identical VarPaths to these scoped
 // variables. Without the fix this panics during JIT compilation.
 fn test_duplicate_scoped_var_in_always_comb(sim) {
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             sel : input  logic   ,
@@ -79,6 +80,7 @@ fn test_duplicate_scoped_var_in_always_comb(sim) {
 // internal vars, and always_comb inside uses `var flag: logic;` in multiple
 // for-loop scopes.
 fn test_duplicate_scoped_var_with_generate_for(sim) {
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk   : input  clock  ,

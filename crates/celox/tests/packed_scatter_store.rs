@@ -46,6 +46,7 @@ fn packed_pattern() -> BigUint {
 all_backends! {
 
 fn packed_scatter_last_lane_does_not_touch_adjacent_storage(sim) {
+    @ignore_on(sv);
     @setup { let code = scatter_source(); }
     @build SimulatorBuilder::new(&code, "Top").optimize(true);
 

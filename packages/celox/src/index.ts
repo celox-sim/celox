@@ -55,6 +55,7 @@ export {
 	defineTbComponent,
 	runTest,
 	runTestFromProject,
+	runTestWithFrontendArtifact,
 } from "./testbench.js";
 // Core types
 /** @internal */

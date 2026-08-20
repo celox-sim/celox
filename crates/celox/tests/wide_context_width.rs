@@ -75,6 +75,7 @@ assign o = a - b;
     }
 
     fn test_wide_context_shift_left(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 i: input  logic<64>,
@@ -126,6 +127,7 @@ o = 64'hffff_ffff_ffff_ffff + 64'h1;
     }
 
     fn test_wide_runtime_shift_width_behavior(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 i: input  logic<64>,
@@ -208,6 +210,7 @@ o = 32'hffff_ffff + 1;
     }
 
     fn test_wide_context_multiplication_boundary(sim) {
+        @ignore_on(sv);
         @setup { // 64-bit * 64-bit in 128-bit context
 let code = r#"
 module Top (

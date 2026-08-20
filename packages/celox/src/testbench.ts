@@ -259,6 +259,26 @@ export function runTest(
 	);
 }
 
+/** Run a Veryl native testbench against an external frontend artifact. */
+export function runTestWithFrontendArtifact(
+	artifactJson: string,
+	sources: ReadonlyArray<SourceFile>,
+	top: string,
+	options: RunTestOptions = {},
+): NapiTestResult {
+	const { components, ...nativeOptions } = options;
+	const injected: NapiInjectedComponent[] = Object.entries(
+		components ?? {},
+	).map(([name, component]) => ({ name, ...component }));
+	return loadNativeAddon().runTestWithFrontendArtifact(
+		artifactJson,
+		sources.map(({ content, path }) => ({ content, path })),
+		top,
+		buildNapiOpts(nativeOptions),
+		injected,
+	);
+}
+
 /** Run a Veryl project testbench with optional TS components. */
 export function runTestFromProject(
 	projectPath: string,

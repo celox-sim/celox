@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
     fn indeterminate_short_circuit_lhs_executes_effectful_rhs(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     u: input logic,
@@ -41,7 +42,7 @@ module Top (
 
     fn indeterminate_ternary_executes_effectful_arms_in_order(sim) {
         // Veryl 0.20.3 retains the prior output effect after sel becomes known.
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     sel: input logic,
@@ -97,6 +98,7 @@ module Top (
 
     fn logical_unknown_truth_table_matches_comb_and_ff(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -167,6 +169,7 @@ module Top (
 
     fn ternary_unknown_condition_merges_branch_bits(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -226,6 +229,7 @@ module Top (
 
     fn wide_logical_unknown_truth_table_uses_dominant_values(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -293,6 +297,7 @@ module Top (
     }
 
     fn logical_not_known_one_dominates_unknown_bits(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -374,7 +379,7 @@ module Top (
 
     fn effectful_ternary_takes_known_true_branch_despite_unknown_bits(sim) {
         // Veryl 0.20.3 evaluates the false arm despite a known 1 in cond.
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -432,6 +437,7 @@ module Top (
 
     fn ff_procedural_control_uses_known_nonzero_truth(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -547,6 +553,7 @@ module Top (
 
     fn ff_unknown_reset_is_not_active(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -616,7 +623,7 @@ module Top (
 
     fn ff_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(wasm);
+        @ignore_on(wasm, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -662,7 +669,7 @@ module Top (
 
     fn comb_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(wasm);
+        @ignore_on(wasm, sv);
         @build Simulator::builder(r#"
 module Top (
     cond: input logic<130>,
@@ -707,6 +714,7 @@ module Top (
     }
 
     fn wide_ternary_condition_known_one_dominates_unknown_bits(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -759,7 +767,7 @@ module Top (
 
     fn wide_ternary_unknown_condition_merges_every_arm_chunk(sim) {
         // Veryl 0.20.3 produces the wrong per-bit merge above 64 bits.
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,

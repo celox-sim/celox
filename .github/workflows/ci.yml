@@ -159,7 +159,7 @@ jobs:
 
       - name: Run SystemVerilog frontend tests
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo test --locked -p celox --features systemverilog --test systemverilog
+        run: cargo test --locked -p celox --features systemverilog --tests
 
       - name: Run cocotb VPI end-to-end test
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'

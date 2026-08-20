@@ -25,6 +25,9 @@ pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
 pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchema};
+pub use celox_frontend_core::FrontendArtifactError;
+pub use celox_frontend_sdk as frontend_sdk;
+pub use celox_frontend_sdk::FrontendArtifact;
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
@@ -148,7 +151,7 @@ pub use host_api::*;
 pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
-pub use simulator::compile_to_sir;
+pub use simulator::{compile_frontend_to_sir, compile_to_sir};
 #[cfg(feature = "systemverilog")]
 pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir};
 

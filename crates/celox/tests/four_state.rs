@@ -117,7 +117,7 @@ fn test_four_state_initial_and_set(sim) {
 }
 
 fn test_ff_struct_logic_to_bit_coercion_clears_mask(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -154,7 +154,7 @@ fn test_ff_struct_logic_to_bit_coercion_clears_mask(sim) {
 }
 
 fn test_four_state_mixing(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -205,7 +205,7 @@ fn test_four_state_mixing(sim) {
 }
 
 fn test_four_state_mixing_propagation(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -767,7 +767,7 @@ fn test_four_state_always_comb_chain(sim) {
 // always_ff: X captured in FF, reset clears X
 // ==========================================================================
 fn test_four_state_ff_capture_and_reset(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -1817,7 +1817,7 @@ fn test_four_state_wide_comparison_with_x(sim) {
 // P2: Multi-bit selector (case) with X
 // ==========================================================================
 fn test_four_state_multibit_mux_with_x(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -1868,7 +1868,7 @@ fn test_four_state_multibit_mux_with_x(sim) {
 }
 
 fn test_four_state_procedural_case_x_uses_default(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -1901,7 +1901,7 @@ fn test_four_state_procedural_case_x_uses_default(sim) {
 }
 
 fn test_four_state_procedural_if_known_nonzero_with_x_is_true(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -2019,7 +2019,7 @@ fn test_four_state_width_widening_with_x(sim) {
 // P2: FF with conditional assignment + X
 // ==========================================================================
 fn test_four_state_ff_conditional_with_x(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (
@@ -3653,7 +3653,7 @@ fn test_four_state_concat_chunk_boundary_x(sim) {
 // FF: synchronous reset + X
 // ==========================================================================
 fn test_four_state_ff_sync_reset_with_x(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl, sv);
     @setup {
     let code = r#"
         module Top (

@@ -252,6 +252,53 @@ export class Simulation<P = Record<string, unknown>> {
 		);
 	}
 
+	/** Create a timed Simulation from an external frontend artifact. */
+	static fromFrontendArtifact<P = Record<string, unknown>>(
+		artifactJson: string,
+		options?: SimulatorOptions & { nativeAddonPath?: string },
+	): Simulation<P> {
+		const addon = loadNativeAddon(options?.nativeAddonPath);
+		const factory = addon.NativeSimulationHandle?.fromFrontendArtifact;
+		if (!factory) {
+			throw new Error(
+				"The loaded Celox native addon does not support timed frontend artifacts.",
+			);
+		}
+		const raw = factory.call(
+			addon.NativeSimulationHandle,
+			artifactJson,
+			buildNapiOpts(options),
+		);
+		const layout = parseNapiLayout(raw.layoutJson);
+		const events: Record<string, number> = JSON.parse(raw.eventsJson);
+		const hierarchy = filterHierarchyForDse(
+			parseHierarchyLayout(raw.hierarchyJson, events),
+			options?.deadStorePolicy,
+		);
+		const ports = buildPortsFromLayout(hierarchy.signals, events);
+		const buffer = raw.sharedMemory().buffer;
+		const handle = wrapDirectSimulationHandle(raw);
+		const state: DirtyState = { dirty: false };
+		const dut = createDut<P>(
+			buffer,
+			layout.forDut,
+			ports,
+			handle,
+			state,
+			hierarchy,
+		);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+		return new Simulation<P>(
+			handle,
+			dut,
+			events,
+			state,
+			buffer,
+			layout.signals,
+			warnings,
+		);
+	}
+
 	/**
 	 * Create a Simulation from a Veryl project directory.
 	 *

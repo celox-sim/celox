@@ -9,9 +9,9 @@ mod error;
     )
 ))]
 pub use builder::NativeCompilation;
-pub use builder::compile_to_sir;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
+pub use builder::{compile_frontend_to_sir, compile_to_sir};
 #[cfg(feature = "systemverilog")]
 pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
 pub use error::render_diagnostic;
@@ -1470,6 +1470,22 @@ mod host {
             top: &'a str,
         ) -> SimulatorBuilder<'a, Simulator> {
             SimulatorBuilder::<Simulator>::from_sources(sources, top)
+        }
+
+        /// Build a simulator from an elaborated external frontend artifact.
+        pub fn from_frontend(
+            artifact: celox_frontend_sdk::FrontendArtifact,
+        ) -> SimulatorBuilder<'static, Simulator> {
+            SimulatorBuilder::<Simulator>::from_frontend(artifact)
+        }
+
+        /// Build a Veryl native testbench around an external frontend module.
+        pub fn from_frontend_with_testbench<'a>(
+            artifact: celox_frontend_sdk::FrontendArtifact,
+            sources: Vec<(&'a str, &'a std::path::Path)>,
+            top: &'a str,
+        ) -> SimulatorBuilder<'a, Simulator> {
+            SimulatorBuilder::<Simulator>::from_frontend_with_testbench(artifact, sources, top)
         }
 
         /// Build a simulator directly from SystemVerilog sources.

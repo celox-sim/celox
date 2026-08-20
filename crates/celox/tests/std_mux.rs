@@ -9,7 +9,7 @@ all_backends! {
     // Build-only smoke test: mux with selector_pkg requires `calc_select_width`
     // evaluation while resolving module parameters and widths.
     fn test_mux_build_smoke(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let top = r#"
 module Top (
 i_select: input  logic<2>,
@@ -49,7 +49,7 @@ let code = format!(
     // Build-only smoke test: binary demux also depends on selector_pkg compile-time
     // width resolution through `calc_select_width`.
     fn test_demux_build_smoke(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let top = r#"
 module Top (
 i_select: input  logic<2>,

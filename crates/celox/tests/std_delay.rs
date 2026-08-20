@@ -8,6 +8,7 @@ all_backends! {
 
     // DELAY=0: passthrough (no delay)
     fn test_delay_zero(sim) {
+        @ignore_on(sv);
         @setup { let top = r#"
 module Top (
 clk: input  clock,
@@ -39,6 +40,7 @@ let code = format!("{}\n{top}", test_utils::veryl_std::source(&["delay", "delay.
 
     // DELAY=1: one cycle delay
     fn test_delay_one(sim) {
+        @ignore_on(sv);
         @setup { let top = r#"
 module Top (
 clk: input  clock,
@@ -87,6 +89,7 @@ let code = format!("{}\n{top}", test_utils::veryl_std::source(&["delay", "delay.
 
     // DELAY=3: three cycle pipeline
     fn test_delay_three(sim) {
+        @ignore_on(sv);
         @setup { let top = r#"
 module Top (
 clk: input  clock,

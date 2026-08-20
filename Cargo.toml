@@ -10,6 +10,7 @@ members = [
     "crates/celox-bench",
     "crates/celox-design",
     "crates/celox-frontend-core",
+    "crates/celox-frontend-sdk",
     "crates/celox-frontend-sv",
     "crates/celox-frontend-veryl",
     "crates/celox-sir",

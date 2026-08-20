@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_struct_constructor_comb_assignment(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 a: input logic<4>,
@@ -41,6 +42,7 @@ o = S'{x: a, y: b};
         // Veryl 867deb1's reference simulator debug-asserts when a non-literal
         // struct member expression needs width adjustment.
         @omit_veryl;
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 narrow: input logic<4>,

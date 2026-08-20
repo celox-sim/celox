@@ -12,6 +12,7 @@ export class NativeSimulatorHandle {
 	readonly eventsJson: string;
 	readonly fourStateInitRegionsJson: string;
 	readonly totalSize: number;
+	initialMemoryBytes(): Uint8Array;
 	combWasmBytes(): Uint8Array;
 	eventWasmBytes(name: string): Uint8Array;
 	dispose(): void;
