@@ -266,7 +266,7 @@ sv_backends! {
 
     fn simulates_veryl_generated_countones_sv(sim) {
         @setup {
-    let sv = include_str!("../../../../../benches/verilator/Countones.sv");
+    let sv = include_str!("../../../testdata/verilator/Countones.sv");
         }
         @build Simulator::from_sv_sources(vec![(sv, Path::new("Countones.sv"))], "Top");
 
@@ -281,7 +281,7 @@ sv_backends! {
 
     fn simulates_veryl_generated_onehot_sv(sim) {
         @setup {
-    let sv = include_str!("../../../../../benches/verilator/Onehot.sv");
+    let sv = include_str!("../../../testdata/verilator/Onehot.sv");
         }
         @build Simulator::from_sv_sources(vec![(sv, Path::new("Onehot.sv"))], "Top");
 
@@ -298,7 +298,7 @@ sv_backends! {
 
     fn simulates_veryl_generated_edge_detector_sv(sim) {
         @setup {
-    let sv = include_str!("../../../../../benches/verilator/EdgeDetector.sv");
+    let sv = include_str!("../../../testdata/verilator/EdgeDetector.sv");
         }
         @build Simulator::from_sv_sources(vec![(sv, Path::new("EdgeDetector.sv"))], "Top");
 
@@ -337,7 +337,7 @@ sv_backends! {
 
     fn simulates_veryl_generated_std_counter_sv(sim) {
         @setup {
-    let sv = include_str!("../../../../../benches/verilator/StdCounter.sv");
+    let sv = include_str!("../../../testdata/verilator/StdCounter.sv");
         }
         @build Simulator::from_sv_sources(vec![(sv, Path::new("StdCounter.sv"))], "Top");
 
@@ -366,7 +366,7 @@ sv_backends! {
 
     fn simulates_veryl_generated_gray_counter_sv(sim) {
         @setup {
-    let sv = include_str!("../../../../../benches/verilator/GrayCounter.sv");
+    let sv = include_str!("../../../testdata/verilator/GrayCounter.sv");
         }
         @build Simulator::from_sv_sources(vec![(sv, Path::new("GrayCounter.sv"))], "Top");
 
@@ -395,7 +395,7 @@ sv_backends! {
 
     fn simulates_veryl_generated_lfsr_sv(sim) {
         @setup {
-    let sv = include_str!("../../../../../benches/verilator/Lfsr.sv");
+    let sv = include_str!("../../../testdata/verilator/Lfsr.sv");
         }
         @build Simulator::from_sv_sources(vec![(sv, Path::new("Lfsr.sv"))], "Top");
 
@@ -422,7 +422,7 @@ sv_backends! {
 
 #[test]
 fn simulates_veryl_generated_gray_codec_sv_smoke() {
-    let sv = include_str!("../../../../../benches/verilator/GrayCodec.sv");
+    let sv = include_str!("../../../testdata/verilator/GrayCodec.sv");
     let mut sim = Simulator::from_sv_sources(vec![(sv, Path::new("GrayCodec.sv"))], "Top")
         .build_native()
         .unwrap();
@@ -441,12 +441,12 @@ fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
     for (name, sv, expected) in [
         (
             "Fifo.sv",
-            include_str!("../../../../../benches/verilator/Fifo.sv"),
+            include_str!("../../../testdata/verilator/Fifo.sv"),
             "cast expression",
         ),
         (
             "LinearSec.sv",
-            include_str!("../../../../../benches/verilator/LinearSec.sv"),
+            include_str!("../../../testdata/verilator/LinearSec.sv"),
             "local data declaration inside loop-generate",
         ),
     ] {
@@ -465,31 +465,31 @@ fn builds_veryl_generated_verilator_sv_smoke() {
     for (name, sv) in [
         (
             "Countones.sv",
-            include_str!("../../../../../benches/verilator/Countones.sv"),
+            include_str!("../../../testdata/verilator/Countones.sv"),
         ),
         (
             "EdgeDetector.sv",
-            include_str!("../../../../../benches/verilator/EdgeDetector.sv"),
+            include_str!("../../../testdata/verilator/EdgeDetector.sv"),
         ),
         (
             "GrayCodec.sv",
-            include_str!("../../../../../benches/verilator/GrayCodec.sv"),
+            include_str!("../../../testdata/verilator/GrayCodec.sv"),
         ),
         (
             "GrayCounter.sv",
-            include_str!("../../../../../benches/verilator/GrayCounter.sv"),
+            include_str!("../../../testdata/verilator/GrayCounter.sv"),
         ),
         (
             "Lfsr.sv",
-            include_str!("../../../../../benches/verilator/Lfsr.sv"),
+            include_str!("../../../testdata/verilator/Lfsr.sv"),
         ),
         (
             "Onehot.sv",
-            include_str!("../../../../../benches/verilator/Onehot.sv"),
+            include_str!("../../../testdata/verilator/Onehot.sv"),
         ),
         (
             "StdCounter.sv",
-            include_str!("../../../../../benches/verilator/StdCounter.sv"),
+            include_str!("../../../testdata/verilator/StdCounter.sv"),
         ),
     ] {
         Simulator::from_sv_sources(vec![(sv, Path::new(name))], "Top")

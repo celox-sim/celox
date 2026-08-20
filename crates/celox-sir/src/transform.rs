@@ -8,7 +8,7 @@ use crate::{
 /// Merge multiple SIR ExecutionUnits into a single EU.
 /// Each EU's Return becomes a Jump to the next EU's entry block.
 /// RegisterIds and BlockIds are renumbered to avoid conflicts.
-/// Returns (merged_eu, eu_entry_block_ids) where eu_entry_block_ids[i] is the
+/// Returns (merged_eu, eu_entry_block_ids) where `eu_entry_block_ids[i]` is the
 /// BlockId of the i-th EU's entry block in the merged EU (for i > 0).
 pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>, Vec<BlockId>) {
     let units = units.iter().collect::<Vec<_>>();

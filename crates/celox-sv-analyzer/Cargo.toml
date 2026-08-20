@@ -1,6 +1,7 @@
 [package]
 name                  = "celox-sv-analyzer"
 version.workspace     = true
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true

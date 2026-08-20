@@ -19,14 +19,14 @@ use celox::{
 #[path = "../tests/fixtures/veryl_std.rs"]
 mod veryl_std;
 
-const TOP_N1000: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
+const TOP_N1000: &str = include_str!("../testdata/veryl/top_n1000.veryl");
 
 fn linear_sec_source() -> String {
     format!(
         "{}\n{}\n{}",
         veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
         veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
-        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
+        include_str!("../testdata/veryl/linear_sec_top.veryl"),
     )
 }
 

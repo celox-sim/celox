@@ -701,7 +701,7 @@ pub enum MInst {
     // ── Data movement ──────────────────────────────────────────
     /// dst = src (full 64-bit word copy)
     Mov { dst: VReg, src: VReg },
-    /// dst = zero_extend(src[31:0])
+    /// `dst = zero_extend(src[31:0])`
     Mov32 { dst: VReg, src: VReg },
     /// dst = immediate
     LoadImm { dst: VReg, value: u64 },
@@ -911,29 +911,29 @@ pub enum MInst {
     // ── ALU (3-operand SSA) ────────────────────────────────────
     /// dst = lhs + rhs modulo 2^64
     Add { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = zero_extend((lhs + rhs)[31:0])
+    /// `dst = zero_extend((lhs + rhs)[31:0])`
     Add32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs - rhs modulo 2^64
     Sub { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = zero_extend((lhs - rhs)[31:0])
+    /// `dst = zero_extend((lhs - rhs)[31:0])`
     Sub32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs * rhs modulo 2^64
     Mul { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = zero_extend((lhs * rhs)[31:0])
+    /// `dst = zero_extend((lhs * rhs)[31:0])`
     Mul32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = upper 64 bits of lhs * rhs (unsigned)
     UMulHi { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs & rhs (full 64-bit word)
     And { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = zero_extend((lhs & rhs)[31:0])
+    /// `dst = zero_extend((lhs & rhs)[31:0])`
     And32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs | rhs (full 64-bit word)
     Or { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = zero_extend((lhs | rhs)[31:0])
+    /// `dst = zero_extend((lhs | rhs)[31:0])`
     Or32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs ^ rhs (full 64-bit word)
     Xor { dst: VReg, lhs: VReg, rhs: VReg },
-    /// dst = zero_extend((lhs ^ rhs)[31:0])
+    /// `dst = zero_extend((lhs ^ rhs)[31:0])`
     Xor32 { dst: VReg, lhs: VReg, rhs: VReg },
     /// dst = lhs >> rhs (logical)
     Shr { dst: VReg, lhs: VReg, rhs: VReg },
@@ -945,7 +945,7 @@ pub enum MInst {
     // ── ALU with immediate ─────────────────────────────────────
     /// dst = src & imm (full 64-bit word)
     AndImm { dst: VReg, src: VReg, imm: u64 },
-    /// dst = zero_extend((src & imm)[31:0])
+    /// `dst = zero_extend((src & imm)[31:0])`
     ///
     /// `imm` must fit in u32.
     AndImm32 { dst: VReg, src: VReg, imm: u32 },

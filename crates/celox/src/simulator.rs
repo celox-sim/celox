@@ -1477,14 +1477,18 @@ mod host {
             SimulatorBuilder::<Simulator>::from_sources(sources, top)
         }
 
-        /// Build a simulator from an elaborated external frontend artifact.
+        /// Low-level adapter hook for an elaborated external frontend artifact.
+        ///
+        /// Frontend crates should wrap this with a constructor named for their
+        /// own artifact type instead of exposing
+        /// [`celox_frontend_sdk::FrontendArtifact`] to applications.
         pub fn from_frontend(
             artifact: celox_frontend_sdk::FrontendArtifact,
         ) -> SimulatorBuilder<'static, Simulator> {
             SimulatorBuilder::<Simulator>::from_frontend(artifact)
         }
 
-        /// Build a Veryl native testbench around an external frontend module.
+        /// Low-level adapter hook for a Veryl testbench around an external module.
         pub fn from_frontend_with_testbench<'a>(
             artifact: celox_frontend_sdk::FrontendArtifact,
             sources: Vec<(&'a str, &'a std::path::Path)>,

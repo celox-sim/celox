@@ -1,0 +1,19 @@
+module Top (
+    clk    : input  clock,
+    rst    : input  reset,
+    i_up   : input  logic,
+    o_count: output logic<32>,
+) {
+    inst u: gray_counter #(WIDTH: 32) (
+        i_clk       : clk,
+        i_rst       : rst,
+        i_clear     : 1'b0,
+        i_set       : 1'b0,
+        i_set_value : 32'b0,
+        i_up,
+        i_down      : 1'b0,
+        o_count,
+        o_count_next: _,
+        o_wrap_around: _,
+    );
+}

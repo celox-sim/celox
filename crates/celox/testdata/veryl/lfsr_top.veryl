@@ -1,0 +1,16 @@
+module Top (
+    clk     : input  clock,
+    rst     : input  reset,
+    i_en    : input  logic,
+    i_set   : input  logic,
+    i_setval: input  logic<32>,
+    o_val   : output logic<32>,
+) {
+    inst u: lfsr_galois #(SIZE: 32) (
+        i_clk   : clk,
+        i_en,
+        i_set,
+        i_setval,
+        o_val,
+    );
+}

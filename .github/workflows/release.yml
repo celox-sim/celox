@@ -29,6 +29,7 @@ jobs:
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-actions: write
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
@@ -82,6 +83,10 @@ jobs:
                 --method POST \
                 "repos/$GITHUB_REPOSITORY/dispatches" \
                 --input -
+
+          gh workflow run publish-crates.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$release_tag"
 
   queue-release:
     name: Queue weekly release

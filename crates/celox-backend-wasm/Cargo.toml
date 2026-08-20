@@ -1,21 +1,23 @@
 [package]
 name = "celox-backend-wasm"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Celox WebAssembly code-generation backend"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-celox-design = { path = "../celox-design" }
-celox-sir = { path = "../celox-sir" }
-celox-state-layout = { path = "../celox-state-layout" }
+celox-design = { workspace = true }
+celox-sir = { workspace = true }
+celox-state-layout = { workspace = true }
 fxhash = { workspace = true }
 wasm-encoder = "0.256"
 
 [dev-dependencies]
-celox-backend-cranelift = { path = "../celox-backend-cranelift" }
+celox-backend-cranelift = { workspace = true }
 num-bigint = { workspace = true }
 wasmtime = "47"
 

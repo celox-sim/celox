@@ -1270,7 +1270,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
 /// making it easy to visualize the expression structure. Each node type displays relevant
 /// information:
 ///
-/// - **Input**: Shows variable ID, dynamic indices (if any), and bit range [lsb:msb]
+/// - **Input**: Shows variable ID, dynamic indices (if any), and bit range `[lsb:msb]`
 /// - **Constant**: Displays the value in hexadecimal and width in bits
 /// - **Binary**: Shows the operation and recursively formats both operands with indentation
 /// - **Unary**: Shows the operation and recursively formats the inner expression

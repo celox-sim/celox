@@ -1,6 +1,7 @@
 # Celox
 
 [![npm version](https://img.shields.io/npm/v/%40celox-sim%2Fcelox.svg)](https://www.npmjs.com/package/@celox-sim/celox)
+[![crates.io](https://img.shields.io/crates/v/celox.svg)](https://crates.io/crates/celox)
 
 **An experimental, compiler-based RTL simulator for [Veryl](https://veryl-lang.org/).**
 
@@ -44,6 +45,8 @@ compiler demo: the result can run real RTL tests, in Node.js or in a browser.
 - Override top-level parameters and include test-only Veryl sources.
 - Inspect child instances and emit VCD waveforms.
 - Compile a Veryl design into a native executable and run cocotb tests through VPI.
+- Build an external netlist frontend with the Rust SDK and ship its simulator as
+  a native application binary or a frontend-specific N-API/WASI addon.
 - Run through the custom x86-64 backend, the Cranelift fallback, or WebAssembly.
   A custom AArch64 backend is also available behind an experimental feature.
 
@@ -192,6 +195,7 @@ and API changes while the design is still evolving.
 - [Getting Started](https://celox-sim.github.io/celox/guide/getting-started)
 - [Writing Tests](https://celox-sim.github.io/celox/guide/writing-tests)
 - [Celox CLI and cocotb](https://celox-sim.github.io/celox/guide/cocotb)
+- [External Frontends and Rust Binaries](https://celox-sim.github.io/celox/guide/external-frontends)
 - [Four-State Simulation](https://celox-sim.github.io/celox/guide/four-state)
 - [VCD Waveforms](https://celox-sim.github.io/celox/guide/vcd)
 - [TypeScript API](https://celox-sim.github.io/celox/api/)
