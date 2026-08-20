@@ -825,6 +825,39 @@ fn rejects_loop_substituted_out_of_range_array_indices() {
 }
 
 #[test]
+fn rejects_out_of_range_packed_array_element_indices() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [7:0] a[0:1], output logic y);
+            assign y = a[0][8];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment expression"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_signedness_in_loop_conditions() {
+    let source = r#"
+        module Top(input logic clk, output logic q, output logic [1:0] result);
+            always_ff @(posedge clk) begin
+                q <= 1'b0;
+                for (int i = -1; i < 32'd1; i++) result[i + 1] <= 1'b1;
+            end
+        endmodule
+        "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("signed_loop_condition.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("result")), 0u8.into());
+}
+
+#[test]
 fn uses_the_first_always_ff_event_as_a_negedge_clock() {
     let source = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);

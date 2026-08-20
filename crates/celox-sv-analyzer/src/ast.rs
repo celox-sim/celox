@@ -417,6 +417,14 @@ fn static_for_loop_iterations(
     for _ in 0..10_000 {
         let mut loop_env = const_env.clone();
         loop_env.insert(name.clone(), value);
+        insert_parameter_type_markers(
+            &mut loop_env,
+            &name,
+            ExprType {
+                width: 32,
+                signed: true,
+            },
+        );
         if eval_ast_const_expr(&condition, &loop_env)? == 0 {
             return Some((name, values));
         }
@@ -427,6 +435,14 @@ fn static_for_loop_iterations(
 
     let mut loop_env = const_env.clone();
     loop_env.insert(name.clone(), value);
+    insert_parameter_type_markers(
+        &mut loop_env,
+        &name,
+        ExprType {
+            width: 32,
+            signed: true,
+        },
+    );
     (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
 }
 
@@ -7211,7 +7227,16 @@ fn conditional_assignments_from_statement(
                 let mut loop_env = const_env.clone();
                 loop_env.insert(name.clone(), value);
                 let mut loop_packed_dimensions = packed_dimensions.clone();
-                loop_packed_dimensions.const_env = loop_env.clone();
+                let mut loop_const_env = loop_env.clone();
+                insert_parameter_type_markers(
+                    &mut loop_const_env,
+                    &name,
+                    ExprType {
+                        width: 32,
+                        signed: true,
+                    },
+                );
+                loop_packed_dimensions.const_env = loop_const_env;
                 let start = assignments.len();
                 conditional_assignments_from_statement_or_null(
                     body,
@@ -8284,13 +8309,21 @@ fn flatten_packed_select(
 
     let mut offset = ConstExpr::Literal("0".to_string());
     for (idx, index) in indices.iter().enumerate() {
+        let dimension = &dimensions[idx];
+        if const_expr_is_out_of_range(
+            index,
+            &dimension.left,
+            &dimension.right,
+            &packed_dimensions.const_env,
+        ) {
+            return None;
+        }
         let stride = product_expr(
             &dimensions[idx + 1..]
                 .iter()
                 .map(|dimension| dimension.width.clone())
                 .collect::<Vec<_>>(),
         );
-        let dimension = &dimensions[idx];
         let index = packed_index_offset(dimension, index.clone());
         let term = if is_one(&stride) {
             index
