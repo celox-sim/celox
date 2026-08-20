@@ -5,6 +5,7 @@ mod error;
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -26,6 +27,7 @@ mod host {
     use crate::backend::RuntimeEventBuffer;
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     use crate::backend::native::{NativeBackend, SharedNativeCode};
@@ -72,7 +74,8 @@ mod host {
     /// and an optional VCD writer. Provides low-level, event-driven control.
     ///
     /// The default type parameter `B = DefaultBackend` means that bare `Simulator`
-    /// uses the custom native backend on x86-64 and opt-in AArch64, and Cranelift elsewhere.
+    /// uses the custom native backend on a matching host and Cranelift for
+    /// cross-codegen builds or unsupported hosts.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
         pub(crate) program: RuntimeProgram,
@@ -484,6 +487,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub(crate) fn runtime_event_write_seq_for_backend<B: SimBackend>(backend: &B) -> u64 {
@@ -501,6 +505,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
@@ -1472,14 +1477,18 @@ mod host {
             SimulatorBuilder::<Simulator>::from_sources(sources, top)
         }
 
-        /// Build a simulator from an elaborated external frontend artifact.
+        /// Low-level adapter hook for an elaborated external frontend artifact.
+        ///
+        /// Frontend crates should wrap this with a constructor named for their
+        /// own artifact type instead of exposing
+        /// [`celox_frontend_sdk::FrontendArtifact`] to applications.
         pub fn from_frontend(
             artifact: celox_frontend_sdk::FrontendArtifact,
         ) -> SimulatorBuilder<'static, Simulator> {
             SimulatorBuilder::<Simulator>::from_frontend(artifact)
         }
 
-        /// Build a Veryl native testbench around an external frontend module.
+        /// Low-level adapter hook for a Veryl testbench around an external module.
         pub fn from_frontend_with_testbench<'a>(
             artifact: celox_frontend_sdk::FrontendArtifact,
             sources: Vec<(&'a str, &'a std::path::Path)>,
@@ -1530,6 +1539,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     impl Simulator<NativeBackend> {

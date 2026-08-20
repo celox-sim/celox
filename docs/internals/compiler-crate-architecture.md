@@ -179,8 +179,9 @@ The following rules define the intended architecture:
 1. Source-language types stop at the frontend boundary. One language adapter
    must not depend on another language frontend; shared assembly belongs in
    `celox-frontend-core`.
-2. External frontends depend only on `celox-frontend-sdk` and exchange a
-   versioned artifact; internal symbolic and scheduled types are not a public
+2. External frontend lowering depends on `celox-frontend-sdk`; a Rust simulator
+   adapter additionally depends on `celox`, and an N-API/WASI adapter on
+   `celox-napi`. Internal symbolic and scheduled types are not a public
    compatibility surface.
 3. Semantic state identities remain distinct from physical memory offsets until
    layout finalization.

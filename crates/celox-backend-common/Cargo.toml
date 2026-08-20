@@ -1,11 +1,13 @@
 [package]
 name = "celox-backend-common"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Target-independent machine-code backend primitives for Celox"
 edition.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

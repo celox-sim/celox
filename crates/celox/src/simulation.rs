@@ -99,7 +99,10 @@ impl Simulation {
         crate::SimulatorBuilder::<Simulation>::from_sources(sources, top)
     }
 
-    /// Build a timed simulation from an elaborated external frontend artifact.
+    /// Low-level adapter hook for a timed simulation from an external artifact.
+    ///
+    /// Frontend crates should wrap this with a constructor named for their own
+    /// artifact type.
     pub fn from_frontend(
         artifact: celox_frontend_sdk::FrontendArtifact,
     ) -> crate::SimulatorBuilder<'static, Simulation> {

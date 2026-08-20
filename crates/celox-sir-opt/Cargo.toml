@@ -1,11 +1,13 @@
 [package]
 name = "celox-sir-opt"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Backend-independent SIR optimization policy and passes for Celox"
 edition.workspace = true
+rust-version.workspace = true
 
 [features]
 default = []
@@ -15,10 +17,10 @@ wide-native-memory = []
 [dependencies]
 tracing = { workspace = true }
 bit-set             = { workspace = true }
-celox-analysis      = { path = "../celox-analysis" }
-celox-design        = { path = "../celox-design" }
-celox-sir           = { path = "../celox-sir" }
-celox-state-layout  = { path = "../celox-state-layout" }
+celox-analysis      = { workspace = true }
+celox-design        = { workspace = true }
+celox-sir           = { workspace = true }
+celox-state-layout  = { workspace = true }
 fxhash              = { workspace = true }
 itertools           = { workspace = true }
 num-bigint          = "0.5"

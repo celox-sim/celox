@@ -1,94 +1,131 @@
-# External Frontends
+# External Frontend Integration
 
-An external frontend can target Celox without depending on compiler-internal
-crates. Build a validated module with the published `celox-frontend-sdk` crate,
-serialize its versioned `FrontendArtifact`, and pass that JSON to a Celox host.
+This guide is for authors of frontend crates and packages. Applications should
+work with the frontend's own artifact type and constructor, such as
+`from_my_artifact`. `celox_frontend_sdk::FrontendArtifact` is the bridge from
+that frontend into Celox; it should not replace the frontend's public artifact
+model.
+
+## Lower into Celox inside the frontend
+
+Use `celox-frontend-sdk` in the frontend adapter. The adapter translates its
+own elaborated representation into a validated Celox module:
 
 ```rust
-use celox_frontend_sdk::{BinaryOp, ModuleBuilder, ValueType};
+use celox_frontend_sdk::{BinaryOp, FrontendArtifact, ModuleBuilder, ValueType};
 
-let byte = ValueType::bits(8)?;
-let mut module = ModuleBuilder::new("NetAdder")?;
-let a = module.input("a", byte)?;
-let b = module.input("b", byte)?;
-let y = module.output("y", byte)?;
-let a_expr = module.read(a)?;
-let b_expr = module.read(b)?;
-let sum = module.binary(BinaryOp::Add, a_expr, b_expr, byte)?;
-let y_target = module.whole(y)?;
-module.assign(y_target, sum)?;
-
-let artifact_json = module.finish().to_json()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+fn lower_to_celox(artifact: &MyArtifact) -> Result<FrontendArtifact, MyError> {
+    let byte = ValueType::bits(artifact.width)?;
+    let mut module = ModuleBuilder::new(&artifact.module_name)?;
+    let a = module.input("a", byte)?;
+    let b = module.input("b", byte)?;
+    let y = module.output("y", byte)?;
+    let a_expr = module.read(a)?;
+    let b_expr = module.read(b)?;
+    let sum = module.binary(BinaryOp::Add, a_expr, b_expr, byte)?;
+    let y_target = module.whole(y)?;
+    module.assign(y_target, sum)?;
+    Ok(module.finish())
+}
 ```
 
-The first SDK release represents one flattened module. It supports typed signals,
-constants, combinational expressions and assignments, edge-triggered registers,
-asynchronous reset, synchronous enable, and initial values. Hierarchical netlists,
-memories, latches, and custom primitives should be flattened or lowered by the
-external frontend before emitting an artifact. Bidirectional (`inout`) signals
-are also unsupported in artifact format version 1; lower them to separate input,
-output, and output-enable signals.
+`MyArtifact` and `MyError` belong to the frontend. Convert SDK validation
+failures into the frontend's error type instead of exposing a Celox JSON blob as
+the normal application API.
 
-## TypeScript testbenches
+## Expose a frontend-specific Rust constructor
 
-The artifact retains port and signal metadata, so the regular typed DUT API works:
+The frontend crate can add an artifact-specific associated function to the
+re-exported simulator with an extension trait:
 
-```ts
-import { Simulator } from "@celox-sim/celox";
+```rust
+pub use celox::Simulator;
 
-interface NetAdderPorts {
-  a: bigint;
-  b: bigint;
-  readonly y: bigint;
+pub trait MyFrontendSimulatorExt: Sized {
+    fn from_my_artifact(artifact: MyArtifact) -> Result<Self, MyError>;
 }
 
-const sim = Simulator.fromFrontendArtifact<NetAdderPorts>(artifactJson);
-sim.dut.a = 10n;
-sim.dut.b = 23n;
-console.assert(sim.dut.y === 33n);
-sim.dispose();
-```
-
-Use `Simulation.fromFrontendArtifact` when the testbench needs timed clocks and
-scheduled events.
-
-## Veryl native testbenches
-
-`runTestWithFrontendArtifact` compiles a Veryl test module and makes the artifact
-module available through the existing external-module namespace:
-
-```veryl
-#[test(t)]
-module NetlistTb {
-    var a: logic<8>;
-    var b: logic<8>;
-    var y: logic<8>;
-    inst dut: $sv::NetAdder (a, b, y);
-
-    initial {
-        a = 8'd10;
-        b = 8'd23;
-        $assert(y == 8'd33);
-        $finish();
+impl MyFrontendSimulatorExt for Simulator {
+    fn from_my_artifact(artifact: MyArtifact) -> Result<Self, MyError> {
+        let artifact = lower_to_celox(&artifact)?;
+        Ok(Simulator::from_frontend(artifact).build()?)
     }
 }
 ```
 
-```ts
-import { runTestWithFrontendArtifact } from "@celox-sim/celox";
+An application then depends on the frontend crate and builds an ordinary Rust
+binary without knowing about `FrontendArtifact`:
 
-const result = runTestWithFrontendArtifact(
-  artifactJson,
-  [{ path: "netlist_tb.veryl", content: testbenchSource }],
-  "NetlistTb",
-);
+```rust
+use my_frontend::{MyFrontendSimulatorExt as _, Simulator};
+
+fn main() -> Result<(), my_frontend::Error> {
+    let artifact = my_frontend::load("design.myhdl")?;
+    let mut sim = Simulator::from_my_artifact(artifact)?;
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(a, 10u8);
+        io.set(b, 23u8);
+    })?;
+    assert_eq!(sim.get(y), 33u8.into());
+    Ok(())
+}
 ```
 
-Here `$sv` denotes Celox's existing external-module link namespace; the design
-itself still comes from exactly one external frontend artifact. This compatibility
-path does not turn the netlist frontend into a mixed Veryl/SystemVerilog frontend.
+```bash
+cargo build --release
+```
 
-Artifacts are validated again when Celox compiles them. Treat the
-`format_version` field as the wire-format compatibility boundary and use the SDK
-builder instead of constructing JSON by hand.
+The `celox` and `celox-frontend-sdk` dependencies in a Rust binary adapter must
+use matching versions. A JavaScript addon also uses the matching `celox-napi`
+version. Other published `celox-*` crates are implementation dependencies.
+
+## Expose `fromMyArtifact` from a TypeScript package
+
+A frontend that ships an N-API or WASI addon can accept `MyArtifact` in that
+addon and return Celox's standard raw simulator handle. `celox-napi` provides
+the Rust-only adapter constructor for both native and `wasm32` builds:
+
+```rust
+use celox_napi::NativeSimulatorHandle;
+use napi_derive::napi;
+
+#[napi]
+pub fn from_my_artifact(artifact: MyArtifact) -> napi::Result<NativeSimulatorHandle> {
+    let artifact = lower_to_celox(&artifact)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    NativeSimulatorHandle::from_frontend(artifact, None)
+}
+```
+
+The frontend's TypeScript entry point wraps that handle in the normal Celox
+runtime while retaining the frontend-specific public name:
+
+```ts
+import { Simulator, type FrontendSimulatorHandle } from "@celox-sim/celox";
+import { fromMyArtifact as nativeFromMyArtifact } from "./native.js";
+
+export function fromMyArtifact<P>(artifact: MyArtifact): Simulator<P> {
+  const handle: FrontendSimulatorHandle = nativeFromMyArtifact(artifact);
+  return Simulator.fromFrontendHandle<P>(handle);
+}
+```
+
+This path is `MyArtifact -> frontend Rust lowering -> FrontendArtifact` as an
+in-memory Rust value. It does not call `fromFrontendArtifact` and does not parse
+Celox artifact JSON. A buildable addon and load test live in
+`examples/my-frontend-napi`.
+
+## Artifact format limits
+
+Format version 1 accepts one flattened module. It supports typed signals,
+constants, combinational expressions and assignments, edge-triggered registers,
+asynchronous reset, synchronous enable, and initial values. A frontend must
+lower hierarchy, memories, latches, custom primitives, and bidirectional signals
+before calling the SDK builder.
+
+Celox validates the artifact again before compilation. Produce it through the
+SDK builder and pass the Rust value directly to `Simulator::from_frontend`.

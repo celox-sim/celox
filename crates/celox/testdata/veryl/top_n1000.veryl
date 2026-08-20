@@ -1,0 +1,19 @@
+module Top #(
+    param N: u32 = 1000,
+)(
+    clk: input clock,
+    rst: input reset,
+    cnt: output logic<32>[N],
+    cnt0: output logic<32>,
+) {
+    assign cnt0 = cnt[0];
+    for i in 0..N: g {
+        always_ff (clk, rst) {
+            if_reset {
+                cnt[i] = 0;
+            } else {
+                cnt[i] += 1;
+            }
+        }
+    }
+}

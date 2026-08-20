@@ -1,6 +1,7 @@
 use std::fmt;
 
 use celox_design::{AbsoluteAddrBase, InstanceId, ModuleId, StateAddr, VariableMetadata};
+use serde::{Deserialize, Serialize};
 
 use crate::{HashMap, HashSet};
 
@@ -11,7 +12,9 @@ pub type SourceAddr = AbsoluteAddrBase<SourceVarId>;
 /// This is deliberately distinct from every parser or analyzer's variable ID.
 /// A frontend projects its native IDs into this namespace before constructing
 /// source lookup metadata retained by the runtime.
-#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct SourceVarId(pub u32);
 
 impl fmt::Display for SourceVarId {
@@ -21,7 +24,7 @@ impl fmt::Display for SourceVarId {
 }
 
 /// Source-language-independent role of a frontend variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VariableKind {
     Parameter,
     Constant,
@@ -50,7 +53,7 @@ impl VariableKind {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VariableInfo {
     pub id: SourceVarId,
     pub path: Vec<String>,
@@ -86,13 +89,13 @@ impl fmt::Debug for VariableInfo {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstancePath(pub Vec<(String, usize)>);
 
 /// Source-language-independent lookup retained for diagnostics and public paths.
 /// Parser-native IDs are projected into [`SourceVarId`] before this artifact is
 /// built and do not cross into runtime metadata.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct FrontendLookup {
     pub instance_ids: HashMap<InstancePath, InstanceId>,
     pub instance_module: HashMap<InstanceId, ModuleId>,

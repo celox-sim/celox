@@ -1,6 +1,6 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(any(
-    target_arch = "x86_64",
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
     all(target_arch = "aarch64", feature = "experimental-arm64-backend")
 ))]
 
@@ -16,9 +16,82 @@ fn native_compilation_can_be_initialized_later() {
 
     let compilation = Simulator::builder(code, "Top").compile_native().unwrap();
     assert!(compilation.warnings().is_empty());
+    assert!(!compilation.program_image().code_image().is_empty());
+
+    let directory = tempfile::tempdir().unwrap();
+    let image_path = directory.path().join("top.native-image");
+    compilation.write_image(&image_path).unwrap();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&std::fs::read(&image_path).unwrap())
+            .unwrap();
+    assert_eq!(image.code_image(), compilation.program_image().code_image());
 
     let mut sim = compilation.initialize().unwrap();
     assert_eq!(sim.get(sim.signal("o")), 0x5au64.into());
+}
+
+#[test]
+fn native_image_restores_runtime_metadata_without_source_compilation() {
+    let code = r#"
+        module Top (o: output logic<8>) {
+            assign o = 8'ha5;
+        }
+    "#;
+
+    let image = Simulator::builder(code, "Top")
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let output = image
+        .reflection()
+        .signals()
+        .iter()
+        .find(|signal| signal.full_name == "Top.o")
+        .expect("compiled image should retain output reflection")
+        .signal;
+
+    let mut sim = Simulator::from_sources(Vec::new(), "Top")
+        .build_native_from_image(image)
+        .unwrap();
+    assert_eq!(sim.get(output), 0xa5u64.into());
+    assert!(sim.named_signals().iter().any(|signal| signal.name == "o"));
+    assert_eq!(sim.named_hierarchy().module_name, "Top");
+    let child_output = sim.child_signal(&[], "o");
+    assert_eq!(sim.get(child_output), 0xa5u64.into());
+    assert!(!sim.build_vcd_descs(false).is_empty());
+}
+
+#[test]
+fn native_image_restores_four_state_mode_for_vcd() {
+    let code = r#"
+        module Top (a: input logic<8>, o: output logic<8>) {
+            assign o = a;
+        }
+    "#;
+
+    let image = Simulator::builder(code, "Top")
+        .four_state(true)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let vcd_path = directory.path().join("top.vcd");
+    let mut sim = Simulator::from_sources(Vec::new(), "Top")
+        .four_state(false)
+        .vcd(&vcd_path)
+        .build_native_from_image(image)
+        .unwrap();
+
+    sim.set_four_state(sim.signal("a"), 0xffu8.into(), 0xffu8.into());
+    sim.dump(0);
+    let dump = std::fs::read_to_string(vcd_path).unwrap();
+    assert!(dump.contains("xxxxxxxx"), "{dump}");
 }
 
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {

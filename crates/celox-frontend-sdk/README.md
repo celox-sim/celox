@@ -21,20 +21,35 @@ let artifact = module.finish();
 # Ok::<(), celox_frontend_sdk::BuildError>(())
 ```
 
-In Rust, pass the result to `celox::Simulator::from_frontend`. For TypeScript
-testbenches, serialize it with `FrontendArtifact::to_json` and call
-`Simulator.fromFrontendArtifact` or `Simulation.fromFrontendArtifact` from
-`@celox-sim/celox`.
+`FrontendArtifact` is an adapter boundary, not the artifact type an application
+should consume. A frontend crate should keep the conversion internal and expose
+an API named for its own representation:
 
-A Veryl native testbench can instantiate the artifact module using its existing
-`$sv::ModuleName` external-module syntax. Pass the artifact and testbench
-sources to `celox::Simulator::from_frontend_with_testbench`; the TypeScript
-equivalent is `runTestWithFrontendArtifact`.
+```rust,ignore
+pub use celox::Simulator;
 
-The versioned JSON representation is checked at decode time. Consumers should
-produce it through `to_json` instead of relying on its field spelling as a
-hand-authored format.
+pub trait MyFrontendSimulatorExt: Sized {
+    fn from_my_artifact(artifact: MyArtifact) -> Result<Self, MyError>;
+}
+
+impl MyFrontendSimulatorExt for Simulator {
+    fn from_my_artifact(artifact: MyArtifact) -> Result<Self, MyError> {
+        let celox_artifact = lower_to_celox(&artifact)?;
+        Ok(Simulator::from_frontend(celox_artifact).build()?)
+    }
+}
+```
+
+After importing the extension trait, applications call
+`Simulator::from_my_artifact` and do not need to know that the adapter uses
+Celox's bridge type.
+
+Pass the resulting Rust value directly to Celox. The JSON representation is a
+separate transport format and is not required to build a Rust simulator binary.
 
 Artifact format version 1 models one flattened module and does not support
 bidirectional (`inout`) signals. External frontends must lower them to separate
 input, output, and output-enable signals before building the artifact.
+
+Frontend adapters that use both `celox-frontend-sdk` and `celox` must keep their
+versions aligned.

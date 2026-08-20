@@ -1,21 +1,22 @@
 [package]
 name                  = "celox-napi"
 version.workspace     = true
-publish               = false
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
-description.workspace = true
+description           = "N-API/WASI simulator handles and frontend adapter API for Celox"
+readme                = "README.md"
 edition.workspace     = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 napi              = { version = "=3.12.1", features = ["napi8", "serde-json"] }
 napi-derive       = "=3.6.3"
-celox-ts-gen      = { path = "../celox-ts-gen" }
-celox-design      = { path = "../celox-design" }
+celox-ts-gen      = { workspace = true }
+celox-design      = { workspace = true }
 veryl-analyzer    = { workspace = true }
 veryl-metadata    = { workspace = true }
 veryl-parser      = { workspace = true }
@@ -28,10 +29,10 @@ globset           = "0.4"
 fxhash            = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-celox = { path = "../celox" }
+celox = { workspace = true, features = ["host-runtime"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-celox = { path = "../celox", default-features = false }
+celox = { workspace = true }
 
 [build-dependencies]
 napi-build = "=2.4.1"

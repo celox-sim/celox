@@ -853,7 +853,7 @@ impl JitBackend {
 
     /// Resolve an `AbsoluteAddr` (clock or async-reset signal) into an
     /// [`EventRef`] handle.  This does a one-time `HashMap` lookup; the
-    /// returned handle can then be passed to [`eval_apply_ff_at`] for zero-cost
+    /// returned handle can then be passed to [`Self::eval_apply_ff_at`] for zero-cost
     /// direct function-pointer dispatch.
     pub fn resolve_event(&self, addr: &AbsoluteAddr) -> EventRef {
         self.shared.event_map[addr]

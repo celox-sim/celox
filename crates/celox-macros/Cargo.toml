@@ -1,12 +1,13 @@
 [package]
 name                  = "celox-macros"
 version.workspace     = true
-publish               = false
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
 description.workspace = true
 edition.workspace     = true
+rust-version.workspace = true
 
 [lib]
 proc-macro = true

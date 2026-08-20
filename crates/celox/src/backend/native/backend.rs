@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
 use celox_design::{
-    InitialStateData, InitialStateValue, InitialStateWriteRun, RuntimeCombObserver,
-    RuntimeErrorInfo, RuntimeEventSite,
+    ElaboratedDesign, EventTopology, InitialStateData, InitialStateValue, InitialStateWriteRun,
+    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema,
 };
 use celox_runtime::DesignReflection;
 use celox_runtime::backend::SimBackend;
+use celox_testbench::TestbenchProgram;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
@@ -40,11 +41,11 @@ const KNOWN_NATIVE_FEATURES: u8 = NATIVE_FEATURE_BMI2
     | NATIVE_FEATURE_POPCNT;
 
 fn current_native_feature_bits() -> u8 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
     {
         celox_backend_x86::native::features::detected_image_feature_bits()
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
     {
         0
     }
@@ -75,9 +76,9 @@ fn format_native_feature_bits(bits: u8) -> String {
 // ────────────────────────────────────────────────────────────────
 
 /// JIT function type: `fn(state: *mut u8) -> i64`
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
-#[cfg(all(target_arch = "aarch64", feature = "experimental-arm64-backend"))]
+#[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
 pub type NativeSimFunc = unsafe extern "C" fn(*mut u8) -> i64;
 
 /// Time spent inside generated native simulator functions.
@@ -314,11 +315,16 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
+    pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
+    pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct NativeEventTopology {
     aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    ordered_events: Vec<AbsoluteAddr>,
+    cascaded_events: std::collections::BTreeSet<AbsoluteAddr>,
+    reset_clocks: HashMap<AbsoluteAddr, AbsoluteAddr>,
 }
 
 impl NativeEventTopology {
@@ -343,7 +349,9 @@ pub struct NativeProgramImage {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
     reflection: DesignReflection,
+    frontend: crate::ir::FrontendLookup,
     initial_state: Vec<InitialStateValue<AbsoluteAddr>>,
+    testbench: Option<TestbenchProgram<AbsoluteAddr>>,
     runtime_schema: NativeRuntimeSchema,
     event_topology: NativeEventTopology,
     layout: MemoryLayout,
@@ -378,9 +386,41 @@ impl NativeProgramImage {
         &self.runtime_schema
     }
 
+    /// Whether the image's generated code and state layout use four-state data.
+    pub(crate) fn four_state(&self) -> bool {
+        self.options.four_state
+    }
+
     /// Canonical event-domain topology used by the runtime scheduler.
     pub(crate) fn event_topology(&self) -> &NativeEventTopology {
         &self.event_topology
+    }
+
+    /// Reconstruct the source-independent runtime metadata retained by this
+    /// image. No frontend parsing or SIR/layout work is needed on the
+    /// execution side of a host-codegen workflow.
+    pub(crate) fn runtime_program(&self) -> crate::ir::RuntimeProgram {
+        crate::ir::RuntimeProgram {
+            design: ElaboratedDesign {
+                state_objects: HashMap::default(),
+                events: EventTopology {
+                    aliases: self.event_topology.aliases.clone(),
+                    ordered_events: self.event_topology.ordered_events.clone(),
+                    cascaded_events: self.event_topology.cascaded_events.clone(),
+                    reset_clocks: self.event_topology.reset_clocks.clone(),
+                },
+                initial_state: self.initial_state.clone(),
+            },
+            frontend: self.frontend.clone(),
+            runtime_schema: RuntimeSchema {
+                runtime_errors: self.runtime_schema.runtime_errors.clone(),
+                runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
+                comb_observers: self.runtime_schema.comb_observers.clone(),
+                testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
+                rtl_writes: self.runtime_schema.rtl_writes.clone(),
+            },
+            testbench: self.testbench.clone(),
+        }
     }
 
     pub(super) fn validate(&self) -> Result<(), String> {
@@ -493,6 +533,10 @@ struct CompiledNativeFunction {
     required_native_features: u8,
 }
 
+#[cfg_attr(
+    all(feature = "arm64-codegen", not(target_arch = "aarch64")),
+    allow(dead_code)
+)]
 pub(crate) struct NativeCodegenTrace {
     pub optimized_sir: String,
     pub mir: String,
@@ -657,9 +701,9 @@ fn compile_unit_refs(
             symbols,
             trace,
             required_state_size: empty_result.required_state_size as usize,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
             required_native_features: empty_result.required_image_features,
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
             required_native_features: 0,
         });
     }
@@ -697,9 +741,9 @@ fn compile_unit_refs(
         symbols,
         trace,
         required_state_size,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         required_native_features: emit_result.required_image_features,
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
         required_native_features: 0,
     })
 }
@@ -1790,14 +1834,21 @@ fn compile_program(
             id_to_addr,
             id_to_event,
             reflection: sir.runtime().build_design_reflection(layout),
+            frontend: sir.runtime().frontend.clone(),
             initial_state: sir.runtime().design.initial_state.clone(),
+            testbench: sir.runtime().testbench.clone(),
             runtime_schema: NativeRuntimeSchema {
                 runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: sir.runtime().runtime_schema.runtime_event_sites.clone(),
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
+                testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
+                rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
             },
             event_topology: NativeEventTopology {
                 aliases: sir.runtime().design.events.aliases.clone(),
+                ordered_events: sir.runtime().design.events.ordered_events.clone(),
+                cascaded_events: sir.runtime().design.events.cascaded_events.clone(),
+                reset_clocks: sir.runtime().design.events.reset_clocks.clone(),
             },
             layout: layout.clone(),
             native_memory_size,
@@ -1924,16 +1975,33 @@ impl NativeBackend {
         Ok(image)
     }
 
+    /// Load a compiler-produced image into executable memory and create a
+    /// backend instance for it.
+    ///
+    /// # Safety
+    ///
+    /// The image's machine code must come from a trusted compiler or image
+    /// container. Structural validation does not authenticate code before it
+    /// is mapped executable and invoked.
+    pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, SimulatorError> {
+        // Safety: upheld by this constructor's caller.
+        let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+        Ok(Self::from_shared(shared))
+    }
+
     pub fn new(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
         let image = Self::compile_image(laid_out, options)?;
         // Safety: `image` was produced in-process by the Celox compiler above.
-        let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
-        Ok(Self::from_shared(shared))
+        unsafe { Self::from_image(image) }
     }
 
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", feature = "arm64-codegen")
+    ))]
     pub(crate) fn new_with_codegen_trace(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
