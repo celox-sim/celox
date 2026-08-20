@@ -4251,6 +4251,7 @@ fn test_ff_runtime_for_bounds(sim) {
         module Top (
             clk: input clock,
             count: input logic<8>,
+            step_start: input logic<32>,
             q_fwd: output logic<8>,
             q_rev: output logic<8>,
             q_inc: output logic<8>,
@@ -4273,7 +4274,7 @@ fn test_ff_runtime_for_bounds(sim) {
                 }
 
                 q_step = 8'hee;
-                for i in 1..(count + 4) step *= 2 {
+                for i in step_start..(count + 4) step *= 2 {
                     q_step = i as 8;
                 }
             }
@@ -4282,12 +4283,17 @@ fn test_ff_runtime_for_bounds(sim) {
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let count = sim.signal("count");
+    let step_start = sim.signal("step_start");
     let q_fwd = sim.signal("q_fwd");
     let q_rev = sim.signal("q_rev");
     let q_inc = sim.signal("q_inc");
     let q_step = sim.signal("q_step");
 
-    sim.modify(|io| io.set(count, 4u8)).unwrap();
+    sim.modify(|io| {
+        io.set(count, 4u8);
+        io.set(step_start, 1u32);
+    })
+    .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q_fwd), 3u32.into());
     assert_eq!(sim.get(q_rev), 0u32.into());
@@ -4390,6 +4396,7 @@ fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
     @setup { let code = r#"
         module Top (
             clk: input clock,
+            start: input signed logic<32>,
             or_end: input signed logic<128>,
             xor_end: input signed logic<128>,
             q_or: output signed logic<32>,
@@ -4397,7 +4404,7 @@ fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
         ) {
             always_ff (clk) {
                 q_or = 0;
-                for i in 3..=or_end step |= 4294967302 {
+                for i in start..=or_end step |= 4294967302 {
                     q_or = i;
                     if i == 7 {
                         break;
@@ -4405,7 +4412,7 @@ fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
                 }
 
                 q_xor = 0;
-                for i in 3..=xor_end step ^= 4294967302 {
+                for i in start..=xor_end step ^= 4294967302 {
                     q_xor = i;
                     if i == 5 {
                         break;
@@ -4416,12 +4423,14 @@ fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
+    let start = sim.signal("start");
     let or_end = sim.signal("or_end");
     let xor_end = sim.signal("xor_end");
     let q_or = sim.signal("q_or");
     let q_xor = sim.signal("q_xor");
 
     sim.modify(|io| {
+        io.set(start, 3i32);
         io.set_wide(or_end, BigUint::from(7u8));
         io.set_wide(xor_end, BigUint::from(5u8));
     })
@@ -4436,12 +4445,13 @@ fn test_ff_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
     @setup { let code = r#"
         module Top (
             clk: input clock,
+            start: input logic<32>,
             end_bound: input logic<32>,
             q: output logic<32>
         ) {
             always_ff (clk) {
                 q = 0;
-                for i in 3..end_bound step ^= 4294967296 {
+                for i in start..end_bound step ^= 4294967296 {
                     q = i;
                 }
             }
@@ -4449,9 +4459,14 @@ fn test_ff_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
 
-    sim.modify(|io| io.set(end_bound, 4u32)).unwrap();
+    sim.modify(|io| {
+        io.set(start, 3u32);
+        io.set(end_bound, 4u32);
+    })
+    .unwrap();
     assert_eq!(
         sim.tick(clk).unwrap_err().to_string(),
         "Non-progressing for loop in always_ff (loop variable `i`): i"
@@ -4463,12 +4478,13 @@ fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     @setup { let code = r#"
         module Top (
             clk: input clock,
+            start: input logic<32>,
             end_bound: input logic<32>,
             q: output logic<32>
         ) {
             always_ff (clk) {
                 q = 0;
-                for i in 3..end_bound step |= 4294967299 {
+                for i in start..end_bound step |= 4294967299 {
                     q = i;
                 }
             }
@@ -4476,9 +4492,14 @@ fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
 
-    sim.modify(|io| io.set(end_bound, 4u32)).unwrap();
+    sim.modify(|io| {
+        io.set(start, 3u32);
+        io.set(end_bound, 4u32);
+    })
+    .unwrap();
     assert_eq!(
         sim.tick(clk).unwrap_err().to_string(),
         "Non-progressing for loop in always_ff (loop variable `i`): i"
@@ -4490,12 +4511,13 @@ fn test_ff_i32_mul_step_overflow_reports_true_loop(sim) {
     @setup { let code = r#"
         module Top (
             clk: input clock,
+            start: input signed logic<32>,
             end_bound: input signed logic<64>,
             q: output logic<32>
         ) {
             always_ff (clk) {
                 q = 0;
-                for i in 1500000000..end_bound step *= 2 {
+                for i in start..end_bound step *= 2 {
                     q += 1;
                 }
             }
@@ -4503,10 +4525,12 @@ fn test_ff_i32_mul_step_overflow_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
 
     // The first update overflows i32 even though its widened value would
     // already exceed this still-representable bound.
+    sim.set(start, 1_500_000_000u32);
     sim.set(end_bound, 1_600_000_000u64);
     assert_eq!(
         sim.tick(clk).unwrap_err().to_string(),
@@ -4519,12 +4543,13 @@ fn test_ff_i32_shl_step_overflow_reports_true_loop(sim) {
     @setup { let code = r#"
         module Top (
             clk: input clock,
+            start: input signed logic<32>,
             end_bound: input signed logic<64>,
             q: output logic<32>
         ) {
             always_ff (clk) {
                 q = 0;
-                for i in 1073741824..end_bound step <<= 1 {
+                for i in start..end_bound step <<= 1 {
                     q += 1;
                 }
             }
@@ -4532,10 +4557,12 @@ fn test_ff_i32_shl_step_overflow_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
 
     // The first update overflows i32 even though its widened value would
     // already exceed this still-representable bound.
+    sim.set(start, 1_073_741_824u32);
     sim.set(end_bound, 1_500_000_000u64);
     assert_eq!(
         sim.tick(clk).unwrap_err().to_string(),

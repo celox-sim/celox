@@ -83,8 +83,62 @@ o_data: top_out
 
     }
 
-fn test_instance_input_function_output_writeback(sim) {
-    @ignore_on(sv);
+    fn test_instance_unpacked_array_slice_input(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[1+:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_output(sim) {
+        @setup { let code = r#"
+module Child (
+o_data: output logic<8>[2]
+) {
+assign o_data[0] = 8'h12;
+assign o_data[1] = 8'h34;
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+inst child: Child (
+o_data: data[1+:2],
+);
+assign o_data = {data[2], data[1]};
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
+    fn test_instance_input_function_output_writeback(sim) {
+        @ignore_on(sv);
         // veryl-simulator currently evaluates the connection value but does
         // not write the function output actual back to the parent variable.
         @setup { let code = r#"

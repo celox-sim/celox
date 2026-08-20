@@ -461,7 +461,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "veryl-analyzer",
- "veryl-component-sys",
+ "veryl-component-sys 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "veryl-emitter",
  "veryl-metadata",
  "veryl-parser",
@@ -4362,8 +4362,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "veryl-aligner"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "046cf648806ae7aa4bb61f1b74119bf65f48681defe515792394cd3ff60f294a"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "veryl-parser",
 ]
@@ -4371,8 +4370,7 @@ dependencies = [
 [[package]]
 name = "veryl-analyzer"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dff8986e0bcbf12ca5dfba8a3a0135838acdef569002b3aabad1aa2acea28f31"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "bimap",
  "daggy",
@@ -4395,7 +4393,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
  "vcd",
- "veryl-component-sys",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821)",
  "veryl-metadata",
  "veryl-parser",
 ]
@@ -4407,10 +4405,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b79b55aefeb953c53c719399b6bd185f9a2f5a196af6bb08586d22568449b5e"
 
 [[package]]
+name = "veryl-component-sys"
+version = "0.1.1"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
+
+[[package]]
 name = "veryl-emitter"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a1a5539b55c79da5ee3d1ebfbc5f7b7eea1f516e1c2ec0cdbd3e01753f792b2"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "serde",
  "veryl-aligner",
@@ -4424,6 +4426,7 @@ dependencies = [
 [[package]]
 name = "veryl-metadata"
 version = "0.20.3"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "log",
  "miette",
@@ -4439,7 +4442,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "url",
  "uuid",
- "veryl-component-sys",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821)",
  "veryl-parser",
  "veryl-path",
  "veryl-std",
@@ -4450,8 +4453,7 @@ dependencies = [
 [[package]]
 name = "veryl-parser"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8e3e84d2e553967d73f60573d1992bc7e784da7ef248d50434cafb3655fbf06"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "anyhow",
  "bimap",
@@ -4469,8 +4471,7 @@ dependencies = [
 [[package]]
 name = "veryl-path"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ee203260eacf0e3140f3259c6e7bf416c05f89426ea518714cb25621a2ab8ce"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "directories",
  "fs4",
@@ -4484,14 +4485,12 @@ dependencies = [
 [[package]]
 name = "veryl-pretty"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9464911bf0f496675caa056cf951bbe9595d0b5fd98c9f2cfb8ef62aaf804054"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 
 [[package]]
 name = "veryl-simulator"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16ee8fb0bcf504abbc9112ed617e8f1abe96b89e1015d3c9180666bb763833f5"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "clap",
  "cranelift",
@@ -4516,7 +4515,7 @@ dependencies = [
  "twox-hash",
  "vcd",
  "veryl-analyzer",
- "veryl-component-sys",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821)",
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",
@@ -4526,8 +4525,7 @@ dependencies = [
 [[package]]
 name = "veryl-sourcemap"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01e70023fb499b3569d75ec033f83027e141d009388ddea1d1d9092f797afd7c"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "miette",
  "relative-path",
@@ -4538,8 +4536,7 @@ dependencies = [
 [[package]]
 name = "veryl-std"
 version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00d07aa6561a99f5852b7e591692bc7f337c9336af261c45e1c2f3954a4c56ff"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=13e9215863f352ee516753beb5b66dbef61da821#13e9215863f352ee516753beb5b66dbef61da821"
 dependencies = [
  "merkle_hash",
  "miette",
@@ -5370,3 +5367,7 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "veryl-metadata"
+version = "0.20.3"
