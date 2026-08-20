@@ -2009,6 +2009,16 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "continuous assignment",
+            r#"
+            module Top(output logic y);
+                localparam J = 3;
+                logic [7:0] values [0:1][0:2];
+                assign y = values[0][J];
+            endmodule
+        "#,
+        ),
+        (
             "control flow inside always_comb",
             r#"
             module Top(input logic s, a, b, output logic y);

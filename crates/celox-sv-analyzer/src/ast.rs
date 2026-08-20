@@ -5,6 +5,7 @@
 //! Celox runtime IR.
 
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::ops::{Deref, DerefMut};
 
 use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
@@ -190,7 +191,8 @@ impl Module {
                 parameter.name()
             )));
         }
-        let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
+        let packed_dimensions =
+            packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env);
         let mut instances =
             instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let mut instance_names = HashSet::default();
@@ -3302,11 +3304,41 @@ struct VariableDimensions {
     signed: bool,
 }
 
-type PackedDimensions = HashMap<String, VariableDimensions>;
+type VariablePackedDimensions = HashMap<String, VariableDimensions>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PackedDimensions {
+    variables: VariablePackedDimensions,
+    const_env: HashMap<String, i128>,
+}
+
+impl PackedDimensions {
+    fn new(variables: VariablePackedDimensions, const_env: &HashMap<String, i128>) -> Self {
+        Self {
+            variables,
+            const_env: const_env.clone(),
+        }
+    }
+}
+
+impl Deref for PackedDimensions {
+    type Target = VariablePackedDimensions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.variables
+    }
+}
+
+impl DerefMut for PackedDimensions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.variables
+    }
+}
 
 fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
+    const_env: &HashMap<String, i128>,
 ) -> PackedDimensions {
     let mut dimensions = HashMap::default();
     for port in ports {
@@ -3329,7 +3361,7 @@ fn packed_dimensions_from_ports_and_signals(
             },
         );
     }
-    dimensions
+    PackedDimensions::new(dimensions, const_env)
 }
 
 fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
@@ -4535,7 +4567,7 @@ fn function_local_packed_dimensions_from_block_items(
     items: &[sv_parser::BlockItemDeclaration],
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
-) -> Option<PackedDimensions> {
+) -> Option<VariablePackedDimensions> {
     function_local_packed_dimensions_from_block_item_iter(items.iter(), syntax_tree, type_aliases)
 }
 
@@ -4543,7 +4575,7 @@ fn function_local_packed_dimensions_from_block_item_iter<'a>(
     items: impl IntoIterator<Item = &'a sv_parser::BlockItemDeclaration>,
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
-) -> Option<PackedDimensions> {
+) -> Option<VariablePackedDimensions> {
     let mut dimensions = HashMap::default();
     for item in items {
         let sv_parser::BlockItemDeclaration::Data(item) = item else {
@@ -7674,7 +7706,7 @@ fn lvalue_from_constant_select(
 }
 
 fn expr_from_expression(expr: &sv_parser::Expression, syntax_tree: &SyntaxTree) -> Option<Expr> {
-    expr_from_expression_with_types(expr, syntax_tree, &HashMap::default())
+    expr_from_expression_with_types(expr, syntax_tree, &PackedDimensions::default())
 }
 
 fn expr_from_expression_with_types(
@@ -7802,7 +7834,7 @@ fn guard_zero_divisions(expr: Expr) -> Expr {
 }
 
 fn expr_from_primary(primary: &sv_parser::Primary, syntax_tree: &SyntaxTree) -> Option<Expr> {
-    expr_from_primary_with_types(primary, syntax_tree, &HashMap::default())
+    expr_from_primary_with_types(primary, syntax_tree, &PackedDimensions::default())
 }
 
 fn expr_from_primary_with_types(
@@ -8106,6 +8138,7 @@ fn flatten_variable_select(
             value,
             &dimensions.unpacked[index].left,
             &dimensions.unpacked[index].right,
+            &packed_dimensions.const_env,
         ) {
             return None;
         }
@@ -8292,11 +8325,16 @@ fn unpacked_index_offset(dimension: &UnpackedDimension, index: ConstExpr) -> Con
     }
 }
 
-fn const_expr_is_out_of_range(index: &ConstExpr, left: &ConstExpr, right: &ConstExpr) -> bool {
+fn const_expr_is_out_of_range(
+    index: &ConstExpr,
+    left: &ConstExpr,
+    right: &ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> bool {
     let (Some(index), Some(left), Some(right)) = (
-        eval_ast_const_expr(index, &HashMap::default()),
-        eval_ast_const_expr(left, &HashMap::default()),
-        eval_ast_const_expr(right, &HashMap::default()),
+        eval_ast_const_expr(index, const_env),
+        eval_ast_const_expr(left, const_env),
+        eval_ast_const_expr(right, const_env),
     ) else {
         return false;
     };
