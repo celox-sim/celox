@@ -90,12 +90,12 @@ the bootstrap is deliberately not a GitHub Actions job:
    ./scripts/bootstrap-crates-io.sh package
    ```
 
-2. Create a short-expiry crates.io API token with the `publish-new` endpoint
-   scope and a crate scope covering `celox` and `celox-*`. Do not save it in
-   GitHub Actions.
+2. Create a short-expiry crates.io API token with both the `publish-new` and
+   **Manage trusted publishing configurations** endpoint scopes, and a crate
+   scope covering `celox` and `celox-*`. Do not save it in GitHub Actions.
 3. Pass the token without putting it in shell history, then publish the
-   placeholders. The confirmation is required because crates.io releases are
-   permanent:
+   placeholders and register their Trusted Publisher configurations. The
+   confirmation is required because crates.io releases are permanent:
 
    ```bash
    read -rsp 'crates.io bootstrap token: ' CARGO_REGISTRY_TOKEN
@@ -105,8 +105,8 @@ the bootstrap is deliberately not a GitHub Actions job:
    unset CARGO_REGISTRY_TOKEN
    ```
 
-4. On the **Trusted Publishers** settings page of every published Celox crate,
-   register this exact identity:
+   The script uses the crates.io API to register this exact identity after each
+   placeholder becomes visible:
 
    | Field | Value |
    | --- | --- |
@@ -115,20 +115,22 @@ the bootstrap is deliberately not a GitHub Actions job:
    | Workflow filename | `publish-crates.yml` |
    | Environment | `crates-io` |
 
-   The crates to configure are the entries in the `crates` array in
-   `scripts/publish-crates.sh`.
-5. Revoke the bootstrap API token immediately. Add the intended crates.io team
+   Re-running the command skips published placeholders and correctly configured
+   publishers. It stops instead of deleting or replacing any unexpected
+   Trusted Publisher configuration. If crates.io rate-limits new crate creation,
+   unset the token, wait until the reported retry time, and run the same command
+   again to resume.
+4. Revoke the bootstrap API token immediately. Add the intended crates.io team
    or backup owners, because the account that performed the bootstrap is the
    initial owner of every new crate.
-6. Run the first stable release normally. It publishes the real lockstep version
+5. Run the first stable release normally. It publishes the real lockstep version
    through OIDC; `0.0.0` remains only as the name bootstrap. After this succeeds,
    optionally enable **Trusted Publishing Only** for each crate so ordinary API
    tokens cannot publish future versions.
 
 Adding another public crate later requires the same bounded bootstrap only for
-that new name, followed by registering the same trusted publisher. The local
-script skips existing `0.0.0` placeholders; existing crates continue to publish
-through OIDC.
+that new name. The local script skips existing `0.0.0` placeholders and Trusted
+Publisher configurations; existing crates continue to publish through OIDC.
 
 ## Veryl dependency lanes
 
