@@ -1719,20 +1719,11 @@ fn emit_packed_lane_compare_vector(
                 4 => dynasm!(ops ; .arch aarch64 ; ushr v0.s4, v0.s4, #shift),
                 _ => unreachable!(),
             }
-            if matches!(rhs, PackedLaneCompareRhs::Memory { .. }) {
-                match element_stride {
-                    1 => dynasm!(ops ; .arch aarch64 ; ushr v1.b16, v1.b16, #shift),
-                    2 => dynasm!(ops ; .arch aarch64 ; ushr v1.h8, v1.h8, #shift),
-                    4 => dynasm!(ops ; .arch aarch64 ; ushr v1.s4, v1.s4, #shift),
-                    _ => unreachable!(),
-                }
-            } else if scalar_rhs.is_some() {
-                match element_stride {
-                    1 => dynasm!(ops ; .arch aarch64 ; ushr v1.b16, v1.b16, #shift),
-                    2 => dynasm!(ops ; .arch aarch64 ; ushr v1.h8, v1.h8, #shift),
-                    4 => dynasm!(ops ; .arch aarch64 ; ushr v1.s4, v1.s4, #shift),
-                    _ => unreachable!(),
-                }
+            match element_stride {
+                1 => dynasm!(ops ; .arch aarch64 ; ushr v1.b16, v1.b16, #shift),
+                2 => dynasm!(ops ; .arch aarch64 ; ushr v1.h8, v1.h8, #shift),
+                4 => dynasm!(ops ; .arch aarch64 ; ushr v1.s4, v1.s4, #shift),
+                _ => unreachable!(),
             }
         }
         if needs_mask {
