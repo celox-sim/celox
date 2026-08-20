@@ -406,8 +406,10 @@ mod tests {
     use super::*;
 
     fn words(code: &[u8]) -> Vec<u32> {
-        code.chunks_exact(4)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        code.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
             .collect()
     }
 
