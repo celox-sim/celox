@@ -1,0 +1,9 @@
+module Top (
+    i_data: input  logic<64>,
+    o_ones: output logic<7>,
+) {
+    inst u: countones #(W: 64) (
+        i_data,
+        o_ones,
+    );
+}

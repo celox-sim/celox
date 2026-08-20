@@ -12,7 +12,7 @@ fn linear_sec_source() -> String {
         "{}\n{}\n{}",
         test_utils::veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
         test_utils::veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
-        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
+        include_str!("../testdata/veryl/linear_sec_top.veryl"),
     )
 }
 

@@ -185,15 +185,18 @@ distribution in every channel.
 ## Repository configuration
 
 Release automation uses the `celox-automation` GitHub App, installed for this
-repository with repository contents and pull request write access. Store its
-numeric App ID as the `RELEASE_APP_ID` Actions variable and its complete PEM
-private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret. Each job mints a
-short-lived, repository-scoped installation token; never store an installation
-token itself because it expires. The weekly queue job uses this token so adding a
-pull request to the queue starts the required `merge_group` checks. The Veryl
-HEAD and vendored-metadata workflows use the same mechanism so generated branch
-pushes start normal CI. Using the default `GITHUB_TOKEN` for these events would
-prevent their follow-up workflows from running.
+repository with Actions, repository contents, pull request, and Workflows write
+access. Store its numeric App ID as the `RELEASE_APP_ID` Actions variable and
+its complete PEM private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret.
+Each job mints a short-lived, repository-scoped installation token; never store
+an installation token itself because it expires. Actions write access lets the
+release workflow dispatch the crate publisher at the verified release tag;
+Workflows write access lets automation update workflow files. The weekly queue
+job uses this token so adding a pull request to the queue starts the required
+`merge_group` checks. The Veryl HEAD and vendored-metadata workflows use the
+same mechanism so generated branch pushes start normal CI. Using the default
+`GITHUB_TOKEN` for these events would prevent their follow-up workflows from
+running.
 
 The App has Issues write permission for Release Please's status labels. The
 weekly workflow still identifies the release pull request by the exact

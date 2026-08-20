@@ -8,19 +8,19 @@ mod veryl_std;
 // Wrapper modules are shared with celox-bench-sv (Verilator SV generation)
 // via benches/veryl/*.veryl to guarantee identical circuits.
 
-const CODE: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
+const CODE: &str = include_str!("../testdata/veryl/top_n1000.veryl");
 
 // Native testbench sources (DUT + TB module in one string)
 const NATIVE_TB_COUNTER_N1000: &str = concat!(
-    include_str!("../../../benches/veryl/top_n1000.veryl"),
-    include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
+    include_str!("../testdata/veryl/top_n1000.veryl"),
+    include_str!("../testdata/veryl/native_tb_counter_n1000.veryl"),
 );
 static NATIVE_TB_STD_COUNTER: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n{}\n{}",
         veryl_std::source(&["counter", "counter.veryl"]),
-        include_str!("../../../benches/veryl/std_counter_top.veryl"),
-        include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
+        include_str!("../testdata/veryl/std_counter_top.veryl"),
+        include_str!("../testdata/veryl/native_tb_std_counter.veryl"),
     )
 });
 
@@ -30,7 +30,7 @@ static LINEAR_SEC_SRC: LazyLock<String> = LazyLock::new(|| {
         "{}\n{}\n{}",
         veryl_std::source(&["coding", "linear_sec_encoder.veryl"]),
         veryl_std::source(&["coding", "linear_sec_decoder.veryl"]),
-        include_str!("../../../benches/veryl/linear_sec_top.veryl"),
+        include_str!("../testdata/veryl/linear_sec_top.veryl"),
     )
 });
 
@@ -39,7 +39,7 @@ static COUNTONES_SRC: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n{}",
         veryl_std::source(&["countones", "countones.veryl"]),
-        include_str!("../../../benches/veryl/countones_top.veryl"),
+        include_str!("../testdata/veryl/countones_top.veryl"),
     )
 });
 
@@ -48,7 +48,7 @@ static STD_COUNTER_SRC: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n{}",
         veryl_std::source(&["counter", "counter.veryl"]),
-        include_str!("../../../benches/veryl/std_counter_top.veryl"),
+        include_str!("../testdata/veryl/std_counter_top.veryl"),
     )
 });
 
@@ -59,7 +59,7 @@ static FIFO_SRC: LazyLock<String> = LazyLock::new(|| {
         veryl_std::source(&["ram", "ram.veryl"]),
         veryl_std::source(&["fifo", "fifo_controller.veryl"]),
         veryl_std::source(&["fifo", "fifo.veryl"]),
-        include_str!("../../../benches/veryl/fifo_top.veryl"),
+        include_str!("../testdata/veryl/fifo_top.veryl"),
     )
 });
 
@@ -69,7 +69,7 @@ static GRAY_CODEC_SRC: LazyLock<String> = LazyLock::new(|| {
         "{}\n{}\n{}",
         veryl_std::source(&["gray", "gray_encoder.veryl"]),
         veryl_std::source(&["gray", "gray_decoder.veryl"]),
-        include_str!("../../../benches/veryl/gray_codec_top.veryl"),
+        include_str!("../testdata/veryl/gray_codec_top.veryl"),
     )
 });
 
@@ -78,7 +78,7 @@ static EDGE_DETECTOR_SRC: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n{}",
         veryl_std::source(&["edge_detector", "edge_detector.veryl"]),
-        include_str!("../../../benches/veryl/edge_detector_top.veryl"),
+        include_str!("../testdata/veryl/edge_detector_top.veryl"),
     )
 });
 
@@ -87,7 +87,7 @@ static ONEHOT_SRC: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n{}",
         veryl_std::source(&["countones", "onehot.veryl"]),
-        include_str!("../../../benches/veryl/onehot_top.veryl"),
+        include_str!("../testdata/veryl/onehot_top.veryl"),
     )
 });
 
@@ -96,7 +96,7 @@ static LFSR_SRC: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n{}",
         veryl_std::source(&["lfsr", "lfsr_galois.veryl"]),
-        include_str!("../../../benches/veryl/lfsr_top.veryl"),
+        include_str!("../testdata/veryl/lfsr_top.veryl"),
     )
 });
 
@@ -107,7 +107,7 @@ static GRAY_COUNTER_SRC: LazyLock<String> = LazyLock::new(|| {
         veryl_std::source(&["counter", "counter.veryl"]),
         veryl_std::source(&["gray", "gray_encoder.veryl"]),
         veryl_std::source(&["gray", "gray_counter.veryl"]),
-        include_str!("../../../benches/veryl/gray_counter_top.veryl"),
+        include_str!("../testdata/veryl/gray_counter_top.veryl"),
     )
 });
 

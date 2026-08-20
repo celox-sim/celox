@@ -73,9 +73,9 @@ for crate in "${crates[@]}"; do
   if [[ "$mode" == "package" ]]; then
     # `cargo package` resolves normalized dependencies from crates.io, so a full
     # archive cannot be created for dependent crates before their first release.
-    # Listing still exercises Cargo's package selection and inclusion checks;
-    # the publish pass creates each real archive after its dependencies exist.
-    echo "validating package contents for $crate@$version"
+    # Check the file list here; the ordered publish pass builds and tests each
+    # real archive once its same-version dependencies are available.
+    echo "checking package file list for $crate@$version"
     cargo package --locked --allow-dirty --no-verify --list -p "$crate" >/dev/null
     continue
   fi
@@ -85,10 +85,24 @@ for crate in "${crates[@]}"; do
     continue
   fi
 
+  echo "building and testing package archive for $crate@$version"
+  cargo package --locked -p "$crate"
+  package_dir="$PWD/target/package/$crate-$version"
+  if [[ ! -f "$package_dir/Cargo.toml" || -L "$package_dir" ]]; then
+    echo "cargo did not create the expected package directory: $package_dir" >&2
+    exit 1
+  fi
+  cargo test \
+    --locked \
+    --all-targets \
+    --no-run \
+    --manifest-path "$package_dir/Cargo.toml" \
+    --target-dir "$PWD/target/package-tests/$crate"
+
   published=false
   for attempt in {1..6}; do
     set +e
-    output="$(cargo publish --locked --no-verify -p "$crate" 2>&1)"
+    output="$(cargo publish --locked -p "$crate" 2>&1)"
     status=$?
     set -e
     printf '%s\n' "$output"

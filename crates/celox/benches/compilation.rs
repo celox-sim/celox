@@ -4,7 +4,7 @@
 use celox::Simulator;
 use codspeed_criterion_compat::{Criterion, black_box, criterion_group, criterion_main};
 
-const COUNTER: &str = include_str!("../../../benches/veryl/top_n1000.veryl");
+const COUNTER: &str = include_str!("../testdata/veryl/top_n1000.veryl");
 const AXI_LITE_REG_FILE: &str = include_str!("../tests/fixtures/bitslice/axi_lite_reg_file.veryl");
 
 fn compile_default(source: &str, top: &str, parameter: Option<(&str, u64)>) {

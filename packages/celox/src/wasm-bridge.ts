@@ -12,6 +12,7 @@
 
 import type {
 	FrontendSimulatorHandle,
+	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	WasmFrontendSimulatorHandle,
 } from "./types.js";
@@ -67,7 +68,8 @@ export type RawWasmSimulatorHandle = WasmFrontendSimulatorHandle;
 export function isWasmHandle(
 	handle: FrontendSimulatorHandle,
 ): handle is RawWasmSimulatorHandle;
-export function isWasmHandle(handle: unknown): boolean;
+export function isWasmHandle(handle: NativeSimulationHandle): boolean;
+export function isWasmHandle(handle: unknown): handle is RawWasmSimulatorHandle;
 export function isWasmHandle(handle: unknown): boolean {
 	return (
 		typeof handle === "object" &&
