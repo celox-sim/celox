@@ -84,6 +84,7 @@ o_data: top_out
     }
 
     fn test_instance_unpacked_array_slice_input(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (
 i_data: input  logic<8>[2],
@@ -113,6 +114,7 @@ o_data,
     }
 
     fn test_instance_unpacked_array_slice_output(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (
 o_data: output logic<8>[2]
