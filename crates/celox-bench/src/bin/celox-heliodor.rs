@@ -83,6 +83,11 @@ enum CeloxHeliodorError {
         #[source]
         source: celox::SimulatorError,
     },
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     #[error("native image container failed: {0}")]
     NativeImage(#[from] celox::NativeImageContainerError),
     #[error("{message}")]
@@ -219,12 +224,23 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "the custom native backend is unavailable; enable experimental-arm64-backend on AArch64",
         });
     }
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     let mut native_image = match &opts.native_image_input {
         Some(path) => Some(celox::NativeProgramImage::from_container_bytes(&fs::read(
             path,
         )?)?),
         None => None,
     };
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )))]
+    let native_image: Option<()> = None;
     let (sources, metadata): (Vec<(String, PathBuf)>, Option<Metadata>) = if native_image.is_some()
     {
         // The image contains the target-specific machine code and all
