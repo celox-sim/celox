@@ -773,6 +773,40 @@ fn merges_always_ff_processes_with_the_same_trigger() {
 }
 
 #[test]
+fn builds_whole_unpacked_array_always_ff_assignment() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [7:0] d [2],
+            output logic [7:0] q [2]
+        );
+            always_ff @(posedge clk) q <= d;
+        endmodule
+    "#;
+    Simulator::from_sv_sources(
+        vec![(source, Path::new("whole_array_ff_assignment.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+}
+
+#[test]
+fn preserves_named_zero_cast_width() {
+    let source = r#"
+        module Top(output logic [8:0] y);
+            typedef logic [7:0] byte_t;
+            assign y = {1'b1, byte_t'(0)};
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("named_zero_cast.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
 fn uses_the_first_always_ff_event_as_a_negedge_clock() {
     let source = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);

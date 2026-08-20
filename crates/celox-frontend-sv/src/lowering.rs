@@ -3664,7 +3664,7 @@ fn emit_ff_assignment_stores(
                     region: WORKING_REGION,
                     var_id: target_id,
                 },
-                SIROffset::Static(target.access.lsb),
+                sv_memory_offset(variables.get(&target_id)?, target.access.lsb, target_width),
                 target_width,
                 store_value,
                 Vec::new(),

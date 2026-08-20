@@ -164,7 +164,8 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         let const_env = const_env_from_parameters(&parameters);
-        reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env)?;
+        let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
+        reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
         let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
@@ -192,7 +193,7 @@ impl Module {
             )));
         }
         let packed_dimensions =
-            packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env);
+            packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
         let mut instances =
             instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let mut instance_names = HashSet::default();
@@ -466,94 +467,91 @@ fn for_loop_index_type_is_supported(data_type: &sv_parser::DataType) -> bool {
 fn cast_target_type(
     casting_type: &sv_parser::CastingType,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
     if let Some(r#type) = integer_atom_expr_type(RefNode::CastingType(casting_type)) {
         return Some(r#type);
     }
-    let sv_parser::CastingType::ConstantPrimary(primary) = casting_type else {
+    match casting_type {
+        sv_parser::CastingType::SimpleType(simple_type) => {
+            let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
+                return None;
+            };
+            let name = identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)?;
+            expr_type_from_type(type_aliases.get(&name)?, const_env)
+        }
+        sv_parser::CastingType::ConstantPrimary(primary) => {
+            let target = const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)?;
+            if let ConstExpr::Ident(name) = &target {
+                return expr_type_from_type(type_aliases.get(name)?, const_env);
+            }
+            let width = eval_ast_const_expr(&target, const_env)?;
+            Some(ExprType {
+                width: usize::try_from(width).ok()?.max(1),
+                signed: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn expr_type_from_type(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<ExprType> {
+    if !r#type.unpacked_ranges().is_empty() {
         return None;
-    };
-    let width = eval_ast_const_expr(
-        &const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)?,
-        &HashMap::default(),
-    )?;
+    }
+    let width = r#type
+        .packed_ranges()
+        .iter()
+        .try_fold(1usize, |width, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+        })?;
     Some(ExprType {
-        width: usize::try_from(width).ok()?.max(1),
-        signed: false,
+        width: width.max(1),
+        signed: r#type.is_signed(),
     })
 }
 
-fn cast_target_is_named_type(
-    casting_type: &sv_parser::CastingType,
+fn cast_is_supported(
+    cast: &sv_parser::Cast,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> bool {
-    if matches!(
-        casting_type,
-        sv_parser::CastingType::SimpleType(simple_type)
-            if matches!(
-                simple_type.as_ref(),
-                sv_parser::SimpleType::PsTypeIdentifier(_)
-            )
-    ) {
-        return true;
-    }
-    let sv_parser::CastingType::ConstantPrimary(primary) = casting_type else {
-        return false;
-    };
-    matches!(
-        const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree),
-        Some(ConstExpr::Ident(_))
-    )
+    cast_zero_type(cast, syntax_tree, const_env, type_aliases).is_some()
 }
 
-fn cast_is_zero_literal(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> bool {
-    matches!(
-        const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree),
-        Some(ConstExpr::Literal(literal))
-            if typecheck::parse_integral_literal(&literal).is_some_and(|literal| {
-                literal.value == 0u8.into() && literal.mask == 0u8.into()
-            })
-    )
+fn constant_cast_is_supported(
+    cast: &sv_parser::ConstantCast,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> bool {
+    constant_cast_zero_type(cast, syntax_tree, const_env, type_aliases).is_some()
 }
 
-fn constant_cast_is_zero_literal(cast: &sv_parser::ConstantCast, syntax_tree: &SyntaxTree) -> bool {
-    matches!(
-        const_expr_from_ref_node(
-            RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
-            syntax_tree,
-        ),
-        Some(ConstExpr::Literal(literal))
-            if typecheck::parse_integral_literal(&literal).is_some_and(|literal| {
-                literal.value == 0u8.into() && literal.mask == 0u8.into()
-            })
-    )
-}
-
-fn cast_is_supported(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> bool {
-    cast_zero_type(cast, syntax_tree).is_some()
-        || (cast_is_zero_literal(cast, syntax_tree)
-            && cast_target_is_named_type(&cast.nodes.0, syntax_tree))
-}
-
-fn constant_cast_is_supported(cast: &sv_parser::ConstantCast, syntax_tree: &SyntaxTree) -> bool {
-    constant_cast_zero_type(cast, syntax_tree).is_some()
-        || (constant_cast_is_zero_literal(cast, syntax_tree)
-            && cast_target_is_named_type(&cast.nodes.0, syntax_tree))
-}
-
-fn cast_zero_type(cast: &sv_parser::Cast, syntax_tree: &SyntaxTree) -> Option<ExprType> {
+fn cast_zero_type(
+    cast: &sv_parser::Cast,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
     let ConstExpr::Literal(literal) = const_expr_from_expr(&cast.nodes.2.nodes.1, syntax_tree)?
     else {
         return None;
     };
     let literal = typecheck::parse_integral_literal(&literal)?;
     (literal.value == 0u8.into() && literal.mask == 0u8.into())
-        .then(|| cast_target_type(&cast.nodes.0, syntax_tree))?
+        .then(|| cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases))?
 }
 
 fn constant_cast_zero_type(
     cast: &sv_parser::ConstantCast,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
     let ConstExpr::Literal(literal) = const_expr_from_ref_node(
         RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
@@ -564,7 +562,7 @@ fn constant_cast_zero_type(
     };
     let literal = typecheck::parse_integral_literal(&literal)?;
     (literal.value == 0u8.into() && literal.mask == 0u8.into())
-        .then(|| cast_target_type(&cast.nodes.0, syntax_tree))?
+        .then(|| cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases))?
 }
 
 fn typed_zero_literal(r#type: ExprType) -> String {
@@ -635,6 +633,7 @@ fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
     let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
     let has_leaking_conditional_generate_local =
@@ -645,10 +644,14 @@ fn reject_silently_ignored_constructs(
             continue;
         }
         match child {
-            RefNode::Cast(cast) if !cast_is_supported(cast, syntax_tree) => {
+            RefNode::Cast(cast)
+                if !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+            {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
-            RefNode::ConstantCast(cast) if !constant_cast_is_supported(cast, syntax_tree) => {
+            RefNode::ConstantCast(cast)
+                if !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+            {
                 return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
             }
             RefNode::AnsiPortDeclarationNet(port) if port.nodes.3.is_some() => {
@@ -3310,13 +3313,19 @@ type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 struct PackedDimensions {
     variables: VariablePackedDimensions,
     const_env: HashMap<String, i128>,
+    type_aliases: HashMap<String, Type>,
 }
 
 impl PackedDimensions {
-    fn new(variables: VariablePackedDimensions, const_env: &HashMap<String, i128>) -> Self {
+    fn new(
+        variables: VariablePackedDimensions,
+        const_env: &HashMap<String, i128>,
+        type_aliases: &HashMap<String, Type>,
+    ) -> Self {
         Self {
             variables,
             const_env: const_env.clone(),
+            type_aliases: type_aliases.clone(),
         }
     }
 }
@@ -3339,6 +3348,7 @@ fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> PackedDimensions {
     let mut dimensions = HashMap::default();
     for port in ports {
@@ -3361,7 +3371,7 @@ fn packed_dimensions_from_ports_and_signals(
             },
         );
     }
-    PackedDimensions::new(dimensions, const_env)
+    PackedDimensions::new(dimensions, const_env, type_aliases)
 }
 
 fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
@@ -7567,7 +7577,7 @@ fn lvalue_from_select(
         .collect::<Option<Vec<_>>>()?;
     if packed_dimensions
         .get(&name)
-        .is_some_and(|dimensions| indices.len() < dimensions.unpacked.len())
+        .is_some_and(|dimensions| !indices.is_empty() && indices.len() < dimensions.unpacked.len())
     {
         return None;
     }
@@ -7651,7 +7661,7 @@ fn lvalue_from_constant_select(
         .collect::<Option<Vec<_>>>()?;
     if packed_dimensions
         .get(&name)
-        .is_some_and(|dimensions| indices.len() < dimensions.unpacked.len())
+        .is_some_and(|dimensions| !indices.is_empty() && indices.len() < dimensions.unpacked.len())
     {
         return None;
     }
@@ -7931,15 +7941,17 @@ fn expr_from_primary_with_types(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            if let Some(r#type) = cast_zero_type(cast, syntax_tree) {
-                Some(Expr::Resize {
-                    expr: Box::new(expr),
-                    width: r#type.width,
-                    signed: r#type.signed,
-                })
-            } else {
-                cast_target_is_named_type(&cast.nodes.0, syntax_tree).then_some(expr)
-            }
+            cast_zero_type(
+                cast,
+                syntax_tree,
+                &packed_dimensions.const_env,
+                &packed_dimensions.type_aliases,
+            )
+            .map(|r#type| Expr::Resize {
+                expr: Box::new(expr),
+                width: r#type.width,
+                signed: r#type.signed,
+            })
         }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
@@ -8930,16 +8942,8 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                 })
             }
             sv_parser::ConstantPrimary::ConstantCast(cast) => {
-                if let Some(r#type) = constant_cast_zero_type(cast, syntax_tree) {
-                    Some(ConstExpr::Literal(typed_zero_literal(r#type)))
-                } else if cast_target_is_named_type(&cast.nodes.0, syntax_tree) {
-                    const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
-                        syntax_tree,
-                    )
-                } else {
-                    None
-                }
+                constant_cast_zero_type(cast, syntax_tree, &HashMap::default(), &HashMap::default())
+                    .map(|r#type| ConstExpr::Literal(typed_zero_literal(r#type)))
             }
             sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
