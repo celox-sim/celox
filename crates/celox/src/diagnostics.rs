@@ -25,11 +25,13 @@ mod host {
         pub cranelift: crate::backend::CraneliftDiagnostics,
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub native: crate::backend::NativeDiagnostics,
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub native_tick_loop: Option<bool>,
@@ -99,6 +101,7 @@ mod host {
             let cranelift = crate::backend::CraneliftDiagnostics { pass_timing };
             #[cfg(any(
                 target_arch = "x86_64",
+                feature = "arm64-codegen",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             ))]
             let (native, native_tick_loop) = {
@@ -147,11 +150,13 @@ mod host {
                 cranelift,
                 #[cfg(any(
                     target_arch = "x86_64",
+                    feature = "arm64-codegen",
                     all(target_arch = "aarch64", feature = "experimental-arm64-backend")
                 ))]
                 native,
                 #[cfg(any(
                     target_arch = "x86_64",
+                    feature = "arm64-codegen",
                     all(target_arch = "aarch64", feature = "experimental-arm64-backend")
                 ))]
                 native_tick_loop,
@@ -176,6 +181,7 @@ mod host {
             assert_eq!(options.runtime.tick_timing_every, Some(100));
             #[cfg(any(
                 target_arch = "x86_64",
+                feature = "arm64-codegen",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             ))]
             assert!(options.native.verify_regalloc);

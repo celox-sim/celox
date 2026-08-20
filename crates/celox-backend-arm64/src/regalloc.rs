@@ -213,7 +213,7 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
                         value,
                     });
                 };
-                if !(1..=15).contains(&register.number()) && !(19..=28).contains(&register.number())
+                if !(1..=15).contains(&register.number()) && !(19..=27).contains(&register.number())
                 {
                     return Err(TargetRegallocError::ReservedAssignment {
                         block: block.id,
@@ -228,7 +228,7 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
     verify_interval_registers(function, &intervals)
 }
 
-const ALLOCATABLE_REGISTERS: [Arm64Reg; 25] = [
+const ALLOCATABLE_REGISTERS: [Arm64Reg; 24] = [
     Arm64Reg::new(1),
     Arm64Reg::new(2),
     Arm64Reg::new(3),
@@ -253,7 +253,6 @@ const ALLOCATABLE_REGISTERS: [Arm64Reg; 25] = [
     Arm64Reg::new(25),
     Arm64Reg::new(26),
     Arm64Reg::new(27),
-    Arm64Reg::new(28),
 ];
 
 pub(crate) struct TargetAllocation {
@@ -406,7 +405,34 @@ fn select_spill_batch(
             (value, length)
         })
         .collect::<BTreeMap<_, _>>();
+    let mut use_counts = BTreeMap::<VReg, u64>::new();
+    for block in &function.blocks {
+        for phi in &block.phis {
+            *use_counts.entry(phi.dst).or_default() += 1;
+            for &(_, source) in &phi.sources {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+        for instruction in &block.insts {
+            if !matches!(instruction, MInst::KeepAlive { .. }) {
+                for value in instruction.uses() {
+                    *use_counts.entry(value).or_default() += 1;
+                }
+            }
+            if let Some(value) = instruction.def() {
+                *use_counts.entry(value).or_default() += 1;
+            }
+        }
+    }
     let live_length = |value: VReg| live_lengths.get(&value).copied().unwrap_or(0);
+    let spill_priority = |value: VReg| {
+        let cost = use_counts.get(&value).copied().unwrap_or(1);
+        (
+            live_length(value) / cost,
+            live_length(value),
+            Reverse(value),
+        )
+    };
     // The widest target instruction has five uses and one definition. Keep
     // that many registers free so a spilled row's local reload/definition
     // temporaries do not immediately create a second pressure wave.
@@ -438,7 +464,7 @@ fn select_spill_batch(
                 let Some(spilled) = active
                     .iter()
                     .filter(|(_, value)| candidates.contains(value))
-                    .max_by_key(|(_, value)| (live_length(*value), Reverse(*value)))
+                    .max_by_key(|(_, value)| spill_priority(*value))
                     .map(|&(_, value)| value)
                 else {
                     break;
@@ -457,7 +483,7 @@ fn select_spill_batch(
     }
     peak.into_iter()
         .filter(|value| candidates.contains(value))
-        .max_by_key(|value| (live_length(*value), Reverse(*value)))
+        .max_by_key(|value| spill_priority(*value))
         .into_iter()
         .collect()
 }
@@ -1085,7 +1111,7 @@ mod tests {
         for value in [VReg(0), VReg(1), VReg(2), VReg(3)] {
             let register = allocated.assignment.get(&value).unwrap();
             assert!(
-                (1..=15).contains(&register.number()) || (19..=28).contains(&register.number())
+                (1..=15).contains(&register.number()) || (19..=27).contains(&register.number())
             );
         }
         verify_allocated(&allocated).unwrap();
@@ -1159,6 +1185,55 @@ mod tests {
             allocate_without_spills(function),
             Err(TargetRegallocError::RegisterPressure { .. })
         ));
+    }
+
+    #[test]
+    fn prefers_long_lived_values_with_fewer_uses_for_spilling() {
+        let mut instructions = (0..19_u32)
+            .map(|value| MInst::LoadImm {
+                dst: VReg(value),
+                value: u64::from(value),
+            })
+            .collect::<Vec<_>>();
+        instructions.extend((0..100).map(|index| MInst::Store {
+            base: BaseReg::SimState,
+            offset: index * 8,
+            src: VReg(1),
+            size: OpSize::S64,
+        }));
+        instructions.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 800,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        instructions.extend((2..19_u32).map(|value| MInst::Store {
+            base: BaseReg::SimState,
+            offset: 800 + (value as i32) * 8,
+            src: VReg(value),
+            size: OpSize::S64,
+        }));
+        instructions.push(MInst::Return);
+        let function = MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        );
+        let facts = build_facts(&function).unwrap();
+        let intervals = analyze_live_intervals(&facts).unwrap();
+        let candidates = facts.blocks[0]
+            .instructions
+            .iter()
+            .flat_map(|instruction| instruction.defs.iter().copied())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            select_spill_batch(&function, &intervals, &candidates, false),
+            vec![VReg(0)]
+        );
     }
 
     #[test]
@@ -1408,7 +1483,7 @@ mod tests {
             allocated
                 .assignment
                 .iter()
-                .any(|(_, register)| (19..=28).contains(&register.number()))
+                .any(|(_, register)| (19..=27).contains(&register.number()))
         );
     }
 }

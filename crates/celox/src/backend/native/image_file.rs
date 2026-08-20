@@ -6,7 +6,7 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-const CONTAINER_VERSION: u16 = 1;
+const CONTAINER_VERSION: u16 = 3;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -20,12 +20,12 @@ pub enum NativeImageArchitecture {
 }
 
 impl NativeImageArchitecture {
-    fn current() -> Self {
-        #[cfg(target_arch = "x86_64")]
+    pub fn current() -> Self {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         {
             Self::X86_64
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
         {
             Self::Aarch64
         }
@@ -93,6 +93,15 @@ impl NativeProgramImage {
     /// Serialize this image as a standalone versioned container.
     pub fn to_container_bytes(&self) -> Result<Vec<u8>, NativeImageContainerError> {
         self.append_to_runtime(&[])
+    }
+
+    /// Write this image as a standalone versioned binary container.
+    pub fn write_container(
+        &self,
+        output_path: impl AsRef<Path>,
+    ) -> Result<(), NativeImageContainerError> {
+        std::fs::write(output_path, self.to_container_bytes()?)?;
+        Ok(())
     }
 
     /// Append this image to an existing precompiled runtime byte sequence.

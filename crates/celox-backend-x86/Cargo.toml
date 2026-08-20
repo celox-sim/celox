@@ -1,19 +1,21 @@
 [package]
 name = "celox-backend-x86"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Celox x86-64 machine-code backend"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 tracing = { workspace = true }
-celox-analysis = { path = "../celox-analysis" }
-celox-backend-common = { path = "../celox-backend-common" }
-celox-design = { path = "../celox-design" }
-celox-sir = { path = "../celox-sir" }
-celox-state-layout = { path = "../celox-state-layout" }
+celox-analysis = { workspace = true }
+celox-backend-common = { workspace = true }
+celox-design = { workspace = true }
+celox-sir = { workspace = true }
+celox-state-layout = { workspace = true }
 fxhash = { workspace = true }
 libc = { workspace = true }
 memmap2 = "0.9"
@@ -21,7 +23,7 @@ num-bigint = { workspace = true }
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "encoder", "block_encoder", "decoder", "nasm", "op_code_info", "code_asm"] }
 
 [dev-dependencies]
-celox-sir-opt = { path = "../celox-sir-opt" }
+celox-sir-opt = { workspace = true }
 
 [lints]
 workspace = true

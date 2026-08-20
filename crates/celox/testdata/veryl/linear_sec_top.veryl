@@ -1,0 +1,24 @@
+module Top #(
+    param P: u32 = 6,
+    const K: u32 = (1 << P) - 1,
+    const N: u32 = K - P,
+)(
+    i_word     : input  logic<N>,
+    o_codeword : output logic<K>,
+    o_word     : output logic<N>,
+    o_corrected: output logic,
+) {
+    inst u_enc: linear_sec_encoder #(
+        P: P,
+    ) (
+        i_word,
+        o_codeword,
+    );
+    inst u_dec: linear_sec_decoder #(
+        P: P,
+    ) (
+        i_codeword: o_codeword,
+        o_word,
+        o_corrected,
+    );
+}

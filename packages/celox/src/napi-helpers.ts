@@ -13,7 +13,9 @@ import type { NativeCreateSimulationFn } from "./simulation.js";
 import type { NativeCreateFn } from "./simulator.js";
 import type {
 	CreateResult,
+	FrontendSimulatorHandle,
 	LoopBreak,
+	NativeFrontendSimulatorHandle,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	PortInfo,
@@ -28,24 +30,7 @@ import { createWasmSimulatorBridge, isWasmHandle } from "./wasm-bridge.js";
 // Raw NAPI handle shapes (what the .node addon actually exports)
 // ---------------------------------------------------------------------------
 
-export interface RawNapiSimulatorHandle {
-	readonly layoutJson: string;
-	readonly eventsJson: string;
-	readonly hierarchyJson: string;
-	readonly warningsJson: string;
-	readonly stableSize: number;
-	readonly totalSize: number;
-	// Native (JIT) methods — present when built for native target
-	tick?(eventId: number): void;
-	tickN?(eventId: number, count: number): void;
-	evalComb?(): void;
-	dump?(timestamp: number): void;
-	sharedMemory?(): Uint8Array;
-	// WASM methods — present when built for wasm32 target
-	combWasmBytes?(): Uint8Array | number[];
-	eventWasmBytes?(name: string): Uint8Array | number[];
-	dispose(): void;
-}
+export type RawNapiSimulatorHandle = FrontendSimulatorHandle;
 
 export interface RawNapiSimulationHandle {
 	readonly layoutJson: string;
@@ -211,7 +196,7 @@ export interface RawNapiAddon {
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
 	};
-	NativeSimulationHandle: {
+	NativeSimulationHandle?: {
 		new (
 			sources: NapiSourceFile[],
 			top: string,
@@ -775,20 +760,20 @@ export function filterHierarchyForDse(
  * The buffer is shared between JS and Rust — no copies per tick.
  */
 export function wrapDirectSimulatorHandle(
-	raw: RawNapiSimulatorHandle,
+	raw: NativeFrontendSimulatorHandle,
 ): NativeSimulatorHandle {
 	return {
 		tick(eventId: number): void {
-			raw.tick!(eventId);
+			raw.tick(eventId);
 		},
 		tickN(eventId: number, count: number): void {
-			raw.tickN!(eventId, count);
+			raw.tickN(eventId, count);
 		},
 		evalComb(): void {
-			raw.evalComb!();
+			raw.evalComb();
 		},
 		dump(timestamp: number): void {
-			raw.dump!(timestamp);
+			raw.dump(timestamp);
 		},
 		dispose(): void {
 			raw.dispose();
@@ -891,7 +876,7 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 			buf = bridge.sharedMemory.buffer;
 			handle = bridge.handle;
 		} else {
-			buf = raw.sharedMemory!().buffer;
+			buf = raw.sharedMemory().buffer;
 			handle = wrapDirectSimulatorHandle(raw);
 		}
 

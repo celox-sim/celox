@@ -1,0 +1,14 @@
+module Top (
+    i_bin  : input  logic<32>,
+    o_gray : output logic<32>,
+    o_bin  : output logic<32>,
+) {
+    inst u_enc: gray_encoder #(WIDTH: 32) (
+        i_bin,
+        o_gray,
+    );
+    inst u_dec: gray_decoder #(WIDTH: 32) (
+        i_gray: o_gray,
+        o_bin,
+    );
+}

@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { type NativeCreateFn, Simulator } from "./simulator.js";
 import type {
 	CreateResult,
+	FrontendSimulatorHandle,
 	ModuleDefinition,
 	NativeSimulatorHandle,
 } from "./types.js";
@@ -104,6 +105,54 @@ function createMockNative(): {
 // ---------------------------------------------------------------------------
 
 describe("Simulator", () => {
+	test("wraps a handle returned by a frontend-owned addon", () => {
+		const memory = new Uint8Array(64);
+		const signal = (offset: number, direction: "input" | "output") => ({
+			offset,
+			width: 8,
+			byte_size: 1,
+			is_4state: false,
+			direction,
+			type_kind: "bit",
+		});
+		const signals = {
+			a: signal(32, "input"),
+			b: signal(33, "input"),
+			y: signal(34, "output"),
+		};
+		const raw: FrontendSimulatorHandle = {
+			layoutJson: JSON.stringify(signals),
+			eventsJson: "{}",
+			hierarchyJson: JSON.stringify({
+				module_name: "NetAdder",
+				signals,
+				children: {},
+			}),
+			warningsJson: "[]",
+			stableSize: 35,
+			totalSize: 64,
+			sharedMemory: () => memory,
+			evalComb: vi.fn(() => {
+				memory[34] = (memory[32] ?? 0) + (memory[33] ?? 0);
+			}),
+			tick: vi.fn(),
+			tickN: vi.fn(),
+			dump: vi.fn(),
+			dispose: vi.fn(),
+		};
+
+		const sim = Simulator.fromFrontendHandle<{
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}>(raw);
+		sim.dut.a = 10n;
+		sim.dut.b = 23n;
+		expect(sim.dut.y).toBe(33n);
+		sim.dispose();
+		expect(raw.dispose).toHaveBeenCalledOnce();
+	});
+
 	test("create and basic tick", () => {
 		const mock = createMockNative();
 		const sim = Simulator.create(AdderModule, {

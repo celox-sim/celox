@@ -43,16 +43,16 @@ const CLOCK_TICK_COUNTER: &str = r#"
 "#;
 
 const BENCH_NATIVE_TB_COUNTER_N1000: &str = concat!(
-    include_str!("../../../benches/veryl/top_n1000.veryl"),
-    include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
+    include_str!("../testdata/veryl/top_n1000.veryl"),
+    include_str!("../testdata/veryl/native_tb_counter_n1000.veryl"),
 );
 
 fn bench_native_tb_std_counter() -> String {
     format!(
         "{}\n{}\n{}",
         test_utils::veryl_std::source(&["counter", "counter.veryl"]),
-        include_str!("../../../benches/veryl/std_counter_top.veryl"),
-        include_str!("../../../benches/veryl/native_tb_std_counter.veryl"),
+        include_str!("../testdata/veryl/std_counter_top.veryl"),
+        include_str!("../testdata/veryl/native_tb_std_counter.veryl"),
     )
 }
 

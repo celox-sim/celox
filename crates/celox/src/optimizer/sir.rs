@@ -2,6 +2,7 @@
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -14,6 +15,7 @@ use crate::ir::{AbsoluteAddr, OptimizedSir};
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -25,6 +27,7 @@ use crate::ir::{
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -37,6 +40,7 @@ pub(crate) use celox_sir_opt::optimizer::{
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -79,6 +83,7 @@ pub(crate) fn optimize_rooted_comb_memory(
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -124,6 +129,7 @@ pub(crate) fn optimize_native_merged_chain(
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]

@@ -1,0 +1,31 @@
+module Top (
+    clk        : input  clock,
+    rst        : input  reset,
+    i_push     : input  logic,
+    i_data     : input  logic<8>,
+    i_pop      : input  logic,
+    o_data     : output logic<8>,
+    o_empty    : output logic,
+    o_full     : output logic,
+    o_word_count: output logic<5>,
+) {
+    var almost_full: logic;
+    var clear: logic;
+    always_comb { clear = '0; }
+    inst u_fifo: fifo #(
+        WIDTH: 8,
+        DEPTH: 16,
+    ) (
+        i_clk: clk,
+        i_rst: rst,
+        i_clear: clear,
+        o_empty,
+        o_almost_full: almost_full,
+        o_full,
+        o_word_count,
+        i_push,
+        i_data,
+        i_pop,
+        o_data,
+    );
+}

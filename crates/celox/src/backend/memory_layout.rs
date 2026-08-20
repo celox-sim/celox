@@ -7,6 +7,7 @@ use crate::ir::{
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]

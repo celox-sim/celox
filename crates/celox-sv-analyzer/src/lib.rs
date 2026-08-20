@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn inlines_veryl_generated_std_counter_functions() {
         let ir = analyze_source(
-            include_str!("../../../benches/verilator/StdCounter.sv"),
+            include_str!("../testdata/verilator/StdCounter.sv"),
             Path::new("StdCounter.sv"),
         )
         .expect("SV analysis should succeed");
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn analyzes_veryl_generated_lfsr_tap_assignments() {
         let ir = analyze_source(
-            include_str!("../../../benches/verilator/Lfsr.sv"),
+            include_str!("../testdata/verilator/Lfsr.sv"),
             Path::new("Lfsr.sv"),
         )
         .expect("SV analysis should succeed");
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn specializes_veryl_generated_lfsr_top_bit_assignment() {
         let ir = analyze_source_with_module_parameter_overrides(
-            include_str!("../../../benches/verilator/Lfsr.sv"),
+            include_str!("../testdata/verilator/Lfsr.sv"),
             Path::new("Lfsr.sv"),
             "lfsr_galois",
             &[("SIZE".to_string(), 32)].into_iter().collect(),
@@ -926,32 +926,26 @@ mod tests {
         let cases = [
             (
                 "Countones.sv",
-                include_str!("../../../benches/verilator/Countones.sv"),
+                include_str!("../testdata/verilator/Countones.sv"),
             ),
             (
                 "StdCounter.sv",
-                include_str!("../../../benches/verilator/StdCounter.sv"),
+                include_str!("../testdata/verilator/StdCounter.sv"),
             ),
             (
                 "GrayCounter.sv",
-                include_str!("../../../benches/verilator/GrayCounter.sv"),
+                include_str!("../testdata/verilator/GrayCounter.sv"),
             ),
             (
                 "GrayCodec.sv",
-                include_str!("../../../benches/verilator/GrayCodec.sv"),
+                include_str!("../testdata/verilator/GrayCodec.sv"),
             ),
             (
                 "EdgeDetector.sv",
-                include_str!("../../../benches/verilator/EdgeDetector.sv"),
+                include_str!("../testdata/verilator/EdgeDetector.sv"),
             ),
-            (
-                "Onehot.sv",
-                include_str!("../../../benches/verilator/Onehot.sv"),
-            ),
-            (
-                "Lfsr.sv",
-                include_str!("../../../benches/verilator/Lfsr.sv"),
-            ),
+            ("Onehot.sv", include_str!("../testdata/verilator/Onehot.sv")),
+            ("Lfsr.sv", include_str!("../testdata/verilator/Lfsr.sv")),
         ];
 
         for (name, code) in cases {
@@ -967,11 +961,8 @@ mod tests {
     #[test]
     fn rejects_unlowered_constructs_in_veryl_emitted_sources() {
         for (name, source) in [
-            ("Top.sv", include_str!("../../../benches/verilator/Top.sv")),
-            (
-                "Fifo.sv",
-                include_str!("../../../benches/verilator/Fifo.sv"),
-            ),
+            ("Top.sv", include_str!("../testdata/verilator/Top.sv")),
+            ("Fifo.sv", include_str!("../testdata/verilator/Fifo.sv")),
         ] {
             let error = analyze_source(source, Path::new(name))
                 .expect_err("unlowered constructs must not be silently ignored");
@@ -982,7 +973,7 @@ mod tests {
         }
 
         let error = analyze_source(
-            include_str!("../../../benches/verilator/LinearSec.sv"),
+            include_str!("../testdata/verilator/LinearSec.sv"),
             Path::new("LinearSec.sv"),
         )
         .expect_err("loop-local declarations must not be silently ignored");
@@ -996,7 +987,7 @@ mod tests {
     #[test]
     fn records_veryl_emitted_module_instantiations() {
         let ir = analyze_source(
-            include_str!("../../../benches/verilator/StdCounter.sv"),
+            include_str!("../testdata/verilator/StdCounter.sv"),
             Path::new("StdCounter.sv"),
         )
         .expect("SV analysis should succeed");
