@@ -20,6 +20,7 @@ import type {
 	CreateResult,
 	EventHandle,
 	FourStateValue,
+	FrontendSimulatorHandle,
 	ModuleDefinition,
 	NativeSimulatorHandle,
 	SignalLayout,
@@ -271,6 +272,22 @@ export class Simulator<P = Record<string, unknown>> {
 			artifactJson,
 			buildNapiOpts(options),
 		);
+		return Simulator.fromFrontendHandle<P>(raw, options);
+	}
+
+	/**
+	 * Wrap a raw simulator handle returned by a frontend-owned native or WASM
+	 * addon.
+	 *
+	 * This is the adapter boundary for frontend packages. A frontend's public
+	 * API can accept its own artifact type, call its native `fromMyArtifact`
+	 * function, then pass the returned handle here. No Celox artifact JSON is
+	 * involved.
+	 */
+	static fromFrontendHandle<P = Record<string, unknown>>(
+		raw: FrontendSimulatorHandle,
+		options?: Pick<SimulatorOptions, "deadStorePolicy">,
+	): Simulator<P> {
 		const isWasm = isWasmHandle(raw);
 		// Frontend artifacts carry an exact state kind for every signal, including
 		// clock/reset ports. Do not apply the legacy WASM type-kind inference here.

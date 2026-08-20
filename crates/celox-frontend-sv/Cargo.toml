@@ -1,18 +1,20 @@
 [package]
 name = "celox-frontend-sv"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "SystemVerilog frontend adapter for Celox"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-celox-design = { path = "../celox-design" }
-celox-frontend-core = { path = "../celox-frontend-core" }
-celox-sir = { path = "../celox-sir" }
-celox-slt = { path = "../celox-slt" }
-celox-sv-analyzer = { path = "../celox-sv-analyzer" }
+celox-design = { workspace = true }
+celox-frontend-core = { workspace = true }
+celox-sir = { workspace = true }
+celox-slt = { workspace = true }
+celox-sv-analyzer = { workspace = true }
 fxhash = { workspace = true }
 num-bigint = { workspace = true }
 thiserror = { workspace = true }

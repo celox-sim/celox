@@ -1,11 +1,13 @@
 [package]
 name                  = "celox-testbench"
 version.workspace     = true
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
 description           = "Source-independent testbench bytecode contracts for Celox"
 edition.workspace     = true
+rust-version.workspace = true
 
 [dependencies]
 num-bigint = { workspace = true }

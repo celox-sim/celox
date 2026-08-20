@@ -13,6 +13,7 @@ import type { NativeCreateSimulationFn } from "./simulation.js";
 import type { NativeCreateFn } from "./simulator.js";
 import type {
 	CreateResult,
+	FrontendSimulatorHandle,
 	LoopBreak,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
@@ -28,24 +29,7 @@ import { createWasmSimulatorBridge, isWasmHandle } from "./wasm-bridge.js";
 // Raw NAPI handle shapes (what the .node addon actually exports)
 // ---------------------------------------------------------------------------
 
-export interface RawNapiSimulatorHandle {
-	readonly layoutJson: string;
-	readonly eventsJson: string;
-	readonly hierarchyJson: string;
-	readonly warningsJson: string;
-	readonly stableSize: number;
-	readonly totalSize: number;
-	// Native (JIT) methods — present when built for native target
-	tick?(eventId: number): void;
-	tickN?(eventId: number, count: number): void;
-	evalComb?(): void;
-	dump?(timestamp: number): void;
-	sharedMemory?(): Uint8Array;
-	// WASM methods — present when built for wasm32 target
-	combWasmBytes?(): Uint8Array | number[];
-	eventWasmBytes?(name: string): Uint8Array | number[];
-	dispose(): void;
-}
+export type RawNapiSimulatorHandle = FrontendSimulatorHandle;
 
 export interface RawNapiSimulationHandle {
 	readonly layoutJson: string;

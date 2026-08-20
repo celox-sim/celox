@@ -1704,7 +1704,9 @@ mod host {
             }
         }
 
-        /// Build a simulator from a source-independent external frontend artifact.
+        /// Low-level adapter hook for a source-independent frontend artifact.
+        ///
+        /// Frontend crates should wrap this with an artifact-specific public API.
         pub fn from_frontend(
             artifact: celox_frontend_sdk::FrontendArtifact,
         ) -> SimulatorBuilder<'static, Simulator> {
@@ -1727,8 +1729,8 @@ mod host {
             }
         }
 
-        /// Build a Veryl native testbench whose `$sv::Module` instances are
-        /// resolved from an external frontend artifact.
+        /// Low-level adapter hook for a Veryl native testbench whose
+        /// `$sv::Module` instances resolve from an external frontend artifact.
         pub fn from_frontend_with_testbench(
             artifact: celox_frontend_sdk::FrontendArtifact,
             sources: Vec<(&'a str, &'a Path)>,

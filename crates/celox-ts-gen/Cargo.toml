@@ -1,11 +1,11 @@
 [package]
 name                  = "celox-ts-gen"
 version.workspace     = true
-publish               = false
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
-description.workspace = true
+description           = "TypeScript definition generator used by Celox bindings"
 edition.workspace     = true
 
 [dependencies]

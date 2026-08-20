@@ -81,6 +81,29 @@ export interface SignalLayout {
 // ---------------------------------------------------------------------------
 
 /**
+ * Raw simulator handle returned by a frontend-owned native or WASM addon.
+ * Frontend packages pass this to `Simulator.fromFrontendHandle`.
+ */
+export interface FrontendSimulatorHandle {
+	readonly layoutJson: string;
+	readonly eventsJson: string;
+	readonly hierarchyJson: string;
+	readonly warningsJson: string;
+	readonly stableSize: number;
+	readonly totalSize: number;
+	// Native (JIT) methods.
+	tick?(eventId: number): void;
+	tickN?(eventId: number, count: number): void;
+	evalComb?(): void;
+	dump?(timestamp: number): void;
+	sharedMemory?(): Uint8Array;
+	// WASM methods.
+	combWasmBytes?(): Uint8Array | number[];
+	eventWasmBytes?(name: string): Uint8Array | number[];
+	dispose(): void;
+}
+
+/**
  * Opaque handle returned by NAPI for event-based simulation.
  * @internal
  */

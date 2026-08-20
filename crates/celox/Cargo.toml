@@ -1,12 +1,14 @@
 [package]
 name                  = "celox"
 version.workspace     = true
-publish               = false
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
 description.workspace = true
+readme                = "README.md"
 edition.workspace     = true
+rust-version.workspace = true
 
 [features]
 default = ["host-runtime"]
@@ -32,19 +34,19 @@ veryl-parser          = { workspace = true }
 veryl-path            = { workspace = true }
 veryl-component-sys   = { version = "0.1.1", optional = true }
 libloading            = { version = "0.9", optional = true }
-celox-analysis        = { path = "../celox-analysis" }
-celox-backend-wasm    = { path = "../celox-backend-wasm" }
-celox-design          = { path = "../celox-design" }
-celox-frontend-core   = { path = "../celox-frontend-core" }
-celox-frontend-sdk    = { path = "../celox-frontend-sdk" }
-celox-frontend-sv     = { path = "../celox-frontend-sv", optional = true }
-celox-frontend-veryl  = { path = "../celox-frontend-veryl" }
-celox-sir             = { path = "../celox-sir" }
-celox-sir-opt         = { path = "../celox-sir-opt", default-features = false }
-celox-slt             = { path = "../celox-slt" }
-celox-state-layout    = { path = "../celox-state-layout" }
-celox-runtime         = { path = "../celox-runtime" }
-celox-testbench       = { path = "../celox-testbench" }
+celox-analysis        = { workspace = true }
+celox-backend-wasm    = { workspace = true }
+celox-design          = { workspace = true }
+celox-frontend-core   = { workspace = true }
+celox-frontend-sdk    = { workspace = true }
+celox-frontend-sv     = { workspace = true, optional = true }
+celox-frontend-veryl  = { workspace = true }
+celox-sir             = { workspace = true }
+celox-sir-opt         = { workspace = true, default-features = false }
+celox-slt             = { workspace = true }
+celox-state-layout    = { workspace = true }
+celox-runtime         = { workspace = true }
+celox-testbench       = { workspace = true }
 fxhash                = { workspace = true }
 thiserror             = { workspace = true }
 clap                  = { workspace = true }
@@ -59,16 +61,16 @@ num-traits            = { workspace = true }
 bit-set               = { workspace = true }
 itertools             = { workspace = true }
 tracing               = { workspace = true }
-celox-macros          = { path = "../celox-macros", optional = true }
-celox-backend-cranelift = { path = "../celox-backend-cranelift", optional = true }
-celox-backend-arm64 = { path = "../celox-backend-arm64", optional = true }
+celox-macros          = { workspace = true, optional = true }
+celox-backend-cranelift = { workspace = true, optional = true }
+celox-backend-arm64   = { workspace = true, optional = true }
 wasmtime              = { version = "47", optional = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-celox-backend-x86     = { path = "../celox-backend-x86", optional = true }
+celox-backend-x86     = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-celox-sir-opt         = { path = "../celox-sir-opt", default-features = false, features = ["wide-native-memory"] }
+celox-sir-opt         = { workspace = true, default-features = false, features = ["wide-native-memory"] }
 
 [dev-dependencies]
 insta      = "1.46"
@@ -98,6 +100,11 @@ required-features = ["systemverilog"]
 name = "compilation"
 harness = false
 bench = false
+
+[[example]]
+name = "frontend_binary"
+path = "examples/frontend_binary.rs"
+required-features = ["host-runtime"]
 
 [lints]
 workspace = true

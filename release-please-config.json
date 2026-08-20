@@ -13,6 +13,15 @@
       "version-file": "VERSION",
       "extra-files": [
         {
+          "type": "generic",
+          "path": "Cargo.toml"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.match(/^celox(?:-|$)/))].version"
+        },
+        {
           "type": "json",
           "path": "packages/celox/package.json",
           "jsonpath": "$.version"

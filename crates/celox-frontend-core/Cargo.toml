@@ -1,17 +1,19 @@
 [package]
 name = "celox-frontend-core"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Source-neutral symbolic frontend core for Celox"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-celox-design = { path = "../celox-design" }
-celox-frontend-sdk = { path = "../celox-frontend-sdk" }
-celox-sir = { path = "../celox-sir" }
-celox-slt = { path = "../celox-slt" }
+celox-design = { workspace = true }
+celox-frontend-sdk = { workspace = true }
+celox-sir = { workspace = true }
+celox-slt = { workspace = true }
 fxhash = { workspace = true }
 miette = { workspace = true }
 num-bigint = { workspace = true }

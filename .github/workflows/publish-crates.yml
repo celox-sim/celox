@@ -1,0 +1,124 @@
+name: Publish Rust Crates
+
+on:
+  repository_dispatch:
+    types: [crates-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed stable release tag
+        required: true
+        type: string
+
+concurrency:
+  group: crates-publish-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    outputs:
+      build_sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Resolve immutable release revision
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check release tag and version
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A v-prefixed stable release tag is required." >&2
+            exit 1
+          fi
+          expected_tag="v$(tr -d '\r\n' < VERSION)"
+          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
+            echo "Release tag $RELEASE_TAG does not match VERSION ($expected_tag)." >&2
+            exit 1
+          fi
+
+      - name: Check published GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          published_tag="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json tagName,isDraft,isPrerelease \
+              --jq 'select(.isDraft == false and .isPrerelease == false) | .tagName'
+          )"
+          if [[ "$published_tag" != "$RELEASE_TAG" ]]; then
+            echo "Published GitHub Release $RELEASE_TAG was not found." >&2
+            exit 1
+          fi
+
+      - name: Check synchronized release versions
+        run: node scripts/check-release-version.mjs
+
+  package:
+    name: Package and test
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.build_sha }}
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Validate every public crate package
+        run: ./scripts/publish-crates.sh package
+
+      - name: Test the public frontend path
+        run: |
+          cargo test --locked -p celox-frontend-sdk
+          cargo test --locked -p celox --test frontend_sdk
+          cargo run --locked -p celox --example frontend_binary
+
+      - name: Build and load a frontend-owned N-API adapter
+        run: |
+          cargo build --locked -p celox-example-my-frontend-napi
+          cp target/debug/libcelox_example_my_frontend_napi.so "$RUNNER_TEMP/my-frontend.node"
+          node examples/my-frontend-napi/smoke.cjs "$RUNNER_TEMP/my-frontend.node"
+
+      - name: Build Rust API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --no-deps
+
+  publish:
+    name: Publish to crates.io
+    needs: [validate, package]
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.build_sha }}
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Authenticate to crates.io
+        id: crates_io_auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
+        run: ./scripts/publish-crates.sh publish

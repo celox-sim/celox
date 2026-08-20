@@ -64,6 +64,7 @@ export type {
 	EventHandle,
 	FourStateSignalValue,
 	FourStateValue,
+	FrontendSimulatorHandle,
 	LoopBreak,
 	ModuleDefinition,
 	NativeHandle,

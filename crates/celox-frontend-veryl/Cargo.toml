@@ -1,20 +1,22 @@
 [package]
 name                  = "celox-frontend-veryl"
 version.workspace     = true
+publish               = ["crates-io"]
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
 description           = "Veryl frontend adapter for Celox"
 edition.workspace     = true
+rust-version.workspace = true
 
 [dependencies]
 tracing = { workspace = true }
 bit-set        = { workspace = true }
-celox-design   = { path = "../celox-design" }
-celox-frontend-core = { path = "../celox-frontend-core" }
-celox-sir      = { path = "../celox-sir" }
-celox-slt      = { path = "../celox-slt" }
-celox-testbench = { path = "../celox-testbench" }
+celox-design   = { workspace = true }
+celox-frontend-core = { workspace = true }
+celox-sir      = { workspace = true }
+celox-slt      = { workspace = true }
+celox-testbench = { workspace = true }
 fxhash         = { workspace = true }
 miette         = { workspace = true }
 num-bigint     = { workspace = true }

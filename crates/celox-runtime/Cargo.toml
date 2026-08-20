@@ -1,16 +1,18 @@
 [package]
 name = "celox-runtime"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Backend-independent Celox simulation runtime contracts"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-celox-design = { path = "../celox-design" }
-celox-state-layout = { path = "../celox-state-layout" }
-celox-testbench = { path = "../celox-testbench" }
+celox-design = { workspace = true }
+celox-state-layout = { workspace = true }
+celox-testbench = { workspace = true }
 bit-set = { workspace = true }
 chrono = "0.4"
 fxhash.workspace = true

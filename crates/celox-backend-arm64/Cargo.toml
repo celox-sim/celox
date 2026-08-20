@@ -1,16 +1,18 @@
 [package]
 name = "celox-backend-arm64"
 version.workspace = true
+publish = ["crates-io"]
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Celox AArch64 machine-code backend"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-celox-backend-common = { path = "../celox-backend-common" }
-celox-backend-x86 = { path = "../celox-backend-x86" }
-celox-state-layout = { path = "../celox-state-layout" }
+celox-backend-common = { workspace = true }
+celox-backend-x86 = { workspace = true }
+celox-state-layout = { workspace = true }
 dynasmrt = "5.1.0"
 fxhash = { workspace = true }
 

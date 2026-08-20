@@ -267,7 +267,7 @@ module MuxX (
 // ---------------------------------------------------------------------------
 
 describe("E2E: external frontend artifact", () => {
-	test("drives a frontend SDK design from a TypeScript testbench", () => {
+	test("builds a simulator from a serialized frontend artifact", () => {
 		interface AdderPorts {
 			a: bigint;
 			b: bigint;

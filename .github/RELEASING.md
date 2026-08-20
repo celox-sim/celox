@@ -1,10 +1,11 @@
 # Release policy
 
-Celox is released as one lockstep npm distribution. `VERSION`,
-`.release-please-manifest.json`, `@celox-sim/celox`,
-`@celox-sim/celox-napi`, and `@celox-sim/vite-plugin` must always carry the same
-version. Rust workspace crates are internal implementation units, use version
-`0.0.0`, and are not published to crates.io.
+Celox is released as one lockstep distribution. `VERSION`,
+`.release-please-manifest.json`, the npm packages, and all Rust workspace crates
+must always carry the same version. The public Rust entry points are `celox`,
+`celox-frontend-sdk`, and the Rust adapter API in `celox-napi`; the remaining
+published `celox-*` crates satisfy their Cargo dependency graph and remain
+implementation details.
 
 ## Versioning before 1.0
 
@@ -47,6 +48,85 @@ Merging the release pull request changes `.release-please-manifest.json`; that
 push, rather than a tag push, starts the NAPI build and npm publication workflow.
 Release Please may still create an immutable version tag and GitHub Release as
 release metadata, but tags are not deployment triggers.
+
+## crates.io publication
+
+The same tagged stable release is published to crates.io. Nightly channels stay
+npm-only because crates.io has no mutable distribution tags. The release
+management workflow dispatches **Publish Rust Crates** after it verifies that the
+tag points at the current release commit and that the GitHub Release is public.
+The Rust workflow repeats those checks, verifies every package archive, runs the
+external-frontend tests (including loading a separately built N-API addon), and
+then publishes in dependency order. A retry skips crate versions already present
+on crates.io.
+
+Release Please updates the workspace version, exact internal dependency
+requirements, and all matching entries in `Cargo.lock`. `scripts/check-release-version.mjs`
+rejects a release if any of those values differs from `VERSION`.
+
+Publication uses crates.io Trusted Publishing. The publish job has
+`id-token: write`, runs in the `crates-io` GitHub environment, and exchanges its
+GitHub OIDC identity for a temporary crates.io token. There is no persistent
+`CARGO_REGISTRY_TOKEN` Actions secret. The manual workflow requires an existing
+stable tag and published GitHub Release, so it is safe to use for a failed or
+partially completed publication retry.
+
+Create a GitHub environment named `crates-io` before the first release. Limit
+deployments to `master` and add required reviewers if publication should require
+a human approval.
+
+### First crates.io release
+
+crates.io cannot configure a trusted publisher for a crate name that has never
+been published. Bootstrap the names locally before the first stable release;
+the bootstrap is deliberately not a GitHub Actions job:
+
+1. After this release setup is merged, validate the generated empty `0.0.0`
+   placeholder packages locally:
+
+   ```bash
+   ./scripts/bootstrap-crates-io.sh package
+   ```
+
+2. Create a short-expiry crates.io API token with the `publish-new` endpoint
+   scope and a crate scope covering `celox` and `celox-*`. Do not save it in
+   GitHub Actions.
+3. Pass the token without putting it in shell history, then publish the
+   placeholders. The confirmation is required because crates.io releases are
+   permanent:
+
+   ```bash
+   read -rsp 'crates.io bootstrap token: ' CARGO_REGISTRY_TOKEN
+   echo
+   export CARGO_REGISTRY_TOKEN
+   ./scripts/bootstrap-crates-io.sh publish BOOTSTRAP-CELOX-CRATES
+   unset CARGO_REGISTRY_TOKEN
+   ```
+
+4. On the **Trusted Publishers** settings page of every published Celox crate,
+   register this exact identity:
+
+   | Field | Value |
+   | --- | --- |
+   | GitHub owner | `celox-sim` |
+   | GitHub repository | `celox` |
+   | Workflow filename | `publish-crates.yml` |
+   | Environment | `crates-io` |
+
+   The crates to configure are the entries in the `crates` array in
+   `scripts/publish-crates.sh`.
+5. Revoke the bootstrap API token immediately. Add the intended crates.io team
+   or backup owners, because the account that performed the bootstrap is the
+   initial owner of every new crate.
+6. Run the first stable release normally. It publishes the real lockstep version
+   through OIDC; `0.0.0` remains only as the name bootstrap. After this succeeds,
+   optionally enable **Trusted Publishing Only** for each crate so ordinary API
+   tokens cannot publish future versions.
+
+Adding another public crate later requires the same bounded bootstrap only for
+that new name, followed by registering the same trusted publisher. The local
+script skips existing `0.0.0` placeholders; existing crates continue to publish
+through OIDC.
 
 ## Veryl dependency lanes
 
@@ -127,3 +207,8 @@ repository auto-merge so dependency rolls, lane synchronization, and weekly
 releases can queue checked pull requests. Allow the automation token to create
 `develop` on first use and force-update the disposable `integration/veryl-head`
 branch; never grant a force-push exception on `master` or `develop`.
+
+Do not create a `CARGO_REGISTRY_TOKEN` repository or environment secret. The
+only manually created crates.io credential in this process is the short-expiry
+bootstrap token, which must be revoked after the initial crate names are
+created.
