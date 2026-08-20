@@ -1674,14 +1674,6 @@ fn emit_packed_lane_compare_vector(
         (1_u64 << field_width) - 1
     };
 
-    if let Some(rhs) = scalar_rhs {
-        match element_stride {
-            1 => dynasm!(ops ; .arch aarch64 ; dup v1.b16, W(rhs)),
-            2 => dynasm!(ops ; .arch aarch64 ; dup v1.h8, W(rhs)),
-            4 => dynasm!(ops ; .arch aarch64 ; dup v1.s4, W(rhs)),
-            _ => unreachable!(),
-        }
-    }
     if needs_mask {
         emit_load_imm(ops, SCRATCH1, field_mask);
         match element_stride {
@@ -1710,6 +1702,13 @@ fn emit_packed_lane_compare_vector(
             let (rhs_base, rhs_offset) =
                 select_vector_memory_base(BaseReg::SimState, i64::from(rhs_offset), state_pages);
             emit_vector_load(ops, 1, rhs_base, rhs_offset);
+        } else if let Some(rhs) = scalar_rhs {
+            match element_stride {
+                1 => dynasm!(ops ; .arch aarch64 ; dup v1.b16, W(rhs)),
+                2 => dynasm!(ops ; .arch aarch64 ; dup v1.h8, W(rhs)),
+                4 => dynasm!(ops ; .arch aarch64 ; dup v1.s4, W(rhs)),
+                _ => unreachable!(),
+            }
         }
 
         if bit_offset != 0 {
@@ -1727,8 +1726,7 @@ fn emit_packed_lane_compare_vector(
                     4 => dynasm!(ops ; .arch aarch64 ; ushr v1.s4, v1.s4, #shift),
                     _ => unreachable!(),
                 }
-            } else if let Some(rhs) = scalar_rhs {
-                let _ = rhs;
+            } else if scalar_rhs.is_some() {
                 match element_stride {
                     1 => dynasm!(ops ; .arch aarch64 ; ushr v1.b16, v1.b16, #shift),
                     2 => dynasm!(ops ; .arch aarch64 ; ushr v1.h8, v1.h8, #shift),
@@ -4712,6 +4710,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn executes_vector_packed_lane_compare_scalar_rhs_per_chunk() {
+        let mut vregs = VRegAllocator::new();
+        let result = vregs.alloc();
+        let rhs = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: rhs,
+            value: 0x0a,
+        });
+        block.push(MInst::PackedLaneCompare {
+            dst: result,
+            rhs: PackedLaneCompareRhs::Scalar(rhs),
+            kind: CmpKind::Eq,
+            offset: 0,
+            lane_count: 32,
+            element_stride: 1,
+            bit_offset: 1,
+            field_width: 8,
+            alias_range: None,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 64,
+            src: result,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        function.push_block(block);
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(result, PhysReg::RDX);
+        assignment.set(rhs, PhysReg::RAX);
+        let emitted = emit(&function, &assignment, 0).unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 72];
+        state[..32].fill(0x0a);
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[64..72].try_into().unwrap()),
+            u64::from(u32::MAX)
+        );
     }
 
     #[cfg(target_arch = "aarch64")]

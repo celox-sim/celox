@@ -386,6 +386,11 @@ impl NativeProgramImage {
         &self.runtime_schema
     }
 
+    /// Whether the image's generated code and state layout use four-state data.
+    pub(crate) fn four_state(&self) -> bool {
+        self.options.four_state
+    }
+
     /// Canonical event-domain topology used by the runtime scheduler.
     pub(crate) fn event_topology(&self) -> &NativeEventTopology {
         &self.event_topology

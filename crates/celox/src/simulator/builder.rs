@@ -1707,7 +1707,8 @@ mod host {
             self,
             image: crate::backend::native::NativeProgramImage,
         ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-            let options = self.options;
+            let mut options = self.options;
+            options.four_state = image.four_state();
             let vcd_path = self.vcd_path;
             let injected_components = self.injected_components;
 

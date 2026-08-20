@@ -64,6 +64,36 @@ fn native_image_restores_runtime_metadata_without_source_compilation() {
     assert!(!sim.build_vcd_descs(false).is_empty());
 }
 
+#[test]
+fn native_image_restores_four_state_mode_for_vcd() {
+    let code = r#"
+        module Top (a: input logic<8>, o: output logic<8>) {
+            assign o = a;
+        }
+    "#;
+
+    let image = Simulator::builder(code, "Top")
+        .four_state(true)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let vcd_path = directory.path().join("top.vcd");
+    let mut sim = Simulator::from_sources(Vec::new(), "Top")
+        .four_state(false)
+        .vcd(&vcd_path)
+        .build_native_from_image(image)
+        .unwrap();
+
+    sim.set_four_state(sim.signal("a"), 0xffu8.into(), 0xffu8.into());
+    sim.dump(0);
+    let dump = std::fs::read_to_string(vcd_path).unwrap();
+    assert!(dump.contains("xxxxxxxx"), "{dump}");
+}
+
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
     use celox::native_backend::emit;
     use celox::native_backend::jit_mem;

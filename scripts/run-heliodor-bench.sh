@@ -27,6 +27,7 @@ HELIODOR_CELOX_CODEGEN_CARGO_FEATURES="${HELIODOR_CELOX_CODEGEN_CARGO_FEATURES:-
 HELIODOR_CELOX_EXECUTION_TARGET="${HELIODOR_CELOX_EXECUTION_TARGET:-}"
 HELIODOR_CELOX_EXECUTION_PREFIX="${HELIODOR_CELOX_EXECUTION_PREFIX:-}"
 if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+    HELIODOR_CELOX_EXECUTION_TARGET="${HELIODOR_CELOX_EXECUTION_TARGET:-aarch64-unknown-linux-gnu}"
     HELIODOR_CELOX_EXECUTION_CARGO_FEATURES="${HELIODOR_CELOX_EXECUTION_CARGO_FEATURES:-experimental-arm64-backend}"
 else
     HELIODOR_CELOX_EXECUTION_CARGO_FEATURES="${HELIODOR_CELOX_EXECUTION_CARGO_FEATURES:-$HELIODOR_CELOX_CARGO_FEATURES}"
@@ -127,6 +128,7 @@ Environment:
                        Cargo features for the execution runner
   HELIODOR_CELOX_EXECUTION_TARGET
                        target triple for the execution runner, e.g. aarch64-unknown-linux-gnu
+                       (defaults to aarch64-unknown-linux-gnu in host-qemu mode)
   HELIODOR_CELOX_EXECUTION_PREFIX
                        command prefix for execution, e.g. "qemu-aarch64 -L /usr/aarch64-linux-gnu"
   HELIODOR_BUILD_CELOX_RUNNER
@@ -1069,6 +1071,10 @@ validate_native_image_mode() {
             fi
             if [[ -z "$HELIODOR_CELOX_EXECUTION_PREFIX" ]]; then
                 echo "error: host-qemu native-image mode requires HELIODOR_CELOX_EXECUTION_PREFIX" >&2
+                return 2
+            fi
+            if [[ "$HELIODOR_CELOX_EXECUTION_TARGET" != aarch64-* ]]; then
+                echo "error: host-qemu native-image mode requires an AArch64 execution target" >&2
                 return 2
             fi
             ;;
