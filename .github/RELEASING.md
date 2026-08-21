@@ -69,9 +69,15 @@ Publication uses crates.io Trusted Publishing. The publish job has
 `id-token: write`, runs in the `crates-io` GitHub environment, and exchanges its
 GitHub OIDC identity for a temporary crates.io token. There is no persistent
 `CARGO_REGISTRY_TOKEN` Actions secret. A manual retry must select the existing
-stable tag as the workflow ref; the workflow has no free-form revision input.
-It also requires a published GitHub Release, so it is safe to use for a failed
-or partially completed publication retry.
+stable tag as the workflow ref. It also requires a published GitHub Release, so
+it is safe to use for a failed or partially completed publication retry.
+
+If the publishing implementation itself must be fixed after a partial release,
+create a numbered `vX.Y.Z-recovery.N` tag from the reviewed fix commit and run
+**Publish Rust Crates** from that tag with `release_tag` set to `vX.Y.Z`. The
+workflow requires the source tag to use that exact recovery form, requires
+the recovery tag to descend from the stable release tag, requires `VERSION` to
+match the stable release, and skips crate versions already visible on crates.io.
 
 Create a GitHub environment named `crates-io` before the first release. Limit
 deployments to protected tags matching `v*` and add required reviewers if
