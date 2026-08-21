@@ -222,7 +222,11 @@ impl JitBackend {
             .clone()
             .with_backend_scratch(eval_comb_plan.scratch_size());
 
-        #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+        #[cfg(all(
+            feature = "host-runtime",
+            target_arch = "x86_64",
+            not(feature = "arm64-codegen")
+        ))]
         let layout_for_mir = if options.trace.mir {
             Some(layout.clone())
         } else {
@@ -294,7 +298,11 @@ impl JitBackend {
                 full_native.push_str(&native_buf);
                 t.native = Some(full_native);
             }
-            #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "host-runtime",
+                target_arch = "x86_64",
+                not(feature = "arm64-codegen")
+            ))]
             if options.trace.mir {
                 use super::native::isel::lower_execution_unit;
                 use super::native::mir_legalize;

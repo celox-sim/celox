@@ -10,11 +10,16 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+celox-analysis = { workspace = true }
 celox-backend-common = { workspace = true }
-celox-backend-x86 = { workspace = true }
+celox-design = { workspace = true }
+celox-sir = { workspace = true }
 celox-state-layout = { workspace = true }
 dynasmrt = "5.1.0"
 fxhash = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+tracing = { workspace = true }
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dev-dependencies]
 libc = { workspace = true }

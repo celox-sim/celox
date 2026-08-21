@@ -482,12 +482,17 @@ dependencies = [
 name = "celox-backend-arm64"
 version = "0.3.1"
 dependencies = [
+ "celox-analysis",
  "celox-backend-common",
- "celox-backend-x86",
+ "celox-design",
+ "celox-sir",
  "celox-state-layout",
  "dynasmrt",
  "fxhash",
  "libc",
+ "num-bigint",
+ "num-traits",
+ "tracing",
 ]
 
 [[package]]

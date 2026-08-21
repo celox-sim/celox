@@ -1,13 +1,14 @@
 //! AArch64 scalar machine IR.
 //!
-//! This is deliberately owned by the AArch64 backend. The current production
-//! pipeline lowers optimized x86 scalar MIR into this form before allocation,
-//! then performs spilling, coloring, and SSA destruction here. Future AArch64
-//! instruction selection can target the same boundary without teaching the
-//! emitter about x86 opcodes.
+//! This is deliberately owned by the AArch64 backend. Instruction selection
+//! lowers SIR directly into this form, then this backend performs spilling,
+//! coloring, SSA destruction, and machine-code emission without depending on
+//! another target's opcodes or allocation policy.
 
 use std::collections::BTreeMap;
 use std::fmt;
+
+use crate::RegionedAbsoluteAddr;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct VReg(pub(crate) u32);
@@ -21,6 +22,113 @@ impl fmt::Debug for VReg {
 impl fmt::Display for VReg {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "v{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct VRegAllocator {
+    next: u32,
+}
+
+impl VRegAllocator {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn alloc(&mut self) -> VReg {
+        let value = VReg(self.next);
+        self.next = self.next.checked_add(1).expect("AArch64 VReg overflow");
+        value
+    }
+
+    pub(crate) fn count(&self) -> u32 {
+        self.next
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SpillKind {
+    SimState {
+        addr: RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+    },
+    SimStateAlias,
+    Stack,
+    Remat {
+        value: u64,
+    },
+}
+
+/// Instruction-selection provenance. AArch64 allocation deliberately does
+/// not consume target-specific spill costs, but keeping rematerialization and
+/// state-origin facts here lets the selector reason about constants and safe
+/// aliases.
+#[derive(Debug, Clone)]
+pub(crate) struct SpillDesc {
+    pub(crate) kind: SpillKind,
+    pub(crate) spill_cost: u8,
+}
+
+impl SpillDesc {
+    pub(crate) fn transient() -> Self {
+        Self {
+            kind: SpillKind::Stack,
+            spill_cost: 1,
+        }
+    }
+
+    pub(crate) fn remat(value: u64) -> Self {
+        Self {
+            kind: SpillKind::Remat { value },
+            spill_cost: 0,
+        }
+    }
+
+    pub(crate) fn sim_state(
+        addr: RegionedAbsoluteAddr,
+        bit_offset: usize,
+        width_bits: usize,
+        store_back_only: bool,
+    ) -> Self {
+        Self {
+            kind: SpillKind::SimState {
+                addr,
+                bit_offset,
+                width_bits,
+            },
+            spill_cost: u8::from(!store_back_only),
+        }
+    }
+
+    pub(crate) fn sim_state_alias(
+        _addr: RegionedAbsoluteAddr,
+        _bit_offset: usize,
+        _width_bits: usize,
+        store_back_only: bool,
+    ) -> Self {
+        Self {
+            kind: SpillKind::SimStateAlias,
+            spill_cost: u8::from(!store_back_only),
+        }
+    }
+
+    pub(crate) fn copy_for_snapshot(&self) -> Self {
+        self.clone()
+    }
+
+    pub(crate) fn with_state_insert(self, _value: VReg, _bit_offset: usize, _width: usize) -> Self {
+        self
+    }
+
+    pub(crate) fn with_state_insert_fragment(
+        self,
+        _value: VReg,
+        _value_bit_offset: usize,
+        _bit_offset: usize,
+        _width: usize,
+    ) -> Self {
+        self
     }
 }
 
@@ -50,10 +158,48 @@ pub(crate) enum OpSize {
     S64,
 }
 
+impl OpSize {
+    pub(crate) fn from_bits(bits: usize) -> Option<Self> {
+        match bits {
+            8 => Some(Self::S8),
+            16 => Some(Self::S16),
+            32 => Some(Self::S32),
+            64 => Some(Self::S64),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn bytes(self) -> u8 {
+        match self {
+            Self::S8 => 1,
+            Self::S16 => 2,
+            Self::S32 => 4,
+            Self::S64 => 8,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BaseReg {
     SimState,
     StackFrame,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct MemoryAliasRange {
+    offset: i32,
+    byte_len: usize,
+}
+
+impl MemoryAliasRange {
+    pub(crate) fn new(offset: i32, byte_len: usize) -> Option<Self> {
+        if byte_len == 0 {
+            return None;
+        }
+        i64::from(offset)
+            .checked_add(i64::try_from(byte_len).ok()?)
+            .map(|_| Self { offset, byte_len })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +217,7 @@ pub(crate) enum CmpKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // Reserved for target-owned MIR optimization and branch folding.
 pub(crate) enum BranchPredicate {
     Compare {
         lhs: VReg,
@@ -92,13 +239,45 @@ pub(crate) enum BranchPredicate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PackedLaneCompareRhs {
     Scalar(VReg),
-    Memory { offset: i32 },
+    Memory {
+        offset: i32,
+        alias_range: Option<MemoryAliasRange>,
+    },
 }
 
 pub(crate) const SPARSE_COMMIT_DESCRIPTOR_WORDS: usize = 8;
 
+pub(crate) struct SparseCommitDescriptor {
+    pub(crate) src_offset: u64,
+    pub(crate) dst_offset: u64,
+    pub(crate) byte_size: u64,
+    pub(crate) dirty_words_offset: u64,
+    pub(crate) dirty_word_count: u64,
+    pub(crate) summary_words_offset: u64,
+    pub(crate) summary_word_count: u64,
+    pub(crate) four_state: u64,
+}
+
+impl SparseCommitDescriptor {
+    pub(crate) const WORDS: usize = SPARSE_COMMIT_DESCRIPTOR_WORDS;
+
+    pub(crate) fn words(self) -> [u64; Self::WORDS] {
+        [
+            self.src_offset,
+            self.dst_offset,
+            self.byte_size,
+            self.dirty_words_offset,
+            self.dirty_word_count,
+            self.summary_words_offset,
+            self.summary_word_count,
+            self.four_state,
+        ]
+    }
+}
+
 /// Word-level AArch64 operations before physical-register substitution.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Some recipes are introduced only by optional late MIR passes.
 pub(crate) enum MInst {
     Mov {
         dst: VReg,
@@ -172,6 +351,7 @@ pub(crate) enum MInst {
         index: VReg,
         scale: u8,
         size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
     },
     PackedLaneCompare {
         dst: VReg,
@@ -182,6 +362,7 @@ pub(crate) enum MInst {
         element_stride: u8,
         bit_offset: u8,
         field_width: u8,
+        alias_range: Option<MemoryAliasRange>,
     },
     PackedByteAffineCompare {
         dst: VReg,
@@ -195,6 +376,7 @@ pub(crate) enum MInst {
         index: VReg,
         src: VReg,
         size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
     },
     OrStoreIndexed {
         base: BaseReg,
@@ -202,6 +384,7 @@ pub(crate) enum MInst {
         index: VReg,
         src: VReg,
         size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
     },
     LoadPtrIndexed {
         dst: VReg,
@@ -979,6 +1162,18 @@ pub(crate) struct MBlock {
 }
 
 impl MBlock {
+    pub(crate) fn new(id: BlockId) -> Self {
+        Self {
+            id,
+            phis: Vec::new(),
+            insts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, instruction: MInst) {
+        self.insts.push(instruction);
+    }
+
     pub(crate) fn successors(&self) -> Vec<BlockId> {
         match self.insts.last() {
             Some(MInst::Branch {
@@ -998,18 +1193,52 @@ impl MBlock {
 pub(crate) struct MFunction {
     pub(crate) blocks: Vec<MBlock>,
     constant_tables: Vec<Vec<u64>>,
+    pub(crate) vregs: VRegAllocator,
+    pub(crate) spill_descs: Vec<SpillDesc>,
     pub(crate) spill_homes: BTreeMap<VReg, i32>,
     pub(crate) spilled_phis: Vec<SpilledPhiNode>,
 }
 
 impl MFunction {
+    #[allow(dead_code)]
     pub(crate) fn new(blocks: Vec<MBlock>, constant_tables: Vec<Vec<u64>>) -> Self {
         Self {
             blocks,
             constant_tables,
+            vregs: VRegAllocator::new(),
+            spill_descs: Vec::new(),
             spill_homes: BTreeMap::new(),
             spilled_phis: Vec::new(),
         }
+    }
+
+    pub(crate) fn for_isel(vregs: VRegAllocator, spill_descs: Vec<SpillDesc>) -> Self {
+        Self {
+            blocks: Vec::new(),
+            constant_tables: Vec::new(),
+            vregs,
+            spill_descs,
+            spill_homes: BTreeMap::new(),
+            spilled_phis: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn push_block(&mut self, block: MBlock) {
+        self.blocks.push(block);
+    }
+
+    pub(crate) fn intern_constant_table(&mut self, values: Vec<u64>) -> ConstantTableId {
+        if let Some(index) = self
+            .constant_tables
+            .iter()
+            .position(|table| table == &values)
+        {
+            return ConstantTableId(index);
+        }
+        let id = ConstantTableId(self.constant_tables.len());
+        self.constant_tables.push(values);
+        id
     }
 
     pub(crate) fn constant_tables(&self) -> &[Vec<u64>] {
