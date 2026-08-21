@@ -10,7 +10,7 @@ const NO_RELEASE_TYPES = new Set([
   "refactor",
   "test",
 ]);
-const PATCH_TYPES = new Set(["fix", "perf", "revert"]);
+const PATCH_TYPES = new Set(["deps", "fix", "perf", "revert"]);
 
 const impactNames = ["none", "patch", "feature", "breaking", "forced"];
 
@@ -65,10 +65,13 @@ function hasBreakingChange(message) {
       if (!/\S/.test(line)) {
         continue;
       }
-      return (
-        !conventionalHeaderPattern.test(line) &&
-        !/^[^\s:]+\s+#\d+/.test(line)
-      );
+      if (
+        conventionalHeaderPattern.test(line) ||
+        /^[^\s:]+\s+#\d+/.test(line)
+      ) {
+        break;
+      }
+      return true;
     }
   }
 

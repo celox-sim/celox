@@ -20,6 +20,7 @@ test("maps pull request titles to their pre-major release policy", () => {
 test("detects every commit form consumed by release automation", () => {
   const options = { preMajor: false };
   assert.equal(commitReleaseImpact("chore: tidy", options), 0);
+  assert.equal(commitReleaseImpact("deps: update dependency", options), 1);
   assert.equal(commitReleaseImpact("fix: repair output", options), 1);
   assert.equal(commitReleaseImpact("feat: add output", options), 2);
   assert.equal(commitReleaseImpact("Fix: repair output", options), 0);
@@ -59,6 +60,10 @@ test("detects every commit form consumed by release automation", () => {
     2,
   );
   assert.equal(
+    commitReleaseImpact("Merge branch master\n\nfeat!: nested break", options),
+    0,
+  );
+  assert.equal(
     commitReleaseImpact(
       "chore: outer\n\nBEGIN_NESTED_COMMIT\nFix!: nested break\nEND_NESTED_COMMIT",
       options,
@@ -93,6 +98,13 @@ test("matches Release Please's permissive header and footer parsing", () => {
   assert.equal(
     commitReleaseImpact("chore: tidy\n\nBREAKING CHANGE:\n\nRefs: #1", options),
     0,
+  );
+  assert.equal(
+    commitReleaseImpact(
+      "chore: tidy\n\nBREAKING CHANGE:\n\nRefs: #1\nBREAKING CHANGE: remove API",
+      options,
+    ),
+    3,
   );
 });
 
