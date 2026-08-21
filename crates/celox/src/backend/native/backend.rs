@@ -27,7 +27,12 @@ use crate::{CodegenError, HashMap, HashSet, SimulatorError, SimulatorOptions};
 use super::super::RuntimeEventBuffer;
 use super::super::traits::SimulatorErrorCode;
 use super::super::{MemoryLayout, get_byte_size};
-use super::{emit, jit_mem, regalloc};
+#[cfg(any(
+    feature = "x86_64-codegen",
+    all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+))]
+use super::regalloc;
+use super::{emit, jit_mem};
 
 const NATIVE_FEATURE_BMI2: u8 = 1 << 0;
 const NATIVE_FEATURE_AVX: u8 = 1 << 1;
@@ -690,20 +695,46 @@ fn compile_unit_refs(
     let timing = x86_options.diagnostics.phase_timing;
     if units.is_empty() {
         // Empty function: just return 0
-        let mut empty_func = super::mir::MFunction::new(super::mir::VRegAllocator::new(), vec![]);
-        let mut block = super::mir::MBlock::new(super::mir::BlockId(0));
-        block.push(super::mir::MInst::Return);
-        empty_func.push_block(block);
-        let empty_result = emit::emit(&empty_func, &regalloc::AssignmentMap::default(), 0)
-            .map_err(|source| codegen_err(CodegenError::NativeEmission { source }))?;
+        #[cfg(any(
+            feature = "x86_64-codegen",
+            all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+        ))]
+        let (empty_result, empty_mir) = {
+            let mut empty_func =
+                super::mir::MFunction::new(super::mir::VRegAllocator::new(), vec![]);
+            let mut block = super::mir::MBlock::new(super::mir::BlockId(0));
+            block.push(super::mir::MInst::Return);
+            empty_func.push_block(block);
+            let empty_result = emit::emit(&empty_func, &regalloc::AssignmentMap::default(), 0)
+                .map_err(|source| codegen_err(CodegenError::NativeEmission { source }))?;
+            let empty_mir = empty_func.to_string();
+            (empty_result, empty_mir)
+        };
+        #[cfg(any(
+            feature = "arm64-codegen",
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        let (empty_result, empty_mir) = {
+            let state_size = layout
+                .merged_total_size
+                .checked_add(layout.triggered_bits_total_size)
+                .ok_or_else(|| {
+                    codegen_err(CodegenError::NativeEmission {
+                        source: emit::EmitError::Range("AArch64 simulation-state size overflow"),
+                    })
+                })?;
+            let result = emit::emit_empty(state_size)
+                .map_err(|source| codegen_err(CodegenError::NativeEmission { source }))?;
+            (result, "bb0:\n  Return\n".to_string())
+        };
         let trace = capture_trace.then(|| emit::NativeFunctionTrace {
             optimized_sir: "<empty native function>\n".into(),
             reactive_graph: String::new(),
             state_layout: String::new(),
-            mir_before_regalloc: empty_func.to_string(),
-            mir_after_late_memory_folds: empty_func.to_string(),
-            mir_after_scheduling: empty_func.to_string(),
-            mir_after_regalloc: empty_func.to_string(),
+            mir_before_regalloc: empty_mir.clone(),
+            mir_after_late_memory_folds: empty_mir.clone(),
+            mir_after_scheduling: empty_mir.clone(),
+            mir_after_regalloc: empty_mir,
             register_assignment: String::new(),
             spill_frame_size: 0,
             disassembly: emit::disassemble(&empty_result.code[..empty_result.text_size], 0),
@@ -737,12 +768,29 @@ fn compile_unit_refs(
     let start = timing.then(crate::timing::now);
     let sir_eu = prepare_merged_sir(units, layout, four_state, label, first_ff_unit, diagnostics)?;
     let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
+    #[cfg(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    ))]
     let emit_result = emit::emit_prepared_eu(
         &sir_eu,
         layout,
         four_state,
         label,
         x86_options,
+        trace.as_mut(),
+    )
+    .map_err(|source| codegen_err(CodegenError::NativePipeline { source }))?;
+    #[cfg(any(
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
+    let emit_result = emit::emit_prepared_eu(
+        &sir_eu,
+        layout,
+        four_state,
+        label,
+        x86_options.native_tick_loop,
         trace.as_mut(),
     )
     .map_err(|source| codegen_err(CodegenError::NativePipeline { source }))?;
