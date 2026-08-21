@@ -123,6 +123,38 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
 mod tests {
     use super::*;
 
+    fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
+        match expr {
+            ir::ConstExpr::Literal(value) => value.parse().ok(),
+            ir::ConstExpr::Binary { left, op, right } => {
+                let left = eval_test_const_expr(left)?;
+                let right = eval_test_const_expr(right)?;
+                Some(match op {
+                    ir::BinaryOp::Add => left + right,
+                    ir::BinaryOp::Sub => left - right,
+                    ir::BinaryOp::Mul => left * right,
+                    ir::BinaryOp::Ge => (left >= right) as i128,
+                    ir::BinaryOp::Le => (left <= right) as i128,
+                    ir::BinaryOp::LogicAnd => ((left != 0) && (right != 0)) as i128,
+                    ir::BinaryOp::LogicOr => ((left != 0) || (right != 0)) as i128,
+                    _ => return None,
+                })
+            }
+            ir::ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                if eval_test_const_expr(condition)? != 0 {
+                    eval_test_const_expr(then_expr)
+                } else {
+                    eval_test_const_expr(else_expr)
+                }
+            }
+            _ => None,
+        }
+    }
+
     #[test]
     fn analyzes_basic_sv_module_name() {
         let ir = analyze_source(
@@ -205,6 +237,36 @@ mod tests {
         assert!(matches!(
             compound.as_ref(),
             ir::Expr::Select { signed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn preserves_operand_signedness_for_size_casts() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic y);
+                    assign y = (8'(0) < -1);
+                endmodule
+            "#,
+            Path::new("size_cast_signedness.sv"),
+        )
+        .expect("size casts should preserve operand signedness");
+        let expression = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Binary {
+            op: ir::BinaryOp::Lt,
+            left,
+            ..
+        } = expression
+        else {
+            panic!("expected a signed less-than comparison, got {expression:?}");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            ir::Expr::Resize {
+                width: 8,
+                signed: true,
+                ..
+            }
         ));
     }
 
@@ -803,6 +865,70 @@ mod tests {
         )
         .expect("nested static loops should use the outer loop environment");
         assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 1);
+    }
+
+    #[test]
+    fn carries_outer_loop_types_into_nested_loop_preflight() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic clk, input logic d);
+                    logic q;
+                    always_ff @(posedge clk) begin
+                        for (int i = -1; i < 0; i++) begin
+                            for (int j = 0; i < 32'd1; j++) begin
+                                q <= d;
+                            end
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("nested_loop_preflight_types.sv"),
+        )
+        .expect("nested loop preflight should use outer loop types");
+        assert!(ir.modules()[0].ff_processes().is_empty());
+    }
+
+    #[test]
+    fn applies_expression_types_to_compound_loop_steps() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic clk, output logic q);
+                    always_ff @(posedge clk) begin
+                        for (int i = -2; i < 0; i /= 32'd2) begin
+                            q <= 1'b1;
+                        end
+                        for (int i = -3; i < 0; i %= 32'd2) begin
+                            q <= 1'b0;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("typed_compound_loop_steps.sv"),
+        )
+        .expect("compound loop steps should use expression types");
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+    }
+
+    #[test]
+    fn flattens_partial_unpacked_array_selections() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic [7:0] values[2][3],
+                    output logic [7:0] row[3]
+                );
+                    assign row = values[0];
+                endmodule
+            "#,
+            Path::new("partial_unpacked_selection.sv"),
+        )
+        .expect("partial unpacked selections should be analyzed");
+        let expression = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Select { msb, lsb, .. } = expression else {
+            panic!("expected a flattened partial selection, got {expression:?}");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(23));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
     }
 
     #[test]

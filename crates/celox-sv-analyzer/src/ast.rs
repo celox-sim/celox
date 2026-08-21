@@ -432,17 +432,13 @@ fn static_for_loop_iterations(
                 signed: true,
             },
         );
-        if eval_ast_const_expr(&condition, &loop_env)? == 0 {
+        let condition_value = eval_ast_const_expr(&condition, &loop_env)?;
+        if condition_value == 0 {
             return Some((name, values));
         }
         values.push(value);
-        value = coerce_for_loop_index_value(next_for_loop_value(
-            step,
-            &name,
-            value,
-            syntax_tree,
-            &loop_env,
-        )?)?;
+        let next = next_for_loop_value(step, &name, value, syntax_tree, &loop_env);
+        value = coerce_for_loop_index_value(next?)?;
     }
 
     let mut loop_env = const_env.clone();
@@ -534,6 +530,14 @@ fn validate_static_for_loops_in_statement(
             for value in values {
                 let mut loop_env = const_env.clone();
                 loop_env.insert(name.clone(), value);
+                insert_parameter_type_markers(
+                    &mut loop_env,
+                    &name,
+                    ExprType {
+                        width: 32,
+                        signed: true,
+                    },
+                );
                 validate_static_for_loops_in_statement_or_null(
                     &loop_statement.nodes.2,
                     syntax_tree,
@@ -665,8 +669,19 @@ fn cast_zero_type(
         return None;
     };
     let literal = typecheck::parse_integral_literal(&literal)?;
-    (literal.value == 0u8.into() && literal.mask == 0u8.into())
-        .then(|| cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases))?
+    if literal.value != 0u8.into() || literal.mask != 0u8.into() {
+        return None;
+    }
+    let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
+    let signed = if matches!(cast.nodes.0, sv_parser::CastingType::ConstantPrimary(_)) {
+        literal.signed
+    } else {
+        target_type.signed
+    };
+    Some(ExprType {
+        signed,
+        ..target_type
+    })
 }
 
 fn constant_cast_zero_type(
@@ -683,8 +698,19 @@ fn constant_cast_zero_type(
         return None;
     };
     let literal = typecheck::parse_integral_literal(&literal)?;
-    (literal.value == 0u8.into() && literal.mask == 0u8.into())
-        .then(|| cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases))?
+    if literal.value != 0u8.into() || literal.mask != 0u8.into() {
+        return None;
+    }
+    let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
+    let signed = if matches!(cast.nodes.0, sv_parser::CastingType::ConstantPrimary(_)) {
+        literal.signed
+    } else {
+        target_type.signed
+    };
+    Some(ExprType {
+        signed,
+        ..target_type
+    })
 }
 
 fn typed_zero_literal(r#type: ExprType) -> String {
@@ -720,18 +746,26 @@ fn next_for_loop_value(
             if for_loop_variable_lvalue_name(&step.nodes.0, syntax_tree)? != name {
                 return None;
             }
-            let operator = syntax_tree.get_str(&step.nodes.1.nodes.0)?;
+            let operator = syntax_tree.get_str(&step.nodes.1.nodes.0)?.trim();
             let rhs = const_expr_from_expr(&step.nodes.2, syntax_tree)?;
-            let rhs = eval_ast_const_expr(&rhs, const_env)?;
-            match operator {
-                "=" => Some(rhs),
-                "+=" => value.checked_add(rhs),
-                "-=" => value.checked_sub(rhs),
-                "*=" => value.checked_mul(rhs),
-                "/=" => (rhs != 0).then(|| value / rhs),
-                "%=" => (rhs != 0).then(|| value % rhs),
-                _ => None,
+            if operator == "=" {
+                return eval_ast_const_expr(&rhs, const_env);
             }
+            let op = match operator {
+                "+=" => BinaryOp::Add,
+                "-=" => BinaryOp::Sub,
+                "*=" => BinaryOp::Mul,
+                "/=" => BinaryOp::Div,
+                "%=" => BinaryOp::Mod,
+                _ => return None,
+            };
+            let lhs = ConstExpr::Literal(format_typed_parameter_literal(value, 32, true));
+            let expression = ConstExpr::Binary {
+                left: Box::new(lhs),
+                op,
+                right: Box::new(rhs),
+            };
+            eval_ast_const_expr(&expression, const_env)
         }
         sv_parser::ForStepAssignment::IncOrDecExpression(step) => {
             let (lvalue, operator) = match &**step {
@@ -8306,6 +8340,26 @@ fn expr_select_from_select(
                     signed: dimensions.signed,
                 });
             }
+            if let Some(dimensions) = packed_dimensions.get(name)
+                && !dimensions.unpacked.is_empty()
+                && packed_indices.is_empty()
+                && indices.len() < dimensions.unpacked.len()
+            {
+                let width = remaining_unpacked_selection_width(dimensions, indices.len());
+                return Some(Expr::Select {
+                    expr: Box::new(base),
+                    msb: add_expr(
+                        array_offset.clone(),
+                        ConstExpr::Binary {
+                            left: Box::new(width),
+                            op: BinaryOp::Sub,
+                            right: Box::new(ConstExpr::Literal("1".to_string())),
+                        },
+                    ),
+                    lsb: array_offset,
+                    signed: dimensions.signed,
+                });
+            }
         }
     }
     if indices.len() == 1 {
@@ -8337,13 +8391,11 @@ fn flatten_variable_select(
 ) -> Option<(ConstExpr, Vec<ConstExpr>)> {
     let dimensions = packed_dimensions.get(name)?;
     let unpacked_count = dimensions.unpacked.len();
-    if indices.len() < unpacked_count {
-        return None;
-    }
+    let selected_unpacked_count = indices.len().min(unpacked_count);
 
     let mut offset = ConstExpr::Literal("0".to_string());
     let mut valid = None;
-    for (index, value) in indices[..unpacked_count].iter().enumerate() {
+    for (index, value) in indices[..selected_unpacked_count].iter().enumerate() {
         if const_expr_is_out_of_range(
             value,
             &dimensions.unpacked[index].left,
@@ -8438,7 +8490,24 @@ fn flatten_variable_select(
             else_expr: Box::new(product_expr(&total_width_parts)),
         };
     }
-    Some((offset, indices[unpacked_count..].to_vec()))
+    Some((offset, indices[selected_unpacked_count..].to_vec()))
+}
+
+fn remaining_unpacked_selection_width(
+    dimensions: &VariableDimensions,
+    selected_unpacked_count: usize,
+) -> ConstExpr {
+    let mut parts = dimensions.unpacked[selected_unpacked_count..]
+        .iter()
+        .map(|dimension| dimension.width.clone())
+        .collect::<Vec<_>>();
+    parts.extend(
+        dimensions
+            .packed
+            .iter()
+            .map(|dimension| dimension.width.clone()),
+    );
+    product_expr(&parts)
 }
 
 fn flatten_select_range(
@@ -8457,6 +8526,9 @@ fn flatten_select_range(
         && !dimensions.packed[0].normalize_single
     {
         return Some((msb, lsb));
+    }
+    if indices.len() < dimensions.unpacked.len() {
+        return None;
     }
     let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     let dimension = dimensions.packed.get(packed_indices.len())?;

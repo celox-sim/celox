@@ -2768,6 +2768,26 @@ fn applies_generate_localparams_inside_always_ff() {
 }
 
 #[test]
+fn reads_partial_unpacked_array_selections() {
+    let source = r#"
+        module Top(output logic [23:0] row);
+            logic [7:0] values [0:1][0:2];
+            assign row = values[1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("partial_unpacked_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let values = sim.signal("values");
+    sim.modify(|io| io.set_wide(values, BigUint::from(0x060504030201u64)))
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("row")), 0x060504u32.into());
+}
+
+#[test]
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
@@ -2803,15 +2823,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(); endmodule
             module Top(); Child child[1:0](); endmodule
-        "#,
-        ),
-        (
-            "continuous assignment",
-            r#"
-            module Top(output logic [23:0] row);
-                logic [7:0] values [0:1][0:2];
-                assign row = values[1];
-            endmodule
         "#,
         ),
         (
