@@ -26,8 +26,8 @@ use celox_sir::{
     SIRValue, merge_sir_eus,
 };
 use celox_slt::{
-    CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, SLTIndex, SLTIndexKind, SLTNode,
-    SLTNodeArena,
+    CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, NodeId, SLTIndex, SLTIndexKind,
+    SLTNode, SLTNodeArena,
 };
 use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -1758,6 +1758,57 @@ fn lower_glue_parent_expr(
             lsb,
             signed,
         } => {
+            if let Some((id, element_width)) = dynamic_array_element_selection(
+                expr,
+                msb,
+                lsb,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+            ) {
+                let (offset, mut sources, mut source_ids) = lower_dynamic_array_element_index_glue(
+                    lsb,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    element_width,
+                )?;
+                let variable = variables.get(&id)?;
+                let node = arena
+                    .alloc(SLTNode::Input {
+                        variable: GlueAddr::Parent(id),
+                        signed: *signed,
+                        index: vec![SLTIndex {
+                            node: offset,
+                            stride: element_width,
+                            kind: SLTIndexKind::Unpacked { element_width },
+                        }],
+                        access: BitAccess::new(0, element_width - 1),
+                    })
+                    .ok()?;
+                sources.insert(VarAtomBase::new(
+                    GlueAddr::Parent(id),
+                    0,
+                    variable.width.checked_sub(1)?,
+                ));
+                source_ids.push(id);
+                source_ids.sort();
+                source_ids.dedup();
+                return Some((
+                    coerce_node_width(
+                        arena,
+                        node,
+                        context_width,
+                        context_signed.unwrap_or(*signed),
+                    )
+                    .ok()?,
+                    sources,
+                    source_ids,
+                ));
+            }
             let (inner, sources, source_ids) = lower_glue_parent_expr(
                 expr,
                 variables,
@@ -2219,6 +2270,44 @@ fn lower_glue_parent_expr(
     }
 }
 
+fn lower_dynamic_array_element_index_glue(
+    offset: &sv::ir::ConstExpr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    arena: &mut SLTNodeArena<GlueAddr>,
+    element_width: usize,
+) -> Option<(NodeId, HashSet<VarAtomBase<GlueAddr>>, Vec<SourceVarId>)> {
+    let offset_expr = expr_from_const_expr(offset)?;
+    let (offset, sources, source_ids) = lower_glue_parent_expr(
+        &offset_expr,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        arena,
+        None,
+        None,
+    )?;
+    let element_index = if element_width == 1 {
+        offset
+    } else {
+        let divisor = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(element_width),
+                BigUint::default(),
+                64,
+                false,
+            ))
+            .ok()?;
+        arena
+            .alloc(SLTNode::Binary(offset, BinaryOp::DivU, divisor))
+            .ok()?
+    };
+    Some((element_index, sources, source_ids))
+}
+
 fn next_var_id(next_id: &mut SourceVarId) -> SourceVarId {
     let id = *next_id;
     next_id.0 += 1;
@@ -2345,6 +2434,48 @@ fn signal_type_from_sv(
     })
 }
 
+struct PreviousArrayValue {
+    expr: NodeId,
+    sources: HashSet<VarAtomBase<SourceVarId>>,
+    previous_sources: HashSet<VarAtomBase<SourceVarId>>,
+    address_sources: HashSet<VarAtomBase<SourceVarId>>,
+}
+
+fn lower_previous_array_value(
+    id: SourceVarId,
+    width: usize,
+    paths: &[LogicPath<SourceVarId>],
+) -> Result<Option<PreviousArrayValue>, sv::AnalyzerError> {
+    let mut matching = paths
+        .iter()
+        .filter(|path| path.target.var().is_some_and(|target| target.id == id));
+    let Some(path) = matching.next() else {
+        return Ok(None);
+    };
+    let Some(target) = path.target.var() else {
+        unreachable!("matching path must have a variable target");
+    };
+    if target.access
+        != BitAccess::new(
+            0,
+            width.checked_sub(1).ok_or_else(|| {
+                sv::AnalyzerError::Unsupported("zero-width unpacked array".to_string())
+            })?,
+        )
+    {
+        return Err(sv::AnalyzerError::Unsupported(
+            "dynamic unpacked-array assignment after an earlier partial assignment to the same array is unsupported"
+                .to_string(),
+        ));
+    }
+    Ok(Some(PreviousArrayValue {
+        expr: path.expr,
+        sources: path.sources.clone(),
+        previous_sources: path.previous_sources.clone(),
+        address_sources: path.address_sources.clone(),
+    }))
+}
+
 fn lower_comb_process(
     process: &sv::ir::CombProcess,
     variables: &HashMap<SourceVarId, SvVariable>,
@@ -2389,6 +2520,30 @@ fn lower_comb_process(
         {
             continue;
         }
+        let allow_dynamic_array_write = process.kind() == sv::ir::CombProcessKind::AlwaysComb;
+        let previous_array = if allow_dynamic_array_write {
+            if let Some((id, _, _)) = dynamic_array_element_lvalue(
+                assignment.lhs_value(),
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+            ) {
+                let width = variables
+                    .get(&id)
+                    .map(|variable| variable.width)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(
+                            "dynamic unpacked-array assignment target".to_string(),
+                        )
+                    })?;
+                lower_previous_array_value(id, width, &paths)?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let path = lower_assignment(
             assignment,
             variables,
@@ -2397,6 +2552,8 @@ fn lower_comb_process(
             parameter_types,
             arena,
             four_state,
+            allow_dynamic_array_write,
+            previous_array.as_ref(),
         )?;
         merge_overlapping_comb_path(&mut paths, path, arena)?;
     }
@@ -2511,12 +2668,26 @@ fn overlay_comb_paths(
     if uses_later {
         sources.extend(later.sources);
     }
+    let mut previous_sources = HashSet::default();
+    if uses_previous {
+        previous_sources.extend(previous.previous_sources);
+    }
+    if uses_later {
+        previous_sources.extend(later.previous_sources);
+    }
+    let mut address_sources = HashSet::default();
+    if uses_previous {
+        address_sources.extend(previous.address_sources);
+    }
+    if uses_later {
+        address_sources.extend(later.address_sources);
+    }
     Ok(LogicPath {
         target: LogicPathTarget::Var(VarAtomBase::new(previous_target.id, access.lsb, access.msb)),
         expr,
         sources,
-        address_sources: HashSet::default(),
-        previous_sources: HashSet::default(),
+        address_sources,
+        previous_sources,
         local_inputs: Vec::new(),
         order_before: HashSet::default(),
         comb_capture_enable_sites: Vec::new(),
@@ -2559,6 +2730,7 @@ fn lower_dynamic_array_write_expr(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<SourceVarId>,
+    previous_array: Option<&PreviousArrayValue>,
 ) -> Option<(
     LogicPathTarget<SourceVarId>,
     celox_slt::NodeId,
@@ -2614,17 +2786,24 @@ fn lower_dynamic_array_write_expr(
         element_width,
     )?;
     sources.extend(index_sources);
-    let previous_sources = [VarAtomBase::new(id, 0, target_width.checked_sub(1)?)]
-        .into_iter()
-        .collect();
-    let old = arena
-        .alloc(SLTNode::Input {
-            variable: id,
-            signed: variable.signed,
-            index: Vec::new(),
-            access: BitAccess::new(0, target_width - 1),
-        })
-        .ok()?;
+    let (old, previous_sources) = if let Some(previous_array) = previous_array {
+        sources.extend(previous_array.sources.iter().copied());
+        sources.extend(previous_array.address_sources.iter().copied());
+        (previous_array.expr, previous_array.previous_sources.clone())
+    } else {
+        let previous_sources = [VarAtomBase::new(id, 0, target_width.checked_sub(1)?)]
+            .into_iter()
+            .collect();
+        let old = arena
+            .alloc(SLTNode::Input {
+                variable: id,
+                signed: variable.signed,
+                index: Vec::new(),
+                access: BitAccess::new(0, target_width - 1),
+            })
+            .ok()?;
+        (old, previous_sources)
+    };
     let mut parts = Vec::with_capacity(element_count);
     for element in (0..element_count).rev() {
         let lsb = element.checked_mul(element_width)?;
@@ -2679,17 +2858,22 @@ fn lower_assignment(
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<SourceVarId>,
     four_state: bool,
+    allow_dynamic_array_write: bool,
+    previous_array: Option<&PreviousArrayValue>,
 ) -> Result<LogicPath<SourceVarId>, sv::AnalyzerError> {
     let rhs = expr_for_state_mode(assignment.rhs(), four_state);
-    if let Some((target, expr, sources, previous_sources)) = lower_dynamic_array_write_expr(
-        assignment.lhs_value(),
-        &rhs,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        arena,
-    ) {
+    if allow_dynamic_array_write
+        && let Some((target, expr, sources, previous_sources)) = lower_dynamic_array_write_expr(
+            assignment.lhs_value(),
+            &rhs,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            arena,
+            previous_array,
+        )
+    {
         let target_width = target
             .var()
             .map(|target| target.access.msb - target.access.lsb + 1)

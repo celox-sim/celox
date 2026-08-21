@@ -921,6 +921,40 @@ fn connects_child_outputs_to_unpacked_array_elements() {
 }
 
 #[test]
+fn connects_runtime_selected_unpacked_array_elements_to_child_inputs() {
+    let source = r#"
+        module Child(
+            input logic [7:0] input_value,
+            output logic [7:0] output_value
+        );
+            assign output_value = input_value;
+        endmodule
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] values[4],
+            output logic [7:0] value
+        );
+            Child child(.input_value(values[sel]), .output_value(value));
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_input_dynamic_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(values, 0x44332211u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0x33u8.into());
+}
+
+#[test]
 fn reads_unpacked_array_elements_at_runtime_indices() {
     let source = r#"
         module Top(
@@ -978,6 +1012,94 @@ fn writes_unpacked_array_elements_at_runtime_indices() {
     })
     .unwrap();
     assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
+fn composes_dynamic_array_writes_after_whole_array_assignments() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] selected,
+            output logic [7:0] cleared
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values = '0;
+                values[sel] = data;
+            end
+            assign selected = values[sel];
+            assign cleared = values[0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_write_after_default.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let selected = sim.signal("selected");
+    let cleared = sim.signal("cleared");
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(data, 0xa5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected), 0xa5u8.into());
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected), 0x5au8.into());
+    assert_eq!(sim.get(cleared), 0u8.into());
+}
+
+#[test]
+fn rejects_dynamic_array_writes_after_partial_array_assignments() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values[0] = 8'h00;
+                values[sel] = data;
+            end
+            assign value = values[sel];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("dynamic unpacked-array assignment after an earlier partial assignment"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_dynamic_array_writes_in_continuous_assignments() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            wire [7:0] values[4];
+            assign values[sel] = data;
+            assign value = values[sel];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("combinational assignment target `values`"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
