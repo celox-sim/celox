@@ -1,6 +1,6 @@
 {
   "name": "@celox-sim/celox-napi",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Celox simulator NAPI bindings",
   "main": "index.js",
   "types": "index.d.ts",
