@@ -1,11 +1,11 @@
 //! x86-64 backend pipeline: SIR → MIR → allocation → machine code.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
 pub mod emit;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub mod features;
 pub mod isel;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
 pub mod jit_mem;
 pub mod memory_effect;
 pub mod mir;

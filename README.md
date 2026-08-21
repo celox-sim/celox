@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/%40celox-sim%2Fcelox.svg)](https://www.npmjs.com/package/@celox-sim/celox)
 [![crates.io](https://img.shields.io/crates/v/celox.svg)](https://crates.io/crates/celox)
 
-**An experimental, compiler-based RTL simulator for [Veryl](https://veryl-lang.org/).**
+**A compiler-based RTL simulator for [Veryl](https://veryl-lang.org/).**
 
 Celox compiles an elaborated Veryl design into executable simulation kernels and
 exposes the design through a type-safe TypeScript API. It is both a practical
@@ -47,8 +47,8 @@ compiler demo: the result can run real RTL tests, in Node.js or in a browser.
 - Compile a Veryl design into a native executable and run cocotb tests through VPI.
 - Build an external netlist frontend with the Rust SDK and ship its simulator as
   a native application binary or a frontend-specific N-API/WASI addon.
-- Run through the custom x86-64 backend, the Cranelift fallback, or WebAssembly.
-  A custom AArch64 backend is also available behind an experimental feature.
+- Run through the custom native backend on x86-64 and AArch64, the Cranelift
+  fallback on other native targets, or WebAssembly in the browser.
 
 ## Quick start
 
@@ -155,9 +155,9 @@ Simulator IR (SIR) and backend-independent optimization
 shared physical state layout
     │
     ├──► native x86-64
+    ├──► native AArch64
     ├──► Cranelift JIT
-    ├──► WebAssembly
-    └──► native AArch64 (experimental)
+    └──► WebAssembly
              │
              ▼
       event-driven runtime
@@ -167,7 +167,7 @@ shared physical state layout
 ```
 
 The shared pipeline is deliberate. Scheduling and RTL semantics do not have to
-be reimplemented for every target, while backend experiments can still own
+be reimplemented for every target, while backend implementations can still own
 their instruction selection, machine IR, register allocation, and code
 emission. The runtime separates next-state evaluation from commit when clock
 domains trigger together, then propagates combinational changes until the step

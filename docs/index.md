@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: Native Backend
-    details: Uses Celox's experimental native x86-64 backend by default, with Cranelift available on other targets. Whole-design performance is still being validated.
+    details: Uses Celox's native backend by default on x86-64 and AArch64, with Cranelift available on other targets. Whole-design performance is still being validated.
   - title: Veryl HDL
     details: First-class support for the Veryl hardware description language.
   - title: TypeScript Testbenches

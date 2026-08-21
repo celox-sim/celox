@@ -3,7 +3,7 @@
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use crate::ir::{AbsoluteAddr, OptimizedSir};
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 use crate::ir::{
@@ -28,7 +28,7 @@ use crate::ir::{
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 pub use celox_sir_opt::optimizer::pass_eliminate_working_round_trip;
@@ -41,7 +41,7 @@ pub(crate) use celox_sir_opt::optimizer::{
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 pub(crate) use celox_sir_opt::optimizer::{
@@ -84,7 +84,7 @@ pub(crate) fn optimize_rooted_comb_memory(
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 pub(crate) fn optimize_native_merged_chain(
@@ -130,7 +130,7 @@ pub(crate) fn optimize_native_merged_chain(
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 fn packed_range_is_physically_contiguous(

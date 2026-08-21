@@ -2,7 +2,8 @@
 
 SIR (Simulator Intermediate Representation) is Celox's source- and target-independent execution
 IR. The frontend consumes source-language-owned symbolic structures before producing SIR; native
-x86-64, Cranelift, and Wasm backends all consume the same laid-out representation.
+x86-64, AArch64, Cranelift, and Wasm backends all consume the same laid-out
+representation.
 
 ## Overview
 

@@ -244,14 +244,16 @@ jobs:
       - name: Run ARM64 backend tests natively
         run: cargo test --locked -p celox-backend-common -p celox-backend-arm64
 
-      - name: Check default AArch64 facade and benchmark runner (ARM64 backend off)
+      - name: Check default AArch64 facade and benchmark runner
         run: cargo check --locked -p celox -p celox-bench
 
-      - name: Check experimental AArch64 facade and benchmark runner
-        run: cargo check --locked -p celox -p celox-bench --features experimental-arm64-backend
+      - name: Test AArch64 facade integration
+        run: cargo test --locked -p celox --lib
 
-      - name: Test experimental AArch64 facade integration
-        run: cargo test --locked -p celox --lib --features experimental-arm64-backend
+      - name: Check x86-64 cross-codegen from AArch64
+        run: >-
+          cargo check --locked -p celox -p celox-bench
+          --no-default-features --features x86_64-codegen
 
   napi-windows:
     name: NAPI Build (Windows)

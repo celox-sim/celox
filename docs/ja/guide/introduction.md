@@ -18,10 +18,10 @@ Vitest で出力を検証できます。
 - GTKWave や Surfer で確認できる VCD 波形を出力する。
 - 値パラメータを上書きし、テスト専用の Veryl ソースを読み込む。
 
-Celox はシミュレータ作成時に設計をコンパイルします。x86-64 ではネイティブ
-バックエンド、それ以外のネイティブ環境では Cranelift JIT、Playground では
-WebAssembly を使います。通常は自動選択され、TypeScript テストベンチ API は
-変わりません。
+Celox はシミュレータ作成時に設計をコンパイルします。x86-64 と AArch64
+ターゲットでは独自のネイティブバックエンド、その他のネイティブターゲットでは
+Cranelift JIT、Playground では WebAssembly を使います。通常は自動選択され、
+TypeScript テストベンチ API は変わりません。
 
 ## シミュレーション方法を選ぶ
 

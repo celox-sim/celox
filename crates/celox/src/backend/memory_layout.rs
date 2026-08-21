@@ -8,7 +8,7 @@ use crate::ir::{
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 pub use celox_state_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;

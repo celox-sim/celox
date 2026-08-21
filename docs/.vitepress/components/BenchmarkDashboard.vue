@@ -59,10 +59,8 @@ interface Series {
     | "verilator"
     | "heliodor-native-x86_64-jit"
     | "heliodor-native-x86_64"
-    | "heliodor-cranelift-x86_64"
     | "heliodor-veryl-x86_64"
     | "heliodor-native-aarch64"
-    | "heliodor-cranelift-aarch64"
     | "heliodor-veryl-aarch64"
     | "unknown";
   points: SeriesPoint[];
@@ -145,7 +143,6 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
       runtimes: new Set<Series["runtime"]>([
         "heliodor-native-x86_64-jit",
         "heliodor-native-x86_64",
-        "heliodor-cranelift-x86_64",
         "heliodor-veryl-x86_64",
       ]),
     },
@@ -153,7 +150,6 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
       label: "AArch64 host",
       runtimes: new Set<Series["runtime"]>([
         "heliodor-native-aarch64",
-        "heliodor-cranelift-aarch64",
         "heliodor-veryl-aarch64",
       ]),
     },
@@ -252,10 +248,8 @@ const RUNTIME_COLORS: Record<string, string> = {
   unknown: "#9ca3af",
   "heliodor-native-x86_64-jit": "#06b6d4",
   "heliodor-native-x86_64": "#2563eb",
-  "heliodor-cranelift-x86_64": "#a855f7",
   "heliodor-veryl-x86_64": "#f97316",
   "heliodor-native-aarch64": "#16a34a",
-  "heliodor-cranelift-aarch64": "#a855f7",
   "heliodor-veryl-aarch64": "#f97316",
 };
 
@@ -268,10 +262,8 @@ const RUNTIME_LABELS: Record<string, string> = {
   unknown: "Unknown",
   "heliodor-native-x86_64-jit": "Native x86-64 (JIT code only)",
   "heliodor-native-x86_64": "Native x86-64",
-  "heliodor-cranelift-x86_64": "Cranelift x86-64",
   "heliodor-veryl-x86_64": "Veryl-CC x86-64",
   "heliodor-native-aarch64": "Native AArch64",
-  "heliodor-cranelift-aarch64": "Cranelift AArch64",
   "heliodor-veryl-aarch64": "Veryl-CC AArch64",
 };
 
@@ -286,9 +278,14 @@ const activeTab = ref("counter");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-cranelift-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-cranelift-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
+}
+
+function isRetiredBenchmark(name: string): boolean {
+  return name.startsWith("heliodor-cranelift-x86_64/")
+    || name.startsWith("heliodor-cranelift-aarch64/");
 }
 
 /** Normalize variant-specific benchmark names so they merge into the same chart cards */
@@ -319,10 +316,8 @@ function runtime(name: string): Series["runtime"] {
   if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-x86_64/")) return "heliodor-native-x86_64";
-  if (name.startsWith("heliodor-cranelift-x86_64/")) return "heliodor-cranelift-x86_64";
   if (name.startsWith("heliodor-veryl-cc-x86_64/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-aarch64/")) return "heliodor-native-aarch64";
-  if (name.startsWith("heliodor-cranelift-aarch64/")) return "heliodor-cranelift-aarch64";
   if (name.startsWith("heliodor-veryl-cc-aarch64/")) return "heliodor-veryl-aarch64";
   if (name.startsWith("rust-dse/")) return "rust-dse";
   if (name.startsWith("rust/") && stripPrefix(name).startsWith("native_tb_")) return "native-tb";
@@ -419,6 +414,7 @@ const allSeries = computed<Series[]>(() => {
   for (const [, entries] of Object.entries(rawData.value.entries)) {
     for (const entry of entries) {
       for (const b of entry.benches) {
+        if (isRetiredBenchmark(b.name)) continue;
         const seriesRuntime = runtime(b.name);
         const benchName = normalizeBenchName(stripPrefix(b.name));
         const key = `${seriesRuntime}/${benchName}`;

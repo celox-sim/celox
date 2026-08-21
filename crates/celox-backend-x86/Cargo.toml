@@ -9,6 +9,10 @@ description = "Celox x86-64 machine-code backend"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+cross-codegen = []
+
 [dependencies]
 tracing = { workspace = true }
 celox-analysis = { workspace = true }
