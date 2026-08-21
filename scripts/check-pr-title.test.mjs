@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { isConventionalPrTitle } from "./check-pr-title.mjs";
@@ -26,4 +27,20 @@ test("rejects titles that cannot drive release automation", () => {
   ]) {
     assert.equal(isConventionalPrTitle(title), false, title);
   }
+});
+
+test("guards the repository setting that exposes the title to release automation", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/pr-title.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    workflow,
+    /gh api "repos\/\$GITHUB_REPOSITORY"[\s\\]+\| node scripts\/check-release-repository-settings\.mjs/,
+  );
+  assert.match(
+    workflow,
+    /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/,
+  );
 });

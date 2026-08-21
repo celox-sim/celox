@@ -16,12 +16,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the trusted title validator
-        if: github.event_name == 'pull_request_target'
         uses: actions/checkout@v7
         with:
           # An older PR's base SHA can predate the validator itself. Always use
           # the current default branch, which pull requests cannot modify.
           ref: ${{ github.event.repository.default_branch }}
+
+      - name: Validate release merge settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY" \
+            | node scripts/check-release-repository-settings.mjs
 
       - name: Validate pull request title
         if: github.event_name == 'pull_request_target'
