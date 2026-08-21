@@ -1944,18 +1944,15 @@ fn lower_glue_parent_expr(
                 let variable = variables.get(&id)?;
                 let element_count = variable.width.checked_div(element_width)?;
                 let (offset, valid) = dynamic_array_index_guard_slt(arena, offset, element_count)?;
-                let node = arena
-                    .alloc(SLTNode::Input {
-                        variable: GlueAddr::Parent(id),
-                        signed: *signed,
-                        index: vec![SLTIndex {
-                            node: offset,
-                            stride: element_width,
-                            kind: SLTIndexKind::Unpacked { element_width },
-                        }],
-                        access,
-                    })
-                    .ok()?;
+                let node = lower_dynamic_array_selection_slt(
+                    arena,
+                    GlueAddr::Parent(id),
+                    *signed,
+                    offset,
+                    access,
+                    element_width,
+                    variable,
+                )?;
                 let node = guard_dynamic_array_read_slt(
                     arena,
                     valid,
@@ -3362,18 +3359,15 @@ fn lower_expr_with_context(
                 let variable = variables.get(&id)?;
                 let element_count = variable.width.checked_div(element_width)?;
                 let (offset, valid) = dynamic_array_index_guard_slt(arena, offset, element_count)?;
-                let node = arena
-                    .alloc(SLTNode::Input {
-                        variable: id,
-                        signed: *signed,
-                        index: vec![SLTIndex {
-                            node: offset,
-                            stride: element_width,
-                            kind: SLTIndexKind::Unpacked { element_width },
-                        }],
-                        access,
-                    })
-                    .ok()?;
+                let node = lower_dynamic_array_selection_slt(
+                    arena,
+                    id,
+                    *signed,
+                    offset,
+                    access,
+                    element_width,
+                    variable,
+                )?;
                 let node = guard_dynamic_array_read_slt(
                     arena,
                     valid,
@@ -3856,6 +3850,106 @@ fn unpacked_element_width(variable: &SvVariable) -> Option<usize> {
     (element_count != 0).then(|| variable.width.checked_div(element_count))?
 }
 
+fn dynamic_array_selection_width(
+    variable: &SvVariable,
+    access: BitAccess,
+    packed_element_width: usize,
+) -> Option<usize> {
+    let access_width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
+    let element_width = packed_element_width.max(access_width);
+    (element_width.is_multiple_of(packed_element_width)
+        && variable.width.is_multiple_of(element_width)
+        && access.msb < element_width)
+        .then_some(element_width)
+}
+
+fn dynamic_array_index_kind(variable: &SvVariable, element_width: usize) -> SLTIndexKind {
+    if unpacked_element_width(variable) == Some(element_width) {
+        SLTIndexKind::Unpacked { element_width }
+    } else {
+        SLTIndexKind::Packed
+    }
+}
+
+fn lower_dynamic_array_selection_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    variable: A,
+    signed: bool,
+    index: NodeId,
+    access: BitAccess,
+    element_width: usize,
+    variable_info: &SvVariable,
+) -> Option<NodeId> {
+    let packed_element_width = unpacked_element_width(variable_info)?;
+    if element_width == packed_element_width {
+        return arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed,
+                index: vec![SLTIndex {
+                    node: index,
+                    stride: element_width,
+                    kind: dynamic_array_index_kind(variable_info, element_width),
+                }],
+                access,
+            })
+            .ok();
+    }
+    if access.lsb != 0 || access.msb.checked_add(1)? != element_width {
+        return None;
+    }
+    let inner_count = element_width.checked_div(packed_element_width)?;
+    let inner_count_literal = arena
+        .alloc(SLTNode::Constant(
+            BigUint::from(inner_count),
+            BigUint::default(),
+            64,
+            false,
+        ))
+        .ok()?;
+    let scaled_index = arena
+        .alloc(SLTNode::Binary(index, BinaryOp::Mul, inner_count_literal))
+        .ok()?;
+    let mut nodes = Vec::with_capacity(inner_count);
+    for inner_index in (0..inner_count).rev() {
+        let node = if inner_index == 0 {
+            scaled_index
+        } else {
+            let inner_index_literal = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(inner_index),
+                    BigUint::default(),
+                    64,
+                    false,
+                ))
+                .ok()?;
+            arena
+                .alloc(SLTNode::Binary(
+                    scaled_index,
+                    BinaryOp::Add,
+                    inner_index_literal,
+                ))
+                .ok()?
+        };
+        let node = arena
+            .alloc(SLTNode::Input {
+                variable: variable.clone(),
+                signed,
+                index: vec![SLTIndex {
+                    node,
+                    stride: packed_element_width,
+                    kind: SLTIndexKind::Unpacked {
+                        element_width: packed_element_width,
+                    },
+                }],
+                access: BitAccess::new(0, packed_element_width - 1),
+            })
+            .ok()?;
+        nodes.push((node, packed_element_width));
+    }
+    arena.alloc(SLTNode::Concat(nodes)).ok()
+}
+
 fn sv_memory_offset(variable: &SvVariable, bit_offset: usize, width: usize) -> SIROffset {
     match unpacked_element_width(variable) {
         Some(element_width)
@@ -3937,31 +4031,33 @@ fn dynamic_array_element_subselection(
     };
     let id = *name_to_id.get(name)?;
     let variable = variables.get(&id)?;
-    let element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
+    let packed_element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
     let is_dynamic = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
         .is_none()
         || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
     if !is_dynamic {
         return None;
     }
-    let element_width_value = i128::try_from(element_width).ok()?;
     let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
     let (lsb_base, lsb_offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
-    if msb_base != lsb_base
-        || (element_width > 1
-            && !dynamic_array_base_has_stride(
-                msb_base,
-                element_width_value,
-                constants,
-                parameter_types,
-            ))
-    {
+    if msb_base != lsb_base {
         return None;
     }
     let msb = usize::try_from(msb_offset).ok()?;
     let lsb = usize::try_from(lsb_offset).ok()?;
     let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
-    (access.msb < element_width).then_some((id, element_width, access))
+    let element_width = dynamic_array_selection_width(variable, access, packed_element_width)?;
+    if element_width > 1
+        && !dynamic_array_base_has_stride(
+            msb_base,
+            i128::try_from(element_width).ok()?,
+            constants,
+            parameter_types,
+        )
+    {
+        return None;
+    }
+    Some((id, element_width, access))
 }
 
 fn split_dynamic_array_offset<'a>(
@@ -4223,6 +4319,85 @@ fn lower_dynamic_array_element_index(
         divisor,
     ));
     Some(index)
+}
+
+fn lower_dynamic_array_selection_sir(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    address: RegionedVarAddr,
+    index: celox_sir::RegisterId,
+    access: BitAccess,
+    element_width: usize,
+    variable: &SvVariable,
+) -> Option<celox_sir::RegisterId> {
+    let packed_element_width = unpacked_element_width(variable)?;
+    let width = access.msb.checked_sub(access.lsb)?.checked_add(1)?;
+    if element_width == packed_element_width {
+        let result = builder.alloc_logic(width);
+        builder.emit(SIRInstruction::Load(
+            result,
+            address,
+            SIROffset::Element {
+                index,
+                element_width,
+                bit_offset: access.lsb,
+                dynamic_bit_offset: None,
+            },
+            width,
+        ));
+        return Some(result);
+    }
+    if access.lsb != 0 || access.msb.checked_add(1)? != element_width {
+        return None;
+    }
+    let inner_count = element_width.checked_div(packed_element_width)?;
+    let inner_count_value = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(
+        inner_count_value,
+        SIRValue::new(u64::try_from(inner_count).ok()?),
+    ));
+    let scaled_index = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Binary(
+        scaled_index,
+        index,
+        BinaryOp::Mul,
+        inner_count_value,
+    ));
+    let mut values = Vec::with_capacity(inner_count);
+    for inner_index in (0..inner_count).rev() {
+        let element_index = if inner_index == 0 {
+            scaled_index
+        } else {
+            let inner_index_value = builder.alloc_bit(64, false);
+            builder.emit(SIRInstruction::Imm(
+                inner_index_value,
+                SIRValue::new(u64::try_from(inner_index).ok()?),
+            ));
+            let element_index = builder.alloc_bit(64, false);
+            builder.emit(SIRInstruction::Binary(
+                element_index,
+                scaled_index,
+                BinaryOp::Add,
+                inner_index_value,
+            ));
+            element_index
+        };
+        let value = builder.alloc_logic(packed_element_width);
+        builder.emit(SIRInstruction::Load(
+            value,
+            address,
+            SIROffset::Element {
+                index: element_index,
+                element_width: packed_element_width,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+            },
+            packed_element_width,
+        ));
+        values.push(value);
+    }
+    let result = builder.alloc_logic(width);
+    builder.emit(SIRInstruction::Concat(result, values));
+    Some(result)
 }
 
 fn dynamic_array_index_guard_sir(
@@ -5485,21 +5660,17 @@ fn lower_expr_to_sir_with_context(
                 let variable = variables.get(&id)?;
                 let element_count = variable.width.checked_div(element_width)?;
                 let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
-                let reg = builder.alloc_logic(width);
-                builder.emit(SIRInstruction::Load(
-                    reg,
+                let reg = lower_dynamic_array_selection_sir(
+                    builder,
                     RegionedVarAddrBase {
                         region: STABLE_REGION,
                         var_id: id,
                     },
-                    SIROffset::Element {
-                        index,
-                        element_width,
-                        bit_offset: access.lsb,
-                        dynamic_bit_offset: None,
-                    },
-                    width,
-                ));
+                    index,
+                    access,
+                    element_width,
+                    variable,
+                )?;
                 let reg =
                     guard_dynamic_array_read_sir(builder, valid, reg, width, variable.is_4state);
                 return resize_sir_register(

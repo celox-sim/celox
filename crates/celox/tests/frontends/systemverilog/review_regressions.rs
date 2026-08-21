@@ -2788,6 +2788,59 @@ fn reads_partial_unpacked_array_selections() {
 }
 
 #[test]
+fn writes_partial_unpacked_array_selections() {
+    let source = r#"
+        module Top(
+            input logic [23:0] row,
+            output logic [7:0] selected[3]
+        );
+            wire [7:0] values[2][3];
+            assign values[0] = row;
+            assign selected = values[0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("partial_unpacked_lvalue_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let row = sim.signal("row");
+    let selected = sim.signal("selected");
+    sim.modify(|io| io.set_wide(row, BigUint::from(0x060504u32)))
+        .unwrap();
+    assert_eq!(sim.get(selected), 0x060504u32.into());
+}
+
+#[test]
+fn reads_runtime_partial_unpacked_array_selections() {
+    let source = r#"
+        module Top(
+            input logic sel,
+            input logic [7:0] values[2][3],
+            output logic [23:0] row
+        );
+            assign row = values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_partial_unpacked_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let row = sim.signal("row");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set_wide(values, BigUint::from(0x060504030201u64));
+    })
+    .unwrap();
+    assert_eq!(sim.get(row), 0x060504u32.into());
+}
+
+#[test]
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
@@ -2841,15 +2894,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 localparam J = 3;
                 logic [7:0] values [0:1][0:2];
                 assign y = values[0][J];
-            endmodule
-        "#,
-        ),
-        (
-            "continuous assignment lvalue",
-            r#"
-            module Top(input logic [23:0] row);
-                logic [7:0] values [2][3];
-                assign values[1] = row;
             endmodule
         "#,
         ),

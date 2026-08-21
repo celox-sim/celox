@@ -932,6 +932,32 @@ mod tests {
     }
 
     #[test]
+    fn flattens_partial_unpacked_array_lvalue_selections() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic [7:0] row[3],
+                    output logic [7:0] values[2][3]
+                );
+                    assign values[0] = row;
+                endmodule
+            "#,
+            Path::new("partial_unpacked_lvalue_selection.sv"),
+        )
+        .expect("partial unpacked lvalues should be analyzed");
+        let assignment = &ir.modules()[0].comb_processes()[0].assignments()[0];
+        let ir::LValue::Select { name, msb, lsb, .. } = assignment.lhs_value() else {
+            panic!(
+                "expected a flattened partial lvalue selection, got {:?}",
+                assignment.lhs_value()
+            );
+        };
+        assert_eq!(name, "values");
+        assert_eq!(eval_test_const_expr(msb), Some(23));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+    }
+
+    #[test]
     fn rejects_duplicate_parameters() {
         let err = analyze_source(
             r#"

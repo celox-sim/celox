@@ -7764,12 +7764,6 @@ fn lvalue_from_select(
         .iter()
         .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
         .collect::<Option<Vec<_>>>()?;
-    if packed_dimensions
-        .get(&name)
-        .is_some_and(|dimensions| !indices.is_empty() && indices.len() < dimensions.unpacked.len())
-    {
-        return None;
-    }
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;
@@ -7825,6 +7819,25 @@ fn lvalue_from_select(
                 lsb: array_offset,
                 signed: dimensions.signed,
             });
+        } else if let Some(dimensions) = packed_dimensions.get(&name)
+            && !dimensions.unpacked.is_empty()
+            && !indices.is_empty()
+            && indices.len() < dimensions.unpacked.len()
+        {
+            let width = remaining_unpacked_selection_width(dimensions, indices.len());
+            return Some(LValue::Select {
+                name,
+                msb: add_expr(
+                    array_offset.clone(),
+                    ConstExpr::Binary {
+                        left: Box::new(width),
+                        op: BinaryOp::Sub,
+                        right: Box::new(ConstExpr::Literal("1".to_string())),
+                    },
+                ),
+                lsb: array_offset,
+                signed: dimensions.signed,
+            });
         }
     }
     if !indices.is_empty()
@@ -7863,12 +7876,6 @@ fn lvalue_from_constant_select(
             )
         })
         .collect::<Option<Vec<_>>>()?;
-    if packed_dimensions
-        .get(&name)
-        .is_some_and(|dimensions| !indices.is_empty() && indices.len() < dimensions.unpacked.len())
-    {
-        return None;
-    }
     if let Some(range) = &select.nodes.2 {
         let sv_parser::ConstantPartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;
@@ -7911,6 +7918,25 @@ fn lvalue_from_constant_select(
                     .map(|dimension| dimension.width.clone())
                     .collect::<Vec<_>>(),
             );
+            return Some(LValue::Select {
+                name,
+                msb: add_expr(
+                    array_offset.clone(),
+                    ConstExpr::Binary {
+                        left: Box::new(width),
+                        op: BinaryOp::Sub,
+                        right: Box::new(ConstExpr::Literal("1".to_string())),
+                    },
+                ),
+                lsb: array_offset,
+                signed: dimensions.signed,
+            });
+        } else if let Some(dimensions) = packed_dimensions.get(&name)
+            && !dimensions.unpacked.is_empty()
+            && !indices.is_empty()
+            && indices.len() < dimensions.unpacked.len()
+        {
+            let width = remaining_unpacked_selection_width(dimensions, indices.len());
             return Some(LValue::Select {
                 name,
                 msb: add_expr(
