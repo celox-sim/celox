@@ -1685,7 +1685,7 @@ fn lower_dynamic_output_glue(
     let sv::ir::Expr::Select { expr, msb, lsb, .. } = actual_expr else {
         return Ok(None);
     };
-    let Some((parent_signal_id, element_width)) = dynamic_array_element_selection(
+    let Some((parent_signal_id, element_width, access)) = dynamic_array_element_subselection(
         expr,
         msb,
         lsb,
@@ -1731,7 +1731,8 @@ fn lower_dynamic_output_glue(
         index: Vec::new(),
         access: BitAccess::new(0, child_var.width - 1),
     })?;
-    let child_expr = coerce_node_width(arena, child_node, Some(element_width), child_var.signed)?;
+    let target_width = access.msb - access.lsb + 1;
+    let child_expr = coerce_node_width(arena, child_node, Some(target_width), child_var.signed)?;
     let old = arena.alloc(SLTNode::Input {
         variable: GlueAddr::Parent(parent_signal_id),
         signed: parent_var.signed,
@@ -1752,9 +1753,19 @@ fn lower_dynamic_output_glue(
             false,
         ))?;
         let condition = arena.alloc(SLTNode::Binary(offset, BinaryOp::EqCase, element_literal))?;
+        let Some(updated_element) = replace_slt_slice(
+            arena,
+            old_element,
+            child_expr,
+            access.lsb,
+            target_width,
+            element_width,
+        ) else {
+            return Ok(None);
+        };
         let updated = arena.alloc(SLTNode::Mux {
             cond: condition,
-            then_expr: child_expr,
+            then_expr: updated_element,
             else_expr: old_element,
         })?;
         parts.push((updated, element_width));
@@ -1945,8 +1956,13 @@ fn lower_glue_parent_expr(
                         access,
                     })
                     .ok()?;
-                let node =
-                    guard_dynamic_array_read_slt(arena, valid, node, access.msb - access.lsb + 1)?;
+                let node = guard_dynamic_array_read_slt(
+                    arena,
+                    valid,
+                    node,
+                    access.msb - access.lsb + 1,
+                    variable.is_4state,
+                )?;
                 sources.insert(VarAtomBase::new(
                     GlueAddr::Parent(id),
                     0,
@@ -3017,8 +3033,8 @@ fn lower_dynamic_array_write_expr(
     ))
 }
 
-fn replace_slt_slice(
-    arena: &mut SLTNodeArena<SourceVarId>,
+fn replace_slt_slice<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
     current: NodeId,
     replacement: NodeId,
     lsb: usize,
@@ -3358,8 +3374,13 @@ fn lower_expr_with_context(
                         access,
                     })
                     .ok()?;
-                let node =
-                    guard_dynamic_array_read_slt(arena, valid, node, access.msb - access.lsb + 1)?;
+                let node = guard_dynamic_array_read_slt(
+                    arena,
+                    valid,
+                    node,
+                    access.msb - access.lsb + 1,
+                    variable.is_4state,
+                )?;
                 sources.insert(VarAtomBase::new(id, 0, variable.width.checked_sub(1)?));
                 return Some((
                     coerce_node_width(
@@ -3902,48 +3923,6 @@ fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
     })
 }
 
-fn const_expr_adds_constant(
-    expr: &sv::ir::ConstExpr,
-    base: &sv::ir::ConstExpr,
-    value: i128,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> bool {
-    let sv::ir::ConstExpr::Binary { left, op, right } = expr else {
-        return false;
-    };
-    *op == sv::ir::BinaryOp::Add
-        && ((left.as_ref() == base
-            && sv::typecheck::eval_const_expr_with_types(right, constants, parameter_types)
-                == Some(value))
-            || (right.as_ref() == base
-                && sv::typecheck::eval_const_expr_with_types(left, constants, parameter_types)
-                    == Some(value)))
-}
-
-fn dynamic_array_element_selection(
-    expr: &sv::ir::Expr,
-    msb: &sv::ir::ConstExpr,
-    lsb: &sv::ir::ConstExpr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<(SourceVarId, usize)> {
-    let sv::ir::Expr::Ident(name) = expr else {
-        return None;
-    };
-    dynamic_array_element_access(
-        name,
-        msb,
-        lsb,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-    )
-}
-
 fn dynamic_array_element_subselection(
     expr: &sv::ir::Expr,
     msb: &sv::ir::ConstExpr,
@@ -4096,36 +4075,6 @@ fn dynamic_array_element_lvalue(
     (access.msb < element_width).then_some((id, element_width, offset, access))
 }
 
-fn dynamic_array_element_access(
-    name: &str,
-    msb: &sv::ir::ConstExpr,
-    lsb: &sv::ir::ConstExpr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
-    constants: &HashMap<String, i128>,
-    parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<(SourceVarId, usize)> {
-    let id = *name_to_id.get(name)?;
-    let variable = variables.get(&id)?;
-    let element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
-    let is_dynamic = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
-        .is_none()
-        || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
-    if !is_dynamic
-        || (element_width > 1
-            && !const_expr_adds_constant(
-                msb,
-                lsb,
-                i128::try_from(element_width - 1).ok()?,
-                constants,
-                parameter_types,
-            ))
-    {
-        return None;
-    }
-    Some((id, element_width))
-}
-
 fn lower_dynamic_array_element_index_slt(
     offset: &sv::ir::ConstExpr,
     variables: &HashMap<SourceVarId, SvVariable>,
@@ -4213,8 +4162,13 @@ fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
     valid: NodeId,
     value: NodeId,
     value_width: usize,
+    is_4state: bool,
 ) -> Option<NodeId> {
-    let unknown_mask = (BigUint::from(1u8) << value_width) - BigUint::from(1u8);
+    let unknown_mask = if is_4state {
+        (BigUint::from(1u8) << value_width) - BigUint::from(1u8)
+    } else {
+        BigUint::default()
+    };
     let unknown = arena
         .alloc(SLTNode::Constant(
             BigUint::default(),
@@ -4318,13 +4272,18 @@ fn guard_dynamic_array_read_sir(
     valid: celox_sir::RegisterId,
     value: celox_sir::RegisterId,
     value_width: usize,
+    is_4state: bool,
 ) -> celox_sir::RegisterId {
     let unknown = builder.alloc_logic(value_width);
-    let unknown_mask = (BigUint::from(1u8) << value_width) - BigUint::from(1u8);
-    builder.emit(SIRInstruction::Imm(
-        unknown,
-        SIRValue::new_four_state(BigUint::default(), unknown_mask),
-    ));
+    if is_4state {
+        let unknown_mask = (BigUint::from(1u8) << value_width) - BigUint::from(1u8);
+        builder.emit(SIRInstruction::Imm(
+            unknown,
+            SIRValue::new_four_state(BigUint::default(), unknown_mask),
+        ));
+    } else {
+        builder.emit(SIRInstruction::Imm(unknown, SIRValue::new(0u8)));
+    }
     let guarded = builder.alloc_logic(value_width);
     builder.emit(SIRInstruction::Mux(guarded, valid, value, unknown));
     guarded
@@ -5523,7 +5482,8 @@ fn lower_expr_to_sir_with_context(
                     element_width,
                 )?;
                 let width = access.msb - access.lsb + 1;
-                let element_count = variables.get(&id)?.width.checked_div(element_width)?;
+                let variable = variables.get(&id)?;
+                let element_count = variable.width.checked_div(element_width)?;
                 let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
                 let reg = builder.alloc_logic(width);
                 builder.emit(SIRInstruction::Load(
@@ -5540,7 +5500,8 @@ fn lower_expr_to_sir_with_context(
                     },
                     width,
                 ));
-                let reg = guard_dynamic_array_read_sir(builder, valid, reg, width);
+                let reg =
+                    guard_dynamic_array_read_sir(builder, valid, reg, width, variable.is_4state);
                 return resize_sir_register(
                     builder,
                     reg,

@@ -1052,6 +1052,45 @@ fn connects_runtime_selected_unpacked_array_elements_to_child_outputs() {
 }
 
 #[test]
+fn connects_runtime_selected_packed_subselects_to_child_outputs() {
+    let source = r#"
+        module Child(
+            input logic [3:0] input_value,
+            output logic [3:0] output_value
+        );
+            assign output_value = input_value;
+        endmodule
+        module Top(
+            input logic [1:0] sel,
+            input logic [3:0] input_value,
+            output var logic [7:0] values[4],
+            output logic [3:0] value
+        );
+            Child child(.input_value(input_value), .output_value(values[sel][3:0]));
+            assign value = values[sel][3:0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("array_output_dynamic_packed_subselect.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let input_value = sim.signal("input_value");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(input_value, 0xau8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0xau8.into());
+}
+
+#[test]
 fn rejects_runtime_selected_child_outputs_to_nets() {
     let error = cranelift_build_error(
         r#"
@@ -1140,6 +1179,47 @@ fn returns_unknown_for_invalid_runtime_array_read_indices() {
     assert_eq!(sim.get_four_state(registered), all_x);
     sim.modify(|io| io.set(sel, 5u8)).unwrap();
     assert_eq!(sim.get_four_state(combinational), all_x);
+}
+
+#[test]
+fn returns_zero_for_invalid_runtime_two_state_array_read_indices() {
+    let source = r#"
+        module Top(
+            input bit clk,
+            input logic [2:0] sel,
+            input bit [7:0] values[2],
+            output logic [7:0] combinational,
+            output logic [7:0] registered
+        );
+            assign combinational = values[sel];
+            always_ff @(posedge clk) registered <= values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_invalid_two_state_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let combinational = sim.signal("combinational");
+    let registered = sim.signal("registered");
+    sim.modify(|io| {
+        io.set(values, 0x2211u16);
+        io.set(sel, 5u8);
+    })
+    .unwrap();
+    let zero = (BigUint::default(), BigUint::default());
+    assert_eq!(sim.get_four_state(combinational), zero);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get_four_state(registered), zero);
+    sim.modify(|io| io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8)))
+        .unwrap();
+    assert_eq!(sim.get_four_state(combinational), zero);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get_four_state(registered), zero);
 }
 
 #[test]
