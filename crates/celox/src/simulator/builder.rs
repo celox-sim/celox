@@ -1574,8 +1574,9 @@ mod host {
         }
 
         /// Add one profile-selected native JIT block to state-layout feasibility
-        /// analysis. The analysis is captured by [`Self::build_with_trace`] from
-        /// the exact merged SIR passed to native instruction selection.
+        /// analysis. The analysis is captured by [`Self::build_with_trace`] or
+        /// [`Self::compile_native_with_trace`] from the exact merged SIR passed
+        /// to native instruction selection.
         pub fn trace_native_profile_block(
             mut self,
             function: impl Into<String>,
@@ -1762,8 +1763,25 @@ mod host {
         /// along with the remaining builder state.
         /// Consumes self.
         fn into_laid_out_program(
+            self,
+            layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+        ) -> Result<
+            (
+                crate::ir::LaidOutProgram,
+                Vec<CompilationWarning>,
+                SimulatorOptions,
+                Option<std::path::PathBuf>,
+                crate::InjectedComponents,
+            ),
+            SimulatorError,
+        > {
+            self.into_laid_out_program_with_trace(layout_mode, None)
+        }
+
+        fn into_laid_out_program_with_trace(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+            trace: Option<&mut crate::debug::CompilationTrace>,
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
@@ -1786,7 +1804,7 @@ mod host {
                         &self.true_loops,
                         self.options.four_state,
                         &self.options.trace,
-                        None,
+                        trace,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         layout_mode,
@@ -1800,7 +1818,7 @@ mod host {
                         &self.true_loops,
                         self.options.four_state,
                         &self.options.trace,
-                        None,
+                        trace,
                         self.metadata,
                         self.clock_type,
                         self.reset_type,
@@ -1820,7 +1838,7 @@ mod host {
                     &self.true_loops,
                     self.options.four_state,
                     &self.options.trace,
-                    None,
+                    trace,
                     self.metadata,
                     self.clock_type,
                     self.reset_type,
@@ -1963,6 +1981,61 @@ mod host {
                 vcd_path,
                 injected_components,
             })
+        }
+
+        /// Compiles using the selected native code-generation architecture and
+        /// returns the trace captured from the same native compilation.
+        ///
+        /// Unlike [`Self::build_with_trace`], this method never loads or runs
+        /// the generated machine code, so it is available during cross-codegen.
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        ))]
+        pub fn compile_native_with_trace(
+            self,
+        ) -> Result<(NativeCompilation, crate::debug::CompilationTrace), SimulatorError> {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let sir_start = phase_timing.then(crate::timing::now);
+            let mut trace = crate::debug::CompilationTrace::default();
+            let (laid_out, warnings, options, vcd_path, injected_components) = self
+                .into_laid_out_program_with_trace(
+                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                    Some(&mut trace),
+                )?;
+            if let Some(start) = sir_start {
+                tracing::debug!(
+                    "[phase-timing] into_laid_out_program total: {:?}",
+                    start.elapsed()
+                );
+            }
+            let backend_start = phase_timing.then(crate::timing::now);
+            let (image, native_trace) =
+                crate::backend::native::NativeBackend::compile_image_with_codegen_trace(
+                    &laid_out, &options,
+                )?;
+            if let Some(start) = backend_start {
+                tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
+            }
+            trace.native_optimized_sir = Some(native_trace.optimized_sir);
+            trace.mir = Some(native_trace.mir);
+            trace.reactive_event_graph = Some(native_trace.reactive_graph);
+            trace.native_state_layout = Some(native_trace.state_layout);
+            if options.trace.output_to_stdout {
+                trace.print();
+            }
+            Ok((
+                NativeCompilation {
+                    image,
+                    program: laid_out,
+                    warnings,
+                    options,
+                    vcd_path,
+                    injected_components,
+                },
+                trace,
+            ))
         }
 
         /// Compiles for an x86-64 target and initializes the simulator.

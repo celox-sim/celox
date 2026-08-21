@@ -1039,7 +1039,7 @@ fn append_native_function_trace(
     mir.push_str(&format!("Spill frame: {} bytes\n", trace.spill_frame_size));
     mir.push_str("Register assignment:\n");
     mir.push_str(&trace.register_assignment);
-    mir.push_str("x86-64 disassembly of emitted function:\n");
+    mir.push_str("Native disassembly of emitted function:\n");
     mir.push_str(&trace.disassembly);
     if !trace.disassembly.ends_with('\n') {
         mir.push('\n');
@@ -2000,6 +2000,17 @@ impl NativeBackend {
         Ok(image)
     }
 
+    pub(crate) fn compile_image_with_codegen_trace(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<(NativeProgramImage, NativeCodegenTrace), SimulatorError> {
+        let (image, trace) = compile_program(laid_out, options, true)?;
+        Ok((
+            image,
+            trace.expect("trace-enabled native compilation must return a trace"),
+        ))
+    }
+
     /// Load a compiler-produced image into executable memory and create a
     /// backend instance for it.
     ///
@@ -2031,14 +2042,11 @@ impl NativeBackend {
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<(Self, NativeCodegenTrace), SimulatorError> {
-        let (image, trace) = compile_program(laid_out, options, true)?;
+        let (image, trace) = Self::compile_image_with_codegen_trace(laid_out, options)?;
         // Safety: `image` was produced in-process by the Celox compiler above.
         let shared = unsafe { SharedNativeCode::from_image(image)? };
         let backend = Self::from_shared(Arc::new(shared));
-        Ok((
-            backend,
-            trace.expect("trace-enabled native compilation must return a trace"),
-        ))
+        Ok((backend, trace))
     }
 
     /// Create a new backend instance from shared compiled code.
