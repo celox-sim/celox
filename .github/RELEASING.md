@@ -76,8 +76,8 @@ If the publishing implementation itself must be fixed after a partial release,
 create a numbered `vX.Y.Z-recovery.N` tag from the reviewed fix commit and run
 **Publish Rust Crates** from that tag with `release_tag` set to `vX.Y.Z`. The
 workflow requires the source tag to use that exact recovery form, requires
-`VERSION` to match the stable release, and skips crate versions already visible
-on crates.io.
+the recovery tag to descend from the stable release tag, requires `VERSION` to
+match the stable release, and skips crate versions already visible on crates.io.
 
 Create a GitHub environment named `crates-io` before the first release. Limit
 deployments to protected tags matching `v*` and add required reviewers if

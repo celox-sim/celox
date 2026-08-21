@@ -43,6 +43,10 @@ jobs:
               echo "Recovery source tag must match $RELEASE_TAG-recovery.N." >&2
               exit 1
             fi
+            if ! git merge-base --is-ancestor "$RELEASE_TAG" "$SOURCE_TAG"; then
+              echo "Recovery source tag $SOURCE_TAG must descend from $RELEASE_TAG." >&2
+              exit 1
+            fi
           fi
           expected_tag="v$(tr -d '\r\n' < VERSION)"
           if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
