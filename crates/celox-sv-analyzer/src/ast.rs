@@ -8536,6 +8536,86 @@ fn remaining_unpacked_selection_width(
     product_expr(&parts)
 }
 
+fn flatten_unpacked_select_range(
+    name: &str,
+    indices: &[ConstExpr],
+    msb: ConstExpr,
+    lsb: ConstExpr,
+    dimensions: &VariableDimensions,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    let dimension = dimensions.unpacked.get(indices.len())?;
+    if const_expr_is_out_of_range(
+        &msb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) || const_expr_is_out_of_range(
+        &lsb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) {
+        return None;
+    }
+    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    if !packed_indices.is_empty() {
+        return None;
+    }
+    let msb_offset = unpacked_index_offset(dimension, msb);
+    let lsb_offset = unpacked_index_offset(dimension, lsb);
+    let stride = product_expr(
+        &dimensions.unpacked[indices.len() + 1..]
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .chain(
+                dimensions
+                    .packed
+                    .iter()
+                    .map(|dimension| dimension.width.clone()),
+            )
+            .collect::<Vec<_>>(),
+    );
+    let scale = |offset: ConstExpr| {
+        if is_one(&stride) {
+            offset
+        } else {
+            ConstExpr::Binary {
+                left: Box::new(offset),
+                op: BinaryOp::Mul,
+                right: Box::new(stride.clone()),
+            }
+        }
+    };
+    let stride_minus_one = ConstExpr::Binary {
+        left: Box::new(stride.clone()),
+        op: BinaryOp::Sub,
+        right: Box::new(ConstExpr::Literal("1".to_string())),
+    };
+    let descending = ConstExpr::Binary {
+        left: Box::new(msb_offset.clone()),
+        op: BinaryOp::Ge,
+        right: Box::new(lsb_offset.clone()),
+    };
+    let high = ConstExpr::Mux {
+        condition: Box::new(descending.clone()),
+        then_expr: Box::new(add_expr(
+            scale(msb_offset.clone()),
+            stride_minus_one.clone(),
+        )),
+        else_expr: Box::new(add_expr(scale(lsb_offset.clone()), stride_minus_one)),
+    };
+    let low = ConstExpr::Mux {
+        condition: Box::new(descending),
+        then_expr: Box::new(scale(lsb_offset)),
+        else_expr: Box::new(scale(msb_offset)),
+    };
+    Some((
+        add_expr(array_offset.clone(), high),
+        add_expr(array_offset, low),
+    ))
+}
+
 fn flatten_select_range(
     name: &str,
     indices: &[ConstExpr],
@@ -8554,7 +8634,14 @@ fn flatten_select_range(
         return Some((msb, lsb));
     }
     if indices.len() < dimensions.unpacked.len() {
-        return None;
+        return flatten_unpacked_select_range(
+            name,
+            indices,
+            msb,
+            lsb,
+            dimensions,
+            packed_dimensions,
+        );
     }
     let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     let dimension = dimensions.packed.get(packed_indices.len())?;
@@ -8617,6 +8704,16 @@ fn flatten_packed_select(
 ) -> Option<(ConstExpr, ConstExpr)> {
     let variable_dimensions = packed_dimensions.get(name)?;
     let dimensions = &variable_dimensions.packed;
+    if dimensions.is_empty() {
+        if variable_dimensions.unpacked.is_empty() || indices.len() != 1 {
+            return None;
+        }
+        let zero = ConstExpr::Literal("0".to_string());
+        if eval_ast_const_expr(&indices[0], &packed_dimensions.const_env) != Some(0) {
+            return None;
+        }
+        return Some((zero.clone(), zero));
+    }
     if indices.is_empty()
         || indices.len() > dimensions.len()
         || (variable_dimensions.unpacked.is_empty()

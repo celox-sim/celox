@@ -958,6 +958,52 @@ mod tests {
     }
 
     #[test]
+    fn flattens_unpacked_array_range_selections() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic [7:0] source[4],
+                    output logic [7:0] target[4]
+                );
+                    assign target[1:0] = source[1:0];
+                endmodule
+            "#,
+            Path::new("unpacked_array_range_selection.sv"),
+        )
+        .expect("unpacked array ranges should be analyzed");
+        let assignment = &ir.modules()[0].comb_processes()[0].assignments()[0];
+        let ir::LValue::Select { msb, lsb, .. } = assignment.lhs_value() else {
+            panic!("expected a flattened unpacked range lvalue");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(15));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+        let ir::Expr::Select { msb, lsb, .. } = assignment.rhs() else {
+            panic!("expected a flattened unpacked range expression");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(15));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+    }
+
+    #[test]
+    fn preserves_implicit_packed_bit_selects_on_scalar_arrays() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic values[2], output logic y);
+                    assign y = values[0][0];
+                endmodule
+            "#,
+            Path::new("scalar_array_bit_selection.sv"),
+        )
+        .expect("scalar array bit-selects should be analyzed");
+        let expression = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Select { msb, lsb, .. } = expression else {
+            panic!("expected a scalar array bit-select, got {expression:?}");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(0));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+    }
+
+    #[test]
     fn rejects_duplicate_parameters() {
         let err = analyze_source(
             r#"

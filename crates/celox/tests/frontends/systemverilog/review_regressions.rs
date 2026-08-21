@@ -2841,6 +2841,51 @@ fn reads_runtime_partial_unpacked_array_selections() {
 }
 
 #[test]
+fn reads_unpacked_array_ranges() {
+    let source = r#"
+        module Top(
+            input logic [7:0] source[4],
+            output logic [7:0] selected[2]
+        );
+            assign selected = source[1:0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unpacked_array_range_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let source = sim.signal("source");
+    let selected = sim.signal("selected");
+    sim.modify(|io| io.set_wide(source, BigUint::from(0x04030201u64)))
+        .unwrap();
+    assert_eq!(sim.get(selected), 0x0201u16.into());
+}
+
+#[test]
+fn reads_bit_selects_of_scalar_array_elements() {
+    let source = r#"
+        module Top(
+            input logic values[2],
+            output logic selected
+        );
+            assign selected = values[0][0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("scalar_array_bit_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let values = sim.signal("values");
+    let selected = sim.signal("selected");
+    sim.modify(|io| io.set(values, 1u8)).unwrap();
+    assert_eq!(sim.get(selected), 1u8.into());
+}
+
+#[test]
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
