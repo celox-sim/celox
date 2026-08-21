@@ -35,5 +35,5 @@ let mut sim = Simulator::from_my_artifact(artifact)?;
 See the [external frontend guide](https://celox-sim.github.io/celox/guide/external-frontends)
 for the complete adapter pattern and artifact format limits.
 
-Celox is experimental and its Rust API is not yet covered by a 1.0 stability
-guarantee.
+Celox is under active development and its Rust API is not yet covered by a 1.0
+stability guarantee.

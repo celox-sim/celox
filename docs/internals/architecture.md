@@ -153,7 +153,7 @@ full IEEE object model remain outside the initial compatibility subset.
 ### Cranelift
 
 The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It
-is the native fallback where the custom x86-64 backend is unavailable.
+is the native fallback where neither custom native backend is selected.
 
 ### WebAssembly
 

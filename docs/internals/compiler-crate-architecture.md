@@ -30,7 +30,7 @@ External frontend -----> celox-frontend-sdk artifact -------------/             
                                                               │
                                            ┌──────────────────┼──────────────────┐
                                            ▼                  ▼                  ▼
-                                    backend-x86      backend-cranelift    backend-wasm
+                             backend-x86   backend-arm64   backend-cranelift   backend-wasm
                                            └──────────────────┼──────────────────┘
                                                               ▼
                                                        RuntimeProgram

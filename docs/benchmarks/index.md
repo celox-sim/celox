@@ -35,7 +35,9 @@ whole-design performance.
 - Validate any optimization choice on the design it will actually run.
 
 Heliodor uses an additional fixed-input acceptance workload. Its methodology is
-described in [Heliodor Linux Benchmark](./heliodor.md).
+described in [Heliodor Linux Benchmark](./heliodor.md). The dashboard compares
+the native backend with Veryl-CC; Cranelift boot results are excluded because
+their much longer runtime makes this chart ineffective for that comparison.
 Heliodor charts are separated by CPU architecture because results from different
 runner types are not directly comparable. Every chart uses a zero baseline.
 
