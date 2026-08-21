@@ -452,11 +452,17 @@ fn for_loop_initialization(
 ) -> Option<(String, ConstExpr)> {
     match initialization {
         sv_parser::ForInitialization::Declaration(declaration) => {
-            let declaration = declaration.nodes.0.contents().into_iter().next()?;
+            let declarations = declaration.nodes.0.contents();
+            let [declaration] = declarations.as_slice() else {
+                return None;
+            };
             if !for_loop_index_type_is_supported(&declaration.nodes.1) {
                 return None;
             }
-            let assignment = declaration.nodes.2.contents().into_iter().next()?;
+            let assignments = declaration.nodes.2.contents();
+            let [assignment] = assignments.as_slice() else {
+                return None;
+            };
             let name = identifier_text(RefNode::VariableIdentifier(&assignment.0), syntax_tree)?;
             let value = const_expr_from_expr(&assignment.2, syntax_tree)?;
             Some((name, value))
@@ -8252,6 +8258,19 @@ fn flatten_select_range(
     }
     let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
     let dimension = dimensions.packed.get(packed_indices.len())?;
+    if const_expr_is_out_of_range(
+        &msb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) || const_expr_is_out_of_range(
+        &lsb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) {
+        return None;
+    }
     msb = packed_index_offset(dimension, msb);
     lsb = packed_index_offset(dimension, lsb);
 

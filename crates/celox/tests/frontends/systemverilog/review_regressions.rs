@@ -840,6 +840,21 @@ fn rejects_out_of_range_packed_array_element_indices() {
 }
 
 #[test]
+fn rejects_out_of_range_packed_array_part_select_bounds() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [7:0] a[0:1], output logic [1:0] y);
+            assign y = a[0][9:8];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment expression"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn preserves_signedness_in_loop_conditions() {
     let source = r#"
         module Top(input logic clk, output logic q, output logic [1:0] result);
@@ -855,6 +870,19 @@ fn preserves_signedness_in_loop_conditions() {
             .unwrap();
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get(sim.signal("result")), 0u8.into());
+}
+
+#[test]
+fn rejects_extra_loop_index_declarations() {
+    cranelift_build_error(
+        r#"
+        module Top #(parameter J = 1) (input logic clk, output logic [1:0] q);
+            always_ff @(posedge clk) begin
+                for (int i = 0, J = 0; i < 1; i++) q[J] <= 1'b1;
+            end
+        endmodule
+        "#,
+    );
 }
 
 #[test]
