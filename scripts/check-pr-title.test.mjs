@@ -44,4 +44,8 @@ test("guards the repository setting that exposes the title to release automation
     workflow,
     /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/,
   );
+  assert.match(
+    workflow,
+    /Validate release merge settings\n\s+if: github\.event_name == 'pull_request_target'/,
+  );
 });
