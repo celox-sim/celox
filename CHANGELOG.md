@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.1 (2026-08-21)
+
+## What's Changed
+* chore(deps): update napi-rs and emnapi compatibility by @renovate[bot] in https://github.com/celox-sim/celox/pull/611
+* feat(test): run Veryl output through SV frontend by @tignear in https://github.com/celox-sim/celox/pull/615
+* feat(frontend): add external frontend SDK by @tignear in https://github.com/celox-sim/celox/pull/620
+* perf(arm64): improve native code generation by @tignear in https://github.com/celox-sim/celox/pull/621
+* feat(rust): publish crates and add frontend adapters by @tignear in https://github.com/celox-sim/celox/pull/623
+* fix(release): correct Cargo.lock version selector by @tignear in https://github.com/celox-sim/celox/pull/624
+* fix(release): automate trusted publisher bootstrap by @tignear in https://github.com/celox-sim/celox/pull/626
+* fix(deps): update rust crate wasmtime to v48 by @renovate[bot] in https://github.com/celox-sim/celox/pull/628
+* chore(deps): update rust to v1.98.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/627
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.3.0...v0.3.1
+
 ## 0.3.0 (2026-08-19)
 
 ## What's Changed
