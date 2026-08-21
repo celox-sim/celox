@@ -85,19 +85,23 @@ for crate in "${crates[@]}"; do
     continue
   fi
 
-  echo "building and testing package archive for $crate@$version"
+  echo "building and checking package archive for $crate@$version"
   cargo package --locked -p "$crate"
   package_dir="$PWD/target/package/$crate-$version"
   if [[ ! -f "$package_dir/Cargo.toml" || -L "$package_dir" ]]; then
     echo "cargo did not create the expected package directory: $package_dir" >&2
     exit 1
   fi
-  cargo test \
+  # The normal release checks already run the workspace tests. Check every
+  # target from the normalized archive here without linking a second copy of
+  # every test and benchmark binary; linking all of Celox exceeds the disk on a
+  # GitHub-hosted runner. A shared target directory also reuses dependencies
+  # between archives instead of keeping one full build tree per crate.
+  cargo check \
     --locked \
     --all-targets \
-    --no-run \
     --manifest-path "$package_dir/Cargo.toml" \
-    --target-dir "$PWD/target/package-tests/$crate"
+    --target-dir "$PWD/target/package-checks"
 
   published=false
   for attempt in {1..6}; do
