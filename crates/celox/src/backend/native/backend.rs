@@ -41,11 +41,17 @@ const KNOWN_NATIVE_FEATURES: u8 = NATIVE_FEATURE_BMI2
     | NATIVE_FEATURE_POPCNT;
 
 fn current_native_feature_bits() -> u8 {
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    ))]
     {
         celox_backend_x86::native::features::detected_image_feature_bits()
     }
-    #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
+    #[cfg(any(
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
     {
         0
     }
@@ -78,7 +84,11 @@ fn format_native_feature_bits(bits: u8) -> String {
 /// JIT function type: `fn(state: *mut u8) -> i64`
 #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
-#[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
+#[cfg(any(
+    feature = "arm64-codegen",
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen")),
+    all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
+))]
 pub type NativeSimFunc = unsafe extern "C" fn(*mut u8) -> i64;
 
 /// Time spent inside generated native simulator functions.
@@ -534,7 +544,10 @@ struct CompiledNativeFunction {
 }
 
 #[cfg_attr(
-    all(feature = "arm64-codegen", not(target_arch = "aarch64")),
+    any(
+        all(feature = "arm64-codegen", not(target_arch = "aarch64")),
+        all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
+    ),
     allow(dead_code)
 )]
 pub(crate) struct NativeCodegenTrace {
@@ -701,9 +714,15 @@ fn compile_unit_refs(
             symbols,
             trace,
             required_state_size: empty_result.required_state_size as usize,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(any(
+                feature = "x86_64-codegen",
+                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+            ))]
             required_native_features: empty_result.required_image_features,
-            #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
+            #[cfg(any(
+                feature = "arm64-codegen",
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             required_native_features: 0,
         });
     }
@@ -741,9 +760,15 @@ fn compile_unit_refs(
         symbols,
         trace,
         required_state_size,
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(any(
+            feature = "x86_64-codegen",
+            all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+        ))]
         required_native_features: emit_result.required_image_features,
-        #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
+        #[cfg(any(
+            feature = "arm64-codegen",
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
         required_native_features: 0,
     })
 }
@@ -2000,7 +2025,7 @@ impl NativeBackend {
 
     #[cfg(any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", feature = "arm64-codegen")
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
     ))]
     pub(crate) fn new_with_codegen_trace(
         laid_out: &LaidOutProgram,

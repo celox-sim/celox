@@ -97,9 +97,17 @@ separate from x86. Both native backends may export opcode-free control-flow,
 use/def, and register-constraint facts to shared allocation algorithms; those
 facts are not a common machine IR.
 
-The backend is experimental and disabled by default. Enable the
-`experimental-arm64-backend` feature on the `celox` crate to select it as the
-default backend on AArch64; without the feature, AArch64 uses Cranelift.
+On AArch64 the backend is included directly and selected as the default backend.
+
+The simulator builder exposes the architecture-specific `build_x86_64` and
+`build_arm64` entry points alongside `build_cranelift`. `build_native` is the
+portable convenience entry point and routes to the backend for the compilation
+target. Consequently, `build_arm64` is also available in Cargo cross-builds
+targeting AArch64. Host-side generation of another architecture's images uses
+the separate, default-off cross-codegen features and compilation/image API.
+`arm64-codegen` selects AArch64 emission on an x86-64 target, while
+`x86_64-codegen` selects x86-64 emission on an AArch64 target. The two features
+are mutually exclusive.
 
 ### Native program images
 

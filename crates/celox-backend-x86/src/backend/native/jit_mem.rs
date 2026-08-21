@@ -6,6 +6,13 @@ use memmap2::{Mmap, MmapMut};
 
 static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
+#[cfg(target_arch = "x86_64")]
+type JitFn = unsafe extern "sysv64" fn(*mut u8) -> i64;
+// Cross-codegen never executes the generated image in this process. Use a
+// target-supported placeholder ABI so the image container can still be built.
+#[cfg(not(target_arch = "x86_64"))]
+type JitFn = unsafe extern "C" fn(*mut u8) -> i64;
+
 /// Optional subrange symbol for Linux perf JIT maps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JitSymbol {
@@ -18,7 +25,7 @@ pub struct JitSymbol {
 /// The code can be called as `fn(*mut u8) -> i64`.
 pub struct JitCode {
     _mmap: Mmap,
-    pub fn_ptr: unsafe extern "sysv64" fn(*mut u8) -> i64,
+    pub fn_ptr: JitFn,
 }
 
 impl JitCode {
@@ -64,8 +71,7 @@ impl JitCode {
         let mmap = mmap.make_exec()?;
 
         // Safety: we just wrote valid x86-64 code into the mmap.
-        let fn_ptr: unsafe extern "sysv64" fn(*mut u8) -> i64 =
-            unsafe { std::mem::transmute(mmap.as_ptr()) };
+        let fn_ptr: JitFn = unsafe { std::mem::transmute(mmap.as_ptr()) };
 
         if perf_map {
             write_perf_map_entries(mmap.as_ptr() as usize, code.len().max(1), name, symbols)?;

@@ -66,8 +66,8 @@ therefore remain in the Veryl adapter and its source sidecars; they do not enter
 `celox-frontend-core`, `FrontendLookup`, or `ScheduledRtl`. Scheduled design
 state, SIR, optimization, layout, and backends use `celox-design` identities.
 
-`celox-backend-arm64` is wired into native backend selection behind the
-default-off `experimental-arm64-backend` feature and emits complete scalar
+`celox-backend-arm64` is wired directly into AArch64 native backend selection
+and emits complete scalar
 simulation kernels. Its production path temporarily uses the established
 x86-owned scalar lowering and allocation pipeline as a compatibility bridge.
 The migration target is separate x86 and AArch64 MIR pipelines which export only

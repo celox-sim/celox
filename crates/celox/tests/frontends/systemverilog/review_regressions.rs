@@ -4277,10 +4277,7 @@ fn rejects_function_writes_outside_the_inlined_scope() {
     );
 }
 
-#[cfg(any(
-    target_arch = "x86_64",
-    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn collapses_unknown_initializers_in_two_state_native_images() {
     use celox::{NativeProgramInstance, SimBackend};

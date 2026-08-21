@@ -6,7 +6,7 @@ mod error;
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 pub use builder::NativeCompilation;
@@ -28,7 +28,7 @@ mod host {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     use crate::backend::native::{NativeBackend, SharedNativeCode};
     use crate::{
@@ -488,7 +488,7 @@ mod host {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub(crate) fn runtime_event_write_seq_for_backend<B: SimBackend>(backend: &B) -> u64 {
         if let Some(buffer) = backend.runtime_event_buffer() {
@@ -506,7 +506,7 @@ mod host {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
         backend: &B,
@@ -1540,7 +1540,7 @@ mod host {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     impl Simulator<NativeBackend> {
         /// Returns the shared compiled native code, allowing it to be reused

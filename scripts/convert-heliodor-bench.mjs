@@ -6,21 +6,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 const [inputPath, outputPath, ...options] = process.argv.slice(2);
 if (!inputPath || !outputPath) {
   console.error(
-    "Usage: node convert-heliodor-bench.mjs <results.tsv> <output.json> [--jit-only | --cranelift-results <results.tsv> --arm64-results <results.tsv>]",
+    "Usage: node convert-heliodor-bench.mjs <results.tsv> <output.json> [--jit-only | --arm64-results <results.tsv>]",
   );
   process.exit(1);
 }
 
 let jitOnly = false;
-let craneliftResultsPath;
 let arm64ResultsPath;
 for (let index = 0; index < options.length; index += 1) {
   switch (options[index]) {
     case "--jit-only":
       jitOnly = true;
-      break;
-    case "--cranelift-results":
-      craneliftResultsPath = options[++index];
       break;
     case "--arm64-results":
       arm64ResultsPath = options[++index];
@@ -29,11 +25,8 @@ for (let index = 0; index < options.length; index += 1) {
       throw new Error(`unknown conversion option: ${options[index]}`);
   }
 }
-if (jitOnly && (craneliftResultsPath || arm64ResultsPath)) {
+if (jitOnly && arm64ResultsPath) {
   throw new Error("--jit-only cannot be combined with platform results");
-}
-if (Boolean(craneliftResultsPath) !== Boolean(arm64ResultsPath)) {
-  throw new Error("Cranelift and ARM64 results must be provided together");
 }
 
 const expectedHeader = [
@@ -133,25 +126,15 @@ const results = [
   ),
 ];
 
-if (craneliftResultsPath && arm64ResultsPath) {
-  const cranelift = requirePassedRunner(
-    readResults(craneliftResultsPath),
-    "celox-cranelift",
-    craneliftResultsPath,
-  );
+if (arm64ResultsPath) {
   const arm64Rows = readResults(arm64ResultsPath);
   const arm64 = requirePassedRunner(arm64Rows, "celox", arm64ResultsPath);
-  const craneliftArm64 = requirePassedRunner(
-    arm64Rows,
-    "celox-cranelift",
-    arm64ResultsPath,
-  );
   const verylArm64 = requirePassedRunner(
     arm64Rows,
     "veryl-cc-sync",
     arm64ResultsPath,
   );
-  for (const row of [cranelift, arm64, craneliftArm64, verylArm64]) {
+  for (const row of [arm64, verylArm64]) {
     if (row.test !== celox.test) {
       throw new Error(
         `runner tests differ: native-x86_64=${celox.test}, ${row.runner}=${row.test}`,
@@ -161,10 +144,8 @@ if (craneliftResultsPath && arm64ResultsPath) {
 
   for (const [platform, row] of [
     ["native-x86_64", celox],
-    ["cranelift-x86_64", cranelift],
     ["veryl-cc-x86_64", veryl],
     ["native-aarch64", arm64],
-    ["cranelift-aarch64", craneliftArm64],
     ["veryl-cc-aarch64", verylArm64],
   ]) {
     results.push(

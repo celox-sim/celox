@@ -21,11 +21,17 @@ pub enum NativeImageArchitecture {
 
 impl NativeImageArchitecture {
     pub fn current() -> Self {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(any(
+            feature = "x86_64-codegen",
+            all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+        ))]
         {
             Self::X86_64
         }
-        #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
+        #[cfg(any(
+            feature = "arm64-codegen",
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
         {
             Self::Aarch64
         }
