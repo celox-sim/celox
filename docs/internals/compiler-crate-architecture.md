@@ -67,11 +67,10 @@ therefore remain in the Veryl adapter and its source sidecars; they do not enter
 state, SIR, optimization, layout, and backends use `celox-design` identities.
 
 `celox-backend-arm64` is wired directly into AArch64 native backend selection
-and emits complete scalar
-simulation kernels. Its production path temporarily uses the established
-x86-owned scalar lowering and allocation pipeline as a compatibility bridge.
-The migration target is separate x86 and AArch64 MIR pipelines which export only
-opcode-free allocation facts to `celox-backend-common`.
+and emits complete scalar simulation kernels. It lowers SIR into target-owned
+AArch64 MIR and applies its own allocation and emission policy; it does not
+depend on the x86 backend or translate x86 opcodes. Native backends share only
+opcode-free allocation facts through `celox-backend-common`.
 
 ## Native MIR and allocation boundary
 

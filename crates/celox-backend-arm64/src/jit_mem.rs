@@ -44,7 +44,11 @@ impl JitCode {
         mutable[..code.len()].copy_from_slice(code);
         let buffer = mutable.make_exec()?;
         dynasmrt::cache_control::prepare_for_execution(&buffer);
-        let fn_ptr = unsafe { std::mem::transmute(buffer.ptr(AssemblyOffset(0))) };
+        let fn_ptr = unsafe {
+            std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8) -> i64>(
+                buffer.ptr(AssemblyOffset(0)),
+            )
+        };
         Ok(Self { buffer, fn_ptr })
     }
 
