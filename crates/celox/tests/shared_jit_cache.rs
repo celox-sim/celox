@@ -652,6 +652,27 @@ fn native_program_image_rejects_corrupt_appended_payload() {
 }
 
 #[test]
+fn native_program_image_rejects_v3_before_decoding_changed_schema() {
+    const TRAILER_SIZE: usize = 32;
+    const VERSION_OFFSET: usize = 8;
+
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - TRAILER_SIZE;
+    encoded[trailer_start + VERSION_OFFSET..trailer_start + VERSION_OFFSET + 2]
+        .copy_from_slice(&3u16.to_le_bytes());
+
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(3))
+    ));
+}
+
+#[test]
 fn native_program_image_writes_an_executable_runtime_file() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
     let shared = sim.shared_code();
