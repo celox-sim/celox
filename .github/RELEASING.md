@@ -218,9 +218,11 @@ removes an existing queue entry before returning when the release is held.
 
 Configure merge commits with `merge_commit_title=PR_TITLE`; use
 `merge_commit_message=BLANK` because Release Please only needs the title. This
-preserves the Conventional Commit subject consumed by Release Please. The
-**Conventional Commit title** check verifies this repository setting as well as
-each title, including in the merge queue. Protect `master` and `develop` and
+preserves the Conventional Commit subject consumed by Release Please. Disable
+squash and rebase merges, and configure the default branch's merge queue to use
+the `MERGE` method so every permitted path has the same message contract. The
+**Conventional Commit title** check verifies these repository settings as well
+as each title, including in the merge queue. Protect `master` and `develop` and
 require that check and the normal CI checks; do not allow those checks to be
 bypassed by automation. Enable repository auto-merge so dependency rolls, lane
 synchronization, and weekly releases can queue checked pull requests. Allow the

@@ -25,9 +25,7 @@ jobs:
       - name: Validate release merge settings
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY" \
-            | node scripts/check-release-repository-settings.mjs
+        run: node scripts/check-release-repository-settings.mjs
 
       - name: Validate pull request title
         if: github.event_name == 'pull_request_target'

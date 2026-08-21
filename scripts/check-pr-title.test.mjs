@@ -37,7 +37,7 @@ test("guards the repository setting that exposes the title to release automation
 
   assert.match(
     workflow,
-    /gh api "repos\/\$GITHUB_REPOSITORY"[\s\\]+\| node scripts\/check-release-repository-settings\.mjs/,
+    /run: node scripts\/check-release-repository-settings\.mjs/,
   );
   assert.match(
     workflow,
