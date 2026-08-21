@@ -61,7 +61,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build docs
         run: pnpm docs:build
@@ -118,7 +118,7 @@ jobs:
 
       - name: Install dependencies
         if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Biome check
         if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
@@ -176,7 +176,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Check NAPI peer compatibility
         run: pnpm peers check
@@ -277,7 +277,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build NAPI (debug)
         run: pnpm run build:napi
@@ -315,7 +315,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build NAPI (Linux ARM64 GNU)
         working-directory: crates/celox-napi
@@ -356,7 +356,7 @@ jobs:
           path: crates/celox-napi
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build packages
         run: pnpm run build
@@ -366,7 +366,7 @@ jobs:
         run: |
           node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.devDependencies['@celox-sim/celox']='link:../../packages/celox'; pkg.devDependencies['@celox-sim/vite-plugin']='link:../../packages/vite-plugin'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
           printf 'packages:\n  - "."\nallowBuilds:\n  esbuild: true\n' > pnpm-workspace.yaml
-          pnpm install --no-frozen-lockfile
+          pnpm install --no-frozen-lockfile --ignore-scripts
 
       - name: Run template tests
         working-directory: examples/template
@@ -399,7 +399,7 @@ jobs:
           path: crates/celox-napi
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build packages
         run: pnpm run build
@@ -431,7 +431,7 @@ jobs:
           path: crates/celox-napi
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build packages
         run: pnpm run build
