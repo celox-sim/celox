@@ -1,4 +1,4 @@
-export function releaseRepositorySettingErrors(repository, rulesets) {
+export function releaseRepositorySettingErrors(repository) {
   const errors = [];
 
   if (repository.allow_merge_commit !== true) {
@@ -25,28 +25,6 @@ export function releaseRepositorySettingErrors(repository, rulesets) {
     );
   }
 
-  const defaultBranchRulesets = rulesets.filter(
-    (ruleset) =>
-      ruleset.enforcement === "active" &&
-      ruleset.target === "branch" &&
-      ruleset.conditions?.ref_name?.include?.includes("~DEFAULT_BRANCH"),
-  );
-  const mergeQueueRules = defaultBranchRulesets.flatMap((ruleset) =>
-    ruleset.rules.filter((rule) => rule.type === "merge_queue"),
-  );
-
-  if (mergeQueueRules.length === 0) {
-    errors.push("the default branch must have an active merge queue");
-  } else {
-    for (const rule of mergeQueueRules) {
-      if (rule.parameters?.merge_method !== "MERGE") {
-        errors.push(
-          `the default branch merge queue must use MERGE, got ${JSON.stringify(rule.parameters?.merge_method)}`,
-        );
-      }
-    }
-  }
-
   return errors;
 }
 
@@ -67,19 +45,6 @@ async function githubJson(path) {
   return response.json();
 }
 
-async function loadRepositorySettings(repositoryName) {
-  const repository = await githubJson(`/repos/${repositoryName}`);
-  const summaries = await githubJson(
-    `/repos/${repositoryName}/rulesets?per_page=100`,
-  );
-  const rulesets = await Promise.all(
-    summaries.map((ruleset) =>
-      githubJson(`/repos/${repositoryName}/rulesets/${ruleset.id}`),
-    ),
-  );
-  return { repository, rulesets };
-}
-
 if (import.meta.url === `file://${process.argv[1]}`) {
   const repositoryName = process.env.GITHUB_REPOSITORY;
   const token = process.env.GH_TOKEN;
@@ -89,8 +54,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(1);
   }
 
-  const { repository, rulesets } = await loadRepositorySettings(repositoryName);
-  const errors = releaseRepositorySettingErrors(repository, rulesets);
+  const repository = await githubJson(`/repos/${repositoryName}`);
+  const errors = releaseRepositorySettingErrors(repository);
   if (errors.length > 0) {
     console.error("Repository settings cannot preserve release semantics:");
     for (const error of errors) {

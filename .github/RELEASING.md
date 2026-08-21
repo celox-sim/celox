@@ -22,13 +22,20 @@ After 1.0, normal Semantic Versioning applies: fixes are patch releases,
 features are minor releases, and breaking changes are major releases.
 
 Release Please calculates the version from Conventional Commits in git history,
-including the merge commit's first line. Changelog entries instead come from
-GitHub's merged pull requests. A pull request therefore appears once under
-**What's Changed**, even when its branch contains multiple Conventional Commits.
-The pull request title is the release-note text and links back to the pull
-request. Because these are separate inputs, a classic `Merge pull request #123`
-merge subject can incorrectly produce a patch version while the changelog still
-displays a title containing `!`.
+including both the merge commit's first line and the commits on the pull request
+branch. The required title check rejects a branch commit whose release impact is
+higher than its pull request title, so the title remains the upper bound. A
+breaking title can contain feature, fix, and non-release commits; a non-release
+title cannot hide any releasable commit. `Release-As` footers are rejected in
+ordinary pull request commits because they bypass this ordering.
+
+Changelog entries instead come from GitHub's merged pull requests. A pull request
+therefore appears once under **What's Changed**, even when its branch contains
+multiple Conventional Commits. The pull request title is the release-note text
+and links back to the pull request. Because versioning and release notes are
+separate inputs, a classic `Merge pull request #123` merge subject can incorrectly
+produce a patch version while the changelog still displays a title containing
+`!`.
 
 ## Automated release train
 
@@ -219,16 +226,15 @@ removes an existing queue entry before returning when the release is held.
 Configure merge commits with `merge_commit_title=PR_TITLE`; use
 `merge_commit_message=BLANK` because Release Please only needs the title. This
 preserves the Conventional Commit subject consumed by Release Please. Disable
-squash and rebase merges, and configure the default branch's merge queue to use
-the `MERGE` method so every permitted path has the same message contract. The
-**Conventional Commit title** check verifies these repository settings as well
-as each title, including in the merge queue. Protect `master` and `develop` and
-require that check and the normal CI checks; do not allow those checks to be
-bypassed by automation. Enable repository auto-merge so dependency rolls, lane
-synchronization, and weekly releases can queue checked pull requests. Allow the
-automation token to create `develop` on first use and force-update the disposable
-`integration/veryl-head` branch; never grant a force-push exception on `master`
-or `develop`.
+squash and rebase merges so every permitted path has the same message contract.
+The **Conventional Commit title** check verifies these repository settings, each
+title, and the release impact of the pull request's commits. Protect `master` and
+`develop` and require that check and the normal CI checks; do not allow those
+checks to be bypassed by automation. Enable repository auto-merge so dependency
+rolls, lane synchronization, and weekly releases can queue checked pull requests.
+Allow the automation token to create `develop` on first use and force-update the
+disposable `integration/veryl-head` branch; never grant a force-push exception on
+`master` or `develop`.
 
 Do not create a `CARGO_REGISTRY_TOKEN` repository or environment secret. The
 only manually created crates.io credential in this process is the short-expiry
