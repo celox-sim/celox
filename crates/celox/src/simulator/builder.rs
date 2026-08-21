@@ -1966,10 +1966,8 @@ mod host {
         }
 
         /// Compiles for an x86-64 target and initializes the simulator.
-        #[cfg(any(
-            feature = "x86_64-codegen",
-            all(target_arch = "x86_64", not(feature = "arm64-codegen"))
-        ))]
+        /// This includes Cargo cross-builds whose target is x86-64.
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         pub fn build_x86_64(
             self,
         ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {

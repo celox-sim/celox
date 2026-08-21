@@ -217,10 +217,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--dump-ir-and-run requires --dump-ir-dir",
         });
     }
-    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
+    #[cfg(any(
+        all(target_arch = "x86_64", feature = "arm64-codegen"),
+        all(target_arch = "aarch64", feature = "x86_64-codegen")
+    ))]
     if opts.dump_ir_dir.is_some() {
         return Err(CeloxHeliodorError::InvalidConfiguration {
-            message: "--dump-ir-dir is unavailable when generating AArch64 code on x86-64",
+            message: "--dump-ir-dir is unavailable during cross-codegen",
         });
     }
     #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
