@@ -24,7 +24,6 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Validate release merge settings
-        if: github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-release-repository-settings.mjs

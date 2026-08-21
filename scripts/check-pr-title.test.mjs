@@ -49,7 +49,7 @@ test("guards the repository setting that exposes the title to release automation
     workflow,
     /Check out the trusted title validator\n\s+if:/,
   );
-  assert.match(
+  assert.doesNotMatch(
     workflow,
     /Validate release merge settings\n\s+if: github\.event_name == 'pull_request_target'/,
   );

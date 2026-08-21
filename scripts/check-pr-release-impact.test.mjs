@@ -44,6 +44,11 @@ test("detects every commit form consumed by release automation", () => {
     commitReleaseImpact("chore: force\n\nRelease-As: 9.0.0", options),
     4,
   );
+  assert.equal(commitReleaseImpact("Release-As: 9.0.0", options), 0);
+  assert.equal(
+    commitReleaseImpact("chore: force\n\nRelease-As:\n 9.0.0", options),
+    4,
+  );
   assert.equal(
     commitReleaseImpact(
       "Merge branch master\n\nRelease-As: 9.0.0",

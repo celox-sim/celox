@@ -78,6 +78,27 @@ function hasBreakingChange(message) {
   return false;
 }
 
+function hasReleaseAsFooter(message) {
+  const lines = message.split(/\r?\n/);
+
+  // A Release-As subject is an ordinary Conventional Commit type. Only a
+  // footer parsed after the subject becomes a forced-version note.
+  for (let index = 1; index < lines.length; index++) {
+    const marker = lines[index].match(/^Release-As:(.*)$/i);
+    if (!marker) {
+      continue;
+    }
+    if (/\S/.test(marker[1])) {
+      return true;
+    }
+    if (/^[ \t]+\S/.test(lines[index + 1] ?? "")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function titleReleaseImpact(title, { preMajor }) {
   const parsed = parseConventionalPrTitle(title);
   if (!parsed) {
@@ -103,7 +124,7 @@ function parsedMessageReleaseImpact(message, { preMajor }) {
   if (!conventionalHeaderPattern.test(subject)) {
     return 0;
   }
-  if (/^Release-As:\s*\S/im.test(message)) {
+  if (hasReleaseAsFooter(message)) {
     return 4;
   }
 
