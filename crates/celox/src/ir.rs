@@ -19,7 +19,7 @@ pub use celox_frontend_core::shared::{
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 use celox_runtime::{
@@ -145,7 +145,7 @@ impl OptimizedSir {
         any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         )
     ))]
     pub(crate) fn into_runtime(self) -> RuntimeProgram {
@@ -337,7 +337,7 @@ impl RuntimeProgram {
         any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         )
     ))]
     pub(crate) fn build_design_reflection(
@@ -753,7 +753,7 @@ pub use celox_frontend_core::TraceSimModule as SimModule;
     any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )
 ))]
 pub(crate) use celox_runtime::SignalArrayLayout;

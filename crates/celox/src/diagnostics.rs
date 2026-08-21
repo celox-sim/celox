@@ -26,13 +26,13 @@ mod host {
         #[cfg(any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         ))]
         pub native: crate::backend::NativeDiagnostics,
         #[cfg(any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         ))]
         pub native_tick_loop: Option<bool>,
     }
@@ -102,7 +102,7 @@ mod host {
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                target_arch = "aarch64"
             ))]
             let (native, native_tick_loop) = {
                 let native_tick_loop = variables
@@ -151,13 +151,13 @@ mod host {
                 #[cfg(any(
                     target_arch = "x86_64",
                     feature = "arm64-codegen",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    target_arch = "aarch64"
                 ))]
                 native,
                 #[cfg(any(
                     target_arch = "x86_64",
                     feature = "arm64-codegen",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    target_arch = "aarch64"
                 ))]
                 native_tick_loop,
             }
@@ -182,7 +182,7 @@ mod host {
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                target_arch = "aarch64"
             ))]
             assert!(options.native.verify_regalloc);
         }

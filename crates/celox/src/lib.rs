@@ -1,4 +1,6 @@
 mod backend;
+#[cfg(all(feature = "arm64-codegen", feature = "x86_64-codegen"))]
+compile_error!("arm64-codegen and x86_64-codegen cannot be enabled together");
 #[cfg(feature = "host-runtime")]
 mod component;
 #[cfg(feature = "host-runtime")]
@@ -66,7 +68,7 @@ mod host_api {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub use crate::simulator::NativeCompilation;
     pub use crate::simulator::{
@@ -103,7 +105,7 @@ mod host_api {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub mod native_backend {
         //! Re-exports for the custom native backend (for testing/integration).
@@ -113,13 +115,13 @@ mod host_api {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub use crate::backend::native::backend::NativeEventRef;
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub use crate::backend::native::{
         AppendedNativeImage, NativeBackend, NativeCodeEntry, NativeImageArchitecture,
@@ -129,20 +131,20 @@ mod host_api {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     pub use crate::backend::{NativeDiagnostics, NativeDumpOptions};
 
-    /// Default simulation backend: custom native on a matching host, and
-    /// Cranelift when `arm64-codegen` is used for cross-compilation.
+    /// Default simulation backend: custom native when it matches the compilation
+    /// target, and Cranelift when a host-side cross-codegen feature is enabled.
     #[cfg(any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", feature = "arm64-codegen")
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
     ))]
     pub type DefaultBackend = NativeBackend;
     #[cfg(not(any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", feature = "arm64-codegen")
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
     )))]
     pub type DefaultBackend = JitBackend;
 

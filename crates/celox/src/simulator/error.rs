@@ -141,7 +141,7 @@ pub enum CodegenError {
         any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         )
     ))]
     #[error("native emission failed: {source}")]
@@ -155,7 +155,7 @@ pub enum CodegenError {
         any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         )
     ))]
     #[error("native emission failed: {source}")]
@@ -169,7 +169,7 @@ pub enum CodegenError {
         any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            target_arch = "aarch64"
         )
     ))]
     #[error("failed to allocate executable native memory: {source}")]

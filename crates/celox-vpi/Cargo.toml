@@ -27,7 +27,7 @@ path = "src/bin/celox.rs"
 celox = { path = "../celox" }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-celox = { path = "../celox", features = ["experimental-arm64-backend"] }
+celox = { path = "../celox" }
 
 [dependencies]
 clap.workspace = true

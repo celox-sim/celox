@@ -1,7 +1,4 @@
-#![cfg(any(
-    target_arch = "x86_64",
-    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
-))]
+#![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
 use celox::{BigUint, Simulator};
 
