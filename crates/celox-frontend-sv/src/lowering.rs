@@ -1583,6 +1583,21 @@ fn build_instance_glue(
                 let Some(actual_expr) = connection.actual_expr.as_ref() else {
                     continue;
                 };
+                if let Some(dynamic_output) = lower_dynamic_output_glue(
+                    actual_expr,
+                    parent_variables,
+                    parent_signal_names,
+                    parent_constants,
+                    parent_parameter_types,
+                    *child_port_id,
+                    child_var,
+                    &mut arena,
+                    &formal,
+                    actual,
+                )? {
+                    output_ports.push(dynamic_output);
+                    continue;
+                }
                 let Some((parent_signal_id, access)) = output_lvalue_access(
                     actual_expr,
                     parent_variables,
@@ -1649,6 +1664,132 @@ fn build_instance_glue(
     }
 
     Ok((input_ports, output_ports, arena))
+}
+
+fn lower_dynamic_output_glue(
+    actual_expr: &sv::ir::Expr,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+    parent_constants: &HashMap<String, i128>,
+    parent_parameter_types: &HashMap<String, (usize, bool)>,
+    child_port_id: SourceVarId,
+    child_var: &SvVariable,
+    arena: &mut SLTNodeArena<GlueAddr>,
+    formal: &str,
+    actual: &str,
+) -> Result<Option<(Vec<SourceVarId>, LogicPath<GlueAddr>)>, ParserError> {
+    let sv::ir::Expr::Select { expr, msb, lsb, .. } = actual_expr else {
+        return Ok(None);
+    };
+    let Some((parent_signal_id, element_width)) = dynamic_array_element_selection(
+        expr,
+        msb,
+        lsb,
+        parent_variables,
+        parent_signal_names,
+        parent_constants,
+        parent_parameter_types,
+    ) else {
+        return Ok(None);
+    };
+    let parent_var = &parent_variables[&parent_signal_id];
+    let (offset, index_sources, index_source_ids) = lower_dynamic_array_element_index_glue(
+        lsb,
+        parent_variables,
+        parent_signal_names,
+        parent_constants,
+        parent_parameter_types,
+        arena,
+        element_width,
+    )
+    .ok_or_else(|| {
+        ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "systemverilog output port lvalue connection",
+            format!("{formal} -> {actual}: {actual_expr:?}"),
+            None,
+        )
+    })?;
+    let element_count = parent_var.width / element_width;
+    let child_node = arena.alloc(SLTNode::Input {
+        variable: GlueAddr::Child(child_port_id),
+        signed: child_var.signed,
+        index: Vec::new(),
+        access: BitAccess::new(0, child_var.width - 1),
+    })?;
+    let child_expr = coerce_node_width(arena, child_node, Some(element_width), child_var.signed)?;
+    let old = arena.alloc(SLTNode::Input {
+        variable: GlueAddr::Parent(parent_signal_id),
+        signed: parent_var.signed,
+        index: Vec::new(),
+        access: BitAccess::new(0, parent_var.width - 1),
+    })?;
+    let mut parts = Vec::with_capacity(element_count);
+    for element in (0..element_count).rev() {
+        let lsb = element * element_width;
+        let old_element = arena.alloc(SLTNode::Slice {
+            expr: old,
+            access: BitAccess::new(lsb, lsb + element_width - 1),
+        })?;
+        let element_literal = arena.alloc(SLTNode::Constant(
+            BigUint::from(element),
+            BigUint::default(),
+            64,
+            false,
+        ))?;
+        let condition = arena.alloc(SLTNode::Binary(offset, BinaryOp::EqCase, element_literal))?;
+        let updated = arena.alloc(SLTNode::Mux {
+            cond: condition,
+            then_expr: child_expr,
+            else_expr: old_element,
+        })?;
+        parts.push((updated, element_width));
+    }
+    let mut expr = if parts.len() == 1 {
+        parts[0].0
+    } else {
+        arena.alloc(SLTNode::Concat(parts))?
+    };
+    if !parent_var.is_4state {
+        expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+    }
+    let mut sources = index_sources.clone();
+    sources.insert(VarAtomBase::new(
+        GlueAddr::Child(child_port_id),
+        0,
+        child_var.width - 1,
+    ));
+    let previous_sources = [VarAtomBase::new(
+        GlueAddr::Parent(parent_signal_id),
+        0,
+        parent_var.width - 1,
+    )]
+    .into_iter()
+    .collect();
+    let mut source_ids = index_source_ids;
+    source_ids.push(parent_signal_id);
+    source_ids.sort();
+    source_ids.dedup();
+    Ok(Some((
+        source_ids,
+        LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(
+                GlueAddr::Parent(parent_signal_id),
+                0,
+                parent_var.width - 1,
+            )),
+            expr,
+            sources,
+            address_sources: index_sources,
+            previous_sources,
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+        },
+    )))
 }
 
 fn simple_output_lvalue_ident(expr: &sv::ir::Expr) -> Option<&str> {
@@ -1758,7 +1899,7 @@ fn lower_glue_parent_expr(
             lsb,
             signed,
         } => {
-            if let Some((id, element_width)) = dynamic_array_element_selection(
+            if let Some((id, element_width, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
                 lsb,
@@ -1786,7 +1927,7 @@ fn lower_glue_parent_expr(
                             stride: element_width,
                             kind: SLTIndexKind::Unpacked { element_width },
                         }],
-                        access: BitAccess::new(0, element_width - 1),
+                        access,
                     })
                     .ok()?;
                 sources.insert(VarAtomBase::new(
@@ -2824,7 +2965,7 @@ fn lower_dynamic_array_write_expr(
         let condition = arena
             .alloc(SLTNode::Binary(
                 element_index,
-                BinaryOp::Eq,
+                BinaryOp::EqCase,
                 element_literal,
             ))
             .ok()?;
@@ -3118,7 +3259,7 @@ fn lower_expr_with_context(
             lsb,
             signed,
         } => {
-            if let Some((id, element_width)) = dynamic_array_element_selection(
+            if let Some((id, element_width, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
                 lsb,
@@ -3146,7 +3287,7 @@ fn lower_expr_with_context(
                             stride: element_width,
                             kind: SLTIndexKind::Unpacked { element_width },
                         }],
-                        access: BitAccess::new(0, element_width - 1),
+                        access,
                     })
                     .ok()?;
                 sources.insert(VarAtomBase::new(id, 0, variable.width.checked_sub(1)?));
@@ -3731,6 +3872,106 @@ fn dynamic_array_element_selection(
         constants,
         parameter_types,
     )
+}
+
+fn dynamic_array_element_subselection(
+    expr: &sv::ir::Expr,
+    msb: &sv::ir::ConstExpr,
+    lsb: &sv::ir::ConstExpr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<(SourceVarId, usize, BitAccess)> {
+    let sv::ir::Expr::Ident(name) = expr else {
+        return None;
+    };
+    let id = *name_to_id.get(name)?;
+    let variable = variables.get(&id)?;
+    let element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
+    let is_dynamic = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
+        .is_none()
+        || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
+    if !is_dynamic {
+        return None;
+    }
+    let element_width_value = i128::try_from(element_width).ok()?;
+    let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
+    let (lsb_base, lsb_offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
+    if msb_base != lsb_base
+        || (element_width > 1
+            && !dynamic_array_base_has_stride(
+                msb_base,
+                element_width_value,
+                constants,
+                parameter_types,
+            ))
+    {
+        return None;
+    }
+    let msb = usize::try_from(msb_offset).ok()?;
+    let lsb = usize::try_from(lsb_offset).ok()?;
+    let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
+    (access.msb < element_width).then_some((id, element_width, access))
+}
+
+fn split_dynamic_array_offset<'a>(
+    expr: &'a sv::ir::ConstExpr,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<(&'a sv::ir::ConstExpr, i128)> {
+    if sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types).is_some() {
+        return None;
+    }
+    if let sv::ir::ConstExpr::Binary { left, op, right } = expr
+        && *op == sv::ir::BinaryOp::Add
+    {
+        if let Some(offset) =
+            sv::typecheck::eval_const_expr_with_types(right, constants, parameter_types)
+            && sv::typecheck::eval_const_expr_with_types(left, constants, parameter_types).is_none()
+        {
+            return Some((left, offset));
+        }
+        if let Some(offset) =
+            sv::typecheck::eval_const_expr_with_types(left, constants, parameter_types)
+            && sv::typecheck::eval_const_expr_with_types(right, constants, parameter_types)
+                .is_none()
+        {
+            return Some((right, offset));
+        }
+    }
+    Some((expr, 0))
+}
+
+fn dynamic_array_base_has_stride(
+    expr: &sv::ir::ConstExpr,
+    element_width: i128,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    match expr {
+        sv::ir::ConstExpr::Binary { left, op, right } => {
+            if *op == sv::ir::BinaryOp::Mul {
+                let left_value =
+                    sv::typecheck::eval_const_expr_with_types(left, constants, parameter_types);
+                let right_value =
+                    sv::typecheck::eval_const_expr_with_types(right, constants, parameter_types);
+                if left_value.is_some_and(|value| value > 0 && value % element_width == 0)
+                    && right_value.is_none()
+                {
+                    return true;
+                }
+                if right_value.is_some_and(|value| value > 0 && value % element_width == 0)
+                    && left_value.is_none()
+                {
+                    return true;
+                }
+            }
+            dynamic_array_base_has_stride(left, element_width, constants, parameter_types)
+                || dynamic_array_base_has_stride(right, element_width, constants, parameter_types)
+        }
+        _ => false,
+    }
 }
 
 fn dynamic_array_element_lvalue(
@@ -4836,7 +5077,7 @@ fn sv_expr_natural_width(
                 .unwrap_or(sv::typecheck::parse_integral_literal(literal)?.width),
         ),
         sv::ir::Expr::Select { expr, msb, lsb, .. } => {
-            if let Some((_, element_width)) = dynamic_array_element_selection(
+            if let Some((_, _, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
                 lsb,
@@ -4845,7 +5086,7 @@ fn sv_expr_natural_width(
                 constants,
                 parameter_types,
             ) {
-                return Some(element_width);
+                return Some(access.msb - access.lsb + 1);
             }
             let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
             let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
@@ -5032,7 +5273,7 @@ fn lower_expr_to_sir_with_context(
             lsb,
             signed,
         } => {
-            if let Some((id, element_width)) = dynamic_array_element_selection(
+            if let Some((id, element_width, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
                 lsb,
@@ -5050,7 +5291,8 @@ fn lower_expr_to_sir_with_context(
                     parameter_types,
                     element_width,
                 )?;
-                let reg = builder.alloc_logic(element_width);
+                let width = access.msb - access.lsb + 1;
+                let reg = builder.alloc_logic(width);
                 builder.emit(SIRInstruction::Load(
                     reg,
                     RegionedVarAddrBase {
@@ -5060,15 +5302,15 @@ fn lower_expr_to_sir_with_context(
                     SIROffset::Element {
                         index,
                         element_width,
-                        bit_offset: 0,
+                        bit_offset: access.lsb,
                         dynamic_bit_offset: None,
                     },
-                    element_width,
+                    width,
                 ));
                 return resize_sir_register(
                     builder,
                     reg,
-                    context_width.unwrap_or(element_width),
+                    context_width.unwrap_or(width),
                     context_signed.unwrap_or(*signed),
                 );
             }
