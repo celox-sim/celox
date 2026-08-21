@@ -151,9 +151,10 @@ fn compile_and_run_inner(
 
     #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
     let emit_result = {
-        use celox::native_backend::{emit, isel, regalloc};
+        use celox::native_backend::{emit, isel, mir_legalize, regalloc};
 
         let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
+        mir_legalize::legalize(&mut mfunc);
 
         if debug {
             println!("=== MIR ===\n{mfunc}");
@@ -551,6 +552,33 @@ fn test_native_shl_register() {
         write_u32_at(state, sir, layout, "shift_amt", 16);
     });
     assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x00FF0000);
+}
+
+#[test]
+fn test_native_oversized_variable_shifts() {
+    let code = r#"
+        module Top (
+            val: input logic<32>,
+            signed_val: input i32,
+            shift_amt: input logic<32>,
+            left: output logic<32>,
+            right: output logic<32>,
+            arithmetic: output i32,
+        ) {
+            assign left = val << shift_amt;
+            assign right = val >> shift_amt;
+            assign arithmetic = signed_val >>> shift_amt;
+        }
+    "#;
+    let (state, sir, layout) = compile_and_run(code, "Top", |state, sir, layout| {
+        write_u32_at(state, sir, layout, "val", 0x8000_0001);
+        write_u32_at(state, sir, layout, "signed_val", 0x8000_0000);
+        write_u32_at(state, sir, layout, "shift_amt", 64);
+    });
+
+    assert_eq!(read_u32_at(&state, &sir, &layout, "left"), 0);
+    assert_eq!(read_u32_at(&state, &sir, &layout, "right"), 0);
+    assert_eq!(read_u32_at(&state, &sir, &layout, "arithmetic"), u32::MAX);
 }
 
 // Debug: dump SIR + MIR + disassembly for failing test

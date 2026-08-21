@@ -39,6 +39,7 @@ mod allocation;
 mod isel;
 pub mod jit_mem;
 pub mod mir;
+mod mir_legalize;
 mod regalloc;
 pub mod scalar;
 mod sparse_write_state;
