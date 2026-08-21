@@ -767,6 +767,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_nonpositive_implicit_unpacked_array_dimensions() {
+        for size in ["0", "-1", "SIZE"] {
+            let source = format!(
+                r#"
+                    module Top #(parameter SIZE = 0) ();
+                        logic [7:0] values[{size}];
+                    endmodule
+                "#
+            );
+            let error = analyze_source(&source, Path::new("invalid_array_size.sv"))
+                .expect_err("nonpositive implicit array dimensions should be rejected");
+            assert!(
+                matches!(error, AnalyzerError::Unsupported(message) if message == "nonpositive unpacked array dimension")
+            );
+        }
+    }
+
+    #[test]
+    fn analyzes_nested_static_loops_with_outer_index_environment() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic clk, input logic d);
+                    logic q[2][2];
+                    always_ff @(posedge clk) begin
+                        for (int i = 0; i < 2; i++) begin
+                            for (int j = 0; j < i; j++) begin
+                                q[i][j] <= d;
+                            end
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("nested_static_loops.sv"),
+        )
+        .expect("nested static loops should use the outer loop environment");
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 1);
+    }
+
+    #[test]
     fn rejects_duplicate_parameters() {
         let err = analyze_source(
             r#"

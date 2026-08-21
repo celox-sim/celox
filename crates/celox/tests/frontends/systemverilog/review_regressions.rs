@@ -921,6 +921,98 @@ fn connects_child_outputs_to_unpacked_array_elements() {
 }
 
 #[test]
+fn reads_unpacked_array_elements_at_runtime_indices() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] sel,
+            input logic [7:0] values[4],
+            output logic [7:0] combinational,
+            output logic [7:0] registered
+        );
+            assign combinational = values[sel];
+            always_ff @(posedge clk) registered <= values[sel];
+        endmodule
+        "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("dynamic_array_index.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let combinational = sim.signal("combinational");
+    let registered = sim.signal("registered");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(values, 0x44332211u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(combinational), 0x33u8.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(registered), 0x33u8.into());
+}
+
+#[test]
+fn writes_unpacked_array_elements_at_runtime_indices() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb values[sel] = data;
+            assign value = values[sel];
+        endmodule
+        "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("dynamic_array_write.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
+fn writes_unpacked_array_elements_at_runtime_indices_in_always_ff() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_ff @(posedge clk) values[sel] <= data;
+            assign value = values[sel];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_ff_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
 fn uses_the_first_always_ff_event_as_a_negedge_clock() {
     let source = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);

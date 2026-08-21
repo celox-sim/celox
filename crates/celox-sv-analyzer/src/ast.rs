@@ -181,6 +181,13 @@ impl Module {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
         let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        for r#type in ports
+            .iter()
+            .map(Port::r#type)
+            .chain(signals.iter().map(Signal::r#type))
+        {
+            validate_unpacked_dimension_sizes(r#type.unpacked_ranges(), &const_env)?;
+        }
         if let Some(parameter) = parameters.iter().find(|parameter| {
             ports.iter().any(|port| port.name() == parameter.name())
                 || signals
@@ -444,6 +451,83 @@ fn static_for_loop_iterations(
         },
     );
     (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
+}
+
+fn validate_static_for_loops_in_statement_or_null(
+    statement: &sv_parser::StatementOrNull,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Result<(), AnalyzerError> {
+    if let sv_parser::StatementOrNull::Statement(statement) = statement {
+        validate_static_for_loops_in_statement(statement, syntax_tree, const_env)?;
+    }
+    Ok(())
+}
+
+fn validate_static_for_loops_in_statement(
+    statement: &sv_parser::Statement,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Result<(), AnalyzerError> {
+    match &statement.nodes.2 {
+        sv_parser::StatementItem::ProceduralTimingControlStatement(timing) => {
+            validate_static_for_loops_in_statement_or_null(
+                &timing.nodes.1,
+                syntax_tree,
+                const_env,
+            )?;
+        }
+        sv_parser::StatementItem::SeqBlock(block) => {
+            for statement in &block.nodes.3 {
+                validate_static_for_loops_in_statement_or_null(statement, syntax_tree, const_env)?;
+            }
+        }
+        sv_parser::StatementItem::ConditionalStatement(conditional) => {
+            validate_static_for_loops_in_statement_or_null(
+                &conditional.nodes.3,
+                syntax_tree,
+                const_env,
+            )?;
+            for (_, _, _, branch) in &conditional.nodes.4 {
+                validate_static_for_loops_in_statement_or_null(branch, syntax_tree, const_env)?;
+            }
+            if let Some((_, branch)) = &conditional.nodes.5 {
+                validate_static_for_loops_in_statement_or_null(branch, syntax_tree, const_env)?;
+            }
+        }
+        sv_parser::StatementItem::CaseStatement(case) => {
+            let sv_parser::CaseStatement::Normal(case) = &**case else {
+                return Ok(());
+            };
+            for item in std::iter::once(&case.nodes.3).chain(case.nodes.4.iter()) {
+                let statement = match item {
+                    sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
+                    sv_parser::CaseItem::Default(item) => &item.nodes.2,
+                };
+                validate_static_for_loops_in_statement_or_null(statement, syntax_tree, const_env)?;
+            }
+        }
+        sv_parser::StatementItem::LoopStatement(loop_statement) => {
+            let (name, values) = static_for_loop_iterations(loop_statement, syntax_tree, const_env)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("procedural loop inside always_ff".to_string())
+                })?;
+            let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
+                unreachable!();
+            };
+            for value in values {
+                let mut loop_env = const_env.clone();
+                loop_env.insert(name.clone(), value);
+                validate_static_for_loops_in_statement_or_null(
+                    &loop_statement.nodes.2,
+                    syntax_tree,
+                    &loop_env,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn for_loop_initialization(
@@ -732,6 +816,9 @@ fn reject_silently_ignored_constructs(
                         "blocking assignment inside always_ff".to_string(),
                     ));
                 }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
+                    validate_static_for_loops_in_statement(&always.nodes.1, syntax_tree, const_env)?;
+                }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
                     && body.clone().into_iter().any(|node| {
                         matches!(
@@ -757,20 +844,6 @@ fn reject_silently_ignored_constructs(
                 {
                     return Err(AnalyzerError::Unsupported(
                         "procedural loop inside always_comb".to_string(),
-                    ));
-                }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
-                    && body.clone().into_iter().any(|node| {
-                        matches!(
-                            node,
-                            RefNode::LoopStatement(loop_statement)
-                                if static_for_loop_iterations(loop_statement, syntax_tree, const_env)
-                                    .is_none()
-                        )
-                    })
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "procedural loop inside always_ff".to_string(),
                     ));
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
@@ -1789,11 +1862,28 @@ impl PackedRange {
 pub struct UnpackedRange {
     left: ConstExpr,
     right: ConstExpr,
+    size: Option<ConstExpr>,
 }
 
 impl UnpackedRange {
     fn new(left: ConstExpr, right: ConstExpr) -> Self {
-        Self { left, right }
+        Self {
+            left,
+            right,
+            size: None,
+        }
+    }
+
+    fn sized(size: ConstExpr) -> Self {
+        Self {
+            left: ConstExpr::Literal("0".to_string()),
+            right: ConstExpr::Binary {
+                left: Box::new(size.clone()),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".to_string())),
+            },
+            size: Some(size),
+        }
     }
 
     pub fn left(&self) -> &ConstExpr {
@@ -1802,6 +1892,10 @@ impl UnpackedRange {
 
     pub fn right(&self) -> &ConstExpr {
         &self.right
+    }
+
+    fn size(&self) -> Option<&ConstExpr> {
+        self.size.as_ref()
     }
 }
 
@@ -8888,43 +8982,52 @@ fn unpacked_ranges_from_dimensions(
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
     dimensions
         .iter()
-        .map(|dimension| {
-            let (left, right) = match dimension {
-                sv_parser::UnpackedDimension::Range(range) => {
-                    let constant_range = &range.nodes.0.nodes.1;
-                    let left = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&constant_range.nodes.0),
-                        syntax_tree,
-                    );
-                    let right = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&constant_range.nodes.2),
-                        syntax_tree,
-                    );
-                    (left, right)
+        .map(|dimension| match dimension {
+            sv_parser::UnpackedDimension::Range(range) => {
+                let constant_range = &range.nodes.0.nodes.1;
+                let left = const_expr_from_ref_node(
+                    RefNode::ConstantExpression(&constant_range.nodes.0),
+                    syntax_tree,
+                );
+                let right = const_expr_from_ref_node(
+                    RefNode::ConstantExpression(&constant_range.nodes.2),
+                    syntax_tree,
+                );
+                match (left, right) {
+                    (Some(left), Some(right)) => Ok(UnpackedRange::new(left, right)),
+                    _ => Err(AnalyzerError::Unsupported(
+                        "unresolved unpacked array dimension".to_string(),
+                    )),
                 }
-                sv_parser::UnpackedDimension::Expression(expression) => {
-                    let size = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&expression.nodes.0.nodes.1),
-                        syntax_tree,
-                    );
-                    (
-                        Some(ConstExpr::Literal("0".to_string())),
-                        size.map(|size| ConstExpr::Binary {
-                            left: Box::new(size),
-                            op: BinaryOp::Sub,
-                            right: Box::new(ConstExpr::Literal("1".to_string())),
-                        }),
-                    )
-                }
-            };
-            match (left, right) {
-                (Some(left), Some(right)) => Ok(UnpackedRange::new(left, right)),
-                _ => Err(AnalyzerError::Unsupported(
-                    "unresolved unpacked array dimension".to_string(),
-                )),
+            }
+            sv_parser::UnpackedDimension::Expression(expression) => {
+                let size = const_expr_from_ref_node(
+                    RefNode::ConstantExpression(&expression.nodes.0.nodes.1),
+                    syntax_tree,
+                );
+                size.map(UnpackedRange::sized).ok_or_else(|| {
+                    AnalyzerError::Unsupported("unresolved unpacked array dimension".to_string())
+                })
             }
         })
         .collect()
+}
+
+fn validate_unpacked_dimension_sizes(
+    ranges: &[UnpackedRange],
+    const_env: &HashMap<String, i128>,
+) -> Result<(), AnalyzerError> {
+    if ranges.iter().any(|range| {
+        range
+            .size()
+            .and_then(|size| eval_ast_const_expr(size, const_env))
+            .is_some_and(|size| size <= 0)
+    }) {
+        return Err(AnalyzerError::Unsupported(
+            "nonpositive unpacked array dimension".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn unpacked_ranges_from_variable_dimensions(
