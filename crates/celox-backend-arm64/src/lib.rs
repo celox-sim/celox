@@ -1,9 +1,8 @@
-//! Bootstrap AArch64 backend.
+//! Self-contained AArch64 code-generation backend.
 //!
-//! The initial pipeline deliberately covers a small, executable subset:
-//! parameters, 64-bit immediates, integer addition, and return. It establishes
-//! the target boundary and exercises the shared register allocator before SIR
-//! lowering and spill support are added.
+//! Production code lowers source-independent SIR directly into AArch64-owned
+//! MIR, allocates against the AAPCS64 register file, and emits machine code.
+//! Only opcode-free allocation facts are shared with other native backends.
 
 use celox_backend_common::regalloc::{
     Allocation, BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts,
@@ -12,13 +11,37 @@ use celox_backend_common::regalloc::{
 use std::fmt;
 
 type HashMap<K, V> = fxhash::FxHashMap<K, V>;
+type HashSet<T> = fxhash::FxHashSet<T>;
+
+pub use celox_design::{
+    SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, WORKING_REGION,
+};
+pub use celox_sir::{
+    BasicBlock, BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction,
+    SIROffset, SIRTerminator, SIRValue, UnaryOp, collect_exact_zero_registers,
+};
+
+pub type AbsoluteAddr = StateAddr;
+pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
+pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
+
+pub(crate) mod cfg {
+    pub use celox_sir::cfg::*;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeDiagnostics {
+    pub verify_sir: bool,
+    pub isel_trace_regs: Vec<usize>,
+}
 
 mod allocation;
+mod isel;
 pub mod jit_mem;
-mod legacy_allocation;
 pub mod mir;
 mod regalloc;
 pub mod scalar;
+mod sparse_write_state;
 
 /// Virtual general-purpose register in bootstrap ARM64 MIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

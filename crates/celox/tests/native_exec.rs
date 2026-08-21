@@ -1,7 +1,7 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(any(
     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-    target_arch = "aarch64"
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 
 use celox::{MemoryLayout, MemoryLayoutMode, OptimizedSir, Simulator, SimulatorBuilder};
@@ -94,6 +94,7 @@ fn native_image_restores_four_state_mode_for_vcd() {
     assert!(dump.contains("xxxxxxxx"), "{dump}");
 }
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
     use celox::native_backend::emit;
     use celox::native_backend::jit_mem;
@@ -146,31 +147,44 @@ fn compile_and_run_inner(
     let sir = trace.trace.post_optimized_sir.unwrap();
     let layout = MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
-    use celox::native_backend::{emit, isel, jit_mem, regalloc};
-
     let eu = &sir.sir.eval_comb[0];
-    let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    let emit_result = {
+        use celox::native_backend::{emit, isel, regalloc};
+
+        let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
+
+        if debug {
+            println!("=== MIR ===\n{mfunc}");
+        }
+
+        let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
+
+        if debug {
+            println!("=== Assignment ===\n{:?}", ra.assignment);
+        }
+
+        emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed")
+    };
+
+    #[cfg(all(target_arch = "aarch64", not(feature = "x86_64-codegen")))]
+    let emit_result = {
+        use celox::native_backend::emit;
+
+        emit::emit_prepared_eu(eu, &layout, false, "native_exec", false, None).expect("emit failed")
+    };
 
     if debug {
-        println!("=== MIR ===\n{mfunc}");
-    }
+        use celox::native_backend::emit;
 
-    let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
-
-    if debug {
-        println!("=== Assignment ===\n{:?}", ra.assignment);
-    }
-
-    let emit_result = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
-
-    if debug {
         println!(
             "=== Disassembly ===\n{}",
             emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
         );
     }
 
-    let jit = jit_mem::JitCode::new(&emit_result.code).expect("mmap failed");
+    let jit = celox::native_backend::jit_mem::JitCode::new(&emit_result.code).expect("mmap failed");
 
     let mut state = vec![0u8; layout.merged_total_size.max(256)];
     setup(&mut state, &sir, &layout);
@@ -193,6 +207,7 @@ fn read_u32_at(state: &[u8], sir: &OptimizedSir, layout: &MemoryLayout, name: &s
     u32::from_le_bytes(state[off..off + 4].try_into().unwrap())
 }
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn test_native_bsr_or_zero_and_nonzero() {
     use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
@@ -226,6 +241,7 @@ fn test_native_bsr_or_zero_and_nonzero() {
     assert_eq!(run(0x10), 4);
 }
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn test_native_bsr_nonzero() {
     use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
@@ -257,6 +273,7 @@ fn test_native_bsr_nonzero() {
     assert_eq!(run(0x8000_0000_0000_0000), 63);
 }
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn test_native_div_zero_safe_rhs_select() {
     use celox::native_backend::mir::{BaseReg, CmpKind, MInst, OpSize, VReg};
@@ -312,6 +329,7 @@ fn test_native_div_zero_safe_rhs_select() {
     assert_eq!(run(42, 7), 6);
 }
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn test_native_div_preserves_live_divisor_across_div() {
     use celox::native_backend::mir::{BaseReg, MInst, OpSize, VReg};
@@ -568,19 +586,32 @@ fn test_debug_let_bitslice_write() {
     println!("{sir_text}");
     let sir = trace.trace.post_optimized_sir.unwrap();
 
-    use celox::native_backend::{emit, isel, regalloc};
     let layout = celox::MemoryLayout::build(&sir, false, MemoryLayoutMode::ElementStrided);
 
     for (eu_idx, eu) in sir.sir.eval_comb.iter().enumerate() {
-        let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
-        println!("=== EU {eu_idx} MIR ===\n{mfunc}");
-        let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
-        println!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
-        let emit_result =
-            emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        let emit_result = {
+            use celox::native_backend::{emit, isel, regalloc};
+
+            let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
+            println!("=== EU {eu_idx} MIR ===\n{mfunc}");
+            let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
+            println!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
+            emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed")
+        };
+        #[cfg(all(target_arch = "aarch64", not(feature = "x86_64-codegen")))]
+        let emit_result = celox::native_backend::emit::emit_prepared_eu(
+            eu,
+            &layout,
+            false,
+            "native_exec_debug",
+            false,
+            None,
+        )
+        .expect("emit failed");
         println!(
             "=== EU {eu_idx} Disassembly ===\n{}",
-            emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
+            celox::native_backend::emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
         );
     }
 
