@@ -38,6 +38,22 @@ fn cross_codegen_can_capture_native_ir_without_loading_target_code() {
     assert!(trace.post_optimized_sir.is_some());
     assert!(trace.native_optimized_sir.is_some());
     assert!(trace.mir.is_some());
+    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
+    assert!(
+        trace
+            .mir
+            .as_deref()
+            .unwrap()
+            .contains("AArch64 disassembly of emitted function:")
+    );
+    #[cfg(all(target_arch = "aarch64", feature = "x86_64-codegen"))]
+    assert!(
+        trace
+            .mir
+            .as_deref()
+            .unwrap()
+            .contains("x86-64 disassembly of emitted function:")
+    );
     assert!(trace.reactive_event_graph.is_some());
     assert!(trace.native_state_layout.is_some());
 }

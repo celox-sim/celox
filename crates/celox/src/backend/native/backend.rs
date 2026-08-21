@@ -1039,7 +1039,16 @@ fn append_native_function_trace(
     mir.push_str(&format!("Spill frame: {} bytes\n", trace.spill_frame_size));
     mir.push_str("Register assignment:\n");
     mir.push_str(&trace.register_assignment);
-    mir.push_str("Native disassembly of emitted function:\n");
+    #[cfg(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    ))]
+    mir.push_str("x86-64 disassembly of emitted function:\n");
+    #[cfg(any(
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
+    mir.push_str("AArch64 disassembly of emitted function:\n");
     mir.push_str(&trace.disassembly);
     if !trace.disassembly.ends_with('\n') {
         mir.push('\n');
