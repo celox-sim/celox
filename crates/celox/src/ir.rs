@@ -301,6 +301,15 @@ impl RuntimeDesign {
                     "state/source variable count differs for {instance_id}"
                 ));
             }
+            if instance
+                .state_addresses
+                .windows(2)
+                .any(|addresses| addresses[0] >= addresses[1])
+            {
+                return Err(format!(
+                    "state addresses are not strictly sorted for {instance_id}"
+                ));
+            }
 
             for address in &instance.state_addresses {
                 if address.instance_id != *instance_id {
@@ -341,7 +350,7 @@ impl RuntimeDesign {
                 .instances
                 .get(&address.instance_id)
                 .ok_or_else(|| format!("runtime variable {address} references missing instance"))?;
-            if !instance.state_addresses.contains(address) {
+            if instance.state_addresses.binary_search(address).is_err() {
                 return Err(format!(
                     "runtime variable {address} is not indexed by instance"
                 ));
