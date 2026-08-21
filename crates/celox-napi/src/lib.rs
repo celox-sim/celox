@@ -1,8 +1,10 @@
+#[cfg(not(target_arch = "wasm32"))]
+mod jit_cache;
 mod layout;
 
 use fxhash::FxHashMap as HashMap;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -13,6 +15,8 @@ use veryl_path::PathSet;
 
 #[cfg(not(target_arch = "wasm32"))]
 use celox::SimBackend;
+#[cfg(not(target_arch = "wasm32"))]
+use jit_cache::{CacheLookup, SingleFlightCache};
 #[cfg(not(target_arch = "wasm32"))]
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
 
@@ -728,8 +732,8 @@ impl From<&celox::OptimizeOptions> for SirOptimizationCacheKey {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::default()));
+static JIT_CACHE: std::sync::LazyLock<SingleFlightCache<CacheKey, CachedBuild>> =
+    std::sync::LazyLock::new(SingleFlightCache::new);
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Build a collision-free cache key from source content, top module, and options.
@@ -878,7 +882,7 @@ impl NativeSimulatorHandle {
     fn build_and_cache(
         sim: celox::Simulator,
         vcd_path: Option<&str>,
-        cache_key: Option<CacheKey>,
+        cache_build: Option<jit_cache::BuildPermit<'static, CacheKey, CachedBuild>>,
     ) -> Result<Self> {
         let four_state = sim.layout().four_state;
         let warnings_json = format_warnings_json(sim.warnings());
@@ -901,8 +905,8 @@ impl NativeSimulatorHandle {
         let hierarchy_json = serde_json::to_string(&hierarchy_node)
             .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
 
-        // Cache the compiled code + metadata for future instances
-        if let Some(key) = cache_key {
+        // Publish the compiled code + metadata to joined callers.
+        if let Some(cache_build) = cache_build {
             let cached = Arc::new(CachedBuild {
                 shared_code: sim.shared_code(),
                 runtime_errors: runtime_errors.clone(),
@@ -914,8 +918,7 @@ impl NativeSimulatorHandle {
                 total_size: total_size as u32,
                 vcd_descs: vcd_descs.clone(),
             });
-            let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            cache.insert(key, cached);
+            cache_build.complete(Ok(cached));
         }
 
         // Create VcdWriter if requested
@@ -987,23 +990,29 @@ impl NativeSimulatorHandle {
 
         let cache_key = build_cache_key(&src_pairs, &top, &opts, None);
 
-        {
-            let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(cached) = cache.get(&cache_key) {
-                return Self::from_cached(cached, opts.vcd.as_deref());
+        let cache_build = match JIT_CACHE.lookup_or_reserve(cache_key) {
+            CacheLookup::Ready(cached) => {
+                return Self::from_cached(&cached, opts.vcd.as_deref());
             }
-        }
+            CacheLookup::Build(cache_build) => cache_build,
+            CacheLookup::Failed(message) => return Err(Error::from_reason(message)),
+        };
 
         let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
         let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
-        let sim = builder
-            .build()
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
+        let sim = match builder.build() {
+            Ok(sim) => sim,
+            Err(error) => {
+                let message = error.to_string();
+                cache_build.complete(Err(message.clone()));
+                return Err(Error::from_reason(message));
+            }
+        };
 
-        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
+        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_build))
     }
 
     /// Create a simulator from a versioned external-frontend artifact.
@@ -1034,12 +1043,13 @@ impl NativeSimulatorHandle {
 
         let cache_key = build_cache_key(&sources, &top, &opts, Some(&metadata));
 
-        {
-            let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(cached) = cache.get(&cache_key) {
-                return Self::from_cached(cached, opts.vcd.as_deref());
+        let cache_build = match JIT_CACHE.lookup_or_reserve(cache_key) {
+            CacheLookup::Ready(cached) => {
+                return Self::from_cached(&cached, opts.vcd.as_deref());
             }
-        }
+            CacheLookup::Build(cache_build) => cache_build,
+            CacheLookup::Failed(message) => return Err(Error::from_reason(message)),
+        };
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
             .iter()
@@ -1050,11 +1060,16 @@ impl NativeSimulatorHandle {
             celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
-        let sim = builder
-            .build()
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
+        let sim = match builder.build() {
+            Ok(sim) => sim,
+            Err(error) => {
+                let message = error.to_string();
+                cache_build.complete(Err(message.clone()));
+                return Err(Error::from_reason(message));
+            }
+        };
 
-        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
+        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_build))
     }
 
     /// Returns the signal layout as a JSON string.
@@ -2166,8 +2181,7 @@ fn format_errors_with_warnings(
 #[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub fn clear_jit_cache() {
-    let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    cache.clear();
+    JIT_CACHE.clear();
 }
 
 /// Stub for wasm32: no JIT cache to clear.
