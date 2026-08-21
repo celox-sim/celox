@@ -74,6 +74,12 @@ test("matches Release Please's permissive header and footer parsing", () => {
   assert.equal(commitReleaseImpact("feat:no space", options), 2);
   assert.equal(commitReleaseImpact("feat:", options), 2);
 
+  // Empty scopes fail parser 0.4.1, while whitespace is a valid, non-empty
+  // scope. Keep the header matcher on the same boundary.
+  assert.equal(commitReleaseImpact("feat(): add output", options), 0);
+  assert.equal(commitReleaseImpact("fix()!: remove output", options), 0);
+  assert.equal(commitReleaseImpact("feat( ): add output", options), 2);
+
   // Release Please deliberately parses commit-shaped footers as additional
   // commits, even when a human might read the line as a body example.
   assert.equal(

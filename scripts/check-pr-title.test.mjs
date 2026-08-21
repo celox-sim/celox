@@ -40,6 +40,7 @@ test("guards the repository setting that exposes the title to release automation
     /run: node scripts\/check-release-repository-settings\.mjs/,
   );
   assert.match(workflow, /run: node scripts\/check-pr-release-impact\.mjs/);
+  assert.match(workflow, /permissions:\n  contents: read\n  pull-requests: read/);
   assert.match(
     workflow,
     /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/,
