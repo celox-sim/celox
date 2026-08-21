@@ -873,6 +873,28 @@ fn coerces_sized_loop_initializers_to_signed_int() {
 }
 
 #[test]
+fn preserves_outer_loop_index_types_during_nested_unrolling() {
+    let source = r#"
+        module Top(input logic clk, output logic [1:0] q);
+            always_ff @(posedge clk) begin
+                q <= 2'b00;
+                for (int i = -1; i < 0; i++) begin
+                    for (int j = 0; j < (i < 32'd1); j++) q[j] <= 1'b1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nested_signed_loop_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+}
+
+#[test]
 fn rejects_out_of_range_packed_array_element_indices() {
     let error = cranelift_build_error(
         r#"
@@ -1121,6 +1143,38 @@ fn returns_unknown_for_invalid_runtime_array_read_indices() {
 }
 
 #[test]
+fn returns_unknown_for_invalid_inner_runtime_array_indices() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] values[2][3],
+            output logic [7:0] selected
+        );
+            assign selected = values[0][sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_multidimensional_array_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let selected = sim.signal("selected");
+    sim.modify(|io| {
+        io.set(sel, 3u8);
+        io.set_wide(values, BigUint::from(0x6655_4433_2211u64));
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(selected),
+        (BigUint::default(), BigUint::from(0xffu16))
+    );
+}
+
+#[test]
 fn reads_packed_subselects_of_runtime_unpacked_array_elements() {
     let source = r#"
         module Top(
@@ -1335,6 +1389,53 @@ fn writes_unpacked_array_elements_at_runtime_indices_in_always_ff() {
     .unwrap();
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
+fn ignores_invalid_dynamic_array_indices_in_always_ff() {
+    let source = r#"
+        module Top(
+            input bit clk,
+            input logic [2:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value0
+        );
+            logic [7:0] values[2];
+            always_ff @(posedge clk) values[sel] <= data;
+            assign value0 = values[0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_ff_invalid_write.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value0 = sim.signal("value0");
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(data, 0x11u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value0), 0x11u8.into());
+    sim.modify(|io| {
+        io.set(sel, 5u8);
+        io.set(data, 0x22u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value0), 0x11u8.into());
+    sim.modify(|io| {
+        io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8));
+        io.set(data, 0x33u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value0), 0x11u8.into());
 }
 
 #[test]

@@ -7359,13 +7359,13 @@ fn conditional_assignments_from_statement(
                         signed: true,
                     },
                 );
-                loop_packed_dimensions.const_env = loop_const_env;
+                loop_packed_dimensions.const_env = loop_const_env.clone();
                 let start = assignments.len();
                 conditional_assignments_from_statement_or_null(
                     body,
                     condition.clone(),
                     syntax_tree,
-                    &loop_env,
+                    &loop_const_env,
                     &loop_packed_dimensions,
                     assignments,
                 )?;
@@ -8342,6 +8342,7 @@ fn flatten_variable_select(
     }
 
     let mut offset = ConstExpr::Literal("0".to_string());
+    let mut valid = None;
     for (index, value) in indices[..unpacked_count].iter().enumerate() {
         if const_expr_is_out_of_range(
             value,
@@ -8351,6 +8352,51 @@ fn flatten_variable_select(
         ) {
             return None;
         }
+        let dimension = &dimensions.unpacked[index];
+        let descending = ConstExpr::Binary {
+            left: Box::new(dimension.left.clone()),
+            op: BinaryOp::Ge,
+            right: Box::new(dimension.right.clone()),
+        };
+        let descending_valid = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Binary {
+                left: Box::new(value.clone()),
+                op: BinaryOp::Ge,
+                right: Box::new(dimension.right.clone()),
+            }),
+            op: BinaryOp::LogicAnd,
+            right: Box::new(ConstExpr::Binary {
+                left: Box::new(value.clone()),
+                op: BinaryOp::Le,
+                right: Box::new(dimension.left.clone()),
+            }),
+        };
+        let ascending_valid = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Binary {
+                left: Box::new(value.clone()),
+                op: BinaryOp::Ge,
+                right: Box::new(dimension.left.clone()),
+            }),
+            op: BinaryOp::LogicAnd,
+            right: Box::new(ConstExpr::Binary {
+                left: Box::new(value.clone()),
+                op: BinaryOp::Le,
+                right: Box::new(dimension.right.clone()),
+            }),
+        };
+        let dimension_valid = ConstExpr::Mux {
+            condition: Box::new(descending),
+            then_expr: Box::new(descending_valid),
+            else_expr: Box::new(ascending_valid),
+        };
+        valid = Some(match valid {
+            Some(previous) => ConstExpr::Binary {
+                left: Box::new(previous),
+                op: BinaryOp::LogicAnd,
+                right: Box::new(dimension_valid),
+            },
+            None => dimension_valid,
+        });
         let mut stride_parts = dimensions.unpacked[index + 1..]
             .iter()
             .map(|dimension| dimension.width.clone())
@@ -8373,6 +8419,24 @@ fn flatten_variable_select(
             }
         };
         offset = add_expr(offset, term);
+    }
+    if let Some(valid) = valid {
+        let mut total_width_parts = dimensions
+            .unpacked
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .collect::<Vec<_>>();
+        total_width_parts.extend(
+            dimensions
+                .packed
+                .iter()
+                .map(|dimension| dimension.width.clone()),
+        );
+        offset = ConstExpr::Mux {
+            condition: Box::new(valid),
+            then_expr: Box::new(offset),
+            else_expr: Box::new(product_expr(&total_width_parts)),
+        };
     }
     Some((offset, indices[unpacked_count..].to_vec()))
 }

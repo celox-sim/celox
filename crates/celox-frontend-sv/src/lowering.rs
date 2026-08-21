@@ -3991,6 +3991,19 @@ fn dynamic_array_base_has_stride(
             dynamic_array_base_has_stride(left, element_width, constants, parameter_types)
                 || dynamic_array_base_has_stride(right, element_width, constants, parameter_types)
         }
+        sv::ir::ConstExpr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            dynamic_array_base_has_stride(then_expr, element_width, constants, parameter_types)
+                || dynamic_array_base_has_stride(
+                    else_expr,
+                    element_width,
+                    constants,
+                    parameter_types,
+                )
+        }
         _ => false,
     }
 }
@@ -4750,23 +4763,25 @@ fn emit_ff_assignment_stores(
                     parameter_types,
                     element_width,
                 )?;
-                let store_value = match assignment.condition() {
+                let element_count = variable.width.checked_div(element_width)?;
+                let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
+                let old = builder.alloc_logic(target_width);
+                builder.emit(SIRInstruction::Load(
+                    old,
+                    RegionedVarAddrBase {
+                        region: WORKING_REGION,
+                        var_id: target_id,
+                    },
+                    SIROffset::Element {
+                        index,
+                        element_width,
+                        bit_offset: 0,
+                        dynamic_bit_offset: None,
+                    },
+                    target_width,
+                ));
+                let selected_value = match assignment.condition() {
                     Some(condition) => {
-                        let old = builder.alloc_logic(target_width);
-                        builder.emit(SIRInstruction::Load(
-                            old,
-                            RegionedVarAddrBase {
-                                region: WORKING_REGION,
-                                var_id: target_id,
-                            },
-                            SIROffset::Element {
-                                index,
-                                element_width,
-                                bit_offset: 0,
-                                dynamic_bit_offset: None,
-                            },
-                            target_width,
-                        ));
                         let condition = lower_procedural_condition(
                             builder,
                             condition,
@@ -4781,6 +4796,8 @@ fn emit_ff_assignment_stores(
                     }
                     None => rhs,
                 };
+                let store_value = builder.alloc_logic(target_width);
+                builder.emit(SIRInstruction::Mux(store_value, valid, selected_value, old));
                 builder.emit(SIRInstruction::Store(
                     RegionedVarAddrBase {
                         region: WORKING_REGION,
