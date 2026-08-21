@@ -886,6 +886,41 @@ fn rejects_extra_loop_index_declarations() {
 }
 
 #[test]
+fn connects_child_outputs_to_unpacked_array_elements() {
+    let source = r#"
+        module Child(
+            input logic [7:0] input_value,
+            output logic [7:0] output_value
+        );
+            assign output_value = input_value;
+        endmodule
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic [7:0] values[2]
+        );
+            Child first(.input_value(a), .output_value(values[0]));
+            Child second(.input_value(b), .output_value(values[1]));
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_output_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let values = sim.signal("values");
+    sim.modify(|io| {
+        io.set(a, 0x12u8);
+        io.set(b, 0x34u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(values), 0x3412u16.into());
+}
+
+#[test]
 fn uses_the_first_always_ff_event_as_a_negedge_clock() {
     let source = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);

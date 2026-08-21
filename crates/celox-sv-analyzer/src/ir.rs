@@ -821,7 +821,7 @@ impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
             ast::LValue::Ident(name) => LValue::Ident(name),
-            ast::LValue::Select { name, msb, lsb } => LValue::Select {
+            ast::LValue::Select { name, msb, lsb, .. } => LValue::Select {
                 name,
                 msb: msb.into(),
                 lsb: lsb.into(),

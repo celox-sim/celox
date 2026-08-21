@@ -185,7 +185,7 @@ fn validate_specialized_instance_net_drivers(
             .iter()
             .filter(|port| port.direction() == sv::ir::PortDirection::Input)
         {
-            if child_output_driver_count(module, port.name(), module_ids, modules) != 0 {
+            if !child_output_driver_ranges(module, port.name(), module_ids, modules).is_empty() {
                 return Err(sv::AnalyzerError::Unsupported(format!(
                     "write to input port `{}`",
                     port.name()
@@ -208,9 +208,9 @@ fn validate_specialized_instance_net_drivers(
                     .map(|port| (port.name(), false)),
             );
         for (signal_name, require_driver) in net_names {
-            let child_driver_count =
-                child_output_driver_count(module, signal_name, module_ids, modules);
-            validate_net_driver_ranges(module, signal_name, child_driver_count, require_driver)?;
+            let child_driver_ranges =
+                child_output_driver_ranges(module, signal_name, module_ids, modules);
+            validate_net_driver_ranges(module, signal_name, &child_driver_ranges, require_driver)?;
         }
 
         let variable_names = module
@@ -228,15 +228,21 @@ fn validate_specialized_instance_net_drivers(
                     .map(|port| port.name()),
             );
         for signal_name in variable_names {
-            let child_driver_count =
-                child_output_driver_count(module, signal_name, module_ids, modules);
+            let child_driver_ranges =
+                child_output_driver_ranges(module, signal_name, module_ids, modules);
             let local_drivers = local_driver_ranges(
                 &module.source,
                 signal_name,
                 &module.constants,
                 &module.parameter_types,
             );
-            if child_driver_count > 1 || child_driver_count == 1 && !local_drivers.is_empty() {
+            let child_overlaps = driver_ranges_overlap(&child_driver_ranges);
+            let child_local_overlap = child_driver_ranges.iter().any(|(_, child_range)| {
+                local_drivers
+                    .iter()
+                    .any(|(_, local_range)| net_driver_ranges_overlap(*child_range, *local_range))
+            });
+            if child_overlaps || child_local_overlap {
                 return Err(sv::AnalyzerError::Unsupported(format!(
                     "multiple variable drivers for `{signal_name}`"
                 )));
@@ -246,36 +252,58 @@ fn validate_specialized_instance_net_drivers(
     Ok(())
 }
 
-fn child_output_driver_count(
+fn child_output_driver_ranges(
     module: &LoweredSvModule,
     signal_name: &str,
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     modules: &HashMap<ModuleId, LoweredSvModule>,
-) -> usize {
-    module
-        .instances
-        .iter()
-        .filter_map(|instance| {
-            let key = LoweredSvModuleKey::instance_key(instance);
-            let child_id = module_ids.get(&key)?;
-            Some((instance, modules.get(child_id)?))
-        })
-        .flat_map(|(instance, child)| {
-            instance.port_connections.iter().filter(move |connection| {
-                connection
-                    .actual_expr
-                    .as_ref()
-                    .is_some_and(|expr| output_connection_targets_signal(expr, signal_name))
-                    && child.source.ports().iter().any(|port| {
-                        port.name() == connection.formal
-                            && matches!(
-                                port.direction(),
-                                sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
-                            )
-                    })
-            })
-        })
-        .count()
+) -> Vec<(usize, Option<(i128, i128)>)> {
+    let Some(signal_id) = module.signal_names.get(signal_name).copied() else {
+        return Vec::new();
+    };
+    let mut drivers = Vec::new();
+    for instance in &module.instances {
+        let key = LoweredSvModuleKey::instance_key(instance);
+        let Some(child_id) = module_ids.get(&key).copied() else {
+            continue;
+        };
+        let Some(child) = modules.get(&child_id) else {
+            continue;
+        };
+        for connection in &instance.port_connections {
+            if !child.source.ports().iter().any(|port| {
+                port.name() == connection.formal
+                    && matches!(
+                        port.direction(),
+                        sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
+                    )
+            }) {
+                continue;
+            }
+            let Some(actual_expr) = connection.actual_expr.as_ref() else {
+                continue;
+            };
+            let Some((actual_id, access)) = output_lvalue_access(
+                actual_expr,
+                &module.variables,
+                &module.signal_names,
+                &module.constants,
+                &module.parameter_types,
+            ) else {
+                if output_connection_targets_signal(actual_expr, signal_name) {
+                    drivers.push((drivers.len(), None));
+                }
+                continue;
+            };
+            if actual_id == signal_id {
+                drivers.push((
+                    drivers.len(),
+                    Some((access.lsb as i128, access.msb as i128)),
+                ));
+            }
+        }
+    }
+    drivers
 }
 
 fn output_connection_targets_signal(expr: &sv::ir::Expr, signal_name: &str) -> bool {
@@ -294,7 +322,7 @@ fn output_connection_targets_signal(expr: &sv::ir::Expr, signal_name: &str) -> b
 fn validate_net_driver_ranges(
     module: &LoweredSvModule,
     signal_name: &str,
-    child_driver_count: usize,
+    child_driver_ranges: &[(usize, Option<(i128, i128)>)],
     require_driver: bool,
 ) -> Result<(), sv::AnalyzerError> {
     let local_drivers = local_driver_ranges(
@@ -308,20 +336,33 @@ fn validate_net_driver_ranges(
             .iter()
             .any(|right| left.0 != right.0 && net_driver_ranges_overlap(left.1, right.1))
     });
-    if child_driver_count > 1
-        || child_driver_count == 1 && !local_drivers.is_empty()
+    let child_local_overlap = child_driver_ranges.iter().any(|(_, child_range)| {
+        local_drivers
+            .iter()
+            .any(|(_, local_range)| net_driver_ranges_overlap(*child_range, *local_range))
+    });
+    if driver_ranges_overlap(child_driver_ranges)
+        || child_local_overlap
         || overlapping_local_drivers
     {
         return Err(sv::AnalyzerError::Unsupported(format!(
             "multiple net drivers for `{signal_name}`"
         )));
     }
-    if require_driver && child_driver_count == 0 && local_drivers.is_empty() {
+    if require_driver && child_driver_ranges.is_empty() && local_drivers.is_empty() {
         return Err(sv::AnalyzerError::Unsupported(format!(
             "undriven net declaration `{signal_name}`"
         )));
     }
     Ok(())
+}
+
+fn driver_ranges_overlap(drivers: &[(usize, Option<(i128, i128)>)]) -> bool {
+    drivers.iter().enumerate().any(|(index, left)| {
+        drivers[index + 1..]
+            .iter()
+            .any(|right| net_driver_ranges_overlap(left.1, right.1))
+    })
 }
 
 fn validate_variable_driver_ranges(
@@ -1539,7 +1580,13 @@ fn build_instance_glue(
                 let Some(actual_expr) = connection.actual_expr.as_ref() else {
                     continue;
                 };
-                let Some(actual) = simple_output_lvalue_ident(actual_expr) else {
+                let Some((parent_signal_id, access)) = output_lvalue_access(
+                    actual_expr,
+                    parent_variables,
+                    parent_signal_names,
+                    parent_constants,
+                    parent_parameter_types,
+                ) else {
                     return Err(ParserError::unsupported(
                         64,
                         LoweringPhase::SimulatorParser,
@@ -1548,10 +1595,8 @@ fn build_instance_glue(
                         None,
                     ));
                 };
-                let Some(parent_signal_id) = parent_signal_names.get(actual).copied() else {
-                    continue;
-                };
                 let parent_var = &parent_variables[&parent_signal_id];
+                let target_width = access.msb - access.lsb + 1;
                 let child_node = arena.alloc(SLTNode::Input {
                     variable: GlueAddr::Child(*child_port_id),
                     signed: child_var.signed,
@@ -1561,7 +1606,7 @@ fn build_instance_glue(
                 let mut expr = coerce_node_width(
                     &mut arena,
                     child_node,
-                    Some(parent_var.width),
+                    Some(target_width),
                     child_var.signed,
                 )?;
                 if !parent_var.is_4state {
@@ -1578,8 +1623,8 @@ fn build_instance_glue(
                     LogicPath {
                         target: LogicPathTarget::Var(VarAtomBase::new(
                             GlueAddr::Parent(parent_signal_id),
-                            0,
-                            parent_var.width - 1,
+                            access.lsb,
+                            access.msb,
                         )),
                         expr,
                         sources,
@@ -1607,6 +1652,41 @@ fn simple_output_lvalue_ident(expr: &sv::ir::Expr) -> Option<&str> {
     match expr {
         sv::ir::Expr::Ident(name) => Some(name),
         sv::ir::Expr::Resize { expr, .. } => simple_output_lvalue_ident(expr),
+        _ => None,
+    }
+}
+
+fn output_lvalue_access(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<(SourceVarId, BitAccess)> {
+    match expr {
+        sv::ir::Expr::Ident(name) => {
+            let id = *name_to_id.get(name)?;
+            let variable = variables.get(&id)?;
+            Some((id, BitAccess::new(0, variable.width.checked_sub(1)?)))
+        }
+        sv::ir::Expr::Resize { expr, .. } => {
+            output_lvalue_access(expr, variables, name_to_id, constants, parameter_types)
+        }
+        sv::ir::Expr::Select { expr, msb, lsb, .. } => {
+            let sv::ir::Expr::Ident(name) = &**expr else {
+                return None;
+            };
+            let id = *name_to_id.get(name)?;
+            let variable = variables.get(&id)?;
+            if variable.array_dims.is_empty() {
+                return None;
+            }
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
+            let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;
+            let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
+            (access.msb < variable.width).then_some((id, access))
+        }
         _ => None,
     }
 }

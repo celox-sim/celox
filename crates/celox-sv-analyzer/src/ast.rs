@@ -1903,6 +1903,7 @@ pub enum LValue {
         name: String,
         msb: ConstExpr,
         lsb: ConstExpr,
+        signed: bool,
     },
 }
 
@@ -6142,10 +6143,16 @@ fn substitute_assignment_constants_with_parameter_literals(
 fn substitute_lvalue_constants(lvalue: LValue, const_env: &HashMap<String, i128>) -> LValue {
     match lvalue {
         LValue::Ident(name) => LValue::Ident(name),
-        LValue::Select { name, msb, lsb } => LValue::Select {
+        LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed,
+        } => LValue::Select {
             name,
             msb: substitute_const_expr_constants(msb, const_env),
             lsb: substitute_const_expr_constants(lsb, const_env),
+            signed,
         },
     }
 }
@@ -7554,11 +7561,16 @@ fn assignment_op_expr(lhs: &LValue, op: &str, rhs: Expr) -> Option<Expr> {
 fn expr_from_lvalue(lhs: &LValue) -> Expr {
     match lhs {
         LValue::Ident(name) => Expr::Ident(name.clone()),
-        LValue::Select { name, msb, lsb } => Expr::Select {
+        LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
             expr: Box::new(Expr::Ident(name.clone())),
             msb: msb.clone(),
             lsb: lsb.clone(),
-            signed: false,
+            signed: *signed,
         },
     }
 }
@@ -7623,7 +7635,12 @@ fn lvalue_from_select(
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
         (msb, lsb) = flatten_select_range(&name, &indices, msb, lsb, packed_dimensions)?;
-        return Some(LValue::Select { name, msb, lsb });
+        return Some(LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed: false,
+        });
     }
 
     if let Some((array_offset, packed_indices)) =
@@ -7637,6 +7654,7 @@ fn lvalue_from_select(
                     name,
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
+                    signed: false,
                 });
             }
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -7661,6 +7679,7 @@ fn lvalue_from_select(
                     },
                 ),
                 lsb: array_offset,
+                signed: dimensions.signed,
             });
         }
     }
@@ -7677,6 +7696,7 @@ fn lvalue_from_select(
             name,
             msb: bit.clone(),
             lsb: bit,
+            signed: false,
         });
     }
 
@@ -7714,7 +7734,12 @@ fn lvalue_from_constant_select(
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
         (msb, lsb) = flatten_select_range(&name, &indices, msb, lsb, packed_dimensions)?;
-        return Some(LValue::Select { name, msb, lsb });
+        return Some(LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed: false,
+        });
     }
 
     if let Some((array_offset, packed_indices)) =
@@ -7728,6 +7753,7 @@ fn lvalue_from_constant_select(
                     name,
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
+                    signed: false,
                 });
             }
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -7752,6 +7778,7 @@ fn lvalue_from_constant_select(
                     },
                 ),
                 lsb: array_offset,
+                signed: dimensions.signed,
             });
         }
     }
@@ -7768,6 +7795,7 @@ fn lvalue_from_constant_select(
             name,
             msb: bit.clone(),
             lsb: bit,
+            signed: false,
         });
     }
 

@@ -175,6 +175,40 @@ mod tests {
     }
 
     #[test]
+    fn preserves_signedness_for_compound_unpacked_array_lvalues() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic signed [7:0] input_value);
+                    logic signed [7:0] values[2];
+                    always_comb begin
+                        values[0] = input_value;
+                        values[0] >>>= 1;
+                    end
+                endmodule
+            "#,
+            Path::new("compound_array.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let compound = ir.modules()[0]
+            .comb_processes()
+            .iter()
+            .flat_map(|process| process.assignments())
+            .find_map(|assignment| match assignment.rhs() {
+                ir::Expr::Binary {
+                    op: ir::BinaryOp::Sar,
+                    left,
+                    ..
+                } => Some(left),
+                _ => None,
+            })
+            .expect("compound assignment should lower to an arithmetic shift");
+        assert!(matches!(
+            compound.as_ref(),
+            ir::Expr::Select { signed: true, .. }
+        ));
+    }
+
+    #[test]
     fn tracks_default_nettype_state_for_each_module() {
         let source = r#"
             `default_nettype none
