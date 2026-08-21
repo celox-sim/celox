@@ -22,10 +22,19 @@ test("detects every commit form consumed by release automation", () => {
   assert.equal(commitReleaseImpact("chore: tidy", options), 0);
   assert.equal(commitReleaseImpact("fix: repair output", options), 1);
   assert.equal(commitReleaseImpact("feat: add output", options), 2);
+  assert.equal(commitReleaseImpact("Fix: repair output", options), 0);
   assert.equal(commitReleaseImpact("fix!: remove output", options), 3);
+  assert.equal(commitReleaseImpact("Fix!: remove output", options), 3);
   assert.equal(
     commitReleaseImpact(
       "fix: repair output\n\nBREAKING CHANGE: remove output",
+      options,
+    ),
+    3,
+  );
+  assert.equal(
+    commitReleaseImpact(
+      "fix: repair output\n\nBREAKING CHANGE:\n continuation",
       options,
     ),
     3,
@@ -35,7 +44,48 @@ test("detects every commit form consumed by release automation", () => {
     4,
   );
   assert.equal(
-    commitReleaseImpact("Merge branch master\n\nfeat!: already released", options),
+    commitReleaseImpact(
+      "Merge branch master\n\nRelease-As: 9.0.0",
+      options,
+    ),
+    0,
+  );
+  assert.equal(
+    commitReleaseImpact("Merge: branch master\n\nRelease-As: 9.0.0", options),
+    4,
+  );
+  assert.equal(
+    commitReleaseImpact("Merge branch master\n\nfeat: nested change", options),
+    2,
+  );
+  assert.equal(
+    commitReleaseImpact(
+      "chore: outer\n\nBEGIN_NESTED_COMMIT\nFix!: nested break\nEND_NESTED_COMMIT",
+      options,
+    ),
+    3,
+  );
+});
+
+test("matches Release Please's permissive header and footer parsing", () => {
+  const options = { preMajor: false };
+
+  // @conventional-commits/parser allows optional whitespace and empty text.
+  assert.equal(commitReleaseImpact("feat:no space", options), 2);
+  assert.equal(commitReleaseImpact("feat:", options), 2);
+
+  // Release Please deliberately parses commit-shaped footers as additional
+  // commits, even when a human might read the line as a body example.
+  assert.equal(
+    commitReleaseImpact(
+      "docs: explain commit syntax\n\nExample follows.\nfeat: body example",
+      options,
+    ),
+    2,
+  );
+
+  assert.equal(
+    commitReleaseImpact("chore: tidy\n\nBREAKING CHANGE:\n\nRefs: #1", options),
     0,
   );
 });

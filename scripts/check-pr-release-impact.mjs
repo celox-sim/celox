@@ -14,8 +14,65 @@ const PATCH_TYPES = new Set(["fix", "perf", "revert"]);
 
 const impactNames = ["none", "patch", "feature", "breaking", "forced"];
 
-function conventionalLines(message) {
-  return message.split(/\r?\n/).filter((line) => /^[a-z][^\s:]*.*:/.test(line));
+// Release Please's parser accepts any non-whitespace type casing, optional
+// whitespace after the colon, and an empty description. It also parses
+// footer-looking lines as additional commits, so this intentionally examines
+// every unindented line rather than only the subject.
+const conventionalHeaderPattern =
+  /^([^\s():!]+)(?:\([^()\r\n]+\))?(!)?:[^\r\n]*$/;
+
+function conventionalHeaders(message) {
+  return message
+    .split(/\r?\n/)
+    .map((line) => line.match(conventionalHeaderPattern))
+    .filter((match) => match !== null);
+}
+
+// Keep this split behavior aligned with release-please's splitMessages helper.
+// A raw git commit can contain several commits, including nested commit blocks.
+function splitMessages(message) {
+  const parts = message.split("BEGIN_NESTED_COMMIT");
+  const messages = [parts.shift()];
+  for (const part of parts) {
+    const [nestedMessage, ...rest] = part.split("END_NESTED_COMMIT");
+    messages.push(nestedMessage);
+    messages[0] += rest.join("END_NESTED_COMMIT");
+  }
+
+  const conventionalCommits = messages[0]
+    .split(
+      /\r?\n\r?\n(?=(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\(.*?\))?: )/,
+    )
+    .filter(Boolean);
+  return [...conventionalCommits, ...messages.slice(1)];
+}
+
+function hasBreakingChange(message) {
+  const lines = message.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index++) {
+    const marker = lines[index].match(/^BREAKING(?: |-)CHANGE:(.*)$/);
+    if (!marker) {
+      continue;
+    }
+    if (/\S/.test(marker[1])) {
+      return true;
+    }
+
+    // The parser accepts a breaking description on a continuation or later
+    // body line. A following footer starts a new token instead.
+    for (const line of lines.slice(index + 1)) {
+      if (!/\S/.test(line)) {
+        continue;
+      }
+      return (
+        !conventionalHeaderPattern.test(line) &&
+        !/^[^\s:]+\s+#\d+/.test(line)
+      );
+    }
+  }
+
+  return false;
 }
 
 export function titleReleaseImpact(title, { preMajor }) {
@@ -38,37 +95,42 @@ export function titleReleaseImpact(title, { preMajor }) {
   return 0;
 }
 
-export function commitReleaseImpact(message, { preMajor }) {
+function parsedMessageReleaseImpact(message, { preMajor }) {
   const [subject = ""] = message.split(/\r?\n/, 1);
-  if (/^Merge\b/.test(subject)) {
+  if (!conventionalHeaderPattern.test(subject)) {
     return 0;
   }
   if (/^Release-As:\s*\S/im.test(message)) {
     return 4;
   }
+
+  const headers = conventionalHeaders(message);
   if (
-    /^BREAKING(?:[ -])CHANGE:\s*\S/im.test(message) ||
-    conventionalLines(message).some((line) =>
-      /^[a-z][a-z0-9_-]*(?:\([^\r\n)]*\))?!:/.test(line),
-    )
+    hasBreakingChange(message) ||
+    headers.some((header) => header[2] === "!")
   ) {
     return 3;
   }
   if (
-    conventionalLines(message).some((line) =>
-      /^(?:feat|feature)(?:\([^\r\n)]*\))?:/.test(line),
-    )
+    headers.some((header) => header[1] === "feat" || header[1] === "feature")
   ) {
     return preMajor ? 1 : 2;
   }
   if (
-    conventionalLines(message).some((line) =>
-      /^(?:fix|perf|revert)(?:\([^\r\n)]*\))?:/.test(line),
-    )
+    headers.some((header) => PATCH_TYPES.has(header[1]))
   ) {
     return 1;
   }
   return 0;
+}
+
+export function commitReleaseImpact(message, options) {
+  return Math.max(
+    0,
+    ...splitMessages(message).map((part) =>
+      parsedMessageReleaseImpact(part.trim(), options),
+    ),
+  );
 }
 
 export function releaseImpactErrors(title, commits, options) {
@@ -107,6 +169,8 @@ async function githubJson(path) {
 
 async function loadPullRequestCommits(repository, number) {
   const pullRequest = await githubJson(`/repos/${repository}/pulls/${number}`);
+  // BEGIN_COMMIT_OVERRIDE does not apply to plain merges. The companion
+  // repository-settings check enforces that this repository stays merge-only.
   if (pullRequest.commits > 250) {
     throw new Error(
       `Pull request has ${pullRequest.commits} commits; GitHub exposes at most 250 for validation`,
