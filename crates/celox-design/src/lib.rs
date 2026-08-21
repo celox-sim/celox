@@ -145,7 +145,11 @@ impl<A> Default for RuntimeSchema<A> {
 ///
 /// Addresses are already flattened. Source paths and frontend IDs used only
 /// for diagnostics or lookup deliberately live outside this structure.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + Eq + std::hash::Hash + Ord",
+    deserialize = "A: Deserialize<'de> + Eq + std::hash::Hash + Ord"
+))]
 pub struct EventTopology<A> {
     /// Alias event address to the canonical event-domain address.
     pub aliases: HashMap<A, A>,
@@ -187,7 +191,11 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
 /// This is intentionally not a frontend lookup table: every state object is
 /// keyed by its flattened semantic address, and no source-language AST or path
 /// type is retained.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + Eq + std::hash::Hash + Ord",
+    deserialize = "A: Deserialize<'de> + Eq + std::hash::Hash + Ord"
+))]
 pub struct ElaboratedDesign<A> {
     pub state_objects: HashMap<A, VariableMetadata>,
     pub events: EventTopology<A>,

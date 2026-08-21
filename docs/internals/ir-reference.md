@@ -33,10 +33,10 @@ arenas and source adapter references; `schedule_symbolic_rtl` consumes it and re
 source-independent artifacts. There is no general object whose valid fields depend on which
 passes happened to run.
 
-`FrontendLookup` also crosses this boundary, but it contains only `SourceVarId`, owned string
-paths, and their projection to `StateAddr`. Analyzer-native IDs such as Veryl's `VarId` and
-`StrId` remain in frontend compiler inputs used for testbench lowering and are discarded before
-`RuntimeProgram` is returned.
+`FrontendLookup` crosses the scheduling boundary temporarily. The compiler uses it for source
+testbench lowering, then consumes it together with `ElaboratedDesign` to construct one normalized
+`RuntimeDesign`. Analyzer-native IDs such as Veryl's `VarId` and `StrId` remain in frontend
+compiler inputs and are discarded before `RuntimeProgram` is returned.
 
 ```rust
 pub struct UnoptimizedSir {
@@ -58,8 +58,7 @@ pub struct LaidOutProgram {
 }
 
 pub struct RuntimeProgram {
-    pub design: ElaboratedDesign<AbsoluteAddr>,
-    pub frontend: FrontendLookup,
+    pub design: RuntimeDesign,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }
@@ -76,7 +75,7 @@ pub struct SirProgram {
 -   **`UnoptimizedSir`**: Internal compiler-driver result before the backend-independent SIR pass pipeline.
 -   **`OptimizedSir`**: The only pre-layout artifact accepted by layout construction.
 -   **`LaidOutProgram`**: Immutable SIR plus finalized physical layout accepted by concrete backends. Layout requirements have been consumed.
--   **`RuntimeProgram`**: Design, source lookup, runtime schema, and compiled testbench retained after code generation. It cannot contain SIR or layout requirements.
+-   **`RuntimeProgram`**: Normalized runtime design, runtime schema, and compiled testbench retained after code generation. `RuntimeDesign` is the sole owner of semantic state metadata, hierarchy, and path/source lookup indices; frontend module tables have already been discarded. It cannot contain SIR or layout requirements.
 -   **`eval_apply_ffs`**: Standard synchronous flip-flop evaluation. Used when operating in a single domain.
 -   **`eval_comb_apply_ffs`**: Fused comb/FF evaluation selected by the frontend scheduler.
 -   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.

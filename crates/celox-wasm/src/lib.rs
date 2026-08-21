@@ -114,17 +114,13 @@ impl SimHandle {
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
         for addr in self.program().design.state_objects.keys() {
-            let Some(source) = self.program().frontend.source_address(addr) else {
+            let Some(variable) = self.program().design.variable(addr) else {
                 continue;
             };
-            let module_id = self.program().frontend.instance_module[&source.instance_id];
-            let variables = &self.program().frontend.module_variables[&module_id];
-            let Some(info) = variables.get(&source.var_id) else {
+            let Some(instance) = self.program().design.instance(addr.instance_id) else {
                 continue;
             };
-            if self.program().frontend.module_var_path_index[&module_id].get(&info.path)
-                == Some(&None)
-            {
+            if !instance.resolves_path_to(&variable.path, *addr) {
                 continue;
             }
 

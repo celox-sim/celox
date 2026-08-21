@@ -1982,36 +1982,35 @@ impl NativeSimulatorHandle {
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
         for addr in program.design.state_objects.keys() {
-            let Some(source) = program.frontend.source_address(addr) else {
+            let Some(variable) = program.design.variable(addr) else {
                 continue;
             };
-            let module_id = program.frontend.instance_module[&source.instance_id];
-            let variables = &program.frontend.module_variables[&module_id];
-            let Some(info) = variables.get(&source.var_id) else {
+            let Some(instance) = program.design.instance(addr.instance_id) else {
                 continue;
             };
-            if program.frontend.module_var_path_index[&module_id].get(&info.path) == Some(&None) {
+            if !instance.resolves_path_to(&variable.path, *addr) {
                 continue;
             }
+            let metadata = &program.design.state_objects[addr];
             let Some(&offset) = layout.offsets.get(addr) else {
                 continue;
             };
             let name = program.get_path(addr);
             let total_width = layout.widths.get(addr).copied().unwrap_or(0);
-            let (width, array_dims) = if info.array_dims.is_empty() {
+            let (width, array_dims) = if metadata.array_dims.is_empty() {
                 (total_width, None)
             } else {
-                let element_count = info.array_dims.iter().product::<usize>();
-                (total_width / element_count, Some(&info.array_dims))
+                let element_count = metadata.array_dims.iter().product::<usize>();
+                (total_width / element_count, Some(&metadata.array_dims))
             };
             let byte_size = celox::get_byte_size(width);
             let mut entry = serde_json::json!({
                 "offset": offset,
                 "width": width,
                 "byte_size": byte_size,
-                "is_4state": four_state && info.is_4state,
-                "direction": layout::direction_str(info.var_kind),
-                "type_kind": layout::type_kind_str(info.type_kind),
+                "is_4state": four_state && metadata.is_4state,
+                "direction": layout::direction_str(variable.var_kind),
+                "type_kind": layout::type_kind_str(metadata.type_kind),
             });
             if let Some(array_dims) = array_dims {
                 entry["array_dims"] = serde_json::json!(array_dims);

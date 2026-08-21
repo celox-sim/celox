@@ -615,7 +615,7 @@ mod host {
 
         pub(crate) fn apply_initial_values(&mut self) {
             let mut applied = false;
-            let initial_memory_values = std::mem::take(&mut self.program.design.initial_state);
+            let initial_memory_values = self.program.design.take_initial_state();
             for init in &initial_memory_values {
                 applied = true;
                 let signal = self.backend.resolve_signal(&init.address);
@@ -649,7 +649,9 @@ mod host {
             if applied {
                 self.dirty = true;
             }
-            self.program.design.initial_state = initial_memory_values;
+            self.program
+                .design
+                .restore_initial_state(initial_memory_values);
         }
 
         fn apply_initial_memory_writes(
@@ -1243,33 +1245,23 @@ mod host {
         /// paths without the original [`RuntimeProgram`].
         pub fn build_vcd_descs(&self, four_state_mode: bool) -> Vec<crate::VcdSignalDesc> {
             let mut descs = Vec::new();
-            let mut sorted_instances: Vec<_> =
-                self.program.frontend.instance_module.iter().collect();
-            sorted_instances.sort_by_key(|(id, _)| *id);
+            let mut sorted_instances = self.program.design.instances().collect::<Vec<_>>();
+            sorted_instances.sort_by_key(|instance| instance.id);
 
-            for (instance_id, module_id) in sorted_instances {
-                let variables = &self.program.frontend.module_variables[module_id];
-                let path_index = &self.program.frontend.module_var_path_index[module_id];
-                let scope = format!("{}", instance_id);
+            for instance in sorted_instances {
+                let scope = format!("{}", instance.id);
 
-                let mut sorted_vars: Vec<_> = variables
-                    .values()
-                    .filter(|info| path_index.get(&info.path) != Some(&None))
+                let mut sorted_vars: Vec<_> = instance
+                    .state_addresses()
+                    .iter()
+                    .filter_map(|address| self.program.design.variable(address))
+                    .filter(|variable| instance.resolves_path_to(&variable.path, variable.address))
                     .collect();
-                sorted_vars.sort_by(|a, b| {
-                    let name_a = a.path.join(".");
-                    let name_b = b.path.join(".");
-                    name_a.cmp(&name_b)
-                });
+                sorted_vars.sort_by(|a, b| a.path.cmp(&b.path));
 
-                for info in sorted_vars {
-                    let name = info.path.join(".");
-
-                    let addr = self
-                        .program
-                        .state_address_for_source(*instance_id, info.id)
-                        .expect("frontend state projection is complete");
-                    let signal = self.backend.resolve_signal(&addr);
+                for variable in sorted_vars {
+                    let name = variable.path.join(".");
+                    let signal = self.backend.resolve_signal(&variable.address);
 
                     descs.push(crate::VcdSignalDesc {
                         scope: scope.clone(),
@@ -1285,13 +1277,12 @@ mod host {
 
         /// Returns all ports of the top-level module with their resolved signal references.
         pub fn named_signals(&self) -> Vec<NamedSignal> {
-            let top_instance_id = self
+            let top_instance = self
                 .program
-                .frontend
-                .instance_ids
-                .get(&InstancePath(vec![]))
+                .design
+                .root_instance()
                 .expect("top-level instance not found");
-            self.build_signals_for_instance(*top_instance_id)
+            self.build_signals_for_instance(top_instance.id)
         }
 
         /// Returns all signals for the instance at the given hierarchical path.
@@ -1303,8 +1294,8 @@ mod host {
                 .iter()
                 .map(|(name, idx)| ((*name).to_string(), *idx))
                 .collect();
-            match self.program.frontend.instance_ids.get(&InstancePath(path)) {
-                Some(&instance_id) => self.build_signals_for_instance(instance_id),
+            match self.program.design.instance_at_path(&InstancePath(path)) {
+                Some(instance) => self.build_signals_for_instance(instance.id),
                 None => Vec::new(),
             }
         }
@@ -1318,22 +1309,17 @@ mod host {
             &self,
             instance_id: crate::ir::InstanceId,
         ) -> Vec<NamedSignal> {
-            let module_id = &self.program.frontend.instance_module[&instance_id];
-            let module_vars = &self.program.frontend.module_variables[module_id];
-            let path_index = &self.program.frontend.module_var_path_index[module_id];
+            let instance = self.program.design.instance(instance_id).unwrap();
 
             let mut result = Vec::new();
-            for info in module_vars.values() {
+            for address in instance.state_addresses() {
+                let variable = self.program.design.variable(address).unwrap();
                 // Skip variables whose VarPath is ambiguous (None in the path index).
-                if path_index.get(&info.path) == Some(&None) {
+                if !instance.resolves_path_to(&variable.path, *address) {
                     continue;
                 }
-                let name = info.path.join(".");
-                let addr = self
-                    .program
-                    .state_address_for_source(instance_id, info.id)
-                    .expect("frontend state projection is complete");
-                let signal = self.backend.resolve_signal(&addr);
+                let name = variable.path.join(".");
+                let signal = self.backend.resolve_signal(address);
 
                 // Resolve associated clock for reset signals
                 let associated_clock = self
@@ -1341,13 +1327,13 @@ mod host {
                     .design
                     .events
                     .reset_clocks
-                    .get(&addr)
+                    .get(address)
                     .map(|clock_addr| self.program.get_path(clock_addr));
 
                 result.push(NamedSignal {
                     name,
                     signal,
-                    info: info.clone(),
+                    info: self.program.design.variable_info(address).unwrap(),
                     associated_clock,
                 });
             }
@@ -1412,32 +1398,24 @@ mod host {
         }
 
         fn build_hierarchy(&self, current_path: &[(String, usize)]) -> InstanceHierarchy {
-            let instance_id = self
+            let instance = self
                 .program
-                .frontend
-                .instance_ids
-                .get(&InstancePath(current_path.to_vec()))
+                .design
+                .instance_at_path(&InstancePath(current_path.to_vec()))
                 .expect("instance not found");
-            let module_id = &self.program.frontend.instance_module[instance_id];
-            let module_name = self
-                .program
-                .frontend
-                .module_names
-                .get(module_id)
-                .cloned()
-                .unwrap_or_else(|| format!("{}", module_id));
+            let module_name = instance.module_name.clone();
 
-            let signals = self.build_signals_for_instance(*instance_id);
+            let signals = self.build_signals_for_instance(instance.id);
 
             // Find direct children: instance paths that extend current by exactly 1 segment
             let current_len = current_path.len();
             let mut children_map: crate::HashMap<String, Vec<(usize, InstanceHierarchy)>> =
                 crate::HashMap::default();
 
-            for path in self.program.frontend.instance_ids.keys() {
-                if path.0.len() == current_len + 1 && path.0.starts_with(current_path) {
-                    let (child_name, child_index) = &path.0[current_len];
-                    let child_hierarchy = self.build_hierarchy(&path.0);
+            for child in self.program.design.instances() {
+                if child.path.0.len() == current_len + 1 && child.path.0.starts_with(current_path) {
+                    let (child_name, child_index) = &child.path.0[current_len];
+                    let child_hierarchy = self.build_hierarchy(&child.path.0);
                     children_map
                         .entry(child_name.clone())
                         .or_default()

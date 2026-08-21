@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
 use celox_design::{
-    ElaboratedDesign, EventTopology, InitialStateData, InitialStateValue, InitialStateWriteRun,
-    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema,
+    InitialStateData, InitialStateValue, InitialStateWriteRun, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema,
 };
 use celox_runtime::DesignReflection;
 use celox_runtime::backend::SimBackend;
@@ -329,20 +329,6 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct NativeEventTopology {
-    aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    ordered_events: Vec<AbsoluteAddr>,
-    cascaded_events: std::collections::BTreeSet<AbsoluteAddr>,
-    reset_clocks: HashMap<AbsoluteAddr, AbsoluteAddr>,
-}
-
-impl NativeEventTopology {
-    pub(crate) fn canonical(&self, address: AbsoluteAddr) -> AbsoluteAddr {
-        self.aliases.get(&address).copied().unwrap_or(address)
-    }
-}
-
 /// Pointer-free native compiler artifact which can be attached to the
 /// precompiled Celox runtime.
 #[derive(Clone, Serialize, Deserialize)]
@@ -359,11 +345,9 @@ pub struct NativeProgramImage {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
     reflection: DesignReflection,
-    frontend: crate::ir::FrontendLookup,
-    initial_state: Vec<InitialStateValue<AbsoluteAddr>>,
+    design: crate::ir::RuntimeDesign,
     testbench: Option<TestbenchProgram<AbsoluteAddr>>,
     runtime_schema: NativeRuntimeSchema,
-    event_topology: NativeEventTopology,
     layout: MemoryLayout,
     native_memory_size: usize,
     options: NativeRuntimeOptions,
@@ -402,8 +386,8 @@ impl NativeProgramImage {
     }
 
     /// Canonical event-domain topology used by the runtime scheduler.
-    pub(crate) fn event_topology(&self) -> &NativeEventTopology {
-        &self.event_topology
+    pub(crate) fn event_topology(&self) -> &celox_design::EventTopology<AbsoluteAddr> {
+        &self.design.events
     }
 
     /// Reconstruct the source-independent runtime metadata retained by this
@@ -411,17 +395,7 @@ impl NativeProgramImage {
     /// execution side of a host-codegen workflow.
     pub(crate) fn runtime_program(&self) -> crate::ir::RuntimeProgram {
         crate::ir::RuntimeProgram {
-            design: ElaboratedDesign {
-                state_objects: HashMap::default(),
-                events: EventTopology {
-                    aliases: self.event_topology.aliases.clone(),
-                    ordered_events: self.event_topology.ordered_events.clone(),
-                    cascaded_events: self.event_topology.cascaded_events.clone(),
-                    reset_clocks: self.event_topology.reset_clocks.clone(),
-                },
-                initial_state: self.initial_state.clone(),
-            },
-            frontend: self.frontend.clone(),
+            design: self.design.clone(),
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
@@ -434,6 +408,9 @@ impl NativeProgramImage {
     }
 
     pub(super) fn validate(&self) -> Result<(), String> {
+        self.design
+            .validate()
+            .map_err(|error| format!("invalid runtime design: {error}"))?;
         self.reflection
             .validate()
             .map_err(|error| format!("invalid design reflection: {error}"))?;
@@ -1868,8 +1845,7 @@ fn compile_program(
             id_to_addr,
             id_to_event,
             reflection: sir.runtime().build_design_reflection(layout),
-            frontend: sir.runtime().frontend.clone(),
-            initial_state: sir.runtime().design.initial_state.clone(),
+            design: sir.runtime().design.clone(),
             testbench: sir.runtime().testbench.clone(),
             runtime_schema: NativeRuntimeSchema {
                 runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
@@ -1877,12 +1853,6 @@ fn compile_program(
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
                 testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
-            },
-            event_topology: NativeEventTopology {
-                aliases: sir.runtime().design.events.aliases.clone(),
-                ordered_events: sir.runtime().design.events.ordered_events.clone(),
-                cascaded_events: sir.runtime().design.events.cascaded_events.clone(),
-                reset_clocks: sir.runtime().design.events.reset_clocks.clone(),
             },
             layout: layout.clone(),
             native_memory_size,
@@ -2087,7 +2057,7 @@ impl NativeBackend {
         };
         backend.install_event_buffers();
         let compiled = Arc::clone(&backend.compiled);
-        backend.apply_initial_values(&compiled.program_image.initial_state);
+        backend.apply_initial_values(&compiled.program_image.design.initial_state);
         backend
     }
 
