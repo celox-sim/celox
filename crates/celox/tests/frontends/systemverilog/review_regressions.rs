@@ -2860,7 +2860,7 @@ fn reads_unpacked_array_ranges() {
     let selected = sim.signal("selected");
     sim.modify(|io| io.set_wide(source, BigUint::from(0x04030201u64)))
         .unwrap();
-    assert_eq!(sim.get(selected), 0x0201u16.into());
+    assert_eq!(sim.get(selected), 0x0102u16.into());
 }
 
 #[test]

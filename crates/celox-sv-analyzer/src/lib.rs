@@ -977,11 +977,20 @@ mod tests {
         };
         assert_eq!(eval_test_const_expr(msb), Some(15));
         assert_eq!(eval_test_const_expr(lsb), Some(0));
-        let ir::Expr::Select { msb, lsb, .. } = assignment.rhs() else {
-            panic!("expected a flattened unpacked range expression");
+        let ir::Expr::Concat(parts) = assignment.rhs() else {
+            panic!("expected an element-ordered unpacked range expression");
+        };
+        assert_eq!(parts.len(), 2);
+        let ir::Expr::Select { msb, lsb, .. } = &parts[0] else {
+            panic!("expected the first unpacked range element selection");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(7));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+        let ir::Expr::Select { msb, lsb, .. } = &parts[1] else {
+            panic!("expected the second unpacked range element selection");
         };
         assert_eq!(eval_test_const_expr(msb), Some(15));
-        assert_eq!(eval_test_const_expr(lsb), Some(0));
+        assert_eq!(eval_test_const_expr(lsb), Some(8));
     }
 
     #[test]

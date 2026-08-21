@@ -8317,6 +8317,15 @@ fn expr_select_from_select(
                 signed: false,
             });
         };
+        if let Some(expr) = expr_from_unpacked_select_range(
+            name,
+            &indices,
+            msb.clone(),
+            lsb.clone(),
+            packed_dimensions,
+        ) {
+            return Some(expr);
+        }
         (msb, lsb) = flatten_select_range(name, &indices, msb, lsb, packed_dimensions)?;
         return Some(Expr::Select {
             expr: Box::new(base),
@@ -8517,6 +8526,91 @@ fn flatten_variable_select(
         };
     }
     Some((offset, indices[selected_unpacked_count..].to_vec()))
+}
+
+fn expr_from_unpacked_select_range(
+    name: &str,
+    indices: &[ConstExpr],
+    msb: ConstExpr,
+    lsb: ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let dimensions = packed_dimensions.get(name)?;
+    let dimension = dimensions.unpacked.get(indices.len())?;
+    if const_expr_is_out_of_range(
+        &msb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) || const_expr_is_out_of_range(
+        &lsb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) {
+        return None;
+    }
+    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    if !packed_indices.is_empty() {
+        return None;
+    }
+    let msb_value = eval_ast_const_expr(&msb, &packed_dimensions.const_env)?;
+    let lsb_value = eval_ast_const_expr(&lsb, &packed_dimensions.const_env)?;
+    let stride = product_expr(
+        &dimensions.unpacked[indices.len() + 1..]
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .chain(
+                dimensions
+                    .packed
+                    .iter()
+                    .map(|dimension| dimension.width.clone()),
+            )
+            .collect::<Vec<_>>(),
+    );
+    let stride_minus_one = ConstExpr::Binary {
+        left: Box::new(stride.clone()),
+        op: BinaryOp::Sub,
+        right: Box::new(ConstExpr::Literal("1".to_string())),
+    };
+    // Concat parts are ordered from most-significant to least-significant.
+    // Walking from the slice lsb toward its msb preserves the array element
+    // order when the slice direction is reversed.
+    let mut parts = Vec::new();
+    let mut value = lsb_value;
+    let step = if value <= msb_value { 1 } else { -1 };
+    loop {
+        let offset = unpacked_index_offset(dimension, ConstExpr::Literal(value.to_string()));
+        let offset = if is_one(&stride) {
+            offset
+        } else {
+            ConstExpr::Binary {
+                left: Box::new(offset),
+                op: BinaryOp::Mul,
+                right: Box::new(stride.clone()),
+            }
+        };
+        let msb = add_expr(
+            array_offset.clone(),
+            add_expr(offset.clone(), stride_minus_one.clone()),
+        );
+        let lsb = add_expr(array_offset.clone(), offset);
+        parts.push(Expr::Select {
+            expr: Box::new(Expr::Ident(name.to_string())),
+            msb,
+            lsb,
+            signed: dimensions.signed,
+        });
+        if value == msb_value {
+            break;
+        }
+        value = value.checked_add(step)?;
+    }
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(Expr::Concat(parts)),
+    }
 }
 
 fn remaining_unpacked_selection_width(
