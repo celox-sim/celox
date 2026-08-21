@@ -51,6 +51,7 @@ struct SvVariable {
     width: usize,
     signed: bool,
     is_4state: bool,
+    is_net: bool,
     packed_ranges: Vec<(i128, i128)>,
     array_dims: Vec<usize>,
     domain_kind: DomainKind,
@@ -846,6 +847,7 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
+            is_net: port.is_net(),
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
             domain_kind: DomainKind::Other,
@@ -889,6 +891,7 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
+            is_net: signal.is_net(),
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
             domain_kind: DomainKind::Other,
@@ -1433,6 +1436,7 @@ fn ensure_parent_output_signals(
             width: 1,
             signed: false,
             is_4state: true,
+            is_net: true,
             packed_ranges: Vec::new(),
             array_dims: Vec::new(),
             domain_kind: DomainKind::Other,
@@ -1693,6 +1697,15 @@ fn lower_dynamic_output_glue(
         return Ok(None);
     };
     let parent_var = &parent_variables[&parent_signal_id];
+    if parent_var.is_net {
+        return Err(ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "dynamic child output connection to a net",
+            format!("{formal} -> {actual}: {actual_expr:?}"),
+            None,
+        ));
+    }
     let (offset, index_sources, index_source_ids) = lower_dynamic_array_element_index_glue(
         lsb,
         parent_variables,
@@ -1918,6 +1931,8 @@ fn lower_glue_parent_expr(
                     element_width,
                 )?;
                 let variable = variables.get(&id)?;
+                let element_count = variable.width.checked_div(element_width)?;
+                let (offset, valid) = dynamic_array_index_guard_slt(arena, offset, element_count)?;
                 let node = arena
                     .alloc(SLTNode::Input {
                         variable: GlueAddr::Parent(id),
@@ -1930,6 +1945,8 @@ fn lower_glue_parent_expr(
                         access,
                     })
                     .ok()?;
+                let node =
+                    guard_dynamic_array_read_slt(arena, valid, node, access.msb - access.lsb + 1)?;
                 sources.insert(VarAtomBase::new(
                     GlueAddr::Parent(id),
                     0,
@@ -3278,6 +3295,8 @@ fn lower_expr_with_context(
                     element_width,
                 )?;
                 let variable = variables.get(&id)?;
+                let element_count = variable.width.checked_div(element_width)?;
+                let (offset, valid) = dynamic_array_index_guard_slt(arena, offset, element_count)?;
                 let node = arena
                     .alloc(SLTNode::Input {
                         variable: id,
@@ -3290,6 +3309,8 @@ fn lower_expr_with_context(
                         access,
                     })
                     .ok()?;
+                let node =
+                    guard_dynamic_array_read_slt(arena, valid, node, access.msb - access.lsb + 1)?;
                 sources.insert(VarAtomBase::new(id, 0, variable.width.checked_sub(1)?));
                 return Some((
                     coerce_node_width(
@@ -4064,6 +4085,74 @@ fn lower_dynamic_array_element_index_slt(
     Some((element_index, sources))
 }
 
+fn dynamic_array_index_guard_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    index: NodeId,
+    element_count: usize,
+) -> Option<(NodeId, NodeId)> {
+    let mut valid = None;
+    for element in 0..element_count {
+        let element_literal = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(element),
+                BigUint::default(),
+                64,
+                false,
+            ))
+            .ok()?;
+        let matches = arena
+            .alloc(SLTNode::Binary(index, BinaryOp::EqCase, element_literal))
+            .ok()?;
+        valid = Some(match valid {
+            Some(previous) => arena
+                .alloc(SLTNode::Binary(previous, BinaryOp::Or, matches))
+                .ok()?,
+            None => matches,
+        });
+    }
+    let valid = valid?;
+    let zero = arena
+        .alloc(SLTNode::Constant(
+            BigUint::default(),
+            BigUint::default(),
+            64,
+            false,
+        ))
+        .ok()?;
+    let safe_index = arena
+        .alloc(SLTNode::Mux {
+            cond: valid,
+            then_expr: index,
+            else_expr: zero,
+        })
+        .ok()?;
+    Some((safe_index, valid))
+}
+
+fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    valid: NodeId,
+    value: NodeId,
+    value_width: usize,
+) -> Option<NodeId> {
+    let unknown_mask = (BigUint::from(1u8) << value_width) - BigUint::from(1u8);
+    let unknown = arena
+        .alloc(SLTNode::Constant(
+            BigUint::default(),
+            unknown_mask,
+            value_width,
+            false,
+        ))
+        .ok()?;
+    arena
+        .alloc(SLTNode::Mux {
+            cond: valid,
+            then_expr: value,
+            else_expr: unknown,
+        })
+        .ok()
+}
+
 fn lower_dynamic_array_element_index(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     offset: &sv::ir::ConstExpr,
@@ -4101,6 +4190,64 @@ fn lower_dynamic_array_element_index(
         divisor,
     ));
     Some(index)
+}
+
+fn dynamic_array_index_guard_sir(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    index: celox_sir::RegisterId,
+    element_count: usize,
+) -> Option<(celox_sir::RegisterId, celox_sir::RegisterId)> {
+    let mut valid = None;
+    for element in 0..element_count {
+        let element_literal = builder.alloc_bit(64, false);
+        builder.emit(SIRInstruction::Imm(
+            element_literal,
+            SIRValue::new(u64::try_from(element).ok()?),
+        ));
+        let matches = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(
+            matches,
+            index,
+            BinaryOp::EqCase,
+            element_literal,
+        ));
+        valid = Some(match valid {
+            Some(previous) => {
+                let combined = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    combined,
+                    previous,
+                    BinaryOp::Or,
+                    matches,
+                ));
+                combined
+            }
+            None => matches,
+        });
+    }
+    let valid = valid?;
+    let zero = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+    let safe_index = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Mux(safe_index, valid, index, zero));
+    Some((safe_index, valid))
+}
+
+fn guard_dynamic_array_read_sir(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    valid: celox_sir::RegisterId,
+    value: celox_sir::RegisterId,
+    value_width: usize,
+) -> celox_sir::RegisterId {
+    let unknown = builder.alloc_logic(value_width);
+    let unknown_mask = (BigUint::from(1u8) << value_width) - BigUint::from(1u8);
+    builder.emit(SIRInstruction::Imm(
+        unknown,
+        SIRValue::new_four_state(BigUint::default(), unknown_mask),
+    ));
+    let guarded = builder.alloc_logic(value_width);
+    builder.emit(SIRInstruction::Mux(guarded, valid, value, unknown));
+    guarded
 }
 
 type SvFfBlocks = (
@@ -5292,6 +5439,8 @@ fn lower_expr_to_sir_with_context(
                     element_width,
                 )?;
                 let width = access.msb - access.lsb + 1;
+                let element_count = variables.get(&id)?.width.checked_div(element_width)?;
+                let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
                 let reg = builder.alloc_logic(width);
                 builder.emit(SIRInstruction::Load(
                     reg,
@@ -5307,6 +5456,7 @@ fn lower_expr_to_sir_with_context(
                     },
                     width,
                 ));
+                let reg = guard_dynamic_array_read_sir(builder, valid, reg, width);
                 return resize_sir_register(
                     builder,
                     reg,

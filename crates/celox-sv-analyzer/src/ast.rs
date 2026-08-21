@@ -412,7 +412,7 @@ fn static_for_loop_iterations(
     let (initialization, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
     let (name, initial_value) = for_loop_initialization(initialization.as_ref()?, syntax_tree)
         .and_then(|(name, value)| Some((name, eval_ast_const_expr(&value, const_env)?)))?;
-    i32::try_from(initial_value).ok()?;
+    let initial_value = coerce_for_loop_index_value(initial_value)?;
     let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
     let steps = step.as_ref()?.nodes.0.contents();
     let [step] = steps.as_slice() else {
@@ -436,8 +436,13 @@ fn static_for_loop_iterations(
             return Some((name, values));
         }
         values.push(value);
-        value = next_for_loop_value(step, &name, value, syntax_tree, &loop_env)?;
-        i32::try_from(value).ok()?;
+        value = coerce_for_loop_index_value(next_for_loop_value(
+            step,
+            &name,
+            value,
+            syntax_tree,
+            &loop_env,
+        )?)?;
     }
 
     let mut loop_env = const_env.clone();
@@ -451,6 +456,17 @@ fn static_for_loop_iterations(
         },
     );
     (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
+}
+
+fn coerce_for_loop_index_value(value: i128) -> Option<i128> {
+    const MODULUS: i128 = 1i128 << 32;
+    const SIGN_BIT: i128 = 1i128 << 31;
+    let value = value.rem_euclid(MODULUS);
+    Some(if value >= SIGN_BIT {
+        value - MODULUS
+    } else {
+        value
+    })
 }
 
 fn validate_static_for_loops_in_statement_or_null(
