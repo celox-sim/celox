@@ -1392,6 +1392,75 @@ fn writes_unpacked_array_elements_at_runtime_indices_in_always_ff() {
 }
 
 #[test]
+fn writes_packed_subselects_of_runtime_array_elements_in_always_ff() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] sel,
+            input logic [3:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[2];
+            always_ff @(posedge clk) begin
+                values[sel][7:4] <= 4'ha;
+                values[sel][3:0] <= data;
+            end
+            assign value = values[1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_ff_packed_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(data, 0x5u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value), 0xa5u8.into());
+}
+
+#[test]
+fn writes_packed_subselects_of_runtime_array_elements_in_always_comb() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [3:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[2];
+            always_comb begin
+                values = '0;
+                values[sel][7:4] = 4'ha;
+                values[sel][3:0] = data;
+            end
+            assign value = values[1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_comb_packed_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(data, 0x5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0xa5u8.into());
+}
+
+#[test]
 fn ignores_invalid_dynamic_array_indices_in_always_ff() {
     let source = r#"
         module Top(

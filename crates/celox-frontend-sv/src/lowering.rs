@@ -2680,7 +2680,7 @@ fn lower_comb_process(
         }
         let allow_dynamic_array_write = process.kind() == sv::ir::CombProcessKind::AlwaysComb;
         let previous_array = if allow_dynamic_array_write {
-            if let Some((id, _, _)) = dynamic_array_element_lvalue(
+            if let Some((id, _, _, _)) = dynamic_array_element_lvalue(
                 assignment.lhs_value(),
                 variables,
                 name_to_id,
@@ -2895,19 +2895,20 @@ fn lower_dynamic_array_write_expr(
     HashSet<VarAtomBase<SourceVarId>>,
     HashSet<VarAtomBase<SourceVarId>>,
 )> {
-    let (id, element_width, offset) =
+    let (id, element_width, offset, access) =
         dynamic_array_element_lvalue(lvalue, variables, name_to_id, constants, parameter_types)?;
     let variable = variables.get(&id)?;
     let element_count = variable.width.checked_div(element_width)?;
     if element_count == 0 {
         return None;
     }
-    let target_width = variable.width;
+    let array_width = variable.width;
+    let target_width = access.msb - access.lsb + 1;
     let (rhs_node, mut sources) = if let sv::ir::Expr::Literal(literal) = rhs
         && let Some(fill) = unbased_fill_literal(literal)
     {
         (
-            lower_unbased_fill_literal_slt(arena, fill, element_width)?,
+            lower_unbased_fill_literal_slt(arena, fill, target_width)?,
             HashSet::default(),
         )
     } else {
@@ -2918,7 +2919,7 @@ fn lower_dynamic_array_write_expr(
             constants,
             parameter_types,
             arena,
-            Some(element_width),
+            Some(target_width),
             Some(sv_expr_is_signed_with_parameters(
                 rhs,
                 variables,
@@ -2930,7 +2931,7 @@ fn lower_dynamic_array_write_expr(
     let rhs_node = coerce_node_width(
         arena,
         rhs_node,
-        Some(element_width),
+        Some(target_width),
         sv_expr_is_signed_with_parameters(rhs, variables, name_to_id, parameter_types),
     )
     .ok()?;
@@ -2949,7 +2950,7 @@ fn lower_dynamic_array_write_expr(
         sources.extend(previous_array.address_sources.iter().copied());
         (previous_array.expr, previous_array.previous_sources.clone())
     } else {
-        let previous_sources = [VarAtomBase::new(id, 0, target_width.checked_sub(1)?)]
+        let previous_sources = [VarAtomBase::new(id, 0, array_width.checked_sub(1)?)]
             .into_iter()
             .collect();
         let old = arena
@@ -2957,7 +2958,7 @@ fn lower_dynamic_array_write_expr(
                 variable: id,
                 signed: variable.signed,
                 index: Vec::new(),
-                access: BitAccess::new(0, target_width - 1),
+                access: BitAccess::new(0, array_width - 1),
             })
             .ok()?;
         (old, previous_sources)
@@ -2986,10 +2987,18 @@ fn lower_dynamic_array_write_expr(
                 element_literal,
             ))
             .ok()?;
+        let updated_element = replace_slt_slice(
+            arena,
+            old_element,
+            rhs_node,
+            access.lsb,
+            target_width,
+            element_width,
+        )?;
         let updated = arena
             .alloc(SLTNode::Mux {
                 cond: condition,
-                then_expr: rhs_node,
+                then_expr: updated_element,
                 else_expr: old_element,
             })
             .ok()?;
@@ -3001,11 +3010,51 @@ fn lower_dynamic_array_write_expr(
         arena.alloc(SLTNode::Concat(parts)).ok()?
     };
     Some((
-        LogicPathTarget::Var(VarAtomBase::new(id, 0, target_width - 1)),
+        LogicPathTarget::Var(VarAtomBase::new(id, 0, array_width - 1)),
         expr,
         sources,
         previous_sources,
     ))
+}
+
+fn replace_slt_slice(
+    arena: &mut SLTNodeArena<SourceVarId>,
+    current: NodeId,
+    replacement: NodeId,
+    lsb: usize,
+    replacement_width: usize,
+    total_width: usize,
+) -> Option<NodeId> {
+    if lsb == 0 && replacement_width == total_width {
+        return Some(replacement);
+    }
+    let end = lsb.checked_add(replacement_width)?;
+    if end > total_width {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(3);
+    if end < total_width {
+        let upper_width = total_width - end;
+        let upper = arena
+            .alloc(SLTNode::Slice {
+                expr: current,
+                access: BitAccess::new(end, total_width - 1),
+            })
+            .ok()?;
+        parts.push((upper, upper_width));
+    }
+    parts.push((replacement, replacement_width));
+    if lsb != 0 {
+        let lower = arena
+            .alloc(SLTNode::Slice {
+                expr: current,
+                access: BitAccess::new(0, lsb - 1),
+            })
+            .ok()?;
+        parts.push((lower, lsb));
+    }
+    arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
 fn lower_assignment(
@@ -4014,20 +4063,37 @@ fn dynamic_array_element_lvalue(
     name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<(SourceVarId, usize, sv::ir::ConstExpr)> {
+) -> Option<(SourceVarId, usize, sv::ir::ConstExpr, BitAccess)> {
     let sv::ir::LValue::Select { name, msb, lsb, .. } = lvalue else {
         return None;
     };
-    let (id, element_width) = dynamic_array_element_access(
-        name,
-        msb,
-        lsb,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-    )?;
-    Some((id, element_width, lsb.clone()))
+    let id = *name_to_id.get(name)?;
+    let variable = variables.get(&id)?;
+    let element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
+    let is_dynamic = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
+        .is_none()
+        || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
+    if !is_dynamic {
+        return None;
+    }
+    let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
+    let (lsb_base, lsb_offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
+    if msb_base != lsb_base
+        || (element_width > 1
+            && !dynamic_array_base_has_stride(
+                msb_base,
+                i128::try_from(element_width).ok()?,
+                constants,
+                parameter_types,
+            ))
+    {
+        return None;
+    }
+    let offset = lsb.clone();
+    let msb = usize::try_from(msb_offset).ok()?;
+    let lsb = usize::try_from(lsb_offset).ok()?;
+    let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
+    (access.msb < element_width).then_some((id, element_width, offset, access))
 }
 
 fn dynamic_array_element_access(
@@ -4103,27 +4169,27 @@ fn dynamic_array_index_guard_slt<A: std::hash::Hash + Eq + Clone>(
     index: NodeId,
     element_count: usize,
 ) -> Option<(NodeId, NodeId)> {
-    let mut valid = None;
-    for element in 0..element_count {
-        let element_literal = arena
-            .alloc(SLTNode::Constant(
-                BigUint::from(element),
-                BigUint::default(),
-                64,
-                false,
-            ))
-            .ok()?;
-        let matches = arena
-            .alloc(SLTNode::Binary(index, BinaryOp::EqCase, element_literal))
-            .ok()?;
-        valid = Some(match valid {
-            Some(previous) => arena
-                .alloc(SLTNode::Binary(previous, BinaryOp::Or, matches))
-                .ok()?,
-            None => matches,
-        });
-    }
-    let valid = valid?;
+    let element_count = BigUint::from(element_count);
+    let two_state_index = arena
+        .alloc(SLTNode::Unary(UnaryOp::ToTwoState, index))
+        .ok()?;
+    let known = arena
+        .alloc(SLTNode::Binary(index, BinaryOp::EqCase, two_state_index))
+        .ok()?;
+    let bound = arena
+        .alloc(SLTNode::Constant(
+            element_count,
+            BigUint::default(),
+            64,
+            false,
+        ))
+        .ok()?;
+    let in_range = arena
+        .alloc(SLTNode::Binary(index, BinaryOp::LtU, bound))
+        .ok()?;
+    let valid = arena
+        .alloc(SLTNode::Binary(known, BinaryOp::LogicAnd, in_range))
+        .ok()?;
     let zero = arena
         .alloc(SLTNode::Constant(
             BigUint::default(),
@@ -4210,35 +4276,36 @@ fn dynamic_array_index_guard_sir(
     index: celox_sir::RegisterId,
     element_count: usize,
 ) -> Option<(celox_sir::RegisterId, celox_sir::RegisterId)> {
-    let mut valid = None;
-    for element in 0..element_count {
-        let element_literal = builder.alloc_bit(64, false);
-        builder.emit(SIRInstruction::Imm(
-            element_literal,
-            SIRValue::new(u64::try_from(element).ok()?),
-        ));
-        let matches = builder.alloc_bit(1, false);
-        builder.emit(SIRInstruction::Binary(
-            matches,
-            index,
-            BinaryOp::EqCase,
-            element_literal,
-        ));
-        valid = Some(match valid {
-            Some(previous) => {
-                let combined = builder.alloc_bit(1, false);
-                builder.emit(SIRInstruction::Binary(
-                    combined,
-                    previous,
-                    BinaryOp::Or,
-                    matches,
-                ));
-                combined
-            }
-            None => matches,
-        });
-    }
-    let valid = valid?;
+    let element_count = u64::try_from(element_count).ok()?;
+    let two_state_index = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Unary(
+        two_state_index,
+        UnaryOp::ToTwoState,
+        index,
+    ));
+    let known = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(
+        known,
+        index,
+        BinaryOp::EqCase,
+        two_state_index,
+    ));
+    let bound = builder.alloc_bit(64, false);
+    builder.emit(SIRInstruction::Imm(bound, SIRValue::new(element_count)));
+    let in_range = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(
+        in_range,
+        index,
+        BinaryOp::LtU,
+        bound,
+    ));
+    let valid = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(
+        valid,
+        known,
+        BinaryOp::LogicAnd,
+        in_range,
+    ));
     let zero = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
     let safe_index = builder.alloc_bit(64, false);
@@ -4554,7 +4621,7 @@ fn ff_targets(
             dynamic_array_element_lvalue(lvalue, variables, name_to_id, constants, parameter_types);
         let target = lvalue_atom(lvalue, variables, name_to_id, constants, parameter_types)
             .or_else(|| {
-                dynamic.as_ref().and_then(|(id, _, _)| {
+                dynamic.as_ref().and_then(|(id, _, _, _)| {
                     variables
                         .get(id)
                         .and_then(|variable| variable.width.checked_sub(1))
@@ -4652,7 +4719,7 @@ fn emit_ff_assignment_stores(
             );
             let target = lvalue_atom(lvalue, variables, name_to_id, constants, parameter_types)
                 .or_else(|| {
-                    dynamic.as_ref().and_then(|(id, _, _)| {
+                    dynamic.as_ref().and_then(|(id, _, _, _)| {
                         variables
                             .get(id)
                             .and_then(|variable| variable.width.checked_sub(1))
@@ -4664,7 +4731,7 @@ fn emit_ff_assignment_stores(
             }
             let target_width = dynamic.as_ref().map_or_else(
                 || target.access.msb - target.access.lsb + 1,
-                |(_, width, _)| *width,
+                |(_, _, _, access)| access.msb - access.lsb + 1,
             );
             let rhs_expr = expr_for_state_mode(assignment.assignment().rhs(), four_state);
             let rhs = match &rhs_expr {
@@ -4737,7 +4804,7 @@ fn emit_ff_assignment_stores(
                 builder.emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, rhs));
                 two_state
             };
-            if let Some((_, element_width, offset)) = dynamic {
+            if let Some((_, element_width, offset, access)) = dynamic {
                 // Flush preceding static assignments before a dynamic store so
                 // the direct element write observes the current working value.
                 if value_dirty {
@@ -4775,7 +4842,7 @@ fn emit_ff_assignment_stores(
                     SIROffset::Element {
                         index,
                         element_width,
-                        bit_offset: 0,
+                        bit_offset: access.lsb,
                         dynamic_bit_offset: None,
                     },
                     target_width,
@@ -4806,7 +4873,7 @@ fn emit_ff_assignment_stores(
                     SIROffset::Element {
                         index,
                         element_width,
-                        bit_offset: 0,
+                        bit_offset: access.lsb,
                         dynamic_bit_offset: None,
                     },
                     target_width,
