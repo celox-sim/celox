@@ -11,7 +11,7 @@ use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 use veryl_path::PathSet;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(not(target_arch = "wasm32"))]
 use celox::SimBackend;
 #[cfg(not(target_arch = "wasm32"))]
 use layout::{build_event_map, build_hierarchy_node, build_signal_layout};
@@ -642,12 +642,15 @@ fn apply_options<'a, T>(
 }
 
 // ---------------------------------------------------------------------------
-//  Process-global JIT cache (native only)
+//  Process-global compiled-code cache (native only)
 // ---------------------------------------------------------------------------
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 type SharedCode = celox::SharedNativeCode;
-#[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
 type SharedCode = celox::SharedJitCode;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -819,7 +822,7 @@ fn napi_runtime_error(
     }
 }
 
-/// Low-level handle wrapping a JIT backend and optional VCD writer.
+/// Low-level handle wrapping the default backend and optional VCD writer.
 ///
 /// JS holds this as an opaque class; all operations go through methods.
 #[cfg(not(target_arch = "wasm32"))]
@@ -871,7 +874,7 @@ impl NativeSimulatorHandle {
 #[napi]
 impl NativeSimulatorHandle {
     /// Build a full simulator, extract metadata, cache the compiled code,
-    /// and return the handle with a JitBackend (and optional VcdWriter).
+    /// and return the handle with the default backend (and optional VcdWriter).
     fn build_and_cache(
         sim: celox::Simulator,
         vcd_path: Option<&str>,
@@ -925,7 +928,7 @@ impl NativeSimulatorHandle {
             None
         };
 
-        // Extract JitBackend from Simulator (drops runtime metadata which is no longer needed)
+        // Extract the backend from Simulator (drops runtime metadata which is no longer needed)
         let backend = sim.into_backend();
 
         Ok(Self {
@@ -943,9 +946,9 @@ impl NativeSimulatorHandle {
 
     /// Create a handle from a cached build (shared compiled code + fresh memory).
     fn from_cached(cached: &CachedBuild, vcd_path: Option<&str>) -> Result<Self> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let backend = celox::NativeBackend::from_shared(Arc::clone(&cached.shared_code));
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let backend = celox::JitBackend::from_shared(Arc::clone(&cached.shared_code));
         let vcd_writer = if let Some(path) = vcd_path {
             Some(

@@ -665,10 +665,7 @@ fn test_hierarchical_dynamic_reads_preserve_wide_values() {
     );
 }
 
-#[cfg(any(
-    target_arch = "x86_64",
-    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn test_hierarchical_dynamic_array_read_uses_native_layout() {
     let code = r#"

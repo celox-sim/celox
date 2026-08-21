@@ -262,7 +262,7 @@ chmod +x "$mock_cargo_dir/cargo"
     export CARGO_BUILD_TARGET=hostile-target-triple
     HELIODOR_RESULTS_DIR="$TMP/mock-build-results"
     HELIODOR_BUILD_CELOX_RUNNER=1
-    export HELIODOR_CELOX_CARGO_FEATURES=experimental-arm64-backend
+    export HELIODOR_CELOX_CARGO_FEATURES=
     HELIODOR_CELOX_TARGET_DIR="$TMP/fixed-gate-target"
     HELIODOR_CELOX_CARGO_PROFILE=release
     CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/celox-heliodor"
@@ -273,10 +273,9 @@ target_arg_line="$(grep -n -x -- '--target-dir' "$TMP/cargo-args" | cut -d: -f1)
 assert_eq "$(sed -n "$((target_arg_line + 1))p" "$TMP/cargo-args")" \
     "$TMP/fixed-gate-target" "explicit Cargo target directory argument"
 grep -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
-feature_arg_line="$(grep -n -x -- '--features' "$TMP/cargo-args" | cut -d: -f1)"
-[[ -n "$feature_arg_line" ]] || fail "Celox build omitted --features"
-assert_eq "$(sed -n "$((feature_arg_line + 1))p" "$TMP/cargo-args")" \
-    experimental-arm64-backend "Celox Cargo features"
+if grep -qx -- '--features' "$TMP/cargo-args"; then
+    fail "default Celox build unexpectedly passed --features"
+fi
 grep -qx -- 'celox-bench' "$TMP/cargo-args" || fail "Celox build did not select celox-bench"
 grep -qx -- 'celox-heliodor' "$TMP/cargo-args" || fail "Celox build did not select celox-heliodor"
 assert_eq "$(sed -n '1p' "$TMP/cargo-env")" unset "CARGO_TARGET_DIR neutralization"

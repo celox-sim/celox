@@ -143,7 +143,7 @@ macro_rules! all_backends {
                 #[test]
                 #[cfg(any(
                     target_arch = "x86_64",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    target_arch = "aarch64"
                 ))]
                 $(#[$meta])*
                 #[allow(unused_mut, unused_variables)]

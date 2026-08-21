@@ -86,7 +86,7 @@ enum CeloxHeliodorError {
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
     #[error("native image container failed: {0}")]
     NativeImage(#[from] celox::NativeImageContainerError),
@@ -163,7 +163,10 @@ fn run() -> Result<(), CeloxHeliodorError> {
         native_profile_blocks: cli.native_profile_blocks,
         pass_overrides: cli.pass_overrides,
         native_memory_width: cli.native_memory_width.unwrap_or({
-            if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen"))) {
+            if cfg!(any(
+                feature = "x86_64-codegen",
+                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+            )) {
                 128
             } else {
                 64
@@ -172,9 +175,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
         x86_slp: cli
             .x86_slp
             .map(|value| matches!(value, OnOff::On))
-            .unwrap_or(cfg!(all(
-                target_arch = "x86_64",
-                not(feature = "arm64-codegen")
+            .unwrap_or(cfg!(any(
+                feature = "x86_64-codegen",
+                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
             ))),
     };
     if opts.native_image_output.is_some() && !opts.compile_only {
@@ -214,27 +217,49 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--dump-ir-and-run requires --dump-ir-dir",
         });
     }
-    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
-    if opts.dump_ir_dir.is_some() {
+    #[cfg(any(
+        all(target_arch = "x86_64", feature = "arm64-codegen"),
+        all(target_arch = "aarch64", feature = "x86_64-codegen")
+    ))]
+    if opts.dump_ir_and_run {
         return Err(CeloxHeliodorError::InvalidConfiguration {
-            message: "--dump-ir-dir is unavailable when generating AArch64 code on x86-64",
+            message: "--dump-ir-and-run is unavailable during cross-codegen",
+        });
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
+    if matches!(opts.backend, Backend::Native) && !opts.compile_only {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "AArch64 cross-codegen requires --compile-only on an x86-64 host",
+        });
+    }
+    #[cfg(all(target_arch = "aarch64", feature = "x86_64-codegen"))]
+    if matches!(opts.backend, Backend::Native) && !opts.compile_only {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "x86-64 cross-codegen requires --compile-only on an AArch64 host",
         });
     }
     #[cfg(not(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )))]
     if matches!(opts.backend, Backend::Native) {
         return Err(CeloxHeliodorError::InvalidConfiguration {
-            message: "the custom native backend is unavailable; enable experimental-arm64-backend on AArch64",
+            message: "the custom native backend is unavailable on this target",
         });
     }
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     ))]
+    #[cfg_attr(
+        any(
+            all(target_arch = "x86_64", feature = "arm64-codegen"),
+            all(target_arch = "aarch64", feature = "x86_64-codegen")
+        ),
+        allow(unused_mut)
+    )]
     let mut native_image = match &opts.native_image_input {
         Some(path) => Some(celox::NativeProgramImage::from_container_bytes(&fs::read(
             path,
@@ -244,7 +269,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
     #[cfg(not(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        target_arch = "aarch64"
     )))]
     let native_image: Option<()> = None;
     let (sources, metadata): (Vec<(String, PathBuf)>, Option<Metadata>) = if native_image.is_some()
@@ -300,186 +325,213 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 message: "--dump-ir-dir is only supported with --backend native",
             });
         }
-        fs::create_dir_all(&output_dir)?;
-        let trace_result = builder
-            .trace_pre_optimized_sir()
-            .trace_post_optimized_sir()
-            .trace_mir()
-            .build_with_trace();
-        let celox::CompilationTraceResult { res, mut trace } = trace_result;
-        let compile_elapsed = total_start.elapsed();
-        let pre_sir_path = output_dir.join("pre_optimized.sir");
-        let sir_path = output_dir.join("post_optimized.sir");
-        let pre_optimized_sir = trace.format_pre_optimized_sir();
-        let sir = trace.format_post_optimized_sir();
-        if let Some(pre_optimized_sir) = &pre_optimized_sir {
-            fs::write(&pre_sir_path, pre_optimized_sir)?;
-            eprintln!(
-                "wrote pre-optimized SIR ({} bytes) to {}",
-                pre_optimized_sir.len(),
-                pre_sir_path.display()
-            );
-        }
-        if let Some(sir) = &sir {
-            fs::write(&sir_path, sir)?;
-            eprintln!(
-                "wrote post-optimized SIR ({} bytes) to {}",
-                sir.len(),
-                sir_path.display()
-            );
-        }
-        let mut sim = res?;
-        let _pre_optimized_sir = pre_optimized_sir.ok_or(CeloxHeliodorError::MissingTrace {
-            artifact: "pre-optimized SIR",
-        })?;
-        let _sir = sir.ok_or(CeloxHeliodorError::MissingTrace {
-            artifact: "post-optimized SIR",
-        })?;
-        let native_sir =
-            trace
-                .native_optimized_sir
-                .take()
-                .ok_or(CeloxHeliodorError::MissingTrace {
-                    artifact: "native optimized SIR",
-                })?;
-        let mir = trace
-            .mir
-            .take()
-            .ok_or(CeloxHeliodorError::MissingTrace { artifact: "MIR" })?;
-        let reactive_graph =
-            trace
-                .reactive_event_graph
-                .take()
-                .ok_or(CeloxHeliodorError::MissingTrace {
-                    artifact: "reactive event graph",
-                })?;
-        let state_layout =
-            trace
-                .native_state_layout
-                .take()
-                .ok_or(CeloxHeliodorError::MissingTrace {
-                    artifact: "native state-layout analysis",
-                })?;
-        let native_sir_path = output_dir.join("native_optimized.sir");
-        let mir_path = output_dir.join("mir.txt");
-        let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
-        let state_layout_path = output_dir.join("native_state_layout.txt");
-        fs::write(&native_sir_path, &native_sir)?;
-        fs::write(&mir_path, &mir)?;
-        fs::write(&reactive_graph_path, &reactive_graph)?;
-        fs::write(&state_layout_path, &state_layout)?;
-        eprintln!(
-            "wrote native optimized SIR ({} bytes) to {}",
-            native_sir.len(),
-            native_sir_path.display()
-        );
-        eprintln!(
-            "wrote full native MIR ({} bytes) to {}",
-            mir.len(),
-            mir_path.display()
-        );
-        eprintln!(
-            "wrote reactive event graph ({} bytes) to {}",
-            reactive_graph.len(),
-            reactive_graph_path.display()
-        );
-        eprintln!(
-            "wrote native state-layout analysis ({} bytes) to {}",
-            state_layout.len(),
-            state_layout_path.display()
-        );
-        // The trace owns complete SIR programs and the formatted dumps are
-        // hundreds of MiB on Heliodor. They are not part of the generated JIT
-        // state; release them before timing that exact Simulator instance.
-        drop((
-            _pre_optimized_sir,
-            _sir,
-            native_sir,
-            mir,
-            reactive_graph,
-            state_layout,
-            trace,
-        ));
-        if opts.dump_ir_and_run {
-            let testbench =
-                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", feature = "arm64-codegen")
-            ))]
-            sim.start_native_execution_timing();
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                (limited.result, limited.ticks, limited.tick_limit_reached)
-            } else {
-                (run_compiled_testbench(&mut sim, &testbench), 0, false)
-            };
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", feature = "arm64-codegen")
-            ))]
-            let jit_execute_elapsed = sim
-                .finish_native_execution_timing()
-                .expect("native execution timing was started")
-                .elapsed();
-            #[cfg(not(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", feature = "arm64-codegen")
-            )))]
-            let jit_execute_elapsed = Duration::ZERO;
-            let execute_elapsed = execute_start.elapsed();
-            let execute_cpu_elapsed = process_cpu_time()
-                .zip(execute_cpu_start)
-                .map(|(end, start)| end.saturating_sub(start));
-            print_celox_timing(
-                &opts.test,
-                compile_elapsed,
-                execute_elapsed,
-                Some(jit_execute_elapsed),
-                execute_cpu_elapsed,
-            );
-            if opts.tick_limit.is_some() {
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        )))]
+        unreachable!("native backend availability checked above");
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        ))]
+        {
+            fs::create_dir_all(&output_dir)?;
+            let (compiled, mut trace) = builder
+                .trace_pre_optimized_sir()
+                .trace_post_optimized_sir()
+                .trace_mir()
+                .compile_native_with_trace()?;
+            if let Some(output_path) = &opts.native_image_output {
+                if let Some(parent) = output_path
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                {
+                    fs::create_dir_all(parent)?;
+                }
+                compiled.write_image(output_path)?;
                 println!(
-                    "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
-                    opts.test, ticks, tick_limit_reached
+                    "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
+                    opts.test,
+                    output_path.display()
                 );
             }
-            let elapsed = total_start.elapsed();
-            return match result {
-                TestResult::Pass if tick_limit_reached => {
+            let compile_elapsed = total_start.elapsed();
+            let pre_sir_path = output_dir.join("pre_optimized.sir");
+            let sir_path = output_dir.join("post_optimized.sir");
+            let pre_optimized_sir = trace.format_pre_optimized_sir();
+            let sir = trace.format_post_optimized_sir();
+            if let Some(pre_optimized_sir) = &pre_optimized_sir {
+                fs::write(&pre_sir_path, pre_optimized_sir)?;
+                eprintln!(
+                    "wrote pre-optimized SIR ({} bytes) to {}",
+                    pre_optimized_sir.len(),
+                    pre_sir_path.display()
+                );
+            }
+            if let Some(sir) = &sir {
+                fs::write(&sir_path, sir)?;
+                eprintln!(
+                    "wrote post-optimized SIR ({} bytes) to {}",
+                    sir.len(),
+                    sir_path.display()
+                );
+            }
+            let _pre_optimized_sir = pre_optimized_sir.ok_or(CeloxHeliodorError::MissingTrace {
+                artifact: "pre-optimized SIR",
+            })?;
+            let _sir = sir.ok_or(CeloxHeliodorError::MissingTrace {
+                artifact: "post-optimized SIR",
+            })?;
+            let native_sir =
+                trace
+                    .native_optimized_sir
+                    .take()
+                    .ok_or(CeloxHeliodorError::MissingTrace {
+                        artifact: "native optimized SIR",
+                    })?;
+            let mir = trace
+                .mir
+                .take()
+                .ok_or(CeloxHeliodorError::MissingTrace { artifact: "MIR" })?;
+            let reactive_graph =
+                trace
+                    .reactive_event_graph
+                    .take()
+                    .ok_or(CeloxHeliodorError::MissingTrace {
+                        artifact: "reactive event graph",
+                    })?;
+            let state_layout =
+                trace
+                    .native_state_layout
+                    .take()
+                    .ok_or(CeloxHeliodorError::MissingTrace {
+                        artifact: "native state-layout analysis",
+                    })?;
+            let native_sir_path = output_dir.join("native_optimized.sir");
+            let mir_path = output_dir.join("mir.txt");
+            let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
+            let state_layout_path = output_dir.join("native_state_layout.txt");
+            fs::write(&native_sir_path, &native_sir)?;
+            fs::write(&mir_path, &mir)?;
+            fs::write(&reactive_graph_path, &reactive_graph)?;
+            fs::write(&state_layout_path, &state_layout)?;
+            eprintln!(
+                "wrote native optimized SIR ({} bytes) to {}",
+                native_sir.len(),
+                native_sir_path.display()
+            );
+            eprintln!(
+                "wrote full native MIR ({} bytes) to {}",
+                mir.len(),
+                mir_path.display()
+            );
+            eprintln!(
+                "wrote reactive event graph ({} bytes) to {}",
+                reactive_graph.len(),
+                reactive_graph_path.display()
+            );
+            eprintln!(
+                "wrote native state-layout analysis ({} bytes) to {}",
+                state_layout.len(),
+                state_layout_path.display()
+            );
+            // The trace owns complete SIR programs and the formatted dumps are
+            // hundreds of MiB on Heliodor. They are not part of the generated JIT
+            // state; release them before timing that exact Simulator instance.
+            drop((
+                _pre_optimized_sir,
+                _sir,
+                native_sir,
+                mir,
+                reactive_graph,
+                state_layout,
+                trace,
+            ));
+            if opts.dump_ir_and_run {
+                let mut sim = compiled.initialize()?;
+                let testbench = compile_initial_testbench(&sim)
+                    .ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+                #[cfg(any(
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+                ))]
+                sim.start_native_execution_timing();
+                let execute_cpu_start = process_cpu_time();
+                let execute_start = Instant::now();
+                let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                    let limited =
+                        run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                    (limited.result, limited.ticks, limited.tick_limit_reached)
+                } else {
+                    (run_compiled_testbench(&mut sim, &testbench), 0, false)
+                };
+                #[cfg(any(
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+                ))]
+                let jit_execute_elapsed = sim
+                    .finish_native_execution_timing()
+                    .expect("native execution timing was started")
+                    .elapsed();
+                #[cfg(not(any(
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+                )))]
+                let jit_execute_elapsed = Duration::ZERO;
+                let execute_elapsed = execute_start.elapsed();
+                let execute_cpu_elapsed = process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start));
+                print_celox_timing(
+                    &opts.test,
+                    compile_elapsed,
+                    execute_elapsed,
+                    Some(jit_execute_elapsed),
+                    execute_cpu_elapsed,
+                );
+                if opts.tick_limit.is_some() {
                     println!(
-                        "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
-                        opts.test,
-                        elapsed.as_nanos()
+                        "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
+                        opts.test, ticks, tick_limit_reached
                     );
-                    Ok(())
                 }
-                TestResult::Pass => {
-                    println!(
-                        "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
-                        opts.test,
-                        elapsed.as_nanos()
-                    );
-                    Ok(())
-                }
-                TestResult::Fail(message) => {
-                    println!(
-                        "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
-                        opts.test,
-                        elapsed.as_nanos()
-                    );
-                    Err(CeloxHeliodorError::TestFailed { message })
-                }
-            };
+                let elapsed = total_start.elapsed();
+                return match result {
+                    TestResult::Pass if tick_limit_reached => {
+                        println!(
+                            "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
+                            opts.test,
+                            elapsed.as_nanos()
+                        );
+                        Ok(())
+                    }
+                    TestResult::Pass => {
+                        println!(
+                            "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
+                            opts.test,
+                            elapsed.as_nanos()
+                        );
+                        Ok(())
+                    }
+                    TestResult::Fail(message) => {
+                        println!(
+                            "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
+                            opts.test,
+                            elapsed.as_nanos()
+                        );
+                        Err(CeloxHeliodorError::TestFailed { message })
+                    }
+                };
+            }
+            println!(
+                "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
+                opts.test,
+                total_start.elapsed().as_nanos()
+            );
+            return Ok(());
         }
-        println!(
-            "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
-            opts.test,
-            total_start.elapsed().as_nanos()
-        );
-        return Ok(());
     }
     if opts.compile_only {
         let compile_start = Instant::now();
@@ -487,7 +539,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                target_arch = "aarch64"
             ))]
             Backend::Native => {
                 let compiled = builder.compile_native()?;
@@ -509,7 +561,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
             #[cfg(not(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                target_arch = "aarch64"
             )))]
             Backend::Native => unreachable!("native backend availability checked above"),
             Backend::Cranelift => {
@@ -544,9 +596,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
         execute_cpu_elapsed,
     ) = match opts.backend {
         #[cfg(any(
-            target_arch = "x86_64",
-            feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
         Backend::Native => {
             let mut sim = if let Some(image_path) = &opts.native_image_input {
@@ -591,9 +642,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
             )
         }
         #[cfg(not(any(
-            target_arch = "x86_64",
-            feature = "arm64-codegen",
-            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         )))]
         Backend::Native => unreachable!("native backend availability checked above"),
         Backend::Cranelift => {

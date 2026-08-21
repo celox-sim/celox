@@ -18,10 +18,10 @@ designs without installing a local toolchain.
 - Write VCD waveforms for GTKWave, Surfer, and other viewers.
 - Override value parameters and include test-only Veryl sources.
 
-Celox compiles the design when the simulator is created. x86-64 hosts use the
-native backend by default; other native hosts use the Cranelift JIT, and the
-Playground uses WebAssembly. Backend selection is normally automatic and does
-not change the TypeScript testbench API.
+Celox compiles the design when the simulator is created. x86-64 and AArch64
+targets use the custom native backend by default; other native targets use the
+Cranelift JIT, and the Playground uses WebAssembly. Backend selection is normally
+automatic and does not change the TypeScript testbench API.
 
 ## Choose a simulation style
 

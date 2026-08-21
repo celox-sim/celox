@@ -1,7 +1,7 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(any(
     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    target_arch = "aarch64"
 ))]
 
 use celox::{MemoryLayout, MemoryLayoutMode, OptimizedSir, Simulator, SimulatorBuilder};

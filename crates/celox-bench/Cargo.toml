@@ -10,8 +10,8 @@ edition.workspace     = true
 
 [features]
 default = []
-experimental-arm64-backend = ["celox/experimental-arm64-backend"]
 arm64-codegen = ["celox/arm64-codegen"]
+x86_64-codegen = ["celox/x86_64-codegen"]
 
 [dependencies]
 celox           = { path = "../celox" }

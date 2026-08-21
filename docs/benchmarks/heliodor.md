@@ -1,8 +1,10 @@
 # Heliodor Linux Benchmark
 
 Heliodor is Celox's large external Veryl workload. It boots a pinned Linux image
-and compares Celox with synchronous `veryl-cc` execution using the same design
-revision and input workload.
+and compares Celox's native backend with synchronous `veryl-cc` execution using
+the same design revision and input workload. Cranelift Linux boot measurements
+are not collected or published because their runtime is outside the useful scale
+of this comparison.
 
 ## What the benchmark answers
 

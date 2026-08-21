@@ -135,29 +135,6 @@ jobs:
           fi
           echo "result_file=$result_file" >> "$GITHUB_OUTPUT"
 
-          runner_file="$(dirname "$result_file")/celox-target/release/celox-heliodor"
-          if [ ! -x "$runner_file" ]; then
-            echo "The Heliodor gate did not produce an executable Celox runner" >&2
-            exit 1
-          fi
-          echo "runner_file=$(realpath -e "$runner_file")" >> "$GITHUB_OUTPUT"
-
-      - name: Boot Linux with the Cranelift backend on the same host
-        if: steps.gate.outputs.status == '0'
-        shell: bash
-        env:
-          HELIODOR_DIR: ${{ github.workspace }}/target/heliodor/source
-          HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor/results/cranelift-x86_64
-          HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor/tools
-          HELIODOR_RUNNERS: celox-cranelift
-          HELIODOR_TESTS: test_soc_linux_boot
-          HELIODOR_TIMEOUT_SEC: "1200"
-          HELIODOR_CELOX_CARGO_PROFILE: release
-          HELIODOR_BUILD_CELOX_RUNNER: "0"
-          CELOX_RUNNER_BIN: ${{ steps.gate.outputs.runner_file }}
-          CELOX_OPT_LEVEL: O2
-        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-cranelift-output.txt
-
       - name: Capture benchmark host final state
         if: always()
         shell: bash
@@ -204,15 +181,12 @@ jobs:
           path: |
             heliodor-host.txt
             heliodor-output.txt
-            heliodor-cranelift-output.txt
             heliodor-converted.json
             heliodor-jit.json
             target/heliodor/results/gate_*/results.tsv
             target/heliodor/results/gate_*/*.log
             target/heliodor/results/gate_*/*.before
             target/heliodor/results/gate_*/*.after
-            target/heliodor/results/cranelift-x86_64/results.tsv
-            target/heliodor/results/cranelift-x86_64/*.log
 
       - name: Enforce fixed gate result
         if: always() && steps.gate.outputs.status != '0'
@@ -239,7 +213,6 @@ jobs:
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_TIMEOUT_SEC: "1200"
       HELIODOR_CELOX_CARGO_PROFILE: release
-      HELIODOR_CELOX_CARGO_FEATURES: experimental-arm64-backend
       CELOX_OPT_LEVEL: O2
     steps:
       - uses: actions/checkout@v7
@@ -276,7 +249,6 @@ jobs:
       HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-arm64/tools
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_CELOX_CARGO_PROFILE: release
-      HELIODOR_CELOX_CARGO_FEATURES: experimental-arm64-backend
       CELOX_OPT_LEVEL: O2
     steps:
       - uses: actions/checkout@v7
@@ -293,14 +265,6 @@ jobs:
           HELIODOR_TIMEOUT_SEC: "1200"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
 
-      - name: Boot Linux with the Cranelift backend on ARM64
-        shell: bash
-        env:
-          HELIODOR_RUNNERS: celox-cranelift
-          HELIODOR_TIMEOUT_SEC: "3600"
-          HELIODOR_BUILD_CELOX_RUNNER: "0"
-        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-cranelift-output.txt
-
       - name: Upload nightly ARM64 Linux boot results
         if: always()
         uses: actions/upload-artifact@v7
@@ -308,7 +272,6 @@ jobs:
           name: heliodor-arm64-linux-boot-full
           path: |
             heliodor-arm64-output.txt
-            heliodor-arm64-cranelift-output.txt
             target/heliodor-arm64/results/results.tsv
             target/heliodor-arm64/results/*.log
 
@@ -342,15 +305,13 @@ jobs:
         shell: bash
         run: |
           native_results="$(find artifacts/x86_64 -path '*/gate_*/results.tsv' -type f -print -quit)"
-          cranelift_results="$(find artifacts/x86_64 -path '*/cranelift-x86_64/results.tsv' -type f -print -quit)"
           arm64_results="$(find artifacts/native-aarch64 -name results.tsv -type f -print -quit)"
-          if [[ -z "$native_results" || -z "$cranelift_results" || -z "$arm64_results" ]]; then
+          if [[ -z "$native_results" || -z "$arm64_results" ]]; then
             echo "Could not find every Linux boot results.tsv artifact" >&2
             exit 1
           fi
           node scripts/convert-heliodor-bench.mjs \
             "$native_results" heliodor-published.json \
-            --cranelift-results "$cranelift_results" \
             --arm64-results "$arm64_results"
 
       - name: Store Heliodor benchmark history
