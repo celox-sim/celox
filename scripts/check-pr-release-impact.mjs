@@ -197,25 +197,76 @@ async function loadPullRequestCommits(repository, number) {
   }
 }
 
+async function loadMergeGroupPullRequests(repository, sha, baseRef) {
+  const baseBranch = baseRef.replace(/^refs\/heads\//, "");
+  const pullRequests = new Map();
+
+  for (let page = 1; ; page++) {
+    const batch = await githubJson(
+      `/repos/${repository}/commits/${sha}/pulls?per_page=100&page=${page}`,
+    );
+    for (const pullRequest of batch) {
+      if (pullRequest.base.ref === baseBranch) {
+        pullRequests.set(pullRequest.number, {
+          number: pullRequest.number,
+          title: pullRequest.title,
+        });
+      }
+    }
+    if (batch.length < 100) {
+      break;
+    }
+  }
+
+  if (pullRequests.size === 0) {
+    throw new Error(
+      `Merge group ${sha} has no pull requests targeting ${baseBranch}`,
+    );
+  }
+  return [...pullRequests.values()];
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const repository = process.env.GITHUB_REPOSITORY;
   const number = process.env.PR_NUMBER;
   const title = process.env.PR_TITLE;
+  const mergeGroupSha = process.env.MERGE_GROUP_SHA;
+  const mergeGroupBaseRef = process.env.MERGE_GROUP_BASE_REF;
+  const pullRequestMode = /^\d+$/.test(number ?? "") && Boolean(title);
+  const mergeGroupMode =
+    /^[0-9a-f]{40}$/.test(mergeGroupSha ?? "") &&
+    /^refs\/heads\/.+/.test(mergeGroupBaseRef ?? "");
   if (
     !repository ||
-    !/^\d+$/.test(number ?? "") ||
-    !title ||
-    !process.env.GH_TOKEN
+    !process.env.GH_TOKEN ||
+    pullRequestMode === mergeGroupMode
   ) {
     console.error(
-      "GITHUB_REPOSITORY, PR_NUMBER, PR_TITLE, and GH_TOKEN are required",
+      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE or MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
     );
     process.exit(1);
   }
 
   const major = Number.parseInt(readFileSync("VERSION", "utf8"), 10);
-  const commits = await loadPullRequestCommits(repository, number);
-  const errors = releaseImpactErrors(title, commits, { preMajor: major === 0 });
+  const pullRequests = pullRequestMode
+    ? [{ number: Number.parseInt(number, 10), title }]
+    : await loadMergeGroupPullRequests(
+        repository,
+        mergeGroupSha,
+        mergeGroupBaseRef,
+      );
+  const errors = [];
+  for (const pullRequest of pullRequests) {
+    const commits = await loadPullRequestCommits(
+      repository,
+      pullRequest.number,
+    );
+    errors.push(
+      ...releaseImpactErrors(pullRequest.title, commits, {
+        preMajor: major === 0,
+      }).map((error) => `#${pullRequest.number}: ${error}`),
+    );
+  }
   if (errors.length > 0) {
     console.error("Commit messages exceed the pull request release impact:");
     for (const error of errors) {

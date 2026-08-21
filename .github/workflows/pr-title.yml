@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the trusted title validator
-        if: github.event_name == 'pull_request_target'
         uses: actions/checkout@v7
         with:
           # An older PR's base SHA can predate the validator itself. Always use
@@ -44,6 +43,10 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: node scripts/check-pr-release-impact.mjs
 
-      - name: Preserve the required check in the merge queue
+      - name: Revalidate merge group release impact
         if: github.event_name == 'merge_group'
-        run: echo "Pull request titles are validated before entering the merge queue."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+        run: node scripts/check-pr-release-impact.mjs

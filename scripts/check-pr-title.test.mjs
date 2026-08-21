@@ -45,8 +45,16 @@ test("guards the repository setting that exposes the title to release automation
     workflow,
     /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/,
   );
+  assert.doesNotMatch(
+    workflow,
+    /Check out the trusted title validator\n\s+if:/,
+  );
   assert.match(
     workflow,
     /Validate release merge settings\n\s+if: github\.event_name == 'pull_request_target'/,
+  );
+  assert.match(
+    workflow,
+    /Revalidate merge group release impact[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
   );
 });
