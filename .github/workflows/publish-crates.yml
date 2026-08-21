@@ -2,13 +2,19 @@ name: Publish Rust Crates
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable release tag to resume from a numbered recovery tag
+        required: false
+        type: string
 
 concurrency:
   group: crates-publish-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.ref_name }}
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  SOURCE_TAG: ${{ github.ref_name }}
 
 permissions:
   contents: read
@@ -29,6 +35,14 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" != "tag" || ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Run this workflow from a v-prefixed stable release tag." >&2
             exit 1
+          fi
+          if [[ "$SOURCE_TAG" != "$RELEASE_TAG" ]]; then
+            recovery_prefix="$RELEASE_TAG-recovery."
+            recovery_number="${SOURCE_TAG#"$recovery_prefix"}"
+            if [[ "$SOURCE_TAG" != "$recovery_prefix"* || ! "$recovery_number" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Recovery source tag must match $RELEASE_TAG-recovery.N." >&2
+              exit 1
+            fi
           fi
           expected_tag="v$(tr -d '\r\n' < VERSION)"
           if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
