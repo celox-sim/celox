@@ -254,6 +254,7 @@ jobs:
     needs: [validate-release, test]
     runs-on: ubuntu-latest
     name: Publish
+    environment: npm
     permissions:
       contents: write
       id-token: write
@@ -360,6 +361,7 @@ jobs:
     needs: [validate-release, publish]
     runs-on: ubuntu-latest
     name: Publish JS Packages
+    environment: npm
     permissions:
       contents: read
       id-token: write
