@@ -749,7 +749,12 @@ fn run_units(
 /// # Safety
 /// Callers must bound `offset + 8` inside the allocation.
 unsafe fn read_word(memory: &[u64], offset: usize) -> u64 {
-    unsafe { (memory.as_ptr() as *const u8).add(offset).cast::<u64>().read_unaligned() }
+    unsafe {
+        (memory.as_ptr() as *const u8)
+            .add(offset)
+            .cast::<u64>()
+            .read_unaligned()
+    }
 }
 
 /// A [`SimBackend`] that interprets the laid-out SIR instead of executing
