@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectMergeGroupPullRequests,
   commitReleaseImpact,
+  releasePolicyFromFiles,
   releaseImpactErrors,
   titleReleaseImpact,
 } from "./check-pr-release-impact.mjs";
@@ -10,11 +12,82 @@ import {
 const commit = (message, sha = "0123456789abcdef") => ({ message, sha });
 
 test("maps pull request titles to their pre-major release policy", () => {
-  const options = { preMajor: true };
+  const options = { preMajor: true, bumpPatchForMinorPreMajor: true };
   assert.equal(titleReleaseImpact("chore: update metadata", options), 0);
   assert.equal(titleReleaseImpact("fix: repair output", options), 1);
   assert.equal(titleReleaseImpact("feat: add output", options), 1);
   assert.equal(titleReleaseImpact("feat(api)!: remove output", options), 3);
+});
+
+test("derives feature impact from the effective release configuration", () => {
+  assert.deepEqual(
+    releasePolicyFromFiles(
+      "0.3.1\n",
+      JSON.stringify({ "bump-patch-for-minor-pre-major": true }),
+    ),
+    { preMajor: true, bumpPatchForMinorPreMajor: true },
+  );
+  assert.deepEqual(
+    releasePolicyFromFiles(
+      "0.3.1\n",
+      JSON.stringify({
+        "bump-patch-for-minor-pre-major": true,
+        packages: { ".": { "bump-patch-for-minor-pre-major": false } },
+      }),
+    ),
+    { preMajor: true, bumpPatchForMinorPreMajor: false },
+  );
+  assert.equal(
+    titleReleaseImpact("feat: add output", {
+      preMajor: true,
+      bumpPatchForMinorPreMajor: false,
+    }),
+    2,
+  );
+});
+
+test("collects every open pull request represented in a merge group", () => {
+  assert.deepEqual(
+    collectMergeGroupPullRequests(
+      [
+        {
+          number: 1,
+          title: "fix: first",
+          state: "open",
+          base: { ref: "master" },
+        },
+        {
+          number: 2,
+          title: "feat: second",
+          state: "open",
+          base: { ref: "master" },
+        },
+        {
+          number: 1,
+          title: "fix: first",
+          state: "open",
+          base: { ref: "master" },
+        },
+        {
+          number: 3,
+          title: "fix: merged",
+          state: "closed",
+          base: { ref: "master" },
+        },
+        {
+          number: 4,
+          title: "fix: develop",
+          state: "open",
+          base: { ref: "develop" },
+        },
+      ],
+      "refs/heads/master",
+    ),
+    [
+      { number: 1, title: "fix: first" },
+      { number: 2, title: "feat: second" },
+    ],
+  );
 });
 
 test("detects every commit form consumed by release automation", () => {
@@ -118,7 +191,7 @@ test("rejects commit impact above the pull request title", () => {
     releaseImpactErrors(
       "chore: update metadata",
       [commit("feat!: remove output")],
-      { preMajor: true },
+      { preMajor: true, bumpPatchForMinorPreMajor: true },
     ),
     [
       '0123456789ab "feat!: remove output" has breaking impact, which exceeds the none pull request title',
@@ -143,7 +216,7 @@ test("allows the commits from the missed breaking-change pull request", () => {
         commit("docs(bench): remove cranelift boot series"),
         commit("fix(napi): use native backend on aarch64"),
       ],
-      { preMajor: true },
+      { preMajor: true, bumpPatchForMinorPreMajor: true },
     ),
     [],
   );

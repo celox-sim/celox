@@ -14,6 +14,32 @@ const PATCH_TYPES = new Set(["deps", "fix", "perf", "revert"]);
 
 const impactNames = ["none", "patch", "feature", "breaking", "forced"];
 
+function featureImpact({ preMajor, bumpPatchForMinorPreMajor }) {
+  return preMajor && bumpPatchForMinorPreMajor ? 1 : 2;
+}
+
+export function releasePolicyFromFiles(versionText, configText) {
+  const version = versionText.trim().match(/^(\d+)\.\d+\.\d+(?:[-+].*)?$/);
+  if (!version) {
+    throw new Error("VERSION must contain a semantic version");
+  }
+
+  const config = JSON.parse(configText);
+  const rootPackage = config.packages?.["."] ?? {};
+  const bumpPatchForMinorPreMajor =
+    rootPackage["bump-patch-for-minor-pre-major"] ??
+    config["bump-patch-for-minor-pre-major"] ??
+    false;
+  if (typeof bumpPatchForMinorPreMajor !== "boolean") {
+    throw new Error("bump-patch-for-minor-pre-major must be a boolean");
+  }
+
+  return {
+    preMajor: Number.parseInt(version[1], 10) === 0,
+    bumpPatchForMinorPreMajor,
+  };
+}
+
 // Release Please's parser accepts any non-whitespace type casing, optional
 // whitespace after the colon, and an empty description. It also parses
 // footer-looking lines as additional commits, so this intentionally examines
@@ -99,7 +125,7 @@ function hasReleaseAsFooter(message) {
   return false;
 }
 
-export function titleReleaseImpact(title, { preMajor }) {
+export function titleReleaseImpact(title, options) {
   const parsed = parseConventionalPrTitle(title);
   if (!parsed) {
     return null;
@@ -108,7 +134,7 @@ export function titleReleaseImpact(title, { preMajor }) {
     return 3;
   }
   if (parsed.type === "feat") {
-    return preMajor ? 1 : 2;
+    return featureImpact(options);
   }
   if (PATCH_TYPES.has(parsed.type)) {
     return 1;
@@ -119,7 +145,7 @@ export function titleReleaseImpact(title, { preMajor }) {
   return 0;
 }
 
-function parsedMessageReleaseImpact(message, { preMajor }) {
+function parsedMessageReleaseImpact(message, options) {
   const [subject = ""] = message.split(/\r?\n/, 1);
   if (!conventionalHeaderPattern.test(subject)) {
     return 0;
@@ -138,7 +164,7 @@ function parsedMessageReleaseImpact(message, { preMajor }) {
   if (
     headers.some((header) => header[1] === "feat" || header[1] === "feature")
   ) {
-    return preMajor ? 1 : 2;
+    return featureImpact(options);
   }
   if (
     headers.some((header) => PATCH_TYPES.has(header[1]))
@@ -218,33 +244,107 @@ async function loadPullRequestCommits(repository, number) {
   }
 }
 
-async function loadMergeGroupPullRequests(repository, sha, baseRef) {
-  const baseBranch = baseRef.replace(/^refs\/heads\//, "");
-  const pullRequests = new Map();
+async function loadRepositoryFile(repository, path, ref) {
+  const file = await githubJson(
+    `/repos/${repository}/contents/${path}?ref=${encodeURIComponent(ref)}`,
+  );
+  if (file.type !== "file" || file.encoding !== "base64") {
+    throw new Error(`${path} at ${ref} is not a base64-encoded file`);
+  }
+  return Buffer.from(file.content.replace(/\s/g, ""), "base64").toString(
+    "utf8",
+  );
+}
 
+async function loadCompareCommits(repository, baseSha, headSha) {
+  const commits = new Map();
+  let totalCommits;
+
+  for (let page = 1; ; page++) {
+    const comparison = await githubJson(
+      `/repos/${repository}/compare/${baseSha}...${headSha}?per_page=100&page=${page}`,
+    );
+    if (totalCommits === undefined) {
+      if (!Number.isSafeInteger(comparison.total_commits)) {
+        throw new Error("GitHub comparison did not return a commit count");
+      }
+      totalCommits = comparison.total_commits;
+    }
+    for (const commit of comparison.commits) {
+      commits.set(commit.sha, commit.sha);
+    }
+    if (commits.size >= totalCommits) {
+      break;
+    }
+    if (comparison.commits.length === 0) {
+      throw new Error(
+        `GitHub returned ${commits.size} of ${totalCommits} merge group commits`,
+      );
+    }
+  }
+
+  if (commits.size === 0) {
+    throw new Error(`Merge group ${baseSha}...${headSha} has no commits`);
+  }
+  return [...commits.keys()];
+}
+
+async function loadAssociatedPullRequests(repository, sha) {
+  const pullRequests = [];
   for (let page = 1; ; page++) {
     const batch = await githubJson(
       `/repos/${repository}/commits/${sha}/pulls?per_page=100&page=${page}`,
     );
-    for (const pullRequest of batch) {
-      if (pullRequest.base.ref === baseBranch) {
-        pullRequests.set(pullRequest.number, {
-          number: pullRequest.number,
-          title: pullRequest.title,
-        });
-      }
-    }
+    pullRequests.push(...batch);
     if (batch.length < 100) {
-      break;
+      return pullRequests;
+    }
+  }
+}
+
+export function collectMergeGroupPullRequests(associatedPullRequests, baseRef) {
+  const baseBranch = baseRef.replace(/^refs\/heads\//, "");
+  const pullRequests = new Map();
+  for (const pullRequest of associatedPullRequests) {
+    if (pullRequest.state === "open" && pullRequest.base.ref === baseBranch) {
+      pullRequests.set(pullRequest.number, {
+        number: pullRequest.number,
+        title: pullRequest.title,
+      });
     }
   }
 
-  if (pullRequests.size === 0) {
+  return [...pullRequests.values()];
+}
+
+async function loadMergeGroupPullRequests(
+  repository,
+  baseSha,
+  headSha,
+  baseRef,
+) {
+  const commits = await loadCompareCommits(repository, baseSha, headSha);
+  const associatedPullRequests = [];
+  for (let index = 0; index < commits.length; index += 10) {
+    const batches = await Promise.all(
+      commits
+        .slice(index, index + 10)
+        .map((sha) => loadAssociatedPullRequests(repository, sha)),
+    );
+    associatedPullRequests.push(...batches.flat());
+  }
+
+  const pullRequests = collectMergeGroupPullRequests(
+    associatedPullRequests,
+    baseRef,
+  );
+
+  if (pullRequests.length === 0) {
     throw new Error(
-      `Merge group ${sha} has no pull requests targeting ${baseBranch}`,
+      `Merge group ${baseSha}...${headSha} has no open pull requests targeting ${baseRef}`,
     );
   }
-  return [...pullRequests.values()];
+  return pullRequests;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -252,10 +352,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const number = process.env.PR_NUMBER;
   const title = process.env.PR_TITLE;
   const mergeGroupSha = process.env.MERGE_GROUP_SHA;
+  const mergeGroupBaseSha = process.env.MERGE_GROUP_BASE_SHA;
   const mergeGroupBaseRef = process.env.MERGE_GROUP_BASE_REF;
   const pullRequestMode = /^\d+$/.test(number ?? "") && Boolean(title);
   const mergeGroupMode =
     /^[0-9a-f]{40}$/.test(mergeGroupSha ?? "") &&
+    /^[0-9a-f]{40}$/.test(mergeGroupBaseSha ?? "") &&
     /^refs\/heads\/.+/.test(mergeGroupBaseRef ?? "");
   if (
     !repository ||
@@ -263,16 +365,30 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     pullRequestMode === mergeGroupMode
   ) {
     console.error(
-      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE or MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
+      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE or MERGE_GROUP_BASE_SHA/MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
     );
     process.exit(1);
   }
 
-  const major = Number.parseInt(readFileSync("VERSION", "utf8"), 10);
+  const [versionText, configText] = pullRequestMode
+    ? [
+        readFileSync("VERSION", "utf8"),
+        readFileSync("release-please-config.json", "utf8"),
+      ]
+    : await Promise.all([
+        loadRepositoryFile(repository, "VERSION", mergeGroupSha),
+        loadRepositoryFile(
+          repository,
+          "release-please-config.json",
+          mergeGroupSha,
+        ),
+      ]);
+  const options = releasePolicyFromFiles(versionText, configText);
   const pullRequests = pullRequestMode
     ? [{ number: Number.parseInt(number, 10), title }]
     : await loadMergeGroupPullRequests(
         repository,
+        mergeGroupBaseSha,
         mergeGroupSha,
         mergeGroupBaseRef,
       );
@@ -283,9 +399,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       pullRequest.number,
     );
     errors.push(
-      ...releaseImpactErrors(pullRequest.title, commits, {
-        preMajor: major === 0,
-      }).map((error) => `#${pullRequest.number}: ${error}`),
+      ...releaseImpactErrors(pullRequest.title, commits, options).map(
+        (error) => `#${pullRequest.number}: ${error}`,
+      ),
     );
   }
   if (errors.length > 0) {

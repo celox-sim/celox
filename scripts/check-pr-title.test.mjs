@@ -55,6 +55,6 @@ test("guards the repository setting that exposes the title to release automation
   );
   assert.match(
     workflow,
-    /Revalidate merge group release impact[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
+    /Revalidate merge group release impact[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_BASE_SHA:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
   );
 });
