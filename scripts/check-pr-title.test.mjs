@@ -35,7 +35,9 @@ test("guards the repository setting that exposes the title to release automation
     "utf8",
   );
 
-  assert.match(
+  // The Actions GITHUB_TOKEN cannot read repository administration settings;
+  // running that audit here would fail every required title check.
+  assert.doesNotMatch(
     workflow,
     /run: node scripts\/check-release-repository-settings\.mjs/,
   );
@@ -47,30 +49,10 @@ test("guards the repository setting that exposes the title to release automation
   );
   assert.match(
     workflow,
-    /Locate trusted release validators[\s\S]*id: release-validators[\s\S]*check-release-repository-settings\.mjs[\s\S]*check-pr-release-impact\.mjs/,
-  );
-  assert.match(
-    workflow,
-    /Authorize the initial validator rollout[\s\S]*id: initial-rollout[\s\S]*MERGE_GROUP_BASE_SHA:[\s\S]*MERGE_GROUP_HEAD_SHA:[\s\S]*compare\/\$MERGE_GROUP_BASE_SHA\.\.\.\$MERGE_GROUP_HEAD_SHA[\s\S]*grep -Fxq "\$rollout_head"/,
-  );
-  assert.match(
-    workflow,
-    /Validate release merge settings\n\s+if: steps\.release-validators\.outputs\.available == 'true'/,
-  );
-  assert.match(
-    workflow,
     /Validate pull request commit release impact\n\s+if: github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.ref == github\.event\.repository\.default_branch/,
   );
   assert.match(
     workflow,
     /Revalidate merge group release impact\n\s+if: github\.event_name == 'merge_group' && github\.event\.merge_group\.base_ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_HEAD_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
-  );
-  assert.match(
-    workflow,
-    /Preserve the initial validator rollout\n\s+if: steps\.initial-rollout\.outputs\.authorized == 'true'/,
-  );
-  assert.match(
-    workflow,
-    /Reject missing trusted release validators\n\s+if: steps\.release-validators\.outputs\.available != 'true'/,
   );
 });
