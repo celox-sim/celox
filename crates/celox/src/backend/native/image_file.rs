@@ -6,7 +6,7 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-const CONTAINER_VERSION: u16 = 3;
+const CONTAINER_VERSION: u16 = 4;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -61,6 +61,13 @@ pub struct AppendedNativeImage {
     pub runtime_len: usize,
     /// Decoded pointer-free program image.
     pub image: NativeProgramImage,
+}
+
+struct AppendedNativePayload<'a> {
+    runtime_len: usize,
+    version: u16,
+    architecture: u8,
+    payload: &'a [u8],
 }
 
 /// Failure while encoding or discovering a native image container.
@@ -155,7 +162,7 @@ impl NativeProgramImage {
         let output_path = output_path.as_ref();
         let metadata = std::fs::metadata(runtime_path)?;
         let runtime = std::fs::read(runtime_path)?;
-        let runtime_len = Self::discover_appended(&runtime)?
+        let runtime_len = discover_appended_payload(&runtime)?
             .map(|appended| appended.runtime_len)
             .unwrap_or(runtime.len());
         let output = self.append_to_runtime(&runtime[..runtime_len])?;
@@ -180,45 +187,27 @@ impl NativeProgramImage {
     pub fn discover_appended(
         bytes: &[u8],
     ) -> Result<Option<AppendedNativeImage>, NativeImageContainerError> {
-        let Some(trailer_start) = bytes.len().checked_sub(TRAILER_SIZE) else {
+        let Some(appended) = discover_appended_payload(bytes)? else {
             return Ok(None);
         };
-        let trailer = &bytes[trailer_start..];
-        if &trailer[..8] != TRAILER_MAGIC {
-            return Ok(None);
+        if appended.version != CONTAINER_VERSION {
+            return Err(NativeImageContainerError::UnsupportedVersion(
+                appended.version,
+            ));
         }
-
-        let version = u16::from_le_bytes(trailer[8..10].try_into().unwrap());
-        if version != CONTAINER_VERSION {
-            return Err(NativeImageContainerError::UnsupportedVersion(version));
-        }
-        let found = NativeImageArchitecture::decode(trailer[10])?;
+        let found = NativeImageArchitecture::decode(appended.architecture)?;
         let expected = NativeImageArchitecture::current();
         if found != expected {
             return Err(NativeImageContainerError::ArchitectureMismatch { expected, found });
         }
-        let trailer_size = u32::from_le_bytes(trailer[12..16].try_into().unwrap());
-        if trailer_size as usize != TRAILER_SIZE {
-            return Err(NativeImageContainerError::UnsupportedTrailerSize(
-                trailer_size,
-            ));
-        }
-        let payload_len = u64::from_le_bytes(trailer[16..24].try_into().unwrap());
-        let payload_len =
-            usize::try_from(payload_len).map_err(|_| NativeImageContainerError::SizeOverflow)?;
-        let runtime_len = trailer_start
-            .checked_sub(payload_len)
-            .ok_or(NativeImageContainerError::TruncatedPayload)?;
-        let payload = &bytes[runtime_len..trailer_start];
-        let expected_checksum = u64::from_le_bytes(trailer[24..32].try_into().unwrap());
-        if checksum(payload) != expected_checksum {
-            return Err(NativeImageContainerError::ChecksumMismatch);
-        }
-        let image: NativeProgramImage = postcard::from_bytes(payload)?;
+        let image: NativeProgramImage = postcard::from_bytes(appended.payload)?;
         image
             .validate()
             .map_err(NativeImageContainerError::InvalidImage)?;
-        Ok(Some(AppendedNativeImage { runtime_len, image }))
+        Ok(Some(AppendedNativeImage {
+            runtime_len: appended.runtime_len,
+            image,
+        }))
     }
 
     /// Read the running executable and discover an image attached at EOF.
@@ -228,6 +217,43 @@ impl NativeProgramImage {
         let bytes = std::fs::read(executable)?;
         Self::discover_appended(&bytes)
     }
+}
+
+fn discover_appended_payload(
+    bytes: &[u8],
+) -> Result<Option<AppendedNativePayload<'_>>, NativeImageContainerError> {
+    let Some(trailer_start) = bytes.len().checked_sub(TRAILER_SIZE) else {
+        return Ok(None);
+    };
+    let trailer = &bytes[trailer_start..];
+    if &trailer[..8] != TRAILER_MAGIC {
+        return Ok(None);
+    }
+
+    let trailer_size = u32::from_le_bytes(trailer[12..16].try_into().unwrap());
+    if trailer_size as usize != TRAILER_SIZE {
+        return Err(NativeImageContainerError::UnsupportedTrailerSize(
+            trailer_size,
+        ));
+    }
+    let payload_len = u64::from_le_bytes(trailer[16..24].try_into().unwrap());
+    let payload_len =
+        usize::try_from(payload_len).map_err(|_| NativeImageContainerError::SizeOverflow)?;
+    let runtime_len = trailer_start
+        .checked_sub(payload_len)
+        .ok_or(NativeImageContainerError::TruncatedPayload)?;
+    let payload = &bytes[runtime_len..trailer_start];
+    let expected_checksum = u64::from_le_bytes(trailer[24..32].try_into().unwrap());
+    if checksum(payload) != expected_checksum {
+        return Err(NativeImageContainerError::ChecksumMismatch);
+    }
+
+    Ok(Some(AppendedNativePayload {
+        runtime_len,
+        version: u16::from_le_bytes(trailer[8..10].try_into().unwrap()),
+        architecture: trailer[10],
+        payload,
+    }))
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
