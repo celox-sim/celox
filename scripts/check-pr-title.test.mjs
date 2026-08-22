@@ -41,17 +41,28 @@ test("guards the repository setting that exposes the title to release automation
   );
   assert.match(workflow, /run: node scripts\/check-pr-release-impact\.mjs/);
   assert.match(workflow, /permissions:\n  contents: read\n  pull-requests: read/);
-  assert.doesNotMatch(workflow, /^\s+ref:/m);
-  assert.doesNotMatch(
+  assert.match(
     workflow,
-    /Check out the event validator\n\s+if:/,
-  );
-  assert.doesNotMatch(
-    workflow,
-    /Validate release merge settings\n\s+if: github\.event_name == 'pull_request_target'/,
+    /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/,
   );
   assert.match(
     workflow,
-    /Revalidate merge group release impact[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_HEAD_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
+    /Locate trusted release validators[\s\S]*id: release-validators[\s\S]*check-release-repository-settings\.mjs[\s\S]*check-pr-release-impact\.mjs/,
+  );
+  assert.match(
+    workflow,
+    /Validate release merge settings\n\s+if: steps\.release-validators\.outputs\.available == 'true'/,
+  );
+  assert.match(
+    workflow,
+    /Revalidate merge group release impact\n\s+if: github\.event_name == 'merge_group' && steps\.release-validators\.outputs\.available == 'true'[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_HEAD_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
+  );
+  assert.match(
+    workflow,
+    /Preserve the initial validator rollout\n\s+if: github\.event_name == 'merge_group' && steps\.release-validators\.outputs\.available != 'true' && contains\(github\.event\.merge_group\.head_ref, '\/pr-644-'\)/,
+  );
+  assert.match(
+    workflow,
+    /Reject missing trusted release validators\n\s+if: steps\.release-validators\.outputs\.available != 'true'/,
   );
 });

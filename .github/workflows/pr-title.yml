@@ -14,12 +14,26 @@ jobs:
     name: Conventional Commit title
     runs-on: ubuntu-latest
     steps:
-      # pull_request_target checks out its trusted base SHA, while merge_group
-      # checks out the generated group SHA that the queue is about to merge.
-      - name: Check out the event validator
+      - name: Check out the trusted title validator
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      # The default branch does not contain these files while PR #644 is being
+      # introduced. After it lands, queued changes cannot replace the validator
+      # scripts fetched by their own required check.
+      - name: Locate trusted release validators
+        id: release-validators
+        shell: bash
+        run: |
+          if [[ -f scripts/check-release-repository-settings.mjs && -f scripts/check-pr-release-impact.mjs ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate release merge settings
+        if: steps.release-validators.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-release-repository-settings.mjs
@@ -31,7 +45,7 @@ jobs:
         run: node scripts/check-pr-title.mjs "$PR_TITLE"
 
       - name: Validate pull request commit release impact
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request_target' && steps.release-validators.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -39,10 +53,20 @@ jobs:
         run: node scripts/check-pr-release-impact.mjs
 
       - name: Revalidate merge group release impact
-        if: github.event_name == 'merge_group'
+        if: github.event_name == 'merge_group' && steps.release-validators.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
           MERGE_GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
           MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
         run: node scripts/check-pr-release-impact.mjs
+
+      - name: Preserve the initial validator rollout
+        if: github.event_name == 'merge_group' && steps.release-validators.outputs.available != 'true' && contains(github.event.merge_group.head_ref, '/pr-644-')
+        run: echo "This merge group introduces the trusted release validators."
+
+      - name: Reject missing trusted release validators
+        if: steps.release-validators.outputs.available != 'true' && (github.event_name != 'merge_group' || contains(github.event.merge_group.head_ref, '/pr-644-') == false)
+        run: |
+          echo "Trusted release validators are missing from the default branch." >&2
+          exit 1
