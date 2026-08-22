@@ -483,6 +483,19 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         }
     }
 
+    fn prepare_store(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<(), InterpError> {
+        if addr.region == SPARSE_WORKING_REGION {
+            let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+            self.prepare_sparse_store(addr, bit_offset, bits)?;
+        }
+        Ok(())
+    }
+
     fn store(
         &mut self,
         addr: &RegionedAbsoluteAddr,
@@ -493,13 +506,35 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         let object = self.object_offset(addr)?;
         let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
         let absolute = addr.absolute_addr();
-        if addr.region == SPARSE_WORKING_REGION {
-            self.prepare_sparse_store(addr, bit_offset, bits)?;
-        }
         self.write_bits(object, bit_offset, bits, &value.payload);
         if self.is_4state_object(&absolute) {
             let mask_offset = object + get_byte_size(self.width_of(&absolute));
             self.write_bits(mask_offset, bit_offset, bits, &value.mask);
+        }
+        Ok(())
+    }
+
+    fn notify_trigger_only_store(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        triggers: &[TriggerIdWithKind],
+    ) -> Result<(), InterpError> {
+        // Zero-width aliased stores detect a change on the aliased signal's
+        // first byte, mirroring the compiled dedicated path.
+        if !self.emit_triggers || triggers.is_empty() {
+            return Ok(());
+        }
+        let absolute = addr.absolute_addr();
+        let Some(&snapshot) = self.trigger_snapshots.get(&(absolute, addr.region)) else {
+            return Ok(());
+        };
+        let base = self.object_offset(addr)?;
+        // Safety: layout-mapped objects fit inside the merged image.
+        let current = unsafe { self.read_u64(base) } as u8;
+        if current != snapshot as u8 {
+            for trigger in triggers {
+                self.mark_trigger_bit(trigger.id);
+            }
         }
         Ok(())
     }

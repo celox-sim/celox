@@ -136,6 +136,27 @@ pub trait InterpMachine<A> {
         triggers: &[TriggerIdWithKind],
     ) -> Result<(), InterpError>;
 
+    /// Trigger-only aliased store (`bits == 0`): no memory write happens and
+    /// the source register is intentionally undefined; the machine detects a
+    /// change on the aliased signal and marks its triggers.
+    fn notify_trigger_only_store(
+        &mut self,
+        addr: &A,
+        triggers: &[TriggerIdWithKind],
+    ) -> Result<(), InterpError>;
+
+    /// Prepare storage for an upcoming store. Invoked before any pre-store
+    /// snapshot so the machine can make the destination readable (for
+    /// example sparse copy-on-write chunk initialization).
+    fn prepare_store(
+        &mut self,
+        _addr: &A,
+        _access: ResolvedAccess<'_>,
+        _bits: usize,
+    ) -> Result<(), InterpError> {
+        Ok(())
+    }
+
     /// Snapshot the stored range before a `Store` with comb capture sites so
     /// the post-store comparison can detect actual changes.
     fn capture_store_range(
@@ -235,11 +256,11 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
                 true_block,
                 false_block,
             } => {
-                let cond_width = regs.width(*cond);
                 let cond = regs.get(*cond)?.clone();
-                // SEMANTICS-CHECK: a known one selects the true branch; an
-                // all-unknown or all-zero condition selects the false branch.
-                let target = if branch_condition_holds(&cond, cond_width) {
+                // Mirrors the compiled `brif` on the raw payload: a
+                // normalized unknown condition (payload one) takes the true
+                // edge, keeping tier migration control-flow identical.
+                let target = if branch_condition_holds(&cond) {
                     true_block
                 } else {
                     false_block
@@ -325,7 +346,6 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 regs.width(*rhs),
                 dst_width,
                 regs.is_signed(*lhs),
-                regs.is_signed(*rhs),
             )?;
             regs.set(*dst, truncate(out, dst_width));
         }
@@ -346,8 +366,17 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             regs.set(*dst, value);
         }
         SIRInstruction::Store(addr, offset, bits, src, triggers, sites) => {
+            if *bits == 0 {
+                // Zero-width aliased store: the compiled lowering performs
+                // no memory write and never reads the source register.
+                if !triggers.is_empty() {
+                    machine.notify_trigger_only_store(addr, triggers)?;
+                }
+                return Ok(());
+            }
             let value = regs.get(*src)?.clone();
             let access = resolve_access(offset, regs)?;
+            machine.prepare_store(addr, access, *bits)?;
             let before = if sites.is_empty() {
                 None
             } else {
@@ -493,7 +522,16 @@ fn known_zeros(value: &SIRValue, width: usize) -> BigUint {
     (&width_mask(width) ^ &value.payload) & (&width_mask(width) ^ &value.mask)
 }
 
-fn branch_condition_holds(cond: &SIRValue, width: usize) -> bool {
+/// Branch selection follows the compiled terminator lowering exactly: it
+/// branches on the raw (normalized) payload, so an unknown condition whose
+/// normalized payload is one takes the true edge.
+fn branch_condition_holds(cond: &SIRValue) -> bool {
+    !cond.payload.is_zero()
+}
+
+/// Mux selection keeps the IEEE dominant-value reading: a known one selects
+/// the then-arm, while a fully unknown condition merges the arms.
+fn mux_condition_known_one(cond: &SIRValue, width: usize) -> bool {
     !known_ones(cond, width).is_zero()
 }
 
@@ -517,7 +555,6 @@ fn alu_binary(
     rhs_width: usize,
     dst_width: usize,
     lhs_signed: bool,
-    rhs_signed: bool,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
@@ -528,9 +565,11 @@ fn alu_binary(
             if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
+                // The compiled lowering zero-extends the right operand for
+                // arithmetic regardless of its declaration.
                 let common = lhs_width.max(rhs_width).max(dst_width);
                 let l = promote_operand(lhs, lhs_signed, lhs_width, common).payload;
-                let r = promote_operand(rhs, rhs_signed, rhs_width, common).payload;
+                let r = zero_extend(rhs, common).payload;
                 let raw = match op {
                     BinaryOp::Add => l + r,
                     BinaryOp::Sub => l + (&width_mask(common) ^ &r) + 1u8,
@@ -580,7 +619,7 @@ fn alu_binary(
             // its sign instead of reading as known zero.
             let common = lhs_width.max(rhs_width).max(dst_width);
             let l = promote_operand(lhs, lhs_signed, lhs_width, common);
-            let r = promote_operand(rhs, rhs_signed, rhs_width, common);
+            let r = zero_extend(rhs, common);
             let ones = known_ones(&l, common) & known_ones(&r, common);
             let zeros = known_zeros(&l, common) | known_zeros(&r, common);
             let mask = &width_mask(common) ^ (&ones | &zeros);
@@ -592,7 +631,7 @@ fn alu_binary(
         BinaryOp::Or => {
             let common = lhs_width.max(rhs_width).max(dst_width);
             let l = promote_operand(lhs, lhs_signed, lhs_width, common);
-            let r = promote_operand(rhs, rhs_signed, rhs_width, common);
+            let r = zero_extend(rhs, common);
             let ones = known_ones(&l, common) | known_ones(&r, common);
             let zeros = known_zeros(&l, common) & known_zeros(&r, common);
             let mask = &width_mask(common) ^ (&ones | &zeros);
@@ -607,7 +646,7 @@ fn alu_binary(
             // unlike arithmetic ops where any X poisons the whole result.
             let common = lhs_width.max(rhs_width).max(dst_width);
             let l = promote_operand(lhs, lhs_signed, lhs_width, common);
-            let r = promote_operand(rhs, rhs_signed, rhs_width, common);
+            let r = zero_extend(rhs, common);
             SIRValue {
                 payload: &l.payload ^ &r.payload,
                 mask: &l.mask | &r.mask,
@@ -707,7 +746,7 @@ fn alu_binary(
             if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
-                let holds = compare_holds(op, lhs, rhs, lhs_width, rhs_width, lhs_signed);
+                let holds = compare_holds(op, lhs, rhs, lhs_width, rhs_width);
                 SIRValue::new(u8::from(holds))
             }
         }
@@ -820,26 +859,19 @@ fn wrap_signed(value: &BigInt, width: usize) -> BigUint {
 }
 
 /// Evaluate an ordering/equality operator on fully-known operands.
-///
-/// `lhs_signed` carries the left-hand register's declaration so `Eq`/`Ne`
-/// replicate the compiled promotion: a signed lhs is sign-extended to the
-/// common width while the rhs is always zero-extended.
 fn compare_holds(
     op: &BinaryOp,
     lhs: &SIRValue,
     rhs: &SIRValue,
     lhs_width: usize,
     rhs_width: usize,
-    lhs_signed: bool,
 ) -> bool {
     let ordering = match op {
         BinaryOp::Eq | BinaryOp::Ne => {
+            // Equality compares zero-extended payloads on both sides, like
+            // every compiled lowering; declaration signedness is ignored.
             let common = lhs_width.max(rhs_width);
-            let lhs_ext = if lhs_signed {
-                sign_extend(&lhs.payload, lhs_width, common)
-            } else {
-                lhs.payload.clone()
-            };
+            let lhs_ext = zero_extend(lhs, common).payload;
             let rhs_ext = zero_extend(rhs, common).payload;
             lhs_ext.cmp(&rhs_ext)
         }
@@ -938,17 +970,29 @@ fn alu_unary(
         },
         UnaryOp::Minus => {
             // SEMANTICS-CHECK: negating a value containing X/Z yields all-X.
+            // Minus forces signed promotion in the compiled lowering, so the
+            // operand is sign-extended to the common width before the
+            // two's-complement negation (negating 4-bit 1 into an 8-bit
+            // destination yields 0xff).
             if src.mask.is_zero() {
-                let inverted = &width_mask(src_width) ^ &src.payload;
-                SIRValue::new((inverted + 1u8) & width_mask(src_width))
+                let common = src_width.max(dst_width);
+                let promoted = promote_operand(src, true, src_width, common).payload;
+                let inverted = &width_mask(common) ^ &promoted;
+                SIRValue::new((&inverted + 1u8) & width_mask(dst_width))
             } else {
-                all_x(src_width)
+                all_x(dst_width)
             }
         }
-        UnaryOp::BitNot => SIRValue {
-            payload: &width_mask(src_width) ^ &src.payload,
-            mask: src.mask.clone(),
-        },
+        UnaryOp::BitNot => {
+            // Complement at the common width so widened results fill their
+            // new high bits, mirroring the compiled promotion.
+            let common = src_width.max(dst_width);
+            let promoted = promote_operand(src, src_signed, src_width, common);
+            SIRValue {
+                payload: &width_mask(common) ^ &promoted.payload,
+                mask: promoted.mask,
+            }
+        }
         UnaryOp::LogicNot => {
             if !known_ones(src, src_width).is_zero() {
                 SIRValue::new(BigUint::zero())
@@ -1039,7 +1083,7 @@ fn eval_mux(
     cond_width: usize,
     out_width: usize,
 ) -> SIRValue {
-    if branch_condition_holds(cond, cond_width) {
+    if mux_condition_known_one(cond, cond_width) {
         return then_value.clone();
     }
     if cond.mask.is_zero() {
@@ -1227,6 +1271,15 @@ mod tests {
             _addr: &u32,
             _access: ResolvedAccess<'_>,
             _bits: usize,
+            triggers: &[TriggerIdWithKind],
+        ) -> Result<(), InterpError> {
+            self.trigger_notifications.push(triggers.len());
+            Ok(())
+        }
+
+        fn notify_trigger_only_store(
+            &mut self,
+            _addr: &u32,
             triggers: &[TriggerIdWithKind],
         ) -> Result<(), InterpError> {
             self.trigger_notifications.push(triggers.len());
