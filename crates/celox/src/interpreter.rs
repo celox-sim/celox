@@ -299,7 +299,12 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 payload = (payload << width) | &value.payload;
                 mask = (mask << width) | &value.mask;
             }
-            regs.set(*dst, SIRValue { payload, mask });
+            // Keep the declared-register-width invariant shared by every other
+            // operation: results never exceed the destination width.
+            regs.set(
+                *dst,
+                truncate(SIRValue { payload, mask }, regs.width(*dst)),
+            );
         }
         SIRInstruction::Slice(dst, src, offset, width) => {
             let value = regs.get(*src)?;
@@ -311,7 +316,15 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             let cond = regs.get(*cond)?.clone();
             let then_value = regs.get(*then_value)?.clone();
             let else_value = regs.get(*else_value)?.clone();
-            let out = eval_mux(&cond, &then_value, &else_value, regs.width(*dst));
+            // Evaluate the condition in its own width; shape the selected
+            // arms to the destination width.
+            let out = eval_mux(
+                &cond,
+                &then_value,
+                &else_value,
+                regs.width(*cond),
+                regs.width(*dst),
+            );
             regs.set(*dst, out);
         }
         SIRInstruction::RuntimeEvent { site_id, args } => {
@@ -623,15 +636,25 @@ fn alu_unary(
 /// `then` exactly (preserving its mask); a fully known zero selects `else`;
 /// an unknown condition preserves bits where both arms agree and turns
 /// differing bits into X.
-fn eval_mux(cond: &SIRValue, then_value: &SIRValue, else_value: &SIRValue, width: usize) -> SIRValue {
-    if branch_condition_holds(cond, width) {
+///
+/// The condition is evaluated in `cond_width` (its own register width) while
+/// the agreement merge is shaped to `out_width` (the destination width).
+fn eval_mux(
+    cond: &SIRValue,
+    then_value: &SIRValue,
+    else_value: &SIRValue,
+    cond_width: usize,
+    out_width: usize,
+) -> SIRValue {
+    if branch_condition_holds(cond, cond_width) {
         return then_value.clone();
     }
     if cond.mask.is_zero() {
         return else_value.clone();
     }
-    let mask = width_mask(width);
-    let difference = (&then_value.payload ^ &else_value.payload) | (&then_value.mask ^ &else_value.mask);
+    let mask = width_mask(out_width);
+    let difference =
+        (&then_value.payload ^ &else_value.payload) | (&then_value.mask ^ &else_value.mask);
     let agree = &mask ^ &difference;
     SIRValue {
         payload: &then_value.payload & &agree,
@@ -1117,6 +1140,40 @@ mod tests {
     }
 
     #[test]
+    fn concat_truncates_to_destination_width() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xFFu8)),
+                    SIRInstruction::Imm(RegisterId(1), SIRValue::new(0xFFu8)),
+                    SIRInstruction::Concat(RegisterId(2), vec![RegisterId(0), RegisterId(1)]),
+                    SIRInstruction::Store(
+                        9u32,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            // Destination is narrower than the concatenated sources: the
+            // declared-register-width invariant keeps the low 8 bits.
+            register_map: bit_regs(&[(0, 8), (1, 8), (2, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[]).unwrap();
+        assert_eq!(machine.stored(9, 0, 8).payload, BigUint::from(0xFFu8));
+    }
+
+    #[test]
     fn mux_follows_four_state_selection_contract() {
         let known_one = SIRValue::new(1u8);
         let known_zero = SIRValue::new(0u8);
@@ -1125,12 +1182,12 @@ mod tests {
         // Known-one condition selects the then-arm exactly, mask included.
         let mixed_arm = SIRValue::new_four_state(0b01u8, 0b10u8);
         assert_eq!(
-            eval_mux(&known_one, &mixed_arm, &SIRValue::new(0u8), 2),
+            eval_mux(&known_one, &mixed_arm, &SIRValue::new(0u8), 1, 2),
             mixed_arm
         );
         // Known-zero condition selects the else-arm.
         assert_eq!(
-            eval_mux(&known_zero, &mixed_arm, &SIRValue::new(0b11u8), 2),
+            eval_mux(&known_zero, &mixed_arm, &SIRValue::new(0b11u8), 1, 2),
             SIRValue::new(0b11u8)
         );
         // Unknown condition: agreeing bits preserved, differing bits become X.
@@ -1138,10 +1195,26 @@ mod tests {
             &unknown,
             &SIRValue::new_four_state(0b1010u8, 0b0000u8),
             &SIRValue::new_four_state(0b0011u8, 0b0100u8),
+            1,
             4,
         );
         assert_eq!(out.payload, BigUint::from(0b0010u8));
         assert_eq!(out.mask, BigUint::from(0b1101u8));
+    }
+
+    #[test]
+    fn mux_condition_is_evaluated_in_its_own_width() {
+        // An 8-bit condition with a known one above the 4-bit destination
+        // width must still select the then-arm.
+        let wide_cond = SIRValue::new(0b1_0000u8);
+        let out = eval_mux(
+            &wide_cond,
+            &SIRValue::new(0xAu8),
+            &SIRValue::new(0x5u8),
+            8,
+            4,
+        );
+        assert_eq!(out.payload, BigUint::from(0xAu8));
     }
 
     #[test]
