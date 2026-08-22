@@ -360,12 +360,14 @@ impl RuntimeDesign {
         Ok(())
     }
 
+    #[cfg(feature = "host-runtime")]
     pub(crate) fn take_initial_state(
         &mut self,
     ) -> Vec<celox_design::InitialStateValue<AbsoluteAddr>> {
         std::mem::take(&mut self.semantic.initial_state)
     }
 
+    #[cfg(feature = "host-runtime")]
     pub(crate) fn restore_initial_state(
         &mut self,
         initial_state: Vec<celox_design::InitialStateValue<AbsoluteAddr>>,
