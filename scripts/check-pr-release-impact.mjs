@@ -117,7 +117,11 @@ function hasReleaseAsFooter(message) {
     if (/\S/.test(marker[1])) {
       return true;
     }
-    if (/^[ \t]+\S/.test(lines[index + 1] ?? "")) {
+    let continuation = index + 1;
+    while (continuation < lines.length && !/\S/.test(lines[continuation])) {
+      continuation++;
+    }
+    if (/^[ \t]+\S/.test(lines[continuation] ?? "")) {
       return true;
     }
   }
