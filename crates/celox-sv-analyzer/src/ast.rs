@@ -2578,6 +2578,10 @@ fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap
         for range in &mut signal.r#type.unpacked_ranges {
             range.left = substitute_const_expr_constants(range.left.clone(), const_env);
             range.right = substitute_const_expr_constants(range.right.clone(), const_env);
+            range.size = range
+                .size
+                .take()
+                .map(|size| substitute_const_expr_constants(size, const_env));
         }
     }
 }
@@ -8252,7 +8256,15 @@ fn expr_from_primary_with_types(
                         signed: false,
                     })
                 }
-                Some(sv_parser::RangeExpression::Expression(_)) => None,
+                Some(sv_parser::RangeExpression::Expression(bit)) => {
+                    let bit = const_expr_from_expr(bit, syntax_tree)?;
+                    Some(Expr::Select {
+                        expr: Box::new(base),
+                        msb: bit.clone(),
+                        lsb: bit,
+                        signed: false,
+                    })
+                }
             }
         }
         sv_parser::Primary::MultipleConcatenation(concat) => {
@@ -8490,12 +8502,10 @@ fn expr_select_from_select(
         }
     }
     if indices.len() == 1 {
-        let Expr::Ident(name) = &base else {
-            return None;
-        };
-        if packed_dimensions
-            .get(name)
-            .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
+        if let Expr::Ident(name) = &base
+            && packed_dimensions
+                .get(name)
+                .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
         {
             return None;
         }

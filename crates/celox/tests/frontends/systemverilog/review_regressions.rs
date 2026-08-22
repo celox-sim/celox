@@ -991,6 +991,29 @@ fn connects_child_outputs_to_unpacked_array_elements() {
 }
 
 #[test]
+fn connects_child_outputs_to_unpacked_array_ranges() {
+    let source = r#"
+        module Child(output logic [15:0] output_value);
+            assign output_value = 16'h1234;
+        endmodule
+        module Top(
+            output logic [7:0] values[4],
+            output logic [15:0] value
+        );
+            Child child(.output_value(values[1:0]));
+            assign value = values[1:0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_output_range_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("value")), 0x1234u16.into());
+}
+
+#[test]
 fn connects_runtime_selected_unpacked_array_elements_to_child_inputs() {
     let source = r#"
         module Child(
@@ -2768,6 +2791,52 @@ fn applies_generate_localparams_inside_always_ff() {
 }
 
 #[test]
+fn rejects_nonpositive_generate_localparam_array_sizes() {
+    let error = cranelift_build_error(
+        r#"
+        module Top();
+            if (1) begin : active
+                localparam N = 0;
+                logic [7:0] values[N];
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("nonpositive unpacked array dimension"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_bit_selects_on_computed_expressions() {
+    let source = r#"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic y
+        );
+            assign y = {a + b}[0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("computed_expression_bit_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
 fn reads_partial_unpacked_array_selections() {
     let source = r#"
         module Top(output logic [23:0] row);
@@ -2838,6 +2907,68 @@ fn reads_runtime_partial_unpacked_array_selections() {
     })
     .unwrap();
     assert_eq!(sim.get(row), 0x060504u32.into());
+}
+
+#[test]
+fn writes_runtime_partial_unpacked_array_selections_in_always_ff() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic sel,
+            input logic [23:0] row,
+            output logic [23:0] selected
+        );
+            logic [7:0] values[2][3];
+            always_ff @(posedge clk) values[sel] <= row;
+            assign selected = values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_partial_unpacked_lvalue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let row = sim.signal("row");
+    let selected = sim.signal("selected");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set_wide(row, BigUint::from(0x060504u32));
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(selected), 0x060504u32.into());
+}
+
+#[test]
+fn writes_runtime_partial_unpacked_array_selections_in_always_comb() {
+    let source = r#"
+        module Top(
+            input logic sel,
+            input logic [23:0] row,
+            output logic [23:0] selected
+        );
+            logic [7:0] values[2][3];
+            always_comb values[sel] = row;
+            assign selected = values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_partial_unpacked_comb_lvalue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let row = sim.signal("row");
+    let selected = sim.signal("selected");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set_wide(row, BigUint::from(0x060504u32));
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected), 0x060504u32.into());
 }
 
 #[test]

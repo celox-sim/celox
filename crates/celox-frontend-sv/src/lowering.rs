@@ -287,7 +287,7 @@ fn child_output_driver_ranges(
             let Some(actual_expr) = connection.actual_expr.as_ref() else {
                 continue;
             };
-            let Some((actual_id, access)) = output_lvalue_access(
+            let Some(accesses) = output_lvalue_accesses(
                 actual_expr,
                 &module.variables,
                 &module.signal_names,
@@ -299,11 +299,13 @@ fn child_output_driver_ranges(
                 }
                 continue;
             };
-            if actual_id == signal_id {
-                drivers.push((
-                    drivers.len(),
-                    Some((access.lsb as i128, access.msb as i128)),
-                ));
+            for (actual_id, access) in accesses {
+                if actual_id == signal_id {
+                    drivers.push((
+                        drivers.len(),
+                        Some((access.lsb as i128, access.msb as i128)),
+                    ));
+                }
             }
         }
     }
@@ -1602,7 +1604,7 @@ fn build_instance_glue(
                     output_ports.push(dynamic_output);
                     continue;
                 }
-                let Some((parent_signal_id, access)) = output_lvalue_access(
+                let Some(accesses) = output_lvalue_accesses(
                     actual_expr,
                     parent_variables,
                     parent_signal_names,
@@ -1617,48 +1619,79 @@ fn build_instance_glue(
                         None,
                     ));
                 };
-                let parent_var = &parent_variables[&parent_signal_id];
-                let target_width = access.msb - access.lsb + 1;
-                let child_node = arena.alloc(SLTNode::Input {
+                let target_width = accesses.iter().try_fold(0usize, |width, (_, access)| {
+                    width.checked_add(access.msb - access.lsb + 1)
+                });
+                let Some(target_width) = target_width.filter(|target_width| *target_width != 0)
+                else {
+                    return Err(ParserError::unsupported(
+                        64,
+                        LoweringPhase::SimulatorParser,
+                        "systemverilog output port lvalue connection",
+                        format!("{formal} -> {actual}: {actual_expr:?}"),
+                        None,
+                    ));
+                };
+                let child_input = arena.alloc(SLTNode::Input {
                     variable: GlueAddr::Child(*child_port_id),
                     signed: child_var.signed,
                     index: Vec::new(),
                     access: BitAccess::new(0, width - 1),
                 })?;
-                let mut expr = coerce_node_width(
+                let child_node = coerce_node_width(
                     &mut arena,
-                    child_node,
+                    child_input,
                     Some(target_width),
                     child_var.signed,
                 )?;
-                if !parent_var.is_4state {
-                    expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                let mut child_lsb = target_width;
+                for (parent_signal_id, access) in accesses {
+                    let parent_var = &parent_variables[&parent_signal_id];
+                    let part_width = access.msb - access.lsb + 1;
+                    child_lsb -= part_width;
+                    let child_expr = if child_lsb == 0 && part_width == target_width {
+                        child_node
+                    } else {
+                        arena.alloc(SLTNode::Slice {
+                            expr: child_node,
+                            access: BitAccess::new(child_lsb, child_lsb + part_width - 1),
+                        })?
+                    };
+                    let mut expr = coerce_node_width(
+                        &mut arena,
+                        child_expr,
+                        Some(part_width),
+                        child_var.signed,
+                    )?;
+                    if !parent_var.is_4state {
+                        expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                    }
+                    let mut sources = HashSet::default();
+                    sources.insert(VarAtomBase::new(
+                        GlueAddr::Child(*child_port_id),
+                        0,
+                        width - 1,
+                    ));
+                    output_ports.push((
+                        vec![parent_signal_id],
+                        LogicPath {
+                            target: LogicPathTarget::Var(VarAtomBase::new(
+                                GlueAddr::Parent(parent_signal_id),
+                                access.lsb,
+                                access.msb,
+                            )),
+                            expr,
+                            sources,
+                            address_sources: HashSet::default(),
+                            previous_sources: HashSet::default(),
+                            local_inputs: Vec::new(),
+                            order_before: HashSet::default(),
+                            comb_capture_enable_sites: Vec::new(),
+                            comb_capture_enable_always: false,
+                            pre_lower_nodes: Vec::new(),
+                        },
+                    ));
                 }
-                let mut sources = HashSet::default();
-                sources.insert(VarAtomBase::new(
-                    GlueAddr::Child(*child_port_id),
-                    0,
-                    width - 1,
-                ));
-                output_ports.push((
-                    vec![parent_signal_id],
-                    LogicPath {
-                        target: LogicPathTarget::Var(VarAtomBase::new(
-                            GlueAddr::Parent(parent_signal_id),
-                            access.lsb,
-                            access.msb,
-                        )),
-                        expr,
-                        sources,
-                        address_sources: HashSet::default(),
-                        previous_sources: HashSet::default(),
-                        local_inputs: Vec::new(),
-                        order_before: HashSet::default(),
-                        comb_capture_enable_sites: Vec::new(),
-                        comb_capture_enable_always: false,
-                        pre_lower_nodes: Vec::new(),
-                    },
-                ));
             }
             VariableKind::Inout => {
                 return Err(unsupported_sv_inout(child_var.path.join(".")));
@@ -1856,6 +1889,35 @@ fn output_lvalue_access(
             (access.msb < variable.width).then_some((id, access))
         }
         _ => None,
+    }
+}
+
+fn output_lvalue_accesses(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<Vec<(SourceVarId, BitAccess)>> {
+    match expr {
+        sv::ir::Expr::Concat(parts) if !parts.is_empty() => {
+            let mut accesses = Vec::new();
+            for part in parts {
+                accesses.extend(output_lvalue_accesses(
+                    part,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                )?);
+            }
+            Some(accesses)
+        }
+        sv::ir::Expr::Resize { expr, .. } => {
+            output_lvalue_accesses(expr, variables, name_to_id, constants, parameter_types)
+        }
+        _ => output_lvalue_access(expr, variables, name_to_id, constants, parameter_types)
+            .map(|access| vec![access]),
     }
 }
 
@@ -4202,7 +4264,7 @@ fn dynamic_array_element_lvalue(
     };
     let id = *name_to_id.get(name)?;
     let variable = variables.get(&id)?;
-    let element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
+    let packed_element_width = unpacked_element_width(variable).filter(|width| *width != 0)?;
     let is_dynamic = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
         .is_none()
         || sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types).is_none();
@@ -4211,21 +4273,24 @@ fn dynamic_array_element_lvalue(
     }
     let (msb_base, msb_offset) = split_dynamic_array_offset(msb, constants, parameter_types)?;
     let (lsb_base, lsb_offset) = split_dynamic_array_offset(lsb, constants, parameter_types)?;
-    if msb_base != lsb_base
-        || (element_width > 1
-            && !dynamic_array_base_has_stride(
-                msb_base,
-                i128::try_from(element_width).ok()?,
-                constants,
-                parameter_types,
-            ))
-    {
+    if msb_base != lsb_base {
         return None;
     }
     let offset = lsb.clone();
     let msb = usize::try_from(msb_offset).ok()?;
     let lsb = usize::try_from(lsb_offset).ok()?;
     let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
+    let element_width = dynamic_array_selection_width(variable, access, packed_element_width)?;
+    if element_width > 1
+        && !dynamic_array_base_has_stride(
+            msb_base,
+            i128::try_from(element_width).ok()?,
+            constants,
+            parameter_types,
+        )
+    {
+        return None;
+    }
     (access.msb < element_width).then_some((id, element_width, offset, access))
 }
 
@@ -5032,6 +5097,111 @@ fn emit_ff_assignment_stores(
                 )?;
                 let element_count = variable.width.checked_div(element_width)?;
                 let (index, valid) = dynamic_array_index_guard_sir(builder, index, element_count)?;
+                let packed_element_width = unpacked_element_width(variable)?;
+                if element_width != packed_element_width {
+                    if access.lsb != 0 || target_width != element_width {
+                        return None;
+                    }
+                    let inner_count = element_width.checked_div(packed_element_width)?;
+                    let inner_count_value = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Imm(
+                        inner_count_value,
+                        SIRValue::new(u64::try_from(inner_count).ok()?),
+                    ));
+                    let scaled_index = builder.alloc_bit(64, false);
+                    builder.emit(SIRInstruction::Binary(
+                        scaled_index,
+                        index,
+                        BinaryOp::Mul,
+                        inner_count_value,
+                    ));
+                    for inner_index in 0..inner_count {
+                        let element_index = if inner_index == 0 {
+                            scaled_index
+                        } else {
+                            let inner_index_value = builder.alloc_bit(64, false);
+                            builder.emit(SIRInstruction::Imm(
+                                inner_index_value,
+                                SIRValue::new(u64::try_from(inner_index).ok()?),
+                            ));
+                            let element_index = builder.alloc_bit(64, false);
+                            builder.emit(SIRInstruction::Binary(
+                                element_index,
+                                scaled_index,
+                                BinaryOp::Add,
+                                inner_index_value,
+                            ));
+                            element_index
+                        };
+                        let old = builder.alloc_logic(packed_element_width);
+                        builder.emit(SIRInstruction::Load(
+                            old,
+                            RegionedVarAddrBase {
+                                region: WORKING_REGION,
+                                var_id: target_id,
+                            },
+                            SIROffset::Element {
+                                index: element_index,
+                                element_width: packed_element_width,
+                                bit_offset: 0,
+                                dynamic_bit_offset: None,
+                            },
+                            packed_element_width,
+                        ));
+                        let rhs_part = builder.alloc_logic(packed_element_width);
+                        builder.emit(SIRInstruction::Slice(
+                            rhs_part,
+                            rhs,
+                            inner_index * packed_element_width,
+                            packed_element_width,
+                        ));
+                        let selected_value = match assignment.condition() {
+                            Some(condition) => {
+                                let condition = lower_procedural_condition(
+                                    builder,
+                                    condition,
+                                    variables,
+                                    name_to_id,
+                                    constants,
+                                    parameter_types,
+                                )?;
+                                let mux = builder.alloc_logic(packed_element_width);
+                                builder.emit(SIRInstruction::Mux(mux, condition, rhs_part, old));
+                                mux
+                            }
+                            None => rhs_part,
+                        };
+                        let store_value = builder.alloc_logic(packed_element_width);
+                        builder.emit(SIRInstruction::Mux(store_value, valid, selected_value, old));
+                        builder.emit(SIRInstruction::Store(
+                            RegionedVarAddrBase {
+                                region: WORKING_REGION,
+                                var_id: target_id,
+                            },
+                            SIROffset::Element {
+                                index: element_index,
+                                element_width: packed_element_width,
+                                bit_offset: 0,
+                                dynamic_bit_offset: None,
+                            },
+                            packed_element_width,
+                            store_value,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
+                    value = builder.alloc_logic(width);
+                    builder.emit(SIRInstruction::Load(
+                        value,
+                        RegionedVarAddrBase {
+                            region: WORKING_REGION,
+                            var_id: target_id,
+                        },
+                        sv_memory_offset(variable, 0, width),
+                        width,
+                    ));
+                    continue;
+                }
                 let old = builder.alloc_logic(target_width);
                 builder.emit(SIRInstruction::Load(
                     old,
