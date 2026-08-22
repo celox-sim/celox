@@ -694,7 +694,7 @@ fn unsigned_upper_bound(
 /// immediate-form MIR instruction without changing liveness or adding new
 /// VRegs. The assignment map may still contain the removed VReg; it is simply
 /// no longer referenced by emitted code.
-pub fn post_regalloc_peephole(func: &mut MFunction) {
+pub fn post_regalloc_peephole(func: &mut MFunction, assignment: &AssignmentMap) {
     const IMM_FOLD_SCAN_LIMIT: usize = 8;
 
     let mut use_counts: HashMap<VReg, usize> = HashMap::default();
@@ -802,6 +802,110 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
             rewritten.push(replacements.remove(&idx).unwrap_or_else(|| inst.clone()));
         }
         block.insts = rewritten;
+    }
+
+    eliminate_loads_clobbered_by_same_register_constants(func, assignment);
+}
+
+/// Drop machine loads whose value is immediately overwritten by a
+/// rematerialized constant in the same physical register.
+///
+/// Allocation rematerializes constants as fresh `LoadImm` definitions and may
+/// coalesce one with an adjacent load's destination. The two back-to-back
+/// definitions leave no observable window between them: nothing can read the
+/// shared register before the constant lands, and every later read observes
+/// the constant either way, so the load is pure overhead (one memory access
+/// per occurrence in the emitted tick loop).
+///
+/// The load's VReg is single-definition (enforced by the MIR verifier), so
+/// redirecting all of its uses to the constant VReg preserves semantics:
+/// those uses already read the shared physical register containing the
+/// constant. Elimination only fires when every use of the loaded value is a
+/// plain instruction use later in the same block; phi sources and cross-block
+/// uses keep the load alive.
+fn eliminate_loads_clobbered_by_same_register_constants(
+    func: &mut MFunction,
+    assignment: &AssignmentMap,
+) {
+    let mut global_uses: HashMap<VReg, usize> = HashMap::default();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, src) in &phi.sources {
+                *global_uses.entry(*src).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for used in inst.uses() {
+                *global_uses.entry(used).or_default() += 1;
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut local_uses: HashMap<VReg, Vec<usize>> = HashMap::default();
+        for (idx, inst) in block.insts.iter().enumerate() {
+            for used in inst.uses() {
+                local_uses.entry(used).or_default().push(idx);
+            }
+        }
+
+        let mut eliminated = Vec::<usize>::new();
+        for idx in 0..block.insts.len().saturating_sub(1) {
+            let (load_dst, constant_dst) = match (&block.insts[idx], &block.insts[idx + 1]) {
+                (
+                    MInst::Load {
+                        dst: loaded,
+                        base: _,
+                        offset: _,
+                        size: _,
+                    },
+                    MInst::LoadImm {
+                        dst: constant,
+                        value: _,
+                    },
+                ) => (*loaded, *constant),
+                _ => continue,
+            };
+            let (Some(loaded_reg), Some(constant_reg)) =
+                (assignment.get(load_dst), assignment.get(constant_dst))
+            else {
+                continue;
+            };
+            if loaded_reg != constant_reg {
+                continue;
+            }
+            let Some(use_indices) = local_uses.get(&load_dst) else {
+                // Fully dead loads are handled by ordinary DCE in
+                // post_regalloc_cleanup; leave them alone here.
+                continue;
+            };
+            if use_indices.first().is_some_and(|first| *first <= idx + 1)
+                || global_uses.get(&load_dst).copied().unwrap_or(0) != use_indices.len()
+            {
+                continue;
+            }
+            for &use_idx in use_indices {
+                block.insts[use_idx].rewrite_use(load_dst, constant_dst);
+            }
+            eliminated.push(idx);
+        }
+
+        if !eliminated.is_empty() {
+            let mut next = eliminated.iter();
+            let mut pending = next.next();
+            block.insts = std::mem::take(&mut block.insts)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, inst)| {
+                    if pending == Some(&idx) {
+                        pending = next.next();
+                        None
+                    } else {
+                        Some(inst)
+                    }
+                })
+                .collect();
+        }
     }
 }
 
@@ -10285,7 +10389,7 @@ mod tests {
             3,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts[1],
@@ -10350,7 +10454,7 @@ mod tests {
             8,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         let expected = [
             (VReg(1), 1, OpSize::S8),
@@ -10370,6 +10474,194 @@ mod tests {
                 } if *actual_dst == dst && *actual_offset == offset && *actual_size == size
             ));
         }
+    }
+
+    #[test]
+    fn post_regalloc_peephole_drops_load_clobbered_by_same_register_constant() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0x78,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0x5555_5555_5555_5555,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Or {
+                    dst: VReg(2),
+                    lhs: VReg(2),
+                    rhs: VReg(1),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R8);
+        assignment.set(VReg(2), PhysReg::R9);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert_eq!(func.blocks[0].insts.len(), 4);
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0x5555_5555_5555_5555,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::And {
+                dst: VReg(2),
+                lhs: VReg(1),
+                rhs: VReg(1),
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Or {
+                dst: VReg(2),
+                lhs: VReg(2),
+                rhs: VReg(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_load_when_constant_uses_other_register() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0x78,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 7,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Or {
+                    dst: VReg(2),
+                    lhs: VReg(2),
+                    rhs: VReg(1),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R9);
+        assignment.set(VReg(2), PhysReg::R10);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert_eq!(func.blocks[0].insts.len(), 5);
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::Load { dst: VReg(0), .. }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::And {
+                lhs: VReg(0),
+                rhs: VReg(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_load_whose_value_is_used_before_the_constant() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0x78,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 7,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        // Same physical register, but the loaded value feeds an instruction
+        // between the load and the rematerialized constant.
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R8);
+        assignment.set(VReg(2), PhysReg::R9);
+        func.blocks[0].insts.swap(1, 2);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert_eq!(func.blocks[0].insts.len(), 4);
+        assert!(matches!(func.blocks[0].insts[0], MInst::Load { .. }));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_load_with_cross_block_or_phi_uses() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..3 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..3).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0x78,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 7,
+            },
+        ];
+        func.push_block(entry);
+        let mut exit = MBlock::new(BlockId(1));
+        exit.phis.push(PhiNode {
+            dst: VReg(2),
+            sources: vec![(BlockId(0), VReg(0))],
+        });
+        func.push_block(exit);
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R8);
+        assignment.set(VReg(2), PhysReg::R9);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert!(matches!(func.blocks[0].insts[0], MInst::Load { .. }));
+        assert_eq!(func.blocks[1].phis[0].sources, vec![(BlockId(0), VReg(0))],);
     }
 
     #[test]
@@ -10422,7 +10714,7 @@ mod tests {
         assignment.set(VReg(2), PhysReg::R8);
 
         assert_eq!(post_regalloc_direct_load_cse(&mut func, &assignment), 2);
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
         post_regalloc_cleanup(&mut func);
         post_regalloc_direct_load_cse(&mut func, &assignment);
 
@@ -10604,7 +10896,7 @@ mod tests {
             2,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts.as_slice(),
@@ -10658,7 +10950,7 @@ mod tests {
             4,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
         post_regalloc_cleanup(&mut func);
 
         assert!(matches!(
@@ -10706,7 +10998,7 @@ mod tests {
         instructions.push(MInst::Return);
         let mut func = make_func(instructions, 8);
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert_eq!(func.blocks[0].insts.len(), 5);
         for (index, (inst, size)) in func.blocks[0]
@@ -10752,7 +11044,7 @@ mod tests {
             4,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(func.blocks[0].insts[0], MInst::LoadImm { .. }));
         assert_eq!(func.blocks[0].insts.len(), 4);
@@ -10799,7 +11091,7 @@ mod tests {
             4,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(
             !func.blocks[0]
@@ -10855,7 +11147,7 @@ mod tests {
             9,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts[0],
@@ -10911,7 +11203,7 @@ mod tests {
             6,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(func.blocks[0].insts[0], MInst::LoadImm { .. }));
         assert!(matches!(func.blocks[0].insts[1], MInst::Or { .. }));
@@ -10957,7 +11249,7 @@ mod tests {
             9,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts[0],
