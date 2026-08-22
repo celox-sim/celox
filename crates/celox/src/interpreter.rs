@@ -654,19 +654,24 @@ fn alu_binary(
         }
         BinaryOp::Shl => {
             // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
-            // The shift runs on the full left-hand value and the destination
-            // keeps the low bits, matching the compiled common-width lowering
-            // (a narrow destination still receives surviving low bits).
+            // The compiled lowering promotes the left operand to the common
+            // width by its declaration (a signed source sign-fills), shifts,
+            // and keeps the low destination bits; a narrow signed value
+            // shifted into a wider destination keeps its sign region.
             // Counts at or beyond the destination width produce zero without
             // materializing a huge BigUint shift.
             if !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
                 match shift_amount(&rhs.payload) {
-                    Some(amount) if amount < dst_width => SIRValue {
-                        payload: (&lhs.payload << amount) & width_mask(dst_width),
-                        mask: (&lhs.mask << amount) & width_mask(dst_width),
-                    },
+                    Some(amount) if amount < dst_width => {
+                        let common = lhs_width.max(dst_width);
+                        let promoted = promote_operand(lhs, lhs_signed, lhs_width, common);
+                        SIRValue {
+                            payload: (&promoted.payload << amount) & width_mask(dst_width),
+                            mask: (&promoted.mask << amount) & width_mask(dst_width),
+                        }
+                    }
                     _ => SIRValue::new(BigUint::zero()),
                 }
             }
