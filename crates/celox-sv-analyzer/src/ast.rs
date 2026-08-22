@@ -2048,6 +2048,8 @@ pub enum LValue {
         msb: ConstExpr,
         lsb: ConstExpr,
         signed: bool,
+        array_slice_width: Option<ConstExpr>,
+        array_slice_reversed: bool,
     },
 }
 
@@ -5221,7 +5223,9 @@ fn function_expr_from_statement(
                     let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
                     let rhs = match (&lhs, rhs, op) {
                         (_, Some(rhs), Some("=")) => Some(rhs),
-                        (Some(lhs), Some(rhs), Some(op)) => assignment_op_expr(lhs, op, rhs),
+                        (Some(lhs), Some(rhs), Some(op)) => {
+                            assignment_op_expr(lhs, op, rhs, packed_dimensions)
+                        }
                         _ => None,
                     };
                     (lhs, rhs)
@@ -6292,11 +6296,16 @@ fn substitute_lvalue_constants(lvalue: LValue, const_env: &HashMap<String, i128>
             msb,
             lsb,
             signed,
+            array_slice_width,
+            array_slice_reversed,
         } => LValue::Select {
             name,
             msb: substitute_const_expr_constants(msb, const_env),
             lsb: substitute_const_expr_constants(lsb, const_env),
             signed,
+            array_slice_width: array_slice_width
+                .map(|width| substitute_const_expr_constants(width, const_env)),
+            array_slice_reversed,
         },
     }
 }
@@ -7646,9 +7655,11 @@ fn assignments_from_statement(
                 );
                 match (lhs, rhs, op) {
                     (Some(lhs), Some(rhs), Some("=")) => vec![Assignment::new(lhs, rhs)],
-                    (Some(lhs), Some(rhs), Some(op)) => assignment_op_expr(&lhs, op, rhs)
-                        .map(|rhs| vec![Assignment::new(lhs, rhs)])
-                        .unwrap_or_default(),
+                    (Some(lhs), Some(rhs), Some(op)) => {
+                        assignment_op_expr(&lhs, op, rhs, packed_dimensions)
+                            .map(|rhs| vec![Assignment::new(lhs, rhs)])
+                            .unwrap_or_default()
+                    }
                     _ => Vec::new(),
                 }
             }
@@ -7679,7 +7690,12 @@ fn assignments_from_statement_or_null(
     }
 }
 
-fn assignment_op_expr(lhs: &LValue, op: &str, rhs: Expr) -> Option<Expr> {
+fn assignment_op_expr(
+    lhs: &LValue,
+    op: &str,
+    rhs: Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
     let op = match op.strip_suffix('=')? {
         "+" => BinaryOp::Add,
         "-" => BinaryOp::Sub,
@@ -7696,27 +7712,77 @@ fn assignment_op_expr(lhs: &LValue, op: &str, rhs: Expr) -> Option<Expr> {
         _ => return None,
     };
     Some(guard_zero_divisions(Expr::Binary {
-        left: Box::new(expr_from_lvalue(lhs)),
+        left: Box::new(expr_from_lvalue(lhs, packed_dimensions)),
         op,
         right: Box::new(rhs),
     }))
 }
 
-fn expr_from_lvalue(lhs: &LValue) -> Expr {
-    match lhs {
-        LValue::Ident(name) => Expr::Ident(name.clone()),
+fn expr_from_lvalue(lhs: &LValue, packed_dimensions: &PackedDimensions) -> Expr {
+    let (base, array_slice_width, array_slice_reversed, signed) = match lhs {
+        LValue::Ident(name) => return Expr::Ident(name.clone()),
         LValue::Select {
             name,
             msb,
             lsb,
             signed,
-        } => Expr::Select {
-            expr: Box::new(Expr::Ident(name.clone())),
-            msb: msb.clone(),
-            lsb: lsb.clone(),
-            signed: *signed,
-        },
+            array_slice_width,
+            array_slice_reversed,
+        } => (
+            Expr::Select {
+                expr: Box::new(Expr::Ident(name.clone())),
+                msb: msb.clone(),
+                lsb: lsb.clone(),
+                signed: *signed,
+            },
+            array_slice_width,
+            *array_slice_reversed,
+            *signed,
+        ),
+    };
+    if !array_slice_reversed {
+        return base;
     }
+    let Some(array_slice_width) = array_slice_width else {
+        return base;
+    };
+    let Some(element_width) = eval_ast_const_expr(array_slice_width, &packed_dimensions.const_env)
+        .and_then(|width| usize::try_from(width).ok())
+        .filter(|width| *width != 0)
+    else {
+        return base;
+    };
+    let Expr::Select { msb, lsb, .. } = &base else {
+        return base;
+    };
+    let Some(total_width) = eval_ast_const_expr(msb, &packed_dimensions.const_env)
+        .and_then(|msb| {
+            eval_ast_const_expr(lsb, &packed_dimensions.const_env)
+                .and_then(|lsb| usize::try_from(msb.abs_diff(lsb)).ok())
+        })
+        .and_then(|width| width.checked_add(1))
+    else {
+        return base;
+    };
+    if total_width % element_width != 0 || total_width == element_width {
+        return base;
+    }
+    let mut parts = Vec::new();
+    for offset in (0..total_width).step_by(element_width) {
+        let Some(part_msb) = offset
+            .checked_add(element_width)
+            .and_then(|value| value.checked_sub(1))
+        else {
+            return base;
+        };
+        parts.push(Expr::Select {
+            expr: Box::new(base.clone()),
+            msb: ConstExpr::Literal(part_msb.to_string()),
+            lsb: ConstExpr::Literal(offset.to_string()),
+            signed,
+        });
+    }
+    Expr::Concat(parts)
 }
 
 fn net_lvalue_from_node(
@@ -7772,12 +7838,17 @@ fn lvalue_from_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        let (array_slice_width, array_slice_reversed) =
+            unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
+                .map_or((None, false), |(width, reversed)| (Some(width), reversed));
         (msb, lsb) = flatten_select_range(&name, &indices, msb, lsb, packed_dimensions)?;
         return Some(LValue::Select {
             name,
             msb,
             lsb,
             signed: false,
+            array_slice_width,
+            array_slice_reversed,
         });
     }
 
@@ -7793,6 +7864,8 @@ fn lvalue_from_select(
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
                     signed: false,
+                    array_slice_width: None,
+                    array_slice_reversed: false,
                 });
             }
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -7818,6 +7891,8 @@ fn lvalue_from_select(
                 ),
                 lsb: array_offset,
                 signed: dimensions.signed,
+                array_slice_width: None,
+                array_slice_reversed: false,
             });
         } else if let Some(dimensions) = packed_dimensions.get(&name)
             && !dimensions.unpacked.is_empty()
@@ -7837,6 +7912,8 @@ fn lvalue_from_select(
                 ),
                 lsb: array_offset,
                 signed: dimensions.signed,
+                array_slice_width: None,
+                array_slice_reversed: false,
             });
         }
     }
@@ -7854,6 +7931,8 @@ fn lvalue_from_select(
             msb: bit.clone(),
             lsb: bit,
             signed: false,
+            array_slice_width: None,
+            array_slice_reversed: false,
         });
     }
 
@@ -7884,12 +7963,17 @@ fn lvalue_from_constant_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        let (array_slice_width, array_slice_reversed) =
+            unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
+                .map_or((None, false), |(width, reversed)| (Some(width), reversed));
         (msb, lsb) = flatten_select_range(&name, &indices, msb, lsb, packed_dimensions)?;
         return Some(LValue::Select {
             name,
             msb,
             lsb,
             signed: false,
+            array_slice_width,
+            array_slice_reversed,
         });
     }
 
@@ -7905,6 +7989,8 @@ fn lvalue_from_constant_select(
                     msb: add_expr(array_offset.clone(), msb),
                     lsb: add_expr(array_offset, lsb),
                     signed: false,
+                    array_slice_width: None,
+                    array_slice_reversed: false,
                 });
             }
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -7930,6 +8016,8 @@ fn lvalue_from_constant_select(
                 ),
                 lsb: array_offset,
                 signed: dimensions.signed,
+                array_slice_width: None,
+                array_slice_reversed: false,
             });
         } else if let Some(dimensions) = packed_dimensions.get(&name)
             && !dimensions.unpacked.is_empty()
@@ -7949,6 +8037,8 @@ fn lvalue_from_constant_select(
                 ),
                 lsb: array_offset,
                 signed: dimensions.signed,
+                array_slice_width: None,
+                array_slice_reversed: false,
             });
         }
     }
@@ -7966,6 +8056,8 @@ fn lvalue_from_constant_select(
             msb: bit.clone(),
             lsb: bit,
             signed: false,
+            array_slice_width: None,
+            array_slice_reversed: false,
         });
     }
 
@@ -8611,6 +8703,55 @@ fn expr_from_unpacked_select_range(
         1 => parts.pop(),
         _ => Some(Expr::Concat(parts)),
     }
+}
+
+fn unpacked_select_range_metadata(
+    name: &str,
+    indices: &[ConstExpr],
+    msb: &ConstExpr,
+    lsb: &ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, bool)> {
+    let dimensions = packed_dimensions.get(name)?;
+    let dimension = dimensions.unpacked.get(indices.len())?;
+    if const_expr_is_out_of_range(
+        msb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) || const_expr_is_out_of_range(
+        lsb,
+        &dimension.left,
+        &dimension.right,
+        &packed_dimensions.const_env,
+    ) {
+        return None;
+    }
+    let (_, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    if !packed_indices.is_empty() {
+        return None;
+    }
+    let msb_offset = eval_ast_const_expr(
+        &unpacked_index_offset(dimension, msb.clone()),
+        &packed_dimensions.const_env,
+    )?;
+    let lsb_offset = eval_ast_const_expr(
+        &unpacked_index_offset(dimension, lsb.clone()),
+        &packed_dimensions.const_env,
+    )?;
+    let stride = product_expr(
+        &dimensions.unpacked[indices.len() + 1..]
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .chain(
+                dimensions
+                    .packed
+                    .iter()
+                    .map(|dimension| dimension.width.clone()),
+            )
+            .collect::<Vec<_>>(),
+    );
+    Some((stride, msb_offset > lsb_offset))
 }
 
 fn remaining_unpacked_selection_width(

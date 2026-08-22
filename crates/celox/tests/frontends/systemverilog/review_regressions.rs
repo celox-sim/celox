@@ -2864,6 +2864,29 @@ fn reads_unpacked_array_ranges() {
 }
 
 #[test]
+fn writes_reversed_unpacked_array_lvalue_ranges() {
+    let source = r#"
+        module Top(
+            input logic [7:0] source[4],
+            output logic [7:0] target[2]
+        );
+            assign target[1:0] = source[0:1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("reversed_unpacked_array_lvalue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let source = sim.signal("source");
+    let target = sim.signal("target");
+    sim.modify(|io| io.set_wide(source, BigUint::from(0x04030201u64)))
+        .unwrap();
+    assert_eq!(sim.get(target), 0x0102u16.into());
+}
+
+#[test]
 fn reads_bit_selects_of_scalar_array_elements() {
     let source = r#"
         module Top(

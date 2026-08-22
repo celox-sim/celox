@@ -556,7 +556,7 @@ mod tests {
 
         assert!(lfsr.assignments().iter().any(|assignment| matches!(
             assignment.lhs_value(),
-            ir::LValue::Select { name, msb, lsb }
+            ir::LValue::Select { name, msb, lsb, .. }
                 if name == "val_next"
                     && typecheck::eval_const_expr(
                         msb,
@@ -592,7 +592,7 @@ mod tests {
             .filter(|assignment| {
                 matches!(
                     assignment.lhs_value(),
-                    ir::LValue::Select { name, msb, lsb }
+                    ir::LValue::Select { name, msb, lsb, .. }
                         if name == "val_next"
                             && typecheck::eval_const_expr(
                                 msb,
@@ -613,7 +613,7 @@ mod tests {
             .filter(|assignment| {
                 matches!(
                     assignment.lhs_value(),
-                    ir::LValue::Select { name, msb, lsb }
+                    ir::LValue::Select { name, msb, lsb, .. }
                         if name == "val_next"
                             && typecheck::eval_const_expr(msb, &constants) == Some(0)
                             && typecheck::eval_const_expr(lsb, &constants) == Some(0)
@@ -972,11 +972,23 @@ mod tests {
         )
         .expect("unpacked array ranges should be analyzed");
         let assignment = &ir.modules()[0].comb_processes()[0].assignments()[0];
-        let ir::LValue::Select { msb, lsb, .. } = assignment.lhs_value() else {
+        let ir::LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            array_slice_reversed,
+            ..
+        } = assignment.lhs_value()
+        else {
             panic!("expected a flattened unpacked range lvalue");
         };
         assert_eq!(eval_test_const_expr(msb), Some(15));
         assert_eq!(eval_test_const_expr(lsb), Some(0));
+        assert_eq!(
+            array_slice_width.as_ref().map(eval_test_const_expr),
+            Some(Some(8))
+        );
+        assert!(*array_slice_reversed);
         let ir::Expr::Concat(parts) = assignment.rhs() else {
             panic!("expected an element-ordered unpacked range expression");
         };

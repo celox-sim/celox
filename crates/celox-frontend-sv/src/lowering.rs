@@ -3070,6 +3070,50 @@ fn replace_slt_slice<A: std::hash::Hash + Eq + Clone>(
     arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
+fn permute_reversed_lvalue_rhs_slt(
+    lvalue: &sv::ir::LValue,
+    expr: NodeId,
+    target_width: usize,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Option<NodeId> {
+    let sv::ir::LValue::Select {
+        array_slice_width: Some(array_slice_width),
+        array_slice_reversed: true,
+        ..
+    } = lvalue
+    else {
+        return Some(expr);
+    };
+    let element_width = usize::try_from(sv::typecheck::eval_const_expr_with_types(
+        array_slice_width,
+        constants,
+        parameter_types,
+    )?)
+    .ok()
+    .filter(|width| *width != 0)?;
+    if !target_width.is_multiple_of(element_width) {
+        return None;
+    }
+    let element_count = target_width / element_width;
+    if element_count <= 1 {
+        return Some(expr);
+    }
+    let mut parts = Vec::with_capacity(element_count);
+    for lsb in (0..target_width).step_by(element_width) {
+        let msb = lsb.checked_add(element_width)?.checked_sub(1)?;
+        let part = arena
+            .alloc(SLTNode::Slice {
+                expr,
+                access: BitAccess::new(lsb, msb),
+            })
+            .ok()?;
+        parts.push((part, element_width));
+    }
+    arena.alloc(SLTNode::Concat(parts)).ok()
+}
+
 fn lower_assignment(
     assignment: &sv::ir::Assignment,
     variables: &HashMap<SourceVarId, SvVariable>,
@@ -3205,6 +3249,20 @@ fn lower_assignment(
     .map_err(|error| {
         sv::AnalyzerError::Unsupported(format!(
             "combinational assignment width coercion for `{}`: {error}",
+            assignment.lhs()
+        ))
+    })?;
+    expr = permute_reversed_lvalue_rhs_slt(
+        assignment.lhs_value(),
+        expr,
+        target_width,
+        constants,
+        parameter_types,
+        arena,
+    )
+    .ok_or_else(|| {
+        sv::AnalyzerError::Unsupported(format!(
+            "combinational assignment lvalue order for `{}`",
             assignment.lhs()
         ))
     })?;
@@ -4929,6 +4987,14 @@ fn emit_ff_assignment_stores(
                     )?
                 }
             };
+            let rhs = permute_reversed_lvalue_rhs_sir(
+                builder,
+                lvalue,
+                rhs,
+                target_width,
+                constants,
+                parameter_types,
+            )?;
             let rhs = if variables.get(&target.id)?.is_4state
                 && (four_state || !expr_is_unknown_literal(&rhs_expr))
             {
@@ -5142,6 +5208,47 @@ fn replace_sir_slice(
     }
 
     let result = builder.alloc_logic(total_width);
+    builder.emit(SIRInstruction::Concat(result, parts));
+    Some(result)
+}
+
+fn permute_reversed_lvalue_rhs_sir(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    lvalue: &sv::ir::LValue,
+    rhs: celox_sir::RegisterId,
+    target_width: usize,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<celox_sir::RegisterId> {
+    let sv::ir::LValue::Select {
+        array_slice_width: Some(array_slice_width),
+        array_slice_reversed: true,
+        ..
+    } = lvalue
+    else {
+        return Some(rhs);
+    };
+    let element_width = usize::try_from(sv::typecheck::eval_const_expr_with_types(
+        array_slice_width,
+        constants,
+        parameter_types,
+    )?)
+    .ok()
+    .filter(|width| *width != 0)?;
+    if !target_width.is_multiple_of(element_width) {
+        return None;
+    }
+    let element_count = target_width / element_width;
+    if element_count <= 1 {
+        return Some(rhs);
+    }
+    let mut parts = Vec::with_capacity(element_count);
+    for lsb in (0..target_width).step_by(element_width) {
+        let part = builder.alloc_logic(element_width);
+        builder.emit(SIRInstruction::Slice(part, rhs, lsb, element_width));
+        parts.push(part);
+    }
+    let result = builder.alloc_logic(target_width);
     builder.emit(SIRInstruction::Concat(result, parts));
     Some(result)
 }

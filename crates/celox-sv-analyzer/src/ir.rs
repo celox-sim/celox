@@ -576,6 +576,8 @@ pub enum LValue {
         name: String,
         msb: ConstExpr,
         lsb: ConstExpr,
+        array_slice_width: Option<ConstExpr>,
+        array_slice_reversed: bool,
     },
 }
 
@@ -821,10 +823,19 @@ impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
             ast::LValue::Ident(name) => LValue::Ident(name),
-            ast::LValue::Select { name, msb, lsb, .. } => LValue::Select {
+            ast::LValue::Select {
+                name,
+                msb,
+                lsb,
+                array_slice_width,
+                array_slice_reversed,
+                ..
+            } => LValue::Select {
                 name,
                 msb: msb.into(),
                 lsb: lsb.into(),
+                array_slice_width: array_slice_width.map(Into::into),
+                array_slice_reversed,
             },
         }
     }
