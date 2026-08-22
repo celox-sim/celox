@@ -565,10 +565,16 @@ fn alu_binary(
             if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
-                // The compiled lowering zero-extends the right operand for
-                // arithmetic regardless of its declaration.
+                // The compiled narrowing (<= 64-bit) lowering zero-extends
+                // the right operand regardless of its declaration and
+                // sign-promotes the left by its declaration; the wide path
+                // passes raw zero-filled chunks for both sides.
                 let common = lhs_width.max(rhs_width).max(dst_width);
-                let l = promote_operand(lhs, lhs_signed, lhs_width, common).payload;
+                let l = if common <= 64 {
+                    promote_operand(lhs, lhs_signed, lhs_width, common).payload
+                } else {
+                    zero_extend(lhs, common).payload
+                };
                 let r = zero_extend(rhs, common).payload;
                 let raw = match op {
                     BinaryOp::Add => l + r,
@@ -618,7 +624,11 @@ fn alu_binary(
             // compiled promotion, so padding above a narrower operand follows
             // its sign instead of reading as known zero.
             let common = lhs_width.max(rhs_width).max(dst_width);
-            let l = promote_operand(lhs, lhs_signed, lhs_width, common);
+            let l = if common <= 64 {
+                promote_operand(lhs, lhs_signed, lhs_width, common)
+            } else {
+                zero_extend(lhs, common)
+            };
             let r = zero_extend(rhs, common);
             let ones = known_ones(&l, common) & known_ones(&r, common);
             let zeros = known_zeros(&l, common) | known_zeros(&r, common);
@@ -630,7 +640,11 @@ fn alu_binary(
         }
         BinaryOp::Or => {
             let common = lhs_width.max(rhs_width).max(dst_width);
-            let l = promote_operand(lhs, lhs_signed, lhs_width, common);
+            let l = if common <= 64 {
+                promote_operand(lhs, lhs_signed, lhs_width, common)
+            } else {
+                zero_extend(lhs, common)
+            };
             let r = zero_extend(rhs, common);
             let ones = known_ones(&l, common) | known_ones(&r, common);
             let zeros = known_zeros(&l, common) & known_zeros(&r, common);
@@ -645,7 +659,11 @@ fn alu_binary(
             // bit only makes the corresponding output bit unknown (mask union),
             // unlike arithmetic ops where any X poisons the whole result.
             let common = lhs_width.max(rhs_width).max(dst_width);
-            let l = promote_operand(lhs, lhs_signed, lhs_width, common);
+            let l = if common <= 64 {
+                promote_operand(lhs, lhs_signed, lhs_width, common)
+            } else {
+                zero_extend(lhs, common)
+            };
             let r = zero_extend(rhs, common);
             SIRValue {
                 payload: &l.payload ^ &r.payload,
