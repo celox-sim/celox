@@ -353,6 +353,7 @@ pub struct Type {
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
+    unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
 }
 
@@ -367,6 +368,10 @@ impl Type {
 
     pub fn packed_ranges(&self) -> &[PackedRange] {
         &self.packed_ranges
+    }
+
+    pub fn unpacked_ranges(&self) -> &[UnpackedRange] {
+        &self.unpacked_ranges
     }
 
     pub fn resolved_width(&self) -> Option<usize> {
@@ -386,11 +391,12 @@ impl Type {
     pub(crate) fn from_ast(r#type: ast::Type, constants: &fxhash::FxHashMap<String, i128>) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
-        let (packed_ranges, resolved_width) = convert_type(r#type, constants);
+        let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             kind,
             is_signed,
             packed_ranges,
+            unpacked_ranges,
             resolved_width,
         }
     }
@@ -399,14 +405,26 @@ impl Type {
 fn convert_type(
     r#type: ast::Type,
     constants: &fxhash::FxHashMap<String, i128>,
-) -> (Vec<PackedRange>, Option<usize>) {
+) -> (Vec<PackedRange>, Vec<UnpackedRange>, Option<usize>) {
     let packed_ranges: Vec<_> = r#type
         .packed_ranges()
         .iter()
         .map(|range| PackedRange::new(range.left().clone().into(), range.right().clone().into()))
         .collect();
-    let resolved_width = typecheck::resolve_packed_width_with_env(&packed_ranges, constants);
-    (packed_ranges, resolved_width)
+    let unpacked_ranges: Vec<_> = r#type
+        .unpacked_ranges()
+        .iter()
+        .map(|range| UnpackedRange::new(range.left().clone().into(), range.right().clone().into()))
+        .collect();
+    let packed_width = typecheck::resolve_packed_width_with_env(&packed_ranges, constants);
+    let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
+        let left = typecheck::eval_const_expr(range.left(), constants)?;
+        let right = typecheck::eval_const_expr(range.right(), constants)?;
+        let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+        acc.checked_mul(width)
+    });
+    let resolved_width = packed_width.and_then(|width| width.checked_mul(unpacked_width?));
+    (packed_ranges, unpacked_ranges, resolved_width)
 }
 
 impl From<ast::TypeKind> for TypeKind {
@@ -424,6 +442,26 @@ impl From<ast::TypeKind> for TypeKind {
 pub struct PackedRange {
     left: ConstExpr,
     right: ConstExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpackedRange {
+    left: ConstExpr,
+    right: ConstExpr,
+}
+
+impl UnpackedRange {
+    pub(crate) fn new(left: ConstExpr, right: ConstExpr) -> Self {
+        Self { left, right }
+    }
+
+    pub fn left(&self) -> &ConstExpr {
+        &self.left
+    }
+
+    pub fn right(&self) -> &ConstExpr {
+        &self.right
+    }
 }
 
 impl PackedRange {
@@ -538,6 +576,8 @@ pub enum LValue {
         name: String,
         msb: ConstExpr,
         lsb: ConstExpr,
+        array_slice_width: Option<ConstExpr>,
+        array_slice_reversed: bool,
     },
 }
 
@@ -668,6 +708,7 @@ pub enum Expr {
         expr: Box<Expr>,
         msb: ConstExpr,
         lsb: ConstExpr,
+        signed: bool,
     },
     Concat(Vec<Expr>),
     RepeatConcat {
@@ -782,10 +823,19 @@ impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
             ast::LValue::Ident(name) => LValue::Ident(name),
-            ast::LValue::Select { name, msb, lsb } => LValue::Select {
+            ast::LValue::Select {
+                name,
+                msb,
+                lsb,
+                array_slice_width,
+                array_slice_reversed,
+                ..
+            } => LValue::Select {
                 name,
                 msb: msb.into(),
                 lsb: lsb.into(),
+                array_slice_width: array_slice_width.map(Into::into),
+                array_slice_reversed,
             },
         }
     }
@@ -858,10 +908,16 @@ impl From<ast::Expr> for Expr {
         match expr {
             ast::Expr::Ident(name) => Expr::Ident(name),
             ast::Expr::Literal(value) => Expr::Literal(value),
-            ast::Expr::Select { expr, msb, lsb } => Expr::Select {
+            ast::Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => Expr::Select {
                 expr: Box::new((*expr).into()),
                 msb: msb.into(),
                 lsb: lsb.into(),
+                signed,
             },
             ast::Expr::Concat(parts) => Expr::Concat(parts.into_iter().map(Into::into).collect()),
             ast::Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {

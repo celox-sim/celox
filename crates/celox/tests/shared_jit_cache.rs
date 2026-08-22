@@ -31,6 +31,9 @@ const ADDER: &str = r#"
     }
 "#;
 
+const NATIVE_IMAGE_TRAILER_SIZE: usize = 32;
+const NATIVE_IMAGE_VERSION_OFFSET: usize = 8;
+
 const FF: &str = r#"
     module Top (
         i_clk: input  clock,
@@ -652,6 +655,25 @@ fn native_program_image_rejects_corrupt_appended_payload() {
 }
 
 #[test]
+fn native_program_image_rejects_v3_before_decoding_changed_schema() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&3u16.to_le_bytes());
+
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(3))
+    ));
+}
+
+#[test]
 fn native_program_image_writes_an_executable_runtime_file() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
     let shared = sim.shared_code();
@@ -673,6 +695,17 @@ fn native_program_image_writes_an_executable_runtime_file() {
         .unwrap();
     // Replacing an existing attached image must strip the old trailer rather
     // than nesting containers indefinitely.
+    image
+        .write_attached_runtime(&output_path, &output_path)
+        .unwrap();
+    // Replacing an older schema must use only the version-independent trailer
+    // framing to strip it, without attempting to decode the v3 payload.
+    let mut old_version = std::fs::read(&output_path).unwrap();
+    let trailer_start = old_version.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    old_version[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&3u16.to_le_bytes());
+    std::fs::write(&output_path, old_version).unwrap();
     image
         .write_attached_runtime(&output_path, &output_path)
         .unwrap();

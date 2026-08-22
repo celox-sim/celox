@@ -286,7 +286,7 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::UnoptimizedSir {
         None,
     )
     .expect("Failed to flatten");
-    let (sir, runtime) = crate::ir::RuntimeProgram::from_scheduled(scheduled.scheduled);
+    let (sir, runtime) = crate::ir::RuntimeProgram::from_scheduled(scheduled.scheduled).unwrap();
     crate::ir::UnoptimizedSir::new(sir, runtime)
 }
 
@@ -328,35 +328,27 @@ fn test_instances_inherit_module_boundaries() {
     let c1_path = InstancePath(vec![("c1".to_string(), 0)]);
     let c2_path = InstancePath(vec![("c2".to_string(), 0)]);
 
-    let c1_id = program
-        .frontend
-        .instance_ids
-        .get(&c1_path)
+    let c1 = program
+        .design
+        .instance_at_path(&c1_path)
         .expect("c1 instance not found");
-    let c2_id = program
-        .frontend
-        .instance_ids
-        .get(&c2_path)
+    let c2 = program
+        .design
+        .instance_at_path(&c2_path)
         .expect("c2 instance not found");
 
-    // Find VarId for 'x' in Child module
-    let child_module_id = program
-        .frontend
-        .module_names
+    // Find the normalized runtime variable for 'x' in Child.
+    let x = c1
+        .state_addresses()
         .iter()
-        .find(|(_, name)| name.as_str() == "Child")
-        .map(|(id, _)| *id)
-        .expect("Child module not found");
-    let child_vars = &program.frontend.module_variables[&child_module_id];
-    let x_info = child_vars
-        .values()
-        .find(|info| info.path.as_slice() == ["x"])
+        .filter_map(|address| program.design.variable(address))
+        .find(|variable| variable.path.as_slice() == ["x"])
         .unwrap();
-    let x_id = x_info.id;
+    let x_id = x.source_id;
 
     // Verify that we actually have different instance IDs in the paths
-    let c1_x_stores = find_stores_to_var(&program, *c1_id, x_id);
-    let c2_x_stores = find_stores_to_var(&program, *c2_id, x_id);
+    let c1_x_stores = find_stores_to_var(&program, c1.id, x_id);
+    let c2_x_stores = find_stores_to_var(&program, c2.id, x_id);
 
     // We expect split stores.
     // Since we can't easily count exact atoms without knowing how scheduler optimizes,
@@ -469,8 +461,10 @@ fn find_stores_to_var(
     var_id: SourceVarId,
 ) -> Vec<StoreInfo> {
     let expected = program
-        .state_address_for_source(instance_id, var_id)
-        .expect("frontend state projection is complete");
+        .design
+        .instance_variable(instance_id, var_id)
+        .expect("runtime state projection is complete")
+        .address;
     let mut stores = Vec::new();
     for unit in &program.sir.eval_comb {
         for block in unit.blocks.values() {

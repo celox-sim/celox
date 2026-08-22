@@ -123,6 +123,38 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
 mod tests {
     use super::*;
 
+    fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
+        match expr {
+            ir::ConstExpr::Literal(value) => value.parse().ok(),
+            ir::ConstExpr::Binary { left, op, right } => {
+                let left = eval_test_const_expr(left)?;
+                let right = eval_test_const_expr(right)?;
+                Some(match op {
+                    ir::BinaryOp::Add => left + right,
+                    ir::BinaryOp::Sub => left - right,
+                    ir::BinaryOp::Mul => left * right,
+                    ir::BinaryOp::Ge => (left >= right) as i128,
+                    ir::BinaryOp::Le => (left <= right) as i128,
+                    ir::BinaryOp::LogicAnd => ((left != 0) && (right != 0)) as i128,
+                    ir::BinaryOp::LogicOr => ((left != 0) || (right != 0)) as i128,
+                    _ => return None,
+                })
+            }
+            ir::ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                if eval_test_const_expr(condition)? != 0 {
+                    eval_test_const_expr(then_expr)
+                } else {
+                    eval_test_const_expr(else_expr)
+                }
+            }
+            _ => None,
+        }
+    }
+
     #[test]
     fn analyzes_basic_sv_module_name() {
         let ir = analyze_source(
@@ -172,6 +204,70 @@ mod tests {
             ir.modules()[0].ports()[1].r#type().resolved_width(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn preserves_signedness_for_compound_unpacked_array_lvalues() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic signed [7:0] input_value);
+                    logic signed [7:0] values[2];
+                    always_comb begin
+                        values[0] = input_value;
+                        values[0] >>>= 1;
+                    end
+                endmodule
+            "#,
+            Path::new("compound_array.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let compound = ir.modules()[0]
+            .comb_processes()
+            .iter()
+            .flat_map(|process| process.assignments())
+            .find_map(|assignment| match assignment.rhs() {
+                ir::Expr::Binary {
+                    op: ir::BinaryOp::Sar,
+                    left,
+                    ..
+                } => Some(left),
+                _ => None,
+            })
+            .expect("compound assignment should lower to an arithmetic shift");
+        assert!(matches!(
+            compound.as_ref(),
+            ir::Expr::Select { signed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn preserves_operand_signedness_for_size_casts() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic y);
+                    assign y = (8'(0) < -1);
+                endmodule
+            "#,
+            Path::new("size_cast_signedness.sv"),
+        )
+        .expect("size casts should preserve operand signedness");
+        let expression = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Binary {
+            op: ir::BinaryOp::Lt,
+            left,
+            ..
+        } = expression
+        else {
+            panic!("expected a signed less-than comparison, got {expression:?}");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            ir::Expr::Resize {
+                width: 8,
+                signed: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -460,7 +556,7 @@ mod tests {
 
         assert!(lfsr.assignments().iter().any(|assignment| matches!(
             assignment.lhs_value(),
-            ir::LValue::Select { name, msb, lsb }
+            ir::LValue::Select { name, msb, lsb, .. }
                 if name == "val_next"
                     && typecheck::eval_const_expr(
                         msb,
@@ -496,7 +592,7 @@ mod tests {
             .filter(|assignment| {
                 matches!(
                     assignment.lhs_value(),
-                    ir::LValue::Select { name, msb, lsb }
+                    ir::LValue::Select { name, msb, lsb, .. }
                         if name == "val_next"
                             && typecheck::eval_const_expr(
                                 msb,
@@ -517,7 +613,7 @@ mod tests {
             .filter(|assignment| {
                 matches!(
                     assignment.lhs_value(),
-                    ir::LValue::Select { name, msb, lsb }
+                    ir::LValue::Select { name, msb, lsb, .. }
                         if name == "val_next"
                             && typecheck::eval_const_expr(msb, &constants) == Some(0)
                             && typecheck::eval_const_expr(lsb, &constants) == Some(0)
@@ -527,7 +623,7 @@ mod tests {
         assert_eq!(assignments.len(), 1);
         assert!(matches!(
             assignments[0].rhs(),
-            ir::Expr::Select { expr, msb, lsb }
+            ir::Expr::Select { expr, msb, lsb, .. }
                 if matches!(&**expr, ir::Expr::Ident(name) if name == "o_val")
                     && typecheck::eval_const_expr(msb, &HashMap::default())
                         == Some(0)
@@ -701,6 +797,231 @@ mod tests {
             ir.modules()[0].ports()[0].r#type().resolved_width(),
             Some(8)
         );
+    }
+
+    #[test]
+    fn analyzes_fixed_unpacked_array_dimensions() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter N = 2) (
+                    input logic [7:0] data,
+                    output logic [7:0] out
+                );
+                    logic [7:0] values [N];
+                    assign values[0] = data;
+                    assign values[1] = data;
+                    assign out = values[1];
+                endmodule
+            "#,
+            Path::new("fixed_array.sv"),
+        )
+        .expect("fixed unpacked arrays should be analyzed");
+
+        let top = &ir.modules()[0];
+        let values = top
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "values")
+            .expect("array signal should be present");
+        assert_eq!(values.r#type().unpacked_ranges().len(), 1);
+        assert_eq!(values.r#type().resolved_width(), Some(16));
+        assert_eq!(top.ports()[1].r#type().resolved_width(), Some(8));
+    }
+
+    #[test]
+    fn rejects_nonpositive_implicit_unpacked_array_dimensions() {
+        for size in ["0", "-1", "SIZE"] {
+            let source = format!(
+                r#"
+                    module Top #(parameter SIZE = 0) ();
+                        logic [7:0] values[{size}];
+                    endmodule
+                "#
+            );
+            let error = analyze_source(&source, Path::new("invalid_array_size.sv"))
+                .expect_err("nonpositive implicit array dimensions should be rejected");
+            assert!(
+                matches!(error, AnalyzerError::Unsupported(message) if message == "nonpositive unpacked array dimension")
+            );
+        }
+    }
+
+    #[test]
+    fn analyzes_nested_static_loops_with_outer_index_environment() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic clk, input logic d);
+                    logic q[2][2];
+                    always_ff @(posedge clk) begin
+                        for (int i = 0; i < 2; i++) begin
+                            for (int j = 0; j < i; j++) begin
+                                q[i][j] <= d;
+                            end
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("nested_static_loops.sv"),
+        )
+        .expect("nested static loops should use the outer loop environment");
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 1);
+    }
+
+    #[test]
+    fn carries_outer_loop_types_into_nested_loop_preflight() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic clk, input logic d);
+                    logic q;
+                    always_ff @(posedge clk) begin
+                        for (int i = -1; i < 0; i++) begin
+                            for (int j = 0; i < 32'd1; j++) begin
+                                q <= d;
+                            end
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("nested_loop_preflight_types.sv"),
+        )
+        .expect("nested loop preflight should use outer loop types");
+        assert!(ir.modules()[0].ff_processes().is_empty());
+    }
+
+    #[test]
+    fn applies_expression_types_to_compound_loop_steps() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic clk, output logic q);
+                    always_ff @(posedge clk) begin
+                        for (int i = -2; i < 0; i /= 32'd2) begin
+                            q <= 1'b1;
+                        end
+                        for (int i = -3; i < 0; i %= 32'd2) begin
+                            q <= 1'b0;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("typed_compound_loop_steps.sv"),
+        )
+        .expect("compound loop steps should use expression types");
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+    }
+
+    #[test]
+    fn flattens_partial_unpacked_array_selections() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic [7:0] values[2][3],
+                    output logic [7:0] row[3]
+                );
+                    assign row = values[0];
+                endmodule
+            "#,
+            Path::new("partial_unpacked_selection.sv"),
+        )
+        .expect("partial unpacked selections should be analyzed");
+        let expression = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Select { msb, lsb, .. } = expression else {
+            panic!("expected a flattened partial selection, got {expression:?}");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(23));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+    }
+
+    #[test]
+    fn flattens_partial_unpacked_array_lvalue_selections() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic [7:0] row[3],
+                    output logic [7:0] values[2][3]
+                );
+                    assign values[0] = row;
+                endmodule
+            "#,
+            Path::new("partial_unpacked_lvalue_selection.sv"),
+        )
+        .expect("partial unpacked lvalues should be analyzed");
+        let assignment = &ir.modules()[0].comb_processes()[0].assignments()[0];
+        let ir::LValue::Select { name, msb, lsb, .. } = assignment.lhs_value() else {
+            panic!(
+                "expected a flattened partial lvalue selection, got {:?}",
+                assignment.lhs_value()
+            );
+        };
+        assert_eq!(name, "values");
+        assert_eq!(eval_test_const_expr(msb), Some(23));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+    }
+
+    #[test]
+    fn flattens_unpacked_array_range_selections() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic [7:0] source[4],
+                    output logic [7:0] target[4]
+                );
+                    assign target[1:0] = source[1:0];
+                endmodule
+            "#,
+            Path::new("unpacked_array_range_selection.sv"),
+        )
+        .expect("unpacked array ranges should be analyzed");
+        let assignment = &ir.modules()[0].comb_processes()[0].assignments()[0];
+        let ir::LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            array_slice_reversed,
+            ..
+        } = assignment.lhs_value()
+        else {
+            panic!("expected a flattened unpacked range lvalue");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(15));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+        assert_eq!(
+            array_slice_width.as_ref().map(eval_test_const_expr),
+            Some(Some(8))
+        );
+        assert!(*array_slice_reversed);
+        let ir::Expr::Concat(parts) = assignment.rhs() else {
+            panic!("expected an element-ordered unpacked range expression");
+        };
+        assert_eq!(parts.len(), 2);
+        let ir::Expr::Select { msb, lsb, .. } = &parts[0] else {
+            panic!("expected the first unpacked range element selection");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(7));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
+        let ir::Expr::Select { msb, lsb, .. } = &parts[1] else {
+            panic!("expected the second unpacked range element selection");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(15));
+        assert_eq!(eval_test_const_expr(lsb), Some(8));
+    }
+
+    #[test]
+    fn preserves_implicit_packed_bit_selects_on_scalar_arrays() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic values[2], output logic y);
+                    assign y = values[0][0];
+                endmodule
+            "#,
+            Path::new("scalar_array_bit_selection.sv"),
+        )
+        .expect("scalar array bit-selects should be analyzed");
+        let expression = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Select { msb, lsb, .. } = expression else {
+            panic!("expected a scalar array bit-select, got {expression:?}");
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(0));
+        assert_eq!(eval_test_const_expr(lsb), Some(0));
     }
 
     #[test]
@@ -966,10 +1287,7 @@ mod tests {
         ] {
             let error = analyze_source(source, Path::new(name))
                 .expect_err("unlowered constructs must not be silently ignored");
-            assert!(matches!(
-                error,
-                AnalyzerError::Unsupported(detail) if detail == "unpacked array dimension"
-            ));
+            assert!(matches!(error, AnalyzerError::Unsupported(_)));
         }
 
         let error = analyze_source(

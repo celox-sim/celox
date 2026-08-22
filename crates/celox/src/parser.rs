@@ -58,47 +58,37 @@ fn dump_addr_map_if_requested(program: &RuntimeProgram, diagnostics: &crate::Run
 
     let filter = parse_addr_map_filter(raw_filter);
     let mut entries = Vec::new();
-    for (&instance_id, &module_id) in &program.frontend.instance_module {
-        let Some(vars) = program.frontend.module_variables.get(&module_id) else {
-            continue;
-        };
-        for (&var_id, info) in vars {
-            let inst_key = instance_id.0.to_string();
-            let var_key = normalized_addr_id(&var_id.to_string());
+    for instance in program.design.instances() {
+        for address in instance.state_addresses() {
+            let variable = program.design.variable(address).unwrap();
+            let inst_key = instance.id.0.to_string();
+            let var_key = normalized_addr_id(&variable.source_id.to_string());
             if let Some(filter) = &filter
                 && !filter.contains(&(inst_key, var_key))
             {
                 continue;
             }
-            entries.push((instance_id, module_id, var_id, info));
+            entries.push((instance, variable));
         }
     }
 
-    entries.sort_by(|(a_inst, _, a_var, _), (b_inst, _, b_var, _)| {
-        (a_inst.0, a_var.to_string()).cmp(&(b_inst.0, b_var.to_string()))
+    entries.sort_by(|(a_instance, a_variable), (b_instance, b_variable)| {
+        (a_instance.id.0, a_variable.source_id).cmp(&(b_instance.id.0, b_variable.source_id))
     });
 
-    for (instance_id, module_id, var_id, info) in entries {
-        let module_name = program
-            .frontend
-            .module_names
-            .get(&module_id)
-            .cloned()
-            .unwrap_or_default();
-        let Some(addr) = program.state_address_for_source(instance_id, var_id) else {
-            continue;
-        };
+    for (instance, variable) in entries {
+        let metadata = &program.design.state_objects[&variable.address];
         tracing::debug!(
             "[addr-map] inst={} var={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",
-            instance_id,
-            var_id,
-            module_name,
-            program.get_path(&addr),
-            info.width,
-            info.array_dims,
-            info.is_4state,
-            info.kind,
-            info.var_kind.description(),
+            instance.id,
+            variable.source_id,
+            instance.module_name,
+            program.get_path(&variable.address),
+            metadata.width,
+            metadata.array_dims,
+            metadata.is_4state,
+            metadata.kind,
+            variable.var_kind.description(),
         );
     }
 }
@@ -133,9 +123,6 @@ fn verify_program_sir(
     program: &RuntimeProgram,
     phase: &'static str,
 ) -> Result<(), ParserError> {
-    program.verify_design_projection().map_err(|error| {
-        ParserError::illegal_context("elaborated design projection", error.to_string(), None)
-    })?;
     let units = sir
         .eval_comb
         .iter()
@@ -314,17 +301,28 @@ pub(crate) fn finalize_scheduled_rtl(
 
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
-    let (sir, mut runtime) = RuntimeProgram::from_scheduled(scheduled.scheduled);
-    if let Some(testbench_source) = testbench_source.as_mut() {
+    let testbench = if let Some(testbench_source) = testbench_source.as_mut() {
         testbench_source.component_libraries = component_libraries;
         testbench_source.component_file_base = component_file_base;
-        crate::testbench_compile::project_observability(&mut runtime, testbench_source)?;
-        runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
-            &runtime,
+        crate::testbench_compile::project_observability(
+            &scheduled.scheduled.frontend_lookup,
+            &mut scheduled.scheduled.runtime_schema,
+            testbench_source,
+        )?;
+        crate::testbench_compile::compile_semantic_testbench(
+            &scheduled.scheduled.frontend_lookup,
+            scheduled.scheduled.runtime_schema.runtime_event_sites.len(),
             testbench_source,
             testbench_random_seed,
-        )?;
-    }
+        )?
+    } else {
+        None
+    };
+    let (sir, mut runtime) =
+        RuntimeProgram::from_scheduled(scheduled.scheduled).map_err(|error| {
+            ParserError::illegal_context("runtime design projection", error.to_string(), None)
+        })?;
+    runtime.testbench = testbench;
     dump_addr_map_if_requested(&runtime, diagnostics);
     let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()
