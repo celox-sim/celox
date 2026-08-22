@@ -9,10 +9,11 @@
 # trusted workflow identity:
 #   1. Go to https://www.npmjs.com/package/<name>/access for each package
 #   2. Add a trusted publisher:
-#        Provider:   GitHub Actions
-#        Owner:      celox-sim
-#        Repository: celox
-#        Workflow:   ci-napi.yml
+#        Provider:    GitHub Actions
+#        Owner:       celox-sim
+#        Repository:  celox
+#        Workflow:    ci-napi.yml
+#        Environment: npm
 set -euo pipefail
 
 PACKAGES=(
