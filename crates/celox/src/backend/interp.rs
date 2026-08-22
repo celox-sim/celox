@@ -10,18 +10,18 @@
 //! execution units between the interpreter and compiled tiers without any
 //! state translation.
 //!
-//! Known gaps versus the compiled backends (all fail loud or degrade
-//! visibly, never silently corrupt):
-//!
-//! - Trigger notification marks the trigger bit on every qualifying
-//!   store/commit (a level-style over-approximation of the compiled
-//!   edge/level detection).
+//! Trigger marking follows the compiled change-detection protocol: the
+//! first word of every trigger-bearing object is snapshotted at group entry
+//! and trigger bits are marked only when a store or commit changes it. As in
+//! the compiled backends, `TriggerIdWithKind.kind` does not influence code
+//! execution.
 
 #![cfg(feature = "host-runtime")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use celox_design::RegionedAbsoluteAddrBase;
 use celox_sir::{ExecutionUnit, SIROffset, SIRValue, TriggerIdWithKind};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
@@ -92,6 +92,9 @@ struct Machine<'a> {
     four_state: bool,
     /// Per-site enable bytes for comb capture events.
     comb_capture_enabled: &'a mut [u8],
+    /// First-word snapshots of trigger-bearing objects taken at group entry;
+    /// trigger bits are only marked when a store changes the value.
+    trigger_snapshots: &'a HashMap<(AbsoluteAddr, u32), u64>,
 }
 
 impl Machine<'_> {
@@ -538,13 +541,26 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         Ok(())
     }
 
-    fn notify_triggers(&mut self, _addr: &RegionedAbsoluteAddr, triggers: &[TriggerIdWithKind]) {
+    fn notify_triggers(&mut self, addr: &RegionedAbsoluteAddr, triggers: &[TriggerIdWithKind]) {
+        if triggers.is_empty() {
+            return;
+        }
+        // Change detection identical to the compiled backends: the object's
+        // first word is compared against the group-entry snapshot and the
+        // trigger bits are only marked on an actual change.
+        let absolute = addr.absolute_addr();
+        let Some(&snapshot) = self.trigger_snapshots.get(&(absolute, addr.region)) else {
+            return;
+        };
+        let Ok(base) = self.object_offset(addr) else {
+            return;
+        };
+        // Safety: layout-mapped objects fit inside the merged image.
+        let current = unsafe { self.read_u64(base) };
+        if current == snapshot {
+            return;
+        }
         for trigger in triggers {
-            // SEMANTICS-GAP: compiled backends emit per-kind edge/level
-            // detection inline. Marking on every qualifying store/commit is a
-            // level-style over-approximation that keeps clocked simulation
-            // advancing until per-kind semantics are ported.
-            // VERIFY: `TriggerIdWithKind` field name assumed to be `id`.
             self.mark_trigger_bit(trigger.id);
         }
     }
@@ -655,6 +671,35 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
     }
 }
 
+/// Collect the addresses of objects whose stores carry triggers. Their
+/// first 64-bit word is snapshotted at group entry so trigger marking can
+/// detect actual changes, mirroring the compiled backends.
+fn collect_trigger_addrs(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+) -> Vec<(AbsoluteAddr, u32)> {
+    let mut addrs = crate::HashSet::<(AbsoluteAddr, u32)>::default();
+    for unit in units {
+        for block in unit.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    celox_sir::SIRInstruction::Store(addr, _, _, _, triggers, _)
+                        if !triggers.is_empty() =>
+                    {
+                        addrs.insert((addr.absolute_addr(), addr.region));
+                    }
+                    celox_sir::SIRInstruction::Commit(_, dst, _, _, triggers)
+                        if !triggers.is_empty() =>
+                    {
+                        addrs.insert((dst.absolute_addr(), dst.region));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    addrs.into_iter().collect()
+}
+
 /// Execute every unit in `units` against the split backend storage.
 fn run_units(
     memory: &mut Vec<u64>,
@@ -663,6 +708,24 @@ fn run_units(
     comb_capture_enabled: &mut [u8],
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
 ) -> Result<(), SimulatorErrorCode> {
+    // Snapshot the first word of every trigger-bearing object at group
+    // entry; stores mark trigger bits only when the value actually changed.
+    let mut trigger_snapshots: HashMap<(AbsoluteAddr, u32), u64> = HashMap::default();
+    for (absolute, region) in collect_trigger_addrs(units) {
+        let addr = RegionedAbsoluteAddrBase::from_absolute_addr(region, absolute);
+        let machine = Machine {
+            memory: &mut *memory,
+            layout,
+            four_state,
+            comb_capture_enabled: &mut *comb_capture_enabled,
+            trigger_snapshots: &trigger_snapshots,
+        };
+        if let Ok(base) = machine.object_offset(&addr) {
+            // Safety: layout-mapped objects fit inside the merged image.
+            trigger_snapshots.insert((absolute, region), unsafe { read_word(memory, base) });
+        }
+    }
+
     for unit in units {
         let mut machine = Machine {
             // Reborrow through the mutable references so a fresh Machine can
@@ -671,6 +734,7 @@ fn run_units(
             layout,
             four_state,
             comb_capture_enabled: &mut *comb_capture_enabled,
+            trigger_snapshots: &trigger_snapshots,
         };
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
@@ -678,6 +742,14 @@ fn run_units(
         execute_unit(unit, &mut machine, &[], four_state).map_err(error_code)?;
     }
     Ok(())
+}
+
+/// Read one little-endian word from the merged image.
+///
+/// # Safety
+/// Callers must bound `offset + 8` inside the allocation.
+unsafe fn read_word(memory: &[u64], offset: usize) -> u64 {
+    unsafe { (memory.as_ptr() as *const u8).add(offset).cast::<u64>().read_unaligned() }
 }
 
 /// A [`SimBackend`] that interprets the laid-out SIR instead of executing
