@@ -207,6 +207,7 @@ pub fn emit_prepared_eu(
         .checked_add(layout.triggered_bits_total_size)
         .ok_or(PrepareError::StateSizeOverflow)?;
     let mut function = crate::isel::lower_execution_unit(sir_eu, layout, four_state);
+    crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_before_regalloc = format!("{function:#?}");
