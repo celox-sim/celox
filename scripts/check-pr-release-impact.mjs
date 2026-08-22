@@ -217,6 +217,31 @@ async function githubJson(path) {
   return response.json();
 }
 
+async function githubGraphql(query, variables) {
+  const graphqlUrl =
+    process.env.GITHUB_GRAPHQL_URL ?? "https://api.github.com/graphql";
+  const response = await fetch(graphqlUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${process.env.GH_TOKEN}`,
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub GraphQL returned ${response.status}`);
+  }
+  const payload = await response.json();
+  if (payload.errors?.length > 0) {
+    throw new Error(
+      `GitHub GraphQL returned errors: ${payload.errors.map((error) => error.message).join("; ")}`,
+    );
+  }
+  return payload.data;
+}
+
 async function loadPullRequestCommits(repository, number) {
   const pullRequest = await githubJson(`/repos/${repository}/pulls/${number}`);
   // BEGIN_COMMIT_OVERRIDE does not apply to plain merges. The companion
@@ -256,57 +281,15 @@ async function loadRepositoryFile(repository, path, ref) {
   );
 }
 
-async function loadCompareCommits(repository, baseSha, headSha) {
-  const commits = new Map();
-  let totalCommits;
-
-  for (let page = 1; ; page++) {
-    const comparison = await githubJson(
-      `/repos/${repository}/compare/${baseSha}...${headSha}?per_page=100&page=${page}`,
-    );
-    if (totalCommits === undefined) {
-      if (!Number.isSafeInteger(comparison.total_commits)) {
-        throw new Error("GitHub comparison did not return a commit count");
-      }
-      totalCommits = comparison.total_commits;
-    }
-    for (const commit of comparison.commits) {
-      commits.set(commit.sha, commit.sha);
-    }
-    if (commits.size >= totalCommits) {
-      break;
-    }
-    if (comparison.commits.length === 0) {
-      throw new Error(
-        `GitHub returned ${commits.size} of ${totalCommits} merge group commits`,
-      );
-    }
-  }
-
-  if (commits.size === 0) {
-    throw new Error(`Merge group ${baseSha}...${headSha} has no commits`);
-  }
-  return [...commits.keys()];
-}
-
-async function loadAssociatedPullRequests(repository, sha) {
-  const pullRequests = [];
-  for (let page = 1; ; page++) {
-    const batch = await githubJson(
-      `/repos/${repository}/commits/${sha}/pulls?per_page=100&page=${page}`,
-    );
-    pullRequests.push(...batch);
-    if (batch.length < 100) {
-      return pullRequests;
-    }
-  }
-}
-
-export function collectMergeGroupPullRequests(associatedPullRequests, baseRef) {
+export function collectMergeQueuePullRequests(entries, targetPosition, baseRef) {
   const baseBranch = baseRef.replace(/^refs\/heads\//, "");
   const pullRequests = new Map();
-  for (const pullRequest of associatedPullRequests) {
-    if (pullRequest.state === "open" && pullRequest.base.ref === baseBranch) {
+  for (const entry of entries) {
+    const pullRequest = entry.pullRequest;
+    if (
+      entry.position <= targetPosition &&
+      pullRequest?.baseRefName === baseBranch
+    ) {
       pullRequests.set(pullRequest.number, {
         number: pullRequest.number,
         title: pullRequest.title,
@@ -317,31 +300,73 @@ export function collectMergeGroupPullRequests(associatedPullRequests, baseRef) {
   return [...pullRequests.values()];
 }
 
-async function loadMergeGroupPullRequests(
-  repository,
-  baseSha,
-  headSha,
-  baseRef,
-) {
-  const commits = await loadCompareCommits(repository, baseSha, headSha);
-  const associatedPullRequests = [];
-  for (let index = 0; index < commits.length; index += 10) {
-    const batches = await Promise.all(
-      commits
-        .slice(index, index + 10)
-        .map((sha) => loadAssociatedPullRequests(repository, sha)),
-    );
-    associatedPullRequests.push(...batches.flat());
+export function mergeGroupHeadPullRequestNumber(headRef) {
+  const match = headRef.match(
+    /^(?:refs\/heads\/)?gh-readonly-queue\/.+\/pr-(\d+)-[0-9a-f]{40}$/,
+  );
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+async function loadMergeGroupPullRequests(repository, headRef, baseRef) {
+  const [owner, name, ...extra] = repository.split("/");
+  const targetNumber = mergeGroupHeadPullRequestNumber(headRef);
+  if (!owner || !name || extra.length > 0 || targetNumber === null) {
+    throw new Error(`Invalid merge group repository or head ref: ${headRef}`);
   }
 
-  const pullRequests = collectMergeGroupPullRequests(
-    associatedPullRequests,
+  const query = `
+    query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          mergeQueueEntry { position }
+          mergeQueue {
+            entries(first: 100, after: $cursor) {
+              nodes {
+                position
+                pullRequest { number title baseRefName }
+              }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const entries = [];
+  let cursor = null;
+  let targetPosition;
+  for (;;) {
+    const data = await githubGraphql(query, {
+      owner,
+      name,
+      number: targetNumber,
+      cursor,
+    });
+    const pullRequest = data.repository?.pullRequest;
+    targetPosition ??= pullRequest?.mergeQueueEntry?.position;
+    const connection = pullRequest?.mergeQueue?.entries;
+    if (!Number.isSafeInteger(targetPosition) || !connection) {
+      throw new Error(`Pull request #${targetNumber} is not in a merge queue`);
+    }
+    entries.push(...connection.nodes);
+    if (!connection.pageInfo.hasNextPage) {
+      break;
+    }
+    cursor = connection.pageInfo.endCursor;
+    if (!cursor) {
+      throw new Error("Merge queue pagination did not return a cursor");
+    }
+  }
+
+  const pullRequests = collectMergeQueuePullRequests(
+    entries,
+    targetPosition,
     baseRef,
   );
 
-  if (pullRequests.length === 0) {
+  if (!pullRequests.some((pullRequest) => pullRequest.number === targetNumber)) {
     throw new Error(
-      `Merge group ${baseSha}...${headSha} has no open pull requests targeting ${baseRef}`,
+      `Merge group ${headRef} does not contain its queued pull request #${targetNumber}`,
     );
   }
   return pullRequests;
@@ -352,12 +377,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const number = process.env.PR_NUMBER;
   const title = process.env.PR_TITLE;
   const mergeGroupSha = process.env.MERGE_GROUP_SHA;
-  const mergeGroupBaseSha = process.env.MERGE_GROUP_BASE_SHA;
+  const mergeGroupHeadRef = process.env.MERGE_GROUP_HEAD_REF;
   const mergeGroupBaseRef = process.env.MERGE_GROUP_BASE_REF;
   const pullRequestMode = /^\d+$/.test(number ?? "") && Boolean(title);
   const mergeGroupMode =
     /^[0-9a-f]{40}$/.test(mergeGroupSha ?? "") &&
-    /^[0-9a-f]{40}$/.test(mergeGroupBaseSha ?? "") &&
+    mergeGroupHeadPullRequestNumber(mergeGroupHeadRef ?? "") !== null &&
     /^refs\/heads\/.+/.test(mergeGroupBaseRef ?? "");
   if (
     !repository ||
@@ -365,7 +390,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     pullRequestMode === mergeGroupMode
   ) {
     console.error(
-      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE or MERGE_GROUP_BASE_SHA/MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
+      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE or MERGE_GROUP_HEAD_REF/MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
     );
     process.exit(1);
   }
@@ -388,8 +413,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     ? [{ number: Number.parseInt(number, 10), title }]
     : await loadMergeGroupPullRequests(
         repository,
-        mergeGroupBaseSha,
-        mergeGroupSha,
+        mergeGroupHeadRef,
         mergeGroupBaseRef,
       );
   const errors = [];

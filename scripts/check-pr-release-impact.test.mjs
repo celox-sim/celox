@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  collectMergeGroupPullRequests,
+  collectMergeQueuePullRequests,
   commitReleaseImpact,
+  mergeGroupHeadPullRequestNumber,
   releasePolicyFromFiles,
   releaseImpactErrors,
   titleReleaseImpact,
@@ -46,47 +47,66 @@ test("derives feature impact from the effective release configuration", () => {
   );
 });
 
-test("collects every open pull request represented in a merge group", () => {
+test("collects only queue entries through the merge group head", () => {
   assert.deepEqual(
-    collectMergeGroupPullRequests(
+    collectMergeQueuePullRequests(
       [
         {
-          number: 1,
-          title: "fix: first",
-          state: "open",
-          base: { ref: "master" },
+          position: 0,
+          pullRequest: {
+            number: 1,
+            title: "fix: first",
+            baseRefName: "master",
+          },
         },
         {
-          number: 2,
-          title: "feat: second",
-          state: "open",
-          base: { ref: "master" },
+          position: 1,
+          pullRequest: {
+            number: 2,
+            title: "feat: group head",
+            baseRefName: "master",
+          },
         },
         {
-          number: 1,
-          title: "fix: first",
-          state: "open",
-          base: { ref: "master" },
+          position: 2,
+          pullRequest: {
+            number: 3,
+            title: "feat: stacked but behind",
+            baseRefName: "master",
+          },
         },
         {
-          number: 3,
-          title: "fix: merged",
-          state: "closed",
-          base: { ref: "master" },
-        },
-        {
-          number: 4,
-          title: "fix: develop",
-          state: "open",
-          base: { ref: "develop" },
+          position: 0,
+          pullRequest: {
+            number: 4,
+            title: "fix: develop",
+            baseRefName: "develop",
+          },
         },
       ],
+      1,
       "refs/heads/master",
     ),
     [
       { number: 1, title: "fix: first" },
-      { number: 2, title: "feat: second" },
+      { number: 2, title: "feat: group head" },
     ],
+  );
+  assert.equal(
+    mergeGroupHeadPullRequestNumber(
+      "refs/heads/gh-readonly-queue/master/pr-644-0123456789abcdef0123456789abcdef01234567",
+    ),
+    644,
+  );
+  assert.equal(
+    mergeGroupHeadPullRequestNumber(
+      "gh-readonly-queue/master/pr-644-0123456789abcdef0123456789abcdef01234567",
+    ),
+    644,
+  );
+  assert.equal(
+    mergeGroupHeadPullRequestNumber("refs/heads/feature/pr-644-deadbeef"),
+    null,
   );
 });
 
