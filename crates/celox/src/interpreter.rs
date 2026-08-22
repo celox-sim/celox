@@ -976,9 +976,11 @@ fn alu_unary(
     let out = match op {
         UnaryOp::Ident => {
             // Identity casts widen with the operand's declared signedness,
-            // matching the compiled promotion: widening a signed negative
-            // value must sign-fill, not zero-fill.
-            if src_signed && dst_width > src_width {
+            // matching the compiled narrow promotion: widening a signed
+            // negative value must sign-fill, not zero-fill. The compiled
+            // multi-word path instead copies chunks and zero-fills, so casts
+            // into registers wider than 64 bits keep zero padding.
+            if src_signed && dst_width > src_width && dst_width <= 64 {
                 SIRValue {
                     payload: sign_extend(&src.payload, src_width, dst_width),
                     mask: sign_extend(&src.mask, src_width, dst_width),
