@@ -13,18 +13,14 @@
 //! Known gaps versus the compiled backends (all fail loud or degrade
 //! visibly, never silently corrupt):
 //!
-//! - `RuntimeEvent` / `CombCaptureEvent` instructions are currently no-ops
-//!   because the interpreter does not yet write the `RuntimeEventBuffer`
-//!   record ABI that generated code uses.
 //! - Trigger notification marks the trigger bit on every qualifying
 //!   store/commit (a level-style over-approximation of the compiled
 //!   edge/level detection).
-//! - `SPARSE_WORKING_REGION` accesses report a machine error instead of
-//!   guessing at an unmapped storage region.
 
 #![cfg(feature = "host-runtime")]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use celox_sir::{ExecutionUnit, SIROffset, SIRValue, TriggerIdWithKind};
 use num_bigint::BigUint;
@@ -33,8 +29,13 @@ use num_traits::{ToPrimitive, Zero};
 use super::{
     EventHandle, MemoryLayout, RuntimeEventBuffer, SimBackend, SimulatorErrorCode, get_byte_size,
 };
-use crate::interpreter::{InterpError, InterpMachine, ResolvedAccess, execute_unit};
-use crate::ir::{STABLE_REGION, WORKING_REGION};
+use crate::backend::memory_layout::{
+    RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+    RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+    RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+};
+use crate::interpreter::{InterpError, InterpMachine, ResolvedAccess, StoreSnapshot, execute_unit};
+use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,
     ir::{AbsoluteAddr, LaidOutProgram, RegionedAbsoluteAddr, SignalRef},
@@ -89,10 +90,7 @@ struct Machine<'a> {
     memory: &'a mut Vec<u64>,
     layout: &'a MemoryLayout,
     four_state: bool,
-    /// Reserved for comb-capture bookkeeping once the runtime-event record
-    /// ABI is implemented; kept in the struct so the borrow split stays
-    /// identical to the final shape.
-    #[allow(dead_code)]
+    /// Per-site enable bytes for comb capture events.
     comb_capture_enabled: &'a mut [u8],
 }
 
@@ -105,12 +103,17 @@ impl Machine<'_> {
 
     /// Resolve a regioned SIR address to its byte offset in the merged image.
     ///
-    /// Only regions with a dedicated layout table are supported; anything
+    /// Every region with a dedicated layout table is supported; anything
     /// else fails loudly rather than aliasing into unrelated storage.
     fn object_offset(&self, addr: &RegionedAbsoluteAddr) -> Result<usize, InterpError> {
         let absolute = addr.absolute_addr();
         let mapped = if addr.region == STABLE_REGION {
             self.layout.offsets.get(&absolute).copied()
+        } else if addr.region == SPARSE_WORKING_REGION {
+            self.layout
+                .sparse_offsets
+                .get(&absolute)
+                .map(|relative| self.layout.sparse_base_offset + relative)
         } else if addr.region == WORKING_REGION {
             self.layout
                 .working_offsets
@@ -168,7 +171,13 @@ impl Machine<'_> {
     }
 
     fn is_4state_object(&self, absolute: &AbsoluteAddr) -> bool {
-        self.four_state && self.layout.is_4states.get(absolute).copied().unwrap_or(false)
+        self.four_state
+            && self
+                .layout
+                .is_4states
+                .get(absolute)
+                .copied()
+                .unwrap_or(false)
     }
 
     /// Read `bits` starting at `bit_offset` within the object at
@@ -226,6 +235,225 @@ impl Machine<'_> {
     fn byte_mut(&mut self, offset: usize) -> *mut u8 {
         unsafe { (self.memory.as_mut_ptr() as *mut u8).add(offset) }
     }
+
+    /// Read one unaligned little-endian `u64` bookkeeping word.
+    ///
+    /// # Safety
+    /// Callers must bound `offset + 8` inside the merged allocation.
+    unsafe fn read_u64(&self, offset: usize) -> u64 {
+        unsafe {
+            let ptr = (self.memory.as_ptr() as *const u8).add(offset) as *const u64;
+            ptr.read_unaligned()
+        }
+    }
+
+    /// Write one unaligned little-endian `u64` bookkeeping word.
+    ///
+    /// # Safety
+    /// Callers must bound `offset + 8` inside the merged allocation.
+    unsafe fn write_u64(&mut self, offset: usize, value: u64) {
+        unsafe {
+            let ptr = (self.memory.as_mut_ptr() as *mut u8).add(offset) as *mut u64;
+            ptr.write_unaligned(value)
+        }
+    }
+
+    /// Read one byte of the merged image.
+    ///
+    /// # Safety
+    /// Callers must bound `offset` inside the merged allocation.
+    unsafe fn read_u8(&self, offset: usize) -> u8 {
+        unsafe { *(self.memory.as_ptr() as *const u8).add(offset) }
+    }
+
+    /// Write one byte of the merged image.
+    ///
+    /// # Safety
+    /// Callers must bound `offset` inside the merged allocation.
+    unsafe fn write_u8(&mut self, offset: usize, value: u8) {
+        unsafe { *(self.memory.as_mut_ptr() as *mut u8).add(offset) = value }
+    }
+
+    /// Little-endian 64-bit words of `value`, as used by the runtime-event
+    /// record payload ABI (short values pad with zero words implicitly).
+    fn value_words(value: &BigUint) -> Vec<u64> {
+        value.to_u64_digits()
+    }
+
+    /// Write one runtime event record into the shared ring buffer whose
+    /// address is installed in the state header, following the compiled
+    /// protocol: reserve the slot with a `WRITING` marker, fill site and
+    /// payload fields plainly, then publish with release semantics.
+    fn emit_event_record(&mut self, site_id: u32, args: &[SIRValue]) {
+        // Safety: the state header always holds a live buffer pointer that
+        // outlives simulation, and the ring arithmetic stays inside the
+        // buffer allocation because `seq` is masked by the capacity.
+        unsafe {
+            let event_ptr = self.read_u64(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET) as *mut AtomicU64;
+            let seq = (*event_ptr).load(Ordering::Acquire);
+            let capacity = self.layout.runtime_event_capacity as u64;
+            if capacity == 0 {
+                return;
+            }
+            let slot_index = (seq & (capacity - 1)) as usize;
+            let slot_base = event_ptr
+                .cast::<u8>()
+                .add(RUNTIME_EVENT_HEADER_SIZE + slot_index * self.layout.runtime_event_slot_size);
+            let slot_seq = slot_base.add(RUNTIME_EVENT_SLOT_SEQ_OFFSET) as *const AtomicU64;
+            (*slot_seq).store(RUNTIME_EVENT_WRITING, Ordering::Relaxed);
+            slot_base
+                .add(RUNTIME_EVENT_SLOT_SITE_OFFSET)
+                .cast::<u64>()
+                .write_unaligned(site_id as u64);
+            slot_base
+                .add(RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET)
+                .cast::<u64>()
+                .write_unaligned(args.len() as u64);
+
+            if let Some(site_layout) = self.layout.runtime_event_site_layouts.get(site_id as usize)
+            {
+                for (index, arg) in args.iter().enumerate() {
+                    let Some(arg_layout) = site_layout.args.get(index) else {
+                        continue;
+                    };
+                    let value_digits = Self::value_words(&arg.payload);
+                    let mask_digits = Self::value_words(&arg.mask);
+                    for word in 0..arg_layout.word_count {
+                        let payload = slot_base.add(
+                            RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.value_word_offset + word) * 8,
+                        );
+                        payload
+                            .cast::<u64>()
+                            .write_unaligned(value_digits.get(word).copied().unwrap_or(0));
+                        let mask_payload = slot_base.add(
+                            RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
+                                + (arg_layout.mask_word_offset + word) * 8,
+                        );
+                        mask_payload
+                            .cast::<u64>()
+                            .write_unaligned(mask_digits.get(word).copied().unwrap_or(0));
+                    }
+                }
+            }
+
+            (*slot_seq).store(seq, Ordering::Release);
+            (*event_ptr).store(seq.wrapping_add(1), Ordering::Release);
+        }
+    }
+
+    /// Copy-on-write preparation for a store into the sparse working region:
+    /// every 64-bit chunk touched by `[bit_offset, bit_offset + bits)` is
+    /// copied from the stable region before it is overwritten, mirroring the
+    /// compiled `prepare_sparse_store` lowering.
+    fn prepare_sparse_store(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+        bits: usize,
+    ) -> Result<(), InterpError> {
+        let absolute = addr.absolute_addr();
+        let Some(sparse) = self.layout.sparse_layouts.get(&absolute) else {
+            return Err(InterpError::Machine(format!(
+                "sparse store to {absolute} without a sparse layout"
+            )));
+        };
+        let stable_base = self.layout.offsets[&absolute];
+        let sparse_base = self.layout.sparse_base_offset + self.layout.sparse_offsets[&absolute];
+        let byte_size = get_byte_size(self.layout.widths[&absolute]);
+        let plane_count = if self.four_state && self.is_4state_object(&absolute) {
+            2
+        } else {
+            1
+        };
+
+        if bits == 0 {
+            return Ok(());
+        }
+        let start_chunk = bit_offset / 64;
+        let end_chunk = (bit_offset + bits - 1) / 64;
+        for chunk in start_chunk..=end_chunk {
+            let dirty_word_index = chunk / 64;
+            let dirty_mask = 1u64 << (chunk % 64);
+            let dirty_word_addr = sparse.dirty_words_offset + dirty_word_index * 8;
+            // Safety: layout bounds the dirty-word region.
+            let was_dirty = unsafe { self.read_u64(dirty_word_addr) } & dirty_mask != 0;
+            if !was_dirty {
+                for plane in 0..plane_count {
+                    let delta = plane * byte_size + chunk * 8;
+                    // Safety: both chunks live inside the merged allocation.
+                    let stable_chunk = unsafe { self.read_u64(stable_base + delta) };
+                    unsafe { self.write_u64(sparse_base + delta, stable_chunk) };
+                }
+            }
+            // Safety: bounded by the dirty-word region above.
+            unsafe {
+                let current = self.read_u64(dirty_word_addr);
+                self.write_u64(dirty_word_addr, current | dirty_mask);
+            }
+            let summary_addr = sparse.summary_words_offset + (dirty_word_index / 64) * 8;
+            // Safety: bounded by the summary region.
+            unsafe {
+                let current = self.read_u64(summary_addr);
+                self.write_u64(summary_addr, current | (1u64 << (dirty_word_index % 64)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush every dirty sparse chunk of `src` back to its stable home and
+    /// clear the dirty bookkeeping, matching the compiled sparse commit. The
+    /// per-instruction access width is deliberately ignored: the compiled
+    /// commit copies whole dirty chunks so partially written next-state data
+    /// is never lost.
+    fn commit_sparse_object(&mut self, src: &RegionedAbsoluteAddr) -> Result<(), InterpError> {
+        let absolute = src.absolute_addr();
+        let Some(sparse) = self.layout.sparse_layouts.get(&absolute) else {
+            return Err(InterpError::Machine(format!(
+                "sparse commit of {absolute} without a sparse layout"
+            )));
+        };
+        let dst_base = self.layout.offsets[&absolute];
+        let src_base = self.layout.sparse_base_offset + self.layout.sparse_offsets[&absolute];
+        let byte_size = get_byte_size(self.layout.widths[&absolute]);
+        let plane_count = if self.four_state && self.is_4state_object(&absolute) {
+            2
+        } else {
+            1
+        };
+        let last_chunk = sparse.chunk_count.saturating_sub(1);
+        let last_len = byte_size.saturating_sub(last_chunk * 8);
+
+        for summary_index in 0..sparse.summary_word_count {
+            let summary_addr = sparse.summary_words_offset + summary_index * 8;
+            // Safety: summary words are part of the merged allocation.
+            let mut summary_bits = unsafe { self.read_u64(summary_addr) };
+            unsafe { self.write_u64(summary_addr, 0) };
+            while summary_bits != 0 {
+                let word_index = summary_bits.trailing_zeros() as usize + summary_index * 64;
+                let dirty_addr = sparse.dirty_words_offset + word_index * 8;
+                // Safety: dirty words are part of the merged allocation.
+                let mut dirty_bits = unsafe { self.read_u64(dirty_addr) };
+                unsafe { self.write_u64(dirty_addr, 0) };
+                while dirty_bits != 0 {
+                    let chunk = word_index * 64 + dirty_bits.trailing_zeros() as usize;
+                    let len = if chunk == last_chunk { last_len } else { 8 };
+                    for plane in 0..plane_count {
+                        let delta = plane * byte_size + chunk * 8;
+                        for byte in 0..len {
+                            // Safety: both chunks live inside the merged
+                            // allocation; `delta + byte` stays in bounds.
+                            let value = unsafe { self.read_u8(src_base + delta + byte) };
+                            unsafe { self.write_u8(dst_base + delta + byte, value) };
+                        }
+                    }
+                    dirty_bits &= dirty_bits - 1;
+                }
+                summary_bits &= summary_bits - 1;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
@@ -258,6 +486,9 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         let object = self.object_offset(addr)?;
         let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
         let absolute = addr.absolute_addr();
+        if addr.region == SPARSE_WORKING_REGION {
+            self.prepare_sparse_store(addr, bit_offset, bits)?;
+        }
         self.write_bits(object, bit_offset, bits, &value.payload);
         if self.is_4state_object(&absolute) {
             let mask_offset = object + get_byte_size(self.width_of(&absolute));
@@ -273,6 +504,9 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         access: ResolvedAccess<'_>,
         bits: usize,
     ) -> Result<(), InterpError> {
+        if src.region == SPARSE_WORKING_REGION {
+            return self.commit_sparse_object(src);
+        }
         let src_object = self.object_offset(src)?;
         let dst_object = self.object_offset(dst)?;
         let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
@@ -315,30 +549,110 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         }
     }
 
-    // SEMANTICS-GAP: runtime-event emission requires the RuntimeEventBuffer
-    // record ABI that generated code writes. Left as no-ops until that ABI
-    // is ported; simulations relying on runtime events must use a compiled
-    // backend meanwhile.
-    fn notify_comb_capture(
+    fn capture_store_range(
         &mut self,
-        _addr: &RegionedAbsoluteAddr,
-        _sites: &[u32],
-        _value: &SIRValue,
-    ) {
+        addr: &RegionedAbsoluteAddr,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<StoreSnapshot, InterpError> {
+        let object = self.object_offset(addr)?;
+        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let absolute = addr.absolute_addr();
+        let value_words = Self::value_words(&self.read_bits(object, bit_offset, bits));
+        let mask_words = if self.is_4state_object(&absolute) {
+            let mask_offset = object + get_byte_size(self.width_of(&absolute));
+            Self::value_words(&self.read_bits(mask_offset, bit_offset, bits))
+        } else {
+            Vec::new()
+        };
+        Ok(StoreSnapshot {
+            value_words,
+            mask_words,
+        })
     }
 
-    fn emit_runtime_event(&mut self, _site_id: u32, _args: &[SIRValue]) {}
+    fn enable_comb_captures(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        before: &StoreSnapshot,
+        sites: &[u32],
+    ) -> Result<(), InterpError> {
+        if sites.is_empty() {
+            return Ok(());
+        }
+        let object = self.object_offset(addr)?;
+        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let absolute = addr.absolute_addr();
+        let changed = Self::value_words(&self.read_bits(object, bit_offset, bits))
+            != before.value_words
+            || (self.is_4state_object(&absolute)
+                && Self::value_words(&self.read_bits(
+                    object + get_byte_size(self.width_of(&absolute)),
+                    bit_offset,
+                    bits,
+                )) != before.mask_words);
+        if changed {
+            for &site in sites {
+                let index = site as usize;
+                if index < self.comb_capture_enabled.len() {
+                    self.comb_capture_enabled[index] = 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_runtime_event(&mut self, site_id: u32, args: &[SIRValue]) -> Result<(), InterpError> {
+        self.emit_event_record(site_id, args);
+        Ok(())
+    }
 
     fn emit_comb_capture_event(
         &mut self,
-        _site_id: u32,
-        _args: &[SIRValue],
-        _fatal_error_code: Option<i64>,
-        _consume_enabled: bool,
-    ) {
+        site_id: u32,
+        args: &[SIRValue],
+        fatal_error_code: Option<i64>,
+        consume_enabled: bool,
+    ) -> Result<(), InterpError> {
+        let index = site_id as usize;
+        if index >= self.comb_capture_enabled.len() || self.comb_capture_enabled[index] == 0 {
+            return Ok(());
+        }
+        self.emit_event_record(site_id, args);
+        if consume_enabled {
+            self.comb_capture_enabled[index] = 0;
+        }
+        match fatal_error_code {
+            Some(code) => Err(InterpError::Fatal(code)),
+            None => Ok(()),
+        }
     }
 
-    fn enable_comb_capture_if_changed(&mut self, _old: &SIRValue, _new: &SIRValue, _sites: &[u32]) {}
+    fn enable_comb_capture_if_changed(
+        &mut self,
+        old: &SIRValue,
+        new: &SIRValue,
+        sites: &[u32],
+    ) -> Result<(), InterpError> {
+        if sites.is_empty() {
+            return Ok(());
+        }
+        let mut changed = Self::value_words(&old.payload) != Self::value_words(&new.payload);
+        if self.four_state {
+            changed |= Self::value_words(&old.mask) != Self::value_words(&new.mask);
+        }
+        if changed {
+            for &site in sites {
+                let index = site as usize;
+                if index < self.comb_capture_enabled.len() {
+                    self.comb_capture_enabled[index] = 1;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Execute every unit in `units` against the split backend storage.
@@ -361,7 +675,7 @@ fn run_units(
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
-        execute_unit(unit, &mut machine, &[]).map_err(error_code)?;
+        execute_unit(unit, &mut machine, &[], four_state).map_err(error_code)?;
     }
     Ok(())
 }
@@ -411,17 +725,17 @@ impl InterpBackend {
         };
 
         let mut event_map: HashMap<AbsoluteAddr, InterpEventRef> = HashMap::default();
-        for (addr, _) in &laid_out.sir.eval_apply_ffs {
+        for addr in laid_out.sir.eval_apply_ffs.keys() {
             let id = intern_event(addr);
             event_map.insert(*addr, InterpEventRef { addr: *addr, id });
         }
         let mut eval_only_event_map: HashMap<AbsoluteAddr, InterpEventRef> = HashMap::default();
-        for (addr, _) in &laid_out.sir.eval_only_ffs {
+        for addr in laid_out.sir.eval_only_ffs.keys() {
             let id = intern_event(addr);
             eval_only_event_map.insert(*addr, InterpEventRef { addr: *addr, id });
         }
         let mut apply_event_map: HashMap<AbsoluteAddr, InterpEventRef> = HashMap::default();
-        for (addr, _) in &laid_out.sir.apply_ffs {
+        for addr in laid_out.sir.apply_ffs.keys() {
             let id = intern_event(addr);
             apply_event_map.insert(*addr, InterpEventRef { addr: *addr, id });
         }

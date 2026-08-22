@@ -1,3 +1,5 @@
+#[cfg(feature = "host-runtime")]
+pub(crate) mod interp;
 pub(crate) mod memory_layout;
 #[cfg(all(
     feature = "host-runtime",
@@ -22,6 +24,7 @@ pub use traits::{EventHandle, SimBackend};
 
 #[cfg(feature = "host-runtime")]
 mod host {
+    pub use super::interp::InterpBackend;
     pub use super::runtime::{EventRef, JitBackend, SharedJitCode};
     pub(crate) use celox_backend_cranelift::JitEngine;
     pub use celox_backend_cranelift::{

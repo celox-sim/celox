@@ -23,8 +23,8 @@ use celox_sir::{
     BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
     SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
 };
-use num_bigint::BigUint;
-use num_traits::{ToPrimitive, Zero};
+use num_bigint::{BigInt, BigUint};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 use crate::HashMap;
 
@@ -50,12 +50,17 @@ pub enum InterpError {
 impl fmt::Display for InterpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InterpError::UnknownBlock(block) => write!(f, "interpreted jump to unknown block b{}", block.0),
+            InterpError::UnknownBlock(block) => {
+                write!(f, "interpreted jump to unknown block b{}", block.0)
+            }
             InterpError::MissingRegister(register) => {
                 write!(f, "read of unwritten register r{}", register.0)
             }
             InterpError::RegisterArityMismatch { expected, found } => {
-                write!(f, "jump argument count mismatch: target expects {expected}, jump supplies {found}")
+                write!(
+                    f,
+                    "jump argument count mismatch: target expects {expected}, jump supplies {found}"
+                )
             }
             InterpError::UnsupportedOperation(description) => {
                 write!(f, "interpreter does not support operation: {description}")
@@ -79,6 +84,14 @@ pub struct ResolvedAccess<'a> {
     /// Values of the registers returned by [`SIROffset::dynamic_registers`],
     /// in the same order.
     pub dynamics: [Option<&'a SIRValue>; 2],
+}
+
+/// Pre-store snapshot of a stored range, used to detect whether a store
+/// actually changed any covered bit before enabling comb capture observers.
+#[derive(Clone, Debug, Default)]
+pub struct StoreSnapshot {
+    pub value_words: Vec<u64>,
+    pub mask_words: Vec<u64>,
 }
 
 /// Storage and side-effect interface driven by the interpreter.
@@ -114,20 +127,45 @@ pub trait InterpMachine<A> {
     /// Edge/level triggers attached to a `Store` or `Commit`.
     fn notify_triggers(&mut self, addr: &A, triggers: &[TriggerIdWithKind]);
 
-    /// Comb capture sites attached to a `Store`; receives the stored value.
-    fn notify_comb_capture(&mut self, addr: &A, sites: &[u32], value: &SIRValue);
+    /// Snapshot the stored range before a `Store` with comb capture sites so
+    /// the post-store comparison can detect actual changes.
+    fn capture_store_range(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<StoreSnapshot, InterpError>;
 
-    fn emit_runtime_event(&mut self, site_id: u32, args: &[SIRValue]);
+    /// Enable comb capture sites when the stored range differs from the
+    /// pre-store snapshot.
+    fn enable_comb_captures(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        before: &StoreSnapshot,
+        sites: &[u32],
+    ) -> Result<(), InterpError>;
 
+    fn emit_runtime_event(&mut self, site_id: u32, args: &[SIRValue]) -> Result<(), InterpError>;
+
+    /// Emit a comb capture event. Returns `Err(InterpError::Fatal)` when the
+    /// event carries a fatal code and its site was enabled, mirroring the
+    /// compiled unit's early return.
     fn emit_comb_capture_event(
         &mut self,
         site_id: u32,
         args: &[SIRValue],
         fatal_error_code: Option<i64>,
         consume_enabled: bool,
-    );
+    ) -> Result<(), InterpError>;
 
-    fn enable_comb_capture_if_changed(&mut self, old: &SIRValue, new: &SIRValue, sites: &[u32]);
+    fn enable_comb_capture_if_changed(
+        &mut self,
+        old: &SIRValue,
+        new: &SIRValue,
+        sites: &[u32],
+    ) -> Result<(), InterpError>;
 }
 
 /// Outcome of one interpreted unit invocation.
@@ -142,10 +180,15 @@ pub enum UnitExit {
 /// `entry_args` binds the entry block's parameters (event arguments). The
 /// simulator drives repeated invocations (comb settle fixpoint, clocked
 /// events); this function performs exactly one entry-to-return traversal.
+///
+/// `four_state` selects the value model: in two-state mode immediate masks
+/// are discarded exactly like the compiled backends' translation does, so
+/// unknown-bit payloads never leak into stored values.
 pub fn execute_unit<A, M: InterpMachine<A>>(
     unit: &ExecutionUnit<A>,
     machine: &mut M,
     entry_args: &[SIRValue],
+    four_state: bool,
 ) -> Result<UnitExit, InterpError> {
     let mut regs = Registers::new(&unit.register_map);
     let entry = unit
@@ -169,7 +212,7 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
             .get(&current)
             .ok_or(InterpError::UnknownBlock(current))?;
         for instruction in &block.instructions {
-            exec_instruction(instruction, &mut regs, machine)?;
+            exec_instruction(instruction, &mut regs, machine, four_state)?;
         }
         match &block.terminator {
             SIRTerminator::Return => return Ok(UnitExit::Return),
@@ -183,10 +226,11 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
                 true_block,
                 false_block,
             } => {
+                let cond_width = regs.width(*cond);
                 let cond = regs.get(*cond)?.clone();
                 // SEMANTICS-CHECK: a known one selects the true branch; an
                 // all-unknown or all-zero condition selects the false branch.
-                let target = if branch_condition_holds(&cond, regs.width(*cond)) {
+                let target = if branch_condition_holds(&cond, cond_width) {
                     true_block
                 } else {
                     false_block
@@ -247,14 +291,34 @@ fn exec_instruction<A, M: InterpMachine<A>>(
     instruction: &SIRInstruction<A>,
     regs: &mut Registers,
     machine: &mut M,
+    four_state: bool,
 ) -> Result<(), InterpError> {
     match instruction {
-        SIRInstruction::Imm(dst, value) => regs.set(*dst, value.clone()),
+        SIRInstruction::Imm(dst, value) => {
+            // Two-state translation drops unknown-bit masks entirely; keep
+            // only the payload so X constants behave as their payload bits.
+            let value = if four_state {
+                value.clone()
+            } else {
+                SIRValue::new(value.payload.clone())
+            };
+            regs.set(*dst, value);
+        }
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
-            let lhs = regs.get(*lhs)?.clone();
-            let rhs = regs.get(*rhs)?.clone();
-            let out = alu_binary(op, &lhs, &rhs, regs.width(*dst))?;
-            regs.set(*dst, truncate(out, regs.width(*dst)));
+            let lhs_value = regs.get(*lhs)?.clone();
+            let rhs_value = regs.get(*rhs)?.clone();
+            let dst_width = regs.width(*dst);
+            let lhs_signed = regs.is_signed(*lhs);
+            let out = alu_binary(
+                op,
+                &lhs_value,
+                &rhs_value,
+                regs.width(*lhs),
+                regs.width(*rhs),
+                dst_width,
+                lhs_signed,
+            )?;
+            regs.set(*dst, truncate(out, dst_width));
         }
         SIRInstruction::Unary(dst, op, src) => {
             let src_value = regs.get(*src)?.clone();
@@ -275,12 +339,18 @@ fn exec_instruction<A, M: InterpMachine<A>>(
         SIRInstruction::Store(addr, offset, bits, src, triggers, sites) => {
             let value = regs.get(*src)?.clone();
             let access = resolve_access(offset, regs)?;
+            let before = if sites.is_empty() {
+                None
+            } else {
+                Some(machine.capture_store_range(addr, access, *bits)?)
+            };
             machine.store(addr, access, *bits, &value)?;
             if !triggers.is_empty() {
                 machine.notify_triggers(addr, triggers);
             }
-            if !sites.is_empty() {
-                machine.notify_comb_capture(addr, sites, &value);
+            if let Some(before) = before {
+                let access = resolve_access(offset, regs)?;
+                machine.enable_comb_captures(addr, access, *bits, &before, sites)?;
             }
         }
         SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
@@ -301,10 +371,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             }
             // Keep the declared-register-width invariant shared by every other
             // operation: results never exceed the destination width.
-            regs.set(
-                *dst,
-                truncate(SIRValue { payload, mask }, regs.width(*dst)),
-            );
+            regs.set(*dst, truncate(SIRValue { payload, mask }, regs.width(*dst)));
         }
         SIRInstruction::Slice(dst, src, offset, width) => {
             let value = regs.get(*src)?;
@@ -313,6 +380,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             regs.set(*dst, SIRValue { payload, mask });
         }
         SIRInstruction::Mux(dst, cond, then_value, else_value) => {
+            let cond_width = regs.width(*cond);
             let cond = regs.get(*cond)?.clone();
             let then_value = regs.get(*then_value)?.clone();
             let else_value = regs.get(*else_value)?.clone();
@@ -322,14 +390,14 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 &cond,
                 &then_value,
                 &else_value,
-                regs.width(*cond),
+                cond_width,
                 regs.width(*dst),
             );
             regs.set(*dst, out);
         }
         SIRInstruction::RuntimeEvent { site_id, args } => {
             let values = resolve_args(args, regs)?;
-            machine.emit_runtime_event(*site_id, &values);
+            machine.emit_runtime_event(*site_id, &values)?;
         }
         SIRInstruction::CombCaptureEvent {
             site_id,
@@ -338,12 +406,17 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             consume_enabled,
         } => {
             let values = resolve_args(args, regs)?;
-            machine.emit_comb_capture_event(*site_id, &values, *fatal_error_code, *consume_enabled);
+            machine.emit_comb_capture_event(
+                *site_id,
+                &values,
+                *fatal_error_code,
+                *consume_enabled,
+            )?;
         }
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             let old = regs.get(*old)?.clone();
             let new = regs.get(*new)?.clone();
-            machine.enable_comb_capture_if_changed(&old, &new, sites);
+            machine.enable_comb_capture_if_changed(&old, &new, sites)?;
         }
     }
     Ok(())
@@ -359,16 +432,11 @@ fn resolve_access<'a>(
             dynamics[slot] = Some(regs.get(register)?);
         }
     }
-    Ok(ResolvedAccess {
-        offset,
-        dynamics,
-    })
+    Ok(ResolvedAccess { offset, dynamics })
 }
 
 fn resolve_args(args: &[RegisterId], regs: &Registers) -> Result<Vec<SIRValue>, InterpError> {
-    args.iter()
-        .map(|arg| regs.get(*arg).cloned())
-        .collect()
+    args.iter().map(|arg| regs.get(*arg).cloned()).collect()
 }
 
 // ── Value helpers ─────────────────────────────────────────────────────
@@ -388,9 +456,11 @@ fn truncate(mut value: SIRValue, width: usize) -> SIRValue {
     value
 }
 
+/// An all-unknown value following the compiled backends' normalized
+/// convention: unknown bits carry payload one.
 fn all_x(width: usize) -> SIRValue {
     SIRValue {
-        payload: BigUint::zero(),
+        payload: width_mask(width),
         mask: width_mask(width),
     }
 }
@@ -418,138 +488,390 @@ fn branch_condition_holds(cond: &SIRValue, width: usize) -> bool {
 
 // ── ALU ───────────────────────────────────────────────────────────────
 
+/// Normalize a value into the compiled backends' register convention:
+/// unknown bits carry payload one (`payload |= mask`), so a value migrated
+/// between the interpreter and generated code is bit-identical in memory.
+fn normalize(value: SIRValue) -> SIRValue {
+    SIRValue {
+        payload: &value.payload | &value.mask,
+        mask: value.mask,
+    }
+}
+
 fn alu_binary(
     op: &BinaryOp,
     lhs: &SIRValue,
     rhs: &SIRValue,
-    width: usize,
+    lhs_width: usize,
+    rhs_width: usize,
+    dst_width: usize,
+    lhs_signed: bool,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
         BinaryOp::Add => {
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
             if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                SIRValue::new((&lhs.payload + &rhs.payload) & width_mask(width))
+                SIRValue::new((&lhs.payload + &rhs.payload) & width_mask(dst_width))
             } else {
-                all_x(width)
+                all_x(dst_width)
             }
         }
         BinaryOp::Sub => {
             // Wrap-safe two's complement subtraction: l + (~r + 1) mod 2^w.
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
             if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                let inverted_rhs = &width_mask(width) ^ &rhs.payload;
-                SIRValue::new(((&lhs.payload + inverted_rhs + 1u8) & width_mask(width)))
+                let inverted_rhs = &width_mask(dst_width) ^ &rhs.payload;
+                SIRValue::new((&lhs.payload + inverted_rhs + 1u8) & width_mask(dst_width))
             } else {
-                all_x(width)
+                all_x(dst_width)
             }
         }
         BinaryOp::Mul => {
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
             if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                SIRValue::new((&lhs.payload * &rhs.payload) & width_mask(width))
+                SIRValue::new((&lhs.payload * &rhs.payload) & width_mask(dst_width))
             } else {
-                all_x(width)
+                all_x(dst_width)
+            }
+        }
+        BinaryOp::DivU | BinaryOp::RemU => {
+            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
+            // Division by zero yields zero, matching the compiled contract.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else if rhs.payload.is_zero() {
+                SIRValue::new(BigUint::zero())
+            } else if *op == BinaryOp::DivU {
+                SIRValue::new(&lhs.payload / &rhs.payload)
+            } else {
+                SIRValue::new(&lhs.payload % &rhs.payload)
+            }
+        }
+        BinaryOp::DivS | BinaryOp::RemS => {
+            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
+            // Signed division truncates toward zero; division by zero yields
+            // zero, and MIN / -1 wraps to MIN (rem: 0), matching the compiled
+            // overflow guards.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let dividend = to_signed(&lhs.payload, lhs_width);
+                let divisor = to_signed(&rhs.payload, rhs_width);
+                if divisor.is_zero() {
+                    SIRValue::new(BigUint::zero())
+                } else {
+                    let raw = if *op == BinaryOp::DivS {
+                        &dividend / &divisor
+                    } else {
+                        &dividend % &divisor
+                    };
+                    SIRValue::new(wrap_signed(&raw, dst_width))
+                }
             }
         }
         BinaryOp::And => {
-            let ones = known_ones(lhs, width) & known_ones(rhs, width);
-            let zeros = known_zeros(lhs, width) | known_zeros(rhs, width);
+            // Per-bit truth tables evaluated at the common width so padding
+            // above a narrower operand counts as known zero.
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let ones = known_ones(lhs, common) & known_ones(rhs, common);
+            let zeros = known_zeros(lhs, common) | known_zeros(rhs, common);
+            let mask = &width_mask(common) ^ (&ones | &zeros);
             SIRValue {
                 payload: ones,
-                mask: &width_mask(width) ^ (&ones | &zeros),
+                mask,
             }
         }
         BinaryOp::Or => {
-            let ones = known_ones(lhs, width) | known_ones(rhs, width);
-            let zeros = known_zeros(lhs, width) & known_zeros(rhs, width);
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let ones = known_ones(lhs, common) | known_ones(rhs, common);
+            let zeros = known_zeros(lhs, common) & known_zeros(rhs, common);
+            let mask = &width_mask(common) ^ (&ones | &zeros);
             SIRValue {
                 payload: ones,
-                mask: &width_mask(width) ^ (&ones | &zeros),
+                mask,
             }
         }
         BinaryOp::Xor => {
-            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
-            if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                SIRValue::new((&lhs.payload ^ &rhs.payload) & width_mask(width))
-            } else {
-                all_x(width)
+            // SEMANTICS-CHECK: XOR is per-bit independent — an unknown input
+            // bit only makes the corresponding output bit unknown (mask union),
+            // unlike arithmetic ops where any X poisons the whole result.
+            let common = lhs_width.max(rhs_width);
+            SIRValue {
+                payload: (&lhs.payload ^ &rhs.payload) & width_mask(common),
+                mask: (&lhs.mask | &rhs.mask) & width_mask(common),
             }
         }
         BinaryOp::Shl => {
             // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
+            // The shift runs on the full left-hand value and the destination
+            // keeps the low bits, matching the compiled common-width lowering
+            // (a narrow destination still receives surviving low bits).
             if !rhs.mask.is_zero() {
-                all_x(width)
+                all_x(dst_width)
             } else {
                 match shift_amount(&rhs.payload) {
-                    Some(amount) if amount < width => SIRValue {
-                        payload: (&lhs.payload << amount) & width_mask(width),
-                        mask: (&lhs.mask << amount) & width_mask(width),
+                    Some(amount) => SIRValue {
+                        payload: (&lhs.payload << amount) & width_mask(dst_width),
+                        mask: (&lhs.mask << amount) & width_mask(dst_width),
                     },
-                    _ => SIRValue::new(BigUint::zero()),
+                    None => SIRValue::new(BigUint::zero()),
                 }
             }
         }
         BinaryOp::Shr => {
             // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
+            // Logical shift: vacated bits are zero regardless of width.
             if !rhs.mask.is_zero() {
-                all_x(width)
+                all_x(dst_width)
             } else {
                 match shift_amount(&rhs.payload) {
-                    Some(amount) if amount < width => SIRValue {
+                    Some(amount) => SIRValue {
                         payload: &lhs.payload >> amount,
                         mask: &lhs.mask >> amount,
                     },
-                    _ => SIRValue::new(BigUint::zero()),
+                    None => SIRValue::new(BigUint::zero()),
                 }
             }
         }
         BinaryOp::Sar => {
-            // SEMANTICS-CHECK: an X/Z shift amount or X/Z sign bit makes the
-            // whole result X; signedness comes from the lhs register.
+            // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
+            // The frontend emits `Sar` only for genuinely signed sources, and
+            // the compiled backends sign-fill unconditionally for this opcode,
+            // so the source value and its unknown-bit mask are interpreted as
+            // two's complement at their declared width before shifting.
             if !rhs.mask.is_zero() {
-                all_x(width)
+                all_x(dst_width)
             } else {
+                let signed_value = to_signed(&lhs.payload, lhs_width);
+                let signed_mask = to_signed(&lhs.mask, lhs_width);
                 match shift_amount(&rhs.payload) {
-                    Some(amount) if width > 0 => {
-                        let sign_bit = (&lhs.payload >> (width - 1)) & 1u8 == 1u8;
-                        let sign_known = (&lhs.mask >> (width - 1)) & 1u8 == 0u8;
-                        if !sign_known {
-                            all_x(width)
-                        } else if amount >= width {
-                            if sign_bit {
-                                SIRValue::new(width_mask(width))
-                            } else {
-                                SIRValue::new(BigUint::zero())
-                            }
-                        } else {
-                            let sign_fill = if sign_bit {
-                                &width_mask(width) >> (width - amount)
-                            } else {
-                                BigUint::zero()
-                            };
-                            SIRValue {
-                                payload: (&lhs.payload >> amount) | sign_fill,
-                                mask: &lhs.mask >> amount,
-                            }
+                    Some(amount) => {
+                        let shifted = signed_value >> amount;
+                        let shifted_mask = signed_mask >> amount;
+                        SIRValue {
+                            payload: wrap_signed(&shifted, dst_width),
+                            mask: wrap_signed(&shifted_mask, dst_width),
                         }
                     }
-                    _ => SIRValue::new(BigUint::zero()),
+                    None => {
+                        // An unrepresentable shift distance drives every bit,
+                        // including the mask, toward the sign fill.
+                        if signed_value.is_negative() {
+                            all_x(dst_width)
+                        } else {
+                            SIRValue::new(BigUint::zero())
+                        }
+                    }
                 }
             }
         }
-        other => {
-            return Err(InterpError::UnsupportedOperation(format!(
-                "binary operator {other}"
-            )))
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::LtU
+        | BinaryOp::LtS
+        | BinaryOp::LeU
+        | BinaryOp::LeS
+        | BinaryOp::GtU
+        | BinaryOp::GtS
+        | BinaryOp::GeU
+        | BinaryOp::GeS => {
+            // SEMANTICS-CHECK: comparisons yield X when either operand holds
+            // an unknown bit; otherwise the comparison runs on the operands'
+            // declared values (signed ops interpret two's complement). `Eq`
+            // and `Ne` sign-extend a signed left-hand operand and zero-extend
+            // the right-hand one, mirroring the compiled promotion rules.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let holds = compare_holds(op, lhs, rhs, lhs_width, rhs_width, lhs_signed);
+                SIRValue::new(u8::from(holds))
+            }
+        }
+        BinaryOp::LogicAnd => {
+            // IEEE 1800: 0 dominates `&&` — a definitely-false operand forces
+            // a definite zero; any remaining X yields X.
+            if logic_operand_definitely_false(lhs, lhs_width)
+                || logic_operand_definitely_false(rhs, rhs_width)
+            {
+                SIRValue::new(BigUint::zero())
+            } else if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let truth = logic_truth(lhs, lhs_width) && logic_truth(rhs, rhs_width);
+                SIRValue::new(u8::from(truth))
+            }
+        }
+        BinaryOp::LogicOr => {
+            // IEEE 1800: 1 dominates `||` — a definitely-true operand forces
+            // a definite one; any remaining X yields X.
+            if logic_operand_definitely_true(lhs, lhs_width)
+                || logic_operand_definitely_true(rhs, rhs_width)
+            {
+                SIRValue::new(1u8)
+            } else if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let truth = logic_truth(lhs, lhs_width) || logic_truth(rhs, rhs_width);
+                SIRValue::new(u8::from(truth))
+            }
+        }
+        BinaryOp::EqCase | BinaryOp::NeCase => {
+            // Case equality treats X/Z as ordinary values: payload and mask
+            // must agree at every compared bit for a match. The result is
+            // always definite.
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let lhs_ext = zero_extend(lhs, common);
+            let rhs_ext = zero_extend(rhs, common);
+            let diff = (&lhs_ext.payload ^ &rhs_ext.payload) | (&lhs_ext.mask ^ &rhs_ext.mask);
+            let matched = diff.is_zero();
+            let holds = if *op == BinaryOp::EqCase {
+                matched
+            } else {
+                !matched
+            };
+            SIRValue::new(u8::from(holds))
+        }
+        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            // IEEE 1800 ==?/!=?: X/Z bits on the right-hand side are
+            // wildcards. A definite mismatch yields a definite result, an
+            // unknown left-hand bit at a compared position yields X, and
+            // otherwise the payloads compare at definitely-known positions.
+            let common = lhs_width.max(rhs_width);
+            let compare_mask = &width_mask(common) ^ &rhs.mask;
+            let definite_compare = &compare_mask & (&width_mask(common) ^ &lhs.mask);
+            let mismatch_bits = (&lhs.payload ^ &rhs.payload) & &definite_compare;
+            let x_at_compared = &lhs.mask & &compare_mask;
+            let mask = if !mismatch_bits.is_zero() {
+                BigUint::zero()
+            } else if !x_at_compared.is_zero() {
+                BigUint::from(1u8)
+            } else {
+                BigUint::zero()
+            };
+            let lhs_eff = &lhs.payload & &definite_compare;
+            let rhs_eff = &rhs.payload & &definite_compare;
+            let equal = lhs_eff == rhs_eff;
+            let holds = if *op == BinaryOp::EqWildcard {
+                equal
+            } else {
+                !equal
+            };
+            SIRValue {
+                payload: BigUint::from(u8::from(holds)),
+                mask,
+            }
         }
     };
-    Ok(out)
+    Ok(normalize(truncate(out, dst_width)))
 }
 
 /// Interpret a shift amount register value as `usize`, or `None` when it
 /// exceeds any meaningful shift distance.
 fn shift_amount(value: &BigUint) -> Option<usize> {
     value.to_usize()
+}
+
+/// Two's complement interpretation of `width`-truncated `value`.
+fn to_signed(value: &BigUint, width: usize) -> BigInt {
+    if width == 0 {
+        return BigInt::from(0);
+    }
+    let masked = value & width_mask(width);
+    if masked.bit((width - 1) as u64) {
+        BigInt::from(masked) - (BigInt::from(1) << width)
+    } else {
+        BigInt::from(masked)
+    }
+}
+
+/// Reduce a signed integer modulo `2^width` into its two's complement bits.
+fn wrap_signed(value: &BigInt, width: usize) -> BigUint {
+    if width == 0 {
+        return BigUint::zero();
+    }
+    let modulus = BigInt::from(1) << width;
+    ((value % &modulus + &modulus) % modulus)
+        .to_biguint()
+        .expect("non-negative remainder")
+}
+
+/// Evaluate an ordering/equality operator on fully-known operands.
+///
+/// `lhs_signed` carries the left-hand register's declaration so `Eq`/`Ne`
+/// replicate the compiled promotion: a signed lhs is sign-extended to the
+/// common width while the rhs is always zero-extended.
+fn compare_holds(
+    op: &BinaryOp,
+    lhs: &SIRValue,
+    rhs: &SIRValue,
+    lhs_width: usize,
+    rhs_width: usize,
+    lhs_signed: bool,
+) -> bool {
+    let ordering = match op {
+        BinaryOp::Eq | BinaryOp::Ne => {
+            let common = lhs_width.max(rhs_width);
+            let lhs_ext = if lhs_signed {
+                sign_extend(&lhs.payload, lhs_width, common)
+            } else {
+                lhs.payload.clone()
+            };
+            let rhs_ext = zero_extend(rhs, common).payload;
+            lhs_ext.cmp(&rhs_ext)
+        }
+        BinaryOp::LtU | BinaryOp::LeU | BinaryOp::GtU | BinaryOp::GeU => {
+            lhs.payload.cmp(&rhs.payload)
+        }
+        _ => to_signed(&lhs.payload, lhs_width).cmp(&to_signed(&rhs.payload, rhs_width)),
+    };
+    use std::cmp::Ordering;
+    match op {
+        BinaryOp::Eq | BinaryOp::EqCase => ordering == Ordering::Equal,
+        BinaryOp::Ne | BinaryOp::NeCase => ordering != Ordering::Equal,
+        BinaryOp::LtU | BinaryOp::LtS => ordering == Ordering::Less,
+        BinaryOp::LeU | BinaryOp::LeS => ordering != Ordering::Greater,
+        BinaryOp::GtU | BinaryOp::GtS => ordering == Ordering::Greater,
+        BinaryOp::GeU | BinaryOp::GeS => ordering != Ordering::Less,
+        _ => false,
+    }
+}
+
+/// Zero-extend a value's payload/mask view up to `width` (padding reads as
+/// known zero).
+fn zero_extend(value: &SIRValue, width: usize) -> SIRValue {
+    SIRValue {
+        payload: &value.payload & width_mask(width),
+        mask: &value.mask & width_mask(width),
+    }
+}
+
+/// Sign-extend the top bit of a `from_width`-wide payload up to `to_width`.
+fn sign_extend(payload: &BigUint, from_width: usize, to_width: usize) -> BigUint {
+    if from_width == 0 || to_width <= from_width {
+        return payload & width_mask(to_width);
+    }
+    if payload.bit((from_width - 1) as u64) {
+        payload | (&width_mask(to_width) ^ &width_mask(from_width))
+    } else {
+        payload.clone()
+    }
+}
+
+/// An operand of a logical operator is definitely false when every bit,
+/// including unknown ones, is zero.
+fn logic_operand_definitely_false(value: &SIRValue, width: usize) -> bool {
+    (&value.payload | &value.mask) & width_mask(width) == BigUint::zero()
+}
+
+/// An operand of a logical operator is definitely true when some bit is a
+/// known one.
+fn logic_operand_definitely_true(value: &SIRValue, width: usize) -> bool {
+    !known_ones(value, width).is_zero()
+}
+
+/// Boolean truth of a fully-known operand.
+fn logic_truth(value: &SIRValue, width: usize) -> bool {
+    !known_ones(value, width).is_zero()
 }
 
 fn alu_unary(
@@ -559,6 +881,9 @@ fn alu_unary(
     src_signed: bool,
     dst_width: usize,
 ) -> Result<SIRValue, InterpError> {
+    // Signedness is carried by dedicated opcodes (e.g. division); unary
+    // operators do not consult the declaration today.
+    let _ = src_signed;
     let out = match op {
         UnaryOp::Ident => src.clone(),
         UnaryOp::ToTwoState => SIRValue {
@@ -606,30 +931,52 @@ fn alu_unary(
                 SIRValue::new(u8::from(parity(&src.payload)))
             }
         }
-        UnaryOp::PopCount => {
-            // Number of known-one bits; result width follows the operator's
-            // declared result width via the destination register.
-            SIRValue::new(known_ones(src, src_width).popcount())
+        UnaryOp::And => {
+            // Reduction-and over the payload bits; a definite zero bit makes
+            // the result a definite zero, otherwise any X/Z input bit yields
+            // X (IEEE 1800 dominant-value rule).
+            let width = width_mask(src_width);
+            let has_definite_zero = !(&width ^ &src.payload ^ &src.mask).is_zero()
+                && !known_zeros(src, src_width).is_zero();
+            let mask = if has_definite_zero {
+                BigUint::zero()
+            } else if !src.mask.is_zero() {
+                BigUint::from(1u8)
+            } else {
+                BigUint::zero()
+            };
+            let all_ones = src.payload == width;
+            SIRValue {
+                payload: BigUint::from(u8::from(all_ones)),
+                mask,
+            }
         }
-        UnaryOp::CountLeadingZeros => {
-            // SEMANTICS-CHECK: masked bits count as their payload value
-            // (normally zero) for the leading-zero scan.
-            let significant = src.payload.bits() as usize;
-            SIRValue::new(src_width.saturating_sub(significant) as u64)
-        }
-        UnaryOp::CountTrailingZeros => {
-            // SEMANTICS-CHECK: masked bits count as their payload value
-            // (normally zero) for the trailing-zero scan.
-            SIRValue::new(trailing_zeros(&src.payload, src_width) as u64)
-        }
-        other => {
-            let _ = src_signed;
-            return Err(InterpError::UnsupportedOperation(format!(
-                "unary operator {other}"
-            )));
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            // SEMANTICS-CHECK: any X/Z input bit makes the whole result X,
+            // matching the compiled bit-count lowering; otherwise the count
+            // runs on the payload bits.
+            if !src.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                match op {
+                    UnaryOp::PopCount => SIRValue::new(src.payload.popcount()),
+                    UnaryOp::CountLeadingZeros => {
+                        let significant = src.payload.bits() as usize;
+                        SIRValue::new(src_width.saturating_sub(significant) as u64)
+                    }
+                    _ => SIRValue::new(trailing_zeros(&src.payload, src_width) as u64),
+                }
+            }
         }
     };
-    Ok(truncate(out, dst_width))
+    let truncated = truncate(out, dst_width);
+    // Identity and two-state casts preserve the incoming bit pattern; every
+    // other unary operation adopts the normalized unknown-bit convention.
+    if matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState) {
+        Ok(truncated)
+    } else {
+        Ok(normalize(truncated))
+    }
 }
 
 /// `Mux` following the SIR contract: a known one in the condition selects
@@ -653,17 +1000,27 @@ fn eval_mux(
         return else_value.clone();
     }
     let mask = width_mask(out_width);
-    let difference =
-        (&then_value.payload ^ &else_value.payload) | (&then_value.mask ^ &else_value.mask);
-    let agree = &mask ^ &difference;
+    let tv = &then_value.payload & &mask;
+    let ev = &else_value.payload & &mask;
+    let tm = &then_value.mask & &mask;
+    let em = &else_value.mask & &mask;
+    let difference = (&tv ^ &ev) | (&tm ^ &em);
+    // Differing bits become X; agreeing bits keep the then-arm bits. The
+    // payload absorbs the difference so unknown bits stay normalized.
     SIRValue {
-        payload: &then_value.payload & &agree,
-        mask: (&then_value.mask & &agree) | &difference,
+        payload: tv | &difference,
+        mask: tm | &difference,
     }
 }
 
 fn parity(value: &BigUint) -> bool {
-    value.to_bytes_le().iter().fold(0u8, |acc, byte| acc ^ byte).count_ones() % 2 == 1
+    value
+        .to_bytes_le()
+        .iter()
+        .fold(0u8, |acc, byte| acc ^ byte)
+        .count_ones()
+        % 2
+        == 1
 }
 
 fn trailing_zeros(value: &BigUint, width: usize) -> usize {
@@ -699,7 +1056,7 @@ struct Registers {
 impl Registers {
     fn new(register_map: &HashMap<RegisterId, RegisterType>) -> Self {
         let size = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
-        let mut values = vec![None; size];
+        let values = vec![None; size];
         let mut widths = vec![0; size];
         let mut signed = vec![false; size];
         for (id, register_type) in register_map {
@@ -746,7 +1103,7 @@ mod tests {
     struct FakeMachine {
         cells: HashMap<(u32, usize, usize), SIRValue>,
         runtime_events: Vec<(u32, Vec<SIRValue>)>,
-        comb_captures: Vec<(u32, Vec<u32>)>,
+        comb_captures: Vec<usize>,
         trigger_notifications: Vec<usize>,
     }
 
@@ -768,7 +1125,7 @@ mod tests {
                 other => {
                     return Err(InterpError::Machine(format!(
                         "fake machine cannot resolve {other}"
-                    )))
+                    )));
                 }
             };
             Ok(self
@@ -790,7 +1147,7 @@ mod tests {
                 other => {
                     return Err(InterpError::Machine(format!(
                         "fake machine cannot resolve {other}"
-                    )))
+                    )));
                 }
             };
             self.cells.insert((*addr, offset, bits), value.clone());
@@ -809,7 +1166,7 @@ mod tests {
                 other => {
                     return Err(InterpError::Machine(format!(
                         "fake machine cannot resolve {other}"
-                    )))
+                    )));
                 }
             };
             let value = self.cells.get(&(*src, offset, bits)).cloned();
@@ -823,12 +1180,49 @@ mod tests {
             self.trigger_notifications.push(triggers.len());
         }
 
-        fn notify_comb_capture(&mut self, _addr: &u32, sites: &[u32], _value: &SIRValue) {
-            self.comb_captures.push((_addr_owned(_addr), sites.to_vec()));
+        fn capture_store_range(
+            &mut self,
+            addr: &u32,
+            access: ResolvedAccess<'_>,
+            bits: usize,
+        ) -> Result<StoreSnapshot, InterpError> {
+            let offset = match access.offset {
+                SIROffset::Static(offset) => *offset,
+                other => {
+                    return Err(InterpError::Machine(format!(
+                        "fake machine cannot resolve {other}"
+                    )));
+                }
+            };
+            Ok(StoreSnapshot {
+                value_words: self
+                    .cells
+                    .get(&(*addr, offset, bits))
+                    .map(|value| Self::words(&value.payload))
+                    .unwrap_or_default(),
+                mask_words: Vec::new(),
+            })
         }
 
-        fn emit_runtime_event(&mut self, site_id: u32, args: &[SIRValue]) {
+        fn enable_comb_captures(
+            &mut self,
+            _addr: &u32,
+            _access: ResolvedAccess<'_>,
+            _bits: usize,
+            _before: &StoreSnapshot,
+            sites: &[u32],
+        ) -> Result<(), InterpError> {
+            self.comb_captures.push(sites.len());
+            Ok(())
+        }
+
+        fn emit_runtime_event(
+            &mut self,
+            site_id: u32,
+            args: &[SIRValue],
+        ) -> Result<(), InterpError> {
             self.runtime_events.push((site_id, args.to_vec()));
+            Ok(())
         }
 
         fn emit_comb_capture_event(
@@ -837,7 +1231,8 @@ mod tests {
             _args: &[SIRValue],
             _fatal_error_code: Option<i64>,
             _consume_enabled: bool,
-        ) {
+        ) -> Result<(), InterpError> {
+            Ok(())
         }
 
         fn enable_comb_capture_if_changed(
@@ -845,7 +1240,14 @@ mod tests {
             _old: &SIRValue,
             _new: &SIRValue,
             _sites: &[u32],
-        ) {
+        ) -> Result<(), InterpError> {
+            Ok(())
+        }
+    }
+
+    impl FakeMachine {
+        fn words(_value: &BigUint) -> Vec<u64> {
+            Vec::new()
         }
     }
 
@@ -918,7 +1320,7 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        execute_unit(&unit, &mut machine, &[]).unwrap();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
         assert_eq!(machine.stored(7, 0, 8).payload, BigUint::from(8u8));
     }
 
@@ -970,7 +1372,7 @@ mod tests {
             };
 
             let mut machine = FakeMachine::default();
-            execute_unit(&unit, &mut machine, &[]).unwrap();
+            execute_unit(&unit, &mut machine, &[], true).unwrap();
             assert_eq!(machine.stored(1, 0, 8).payload, BigUint::from(expected));
         }
     }
@@ -1038,7 +1440,7 @@ mod tests {
             };
 
             let mut machine = FakeMachine::default();
-            execute_unit(&unit, &mut machine, &[]).unwrap();
+            execute_unit(&unit, &mut machine, &[], true).unwrap();
             assert_eq!(machine.stored(1, 0, 8).payload, BigUint::from(expected));
         }
     }
@@ -1074,7 +1476,7 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        execute_unit(&unit, &mut machine, &[]).unwrap();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
         assert_eq!(machine.stored(3, 0, 8).payload, BigUint::from(7u8));
     }
 
@@ -1101,7 +1503,7 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        execute_unit(&unit, &mut machine, &[SIRValue::new(0xDEu16)]).unwrap();
+        execute_unit(&unit, &mut machine, &[SIRValue::new(0xDEu16)], true).unwrap();
         assert_eq!(machine.stored(5, 0, 8).payload, BigUint::from(0xDEu16));
     }
 
@@ -1134,7 +1536,7 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        execute_unit(&unit, &mut machine, &[]).unwrap();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
         // 0xABCD sliced [4 +: 8] == 0xBC.
         assert_eq!(machine.stored(9, 0, 8).payload, BigUint::from(0xBCu8));
     }
@@ -1169,7 +1571,7 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        execute_unit(&unit, &mut machine, &[]).unwrap();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
         assert_eq!(machine.stored(9, 0, 8).payload, BigUint::from(0xFFu8));
     }
 
@@ -1190,7 +1592,8 @@ mod tests {
             eval_mux(&known_zero, &mixed_arm, &SIRValue::new(0b11u8), 1, 2),
             SIRValue::new(0b11u8)
         );
-        // Unknown condition: agreeing bits preserved, differing bits become X.
+        // Unknown condition: agreeing bits preserved, differing bits become X
+        // with a normalized (all-ones) payload.
         let out = eval_mux(
             &unknown,
             &SIRValue::new_four_state(0b1010u8, 0b0000u8),
@@ -1198,7 +1601,9 @@ mod tests {
             1,
             4,
         );
-        assert_eq!(out.payload, BigUint::from(0b0010u8));
+        // difference = 1101 → mask keeps those bits unknown, payload absorbs
+        // them so X bits read as one.
+        assert_eq!(out.payload, BigUint::from(0b1111u8));
         assert_eq!(out.mask, BigUint::from(0b1101u8));
     }
 
@@ -1229,7 +1634,7 @@ mod tests {
 
         let mut machine = FakeMachine::default();
         assert_eq!(
-            execute_unit(&unit, &mut machine, &[]).unwrap_err(),
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
             InterpError::Fatal(42)
         );
     }
@@ -1238,15 +1643,20 @@ mod tests {
     fn jump_to_missing_block_reports_unknown_block() {
         let unit = ExecutionUnit {
             entry_block_id: BlockId(0),
-            blocks: [block(0, vec![], vec![], SIRTerminator::Jump(BlockId(99), vec![]))]
-                .into_iter()
-                .collect(),
+            blocks: [block(
+                0,
+                vec![],
+                vec![],
+                SIRTerminator::Jump(BlockId(99), vec![]),
+            )]
+            .into_iter()
+            .collect(),
             register_map: HashMap::default(),
         };
 
         let mut machine = FakeMachine::default();
         assert_eq!(
-            execute_unit(&unit, &mut machine, &[]).unwrap_err(),
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
             InterpError::UnknownBlock(BlockId(99))
         );
     }
@@ -1266,7 +1676,7 @@ mod tests {
 
         let mut machine = FakeMachine::default();
         assert_eq!(
-            execute_unit(&unit, &mut machine, &[]).unwrap_err(),
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
             InterpError::RegisterArityMismatch {
                 expected: 1,
                 found: 0,
@@ -1298,7 +1708,7 @@ mod tests {
 
         let mut machine = FakeMachine::default();
         assert_eq!(
-            execute_unit(&unit, &mut machine, &[]).unwrap_err(),
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
             InterpError::MissingRegister(RegisterId(4))
         );
     }
@@ -1325,10 +1735,7 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        execute_unit(&unit, &mut machine, &[]).unwrap();
-        assert_eq!(
-            machine.runtime_events,
-            vec![(3, vec![SIRValue::new(11u8)])]
-        );
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
+        assert_eq!(machine.runtime_events, vec![(3, vec![SIRValue::new(11u8)])]);
     }
 }
