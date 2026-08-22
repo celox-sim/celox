@@ -10,11 +10,12 @@
 //! execution units between the interpreter and compiled tiers without any
 //! state translation.
 //!
-//! Trigger marking follows the compiled change-detection protocol: the
-//! first word of every trigger-bearing object is snapshotted at group entry
-//! and trigger bits are marked only when a store or commit changes it. As in
-//! the compiled backends, `TriggerIdWithKind.kind` does not influence code
-//! execution.
+//! Trigger marking follows the compiled per-kind protocol: the first word
+//! of every trigger-bearing object is snapshotted at group entry, and each
+//! store or commit with triggers extracts its range's old and new values to
+//! detect posedge/negedge edges and active reset levels. Marking only runs
+//! when the backend is constructed with `emit_triggers`, like the compiled
+//! codegen flag.
 
 #![cfg(feature = "host-runtime")]
 
@@ -92,9 +93,12 @@ struct Machine<'a> {
     four_state: bool,
     /// Per-site enable bytes for comb capture events.
     comb_capture_enabled: &'a mut [u8],
-    /// First-word snapshots of trigger-bearing objects taken at group entry;
-    /// trigger bits are only marked when a store changes the value.
+    /// First-word snapshots of trigger-bearing objects taken at group entry,
+    /// used by per-kind trigger edge detection.
     trigger_snapshots: &'a HashMap<(AbsoluteAddr, u32), u64>,
+    /// Whether trigger detection may mark bits; mirrors the compiled
+    /// `emit_triggers` codegen flag.
+    emit_triggers: bool,
 }
 
 impl Machine<'_> {
@@ -541,35 +545,52 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         Ok(())
     }
 
-    fn notify_triggers(&mut self, addr: &RegionedAbsoluteAddr, triggers: &[TriggerIdWithKind]) {
-        if triggers.is_empty() {
-            return;
+    fn notify_triggers(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        triggers: &[TriggerIdWithKind],
+    ) -> Result<(), InterpError> {
+        if !self.emit_triggers || triggers.is_empty() {
+            return Ok(());
         }
-        // Change detection identical to the compiled backends: the object's
-        // declared bits are compared against the group-entry snapshot and the
-        // trigger bits are only marked on an actual change. Masking to the
-        // signal width keeps adjacent packed state out of the comparison.
+        // Per-kind edge detection identical to the compiled lowering: the
+        // stored range's old value comes from the group-entry snapshot and
+        // its new value from live memory, both confined to the first word.
         let absolute = addr.absolute_addr();
         let Some(&snapshot) = self.trigger_snapshots.get(&(absolute, addr.region)) else {
-            return;
+            return Ok(());
         };
-        let Ok(base) = self.object_offset(addr) else {
-            return;
-        };
-        // Safety: layout-mapped objects fit inside the merged image.
-        let bits = self.layout.widths[&absolute];
-        let signal_mask = if bits >= 64 {
+        let base = self.object_offset(addr)?;
+        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let range_mask = if bits >= 64 {
             u64::MAX
         } else {
             (1u64 << bits) - 1
         };
-        let current = unsafe { self.read_u64(base) } & signal_mask;
-        if current == snapshot {
-            return;
-        }
+        let old = if bit_offset >= 64 {
+            0
+        } else {
+            (snapshot >> bit_offset) & range_mask
+        };
+        let new = self
+            .read_bits(base, bit_offset, bits.min(64))
+            .to_u64()
+            .unwrap_or(0);
         for trigger in triggers {
-            self.mark_trigger_bit(trigger.id);
+            let marked = match trigger.kind {
+                celox_sir::DomainKind::ClockPosedge => old == 0 && new == 1,
+                celox_sir::DomainKind::ClockNegedge => old == 1 && new == 0,
+                celox_sir::DomainKind::ResetAsyncHigh => new == 1,
+                celox_sir::DomainKind::ResetAsyncLow => new == 0,
+                celox_sir::DomainKind::Other => old != new,
+            };
+            if marked {
+                self.mark_trigger_bit(trigger.id);
+            }
         }
+        Ok(())
     }
 
     fn capture_store_range(
@@ -708,15 +729,17 @@ fn collect_trigger_addrs(
 }
 
 /// Execute every unit in `units` against the split backend storage.
+#[allow(clippy::too_many_arguments)]
 fn run_units(
     memory: &mut Vec<u64>,
     layout: &MemoryLayout,
     four_state: bool,
     comb_capture_enabled: &mut [u8],
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    emit_triggers: bool,
 ) -> Result<(), SimulatorErrorCode> {
     // Snapshot the first word of every trigger-bearing object at group
-    // entry; stores mark trigger bits only when the value actually changed.
+    // entry; trigger detection compares the stored range against it.
     let mut trigger_snapshots: HashMap<(AbsoluteAddr, u32), u64> = HashMap::default();
     for (absolute, region) in collect_trigger_addrs(units) {
         let addr = RegionedAbsoluteAddrBase::from_absolute_addr(region, absolute);
@@ -726,21 +749,13 @@ fn run_units(
             four_state,
             comb_capture_enabled: &mut *comb_capture_enabled,
             trigger_snapshots: &trigger_snapshots,
+            emit_triggers,
         };
         if let Ok(base) = machine.object_offset(&addr) {
-            // Snapshot only the declared signal bits: packed neighbors share
-            // the same word and must not influence change detection.
+            // Snapshot the raw first word; trigger detection extracts the
+            // stored range from it, so packed neighbors never leak in.
             // Safety: layout-mapped objects fit inside the merged image.
-            let bits = layout.widths[&absolute];
-            let mask = if bits >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << bits) - 1
-            };
-            trigger_snapshots.insert(
-                (absolute, region),
-                unsafe { read_word(memory, base) } & mask,
-            );
+            trigger_snapshots.insert((absolute, region), unsafe { read_word(memory, base) });
         }
     }
 
@@ -753,6 +768,7 @@ fn run_units(
             four_state,
             comb_capture_enabled: &mut *comb_capture_enabled,
             trigger_snapshots: &trigger_snapshots,
+            emit_triggers,
         };
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
@@ -798,6 +814,9 @@ pub struct InterpBackend {
     /// compiled `comb_apply_func`: fused schedules when present, otherwise
     /// comb units followed by the clock's FF units.
     comb_apply_units: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    /// Whether trigger detection marks bits; matches the compiled
+    /// `emit_triggers` codegen flag.
+    emit_triggers: bool,
 }
 
 impl InterpBackend {
@@ -925,14 +944,8 @@ impl InterpBackend {
             };
             comb_apply_units.insert(*clock, units);
         }
-        for (clock, units) in laid_out
-            .sir
-            .eval_only_ffs
-            .iter()
-            .chain(&laid_out.sir.apply_ffs)
-        {
-            comb_apply_units.insert(*clock, units.clone());
-        }
+        // Only eval/apply clocks receive combined ticks; eval-only and
+        // apply-only groups fall back to the default two-phase evaluation.
 
         let mut backend = Self {
             program_sir,
@@ -948,6 +961,7 @@ impl InterpBackend {
             id_to_event,
             four_state_inits,
             comb_apply_units,
+            emit_triggers: options.emit_triggers,
         };
         backend.install_event_buffers();
         Ok(backend)
@@ -993,6 +1007,7 @@ impl SimBackend for InterpBackend {
             self.four_state,
             &mut self.comb_capture_enabled,
             &self.program_sir.eval_comb,
+            self.emit_triggers,
         )
     }
 
@@ -1006,16 +1021,23 @@ impl SimBackend for InterpBackend {
                 .eval_apply_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+            self.emit_triggers,
         )
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        let Some(units) = self.comb_apply_units.get(&event.addr()) else {
+            // Events outside the eval/apply map keep the default ordering.
+            self.eval_comb()?;
+            return self.eval_apply_ff_at(event);
+        };
         run_units(
             &mut self.memory,
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
-            &self.comb_apply_units[&event.addr()],
+            units,
+            self.emit_triggers,
         )
     }
 
@@ -1029,6 +1051,7 @@ impl SimBackend for InterpBackend {
                 .eval_only_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+            self.emit_triggers,
         )
     }
 
@@ -1042,6 +1065,7 @@ impl SimBackend for InterpBackend {
                 .apply_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+            self.emit_triggers,
         )
     }
 

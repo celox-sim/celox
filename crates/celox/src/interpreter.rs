@@ -125,7 +125,16 @@ pub trait InterpMachine<A> {
     ) -> Result<(), InterpError>;
 
     /// Edge/level triggers attached to a `Store` or `Commit`.
-    fn notify_triggers(&mut self, addr: &A, triggers: &[TriggerIdWithKind]);
+    ///
+    /// The resolved access and width let the machine compare the stored
+    /// range against its group-entry snapshot for per-kind edge detection.
+    fn notify_triggers(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        triggers: &[TriggerIdWithKind],
+    ) -> Result<(), InterpError>;
 
     /// Snapshot the stored range before a `Store` with comb capture sites so
     /// the post-store comparison can detect actual changes.
@@ -346,7 +355,8 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             };
             machine.store(addr, access, *bits, &value)?;
             if !triggers.is_empty() {
-                machine.notify_triggers(addr, triggers);
+                let access = resolve_access(offset, regs)?;
+                machine.notify_triggers(addr, access, *bits, triggers)?;
             }
             if let Some(before) = before {
                 let access = resolve_access(offset, regs)?;
@@ -357,7 +367,8 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             let access = resolve_access(offset, regs)?;
             machine.commit(src, dst, access, *bits)?;
             if !triggers.is_empty() {
-                machine.notify_triggers(dst, triggers);
+                let access = resolve_access(offset, regs)?;
+                machine.notify_triggers(dst, access, *bits, triggers)?;
             }
         }
         SIRInstruction::Concat(dst, sources) => {
@@ -660,13 +671,20 @@ fn alu_binary(
                         }
                     }
                     _ => {
-                        // Overshift or unrepresentable distances drive every
-                        // bit, including the mask, toward the sign fill.
-                        if signed_value.is_negative() {
-                            all_x(dst_width)
+                        // Overshift or unrepresentable distances converge the
+                        // value and the mask toward their own sign fills
+                        // independently, exactly like the normal branch.
+                        let payload = if signed_value.is_negative() {
+                            width_mask(dst_width)
                         } else {
-                            SIRValue::new(BigUint::zero())
-                        }
+                            BigUint::zero()
+                        };
+                        let mask = if signed_mask.is_negative() {
+                            width_mask(dst_width)
+                        } else {
+                            BigUint::zero()
+                        };
+                        SIRValue { payload, mask }
                     }
                 }
             }
@@ -1204,8 +1222,15 @@ mod tests {
             Ok(())
         }
 
-        fn notify_triggers(&mut self, _addr: &u32, triggers: &[TriggerIdWithKind]) {
+        fn notify_triggers(
+            &mut self,
+            _addr: &u32,
+            _access: ResolvedAccess<'_>,
+            _bits: usize,
+            triggers: &[TriggerIdWithKind],
+        ) -> Result<(), InterpError> {
             self.trigger_notifications.push(triggers.len());
+            Ok(())
         }
 
         fn capture_store_range(
