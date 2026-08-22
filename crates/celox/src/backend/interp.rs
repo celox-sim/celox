@@ -548,7 +548,7 @@ impl SimBackend for InterpBackend {
     type Event = InterpEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
-        Self::run_units(
+        run_units(
             &mut self.memory,
             &self.layout,
             self.four_state,
@@ -558,7 +558,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn eval_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::run_units(
+        run_units(
             &mut self.memory,
             &self.layout,
             self.four_state,
@@ -571,7 +571,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn eval_only_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::run_units(
+        run_units(
             &mut self.memory,
             &self.layout,
             self.four_state,
@@ -584,7 +584,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::run_units(
+        run_units(
             &mut self.memory,
             &self.layout,
             self.four_state,
