@@ -14,6 +14,7 @@ use crate::mir::{CmpKind, MFunction, MInst, VReg};
 pub(crate) fn optimize(function: &mut MFunction) {
     fold_constants(function);
     lower_immediate_uses(function);
+    canonicalize_identity_operations(function);
     fuse_compare_selects(function);
     eliminate_nearby_common_expressions(function);
     propagate_exact_copies(function);
@@ -21,6 +22,35 @@ pub(crate) fn optimize(function: &mut MFunction) {
     remove_redundant_low_masks(function);
     propagate_exact_copies(function);
     dead_code_eliminate(function);
+}
+
+fn canonicalize_identity_operations(function: &mut MFunction) {
+    for block in &mut function.blocks {
+        for instruction in &mut block.insts {
+            let replacement = match *instruction {
+                MInst::OrImm { dst, src, imm: 0 }
+                | MInst::ShrImm { dst, src, imm: 0 }
+                | MInst::ShlImm { dst, src, imm: 0 }
+                | MInst::SarImm { dst, src, imm: 0 }
+                | MInst::AddImm { dst, src, imm: 0 }
+                | MInst::SubImm { dst, src, imm: 0 }
+                | MInst::AndImm {
+                    dst,
+                    src,
+                    imm: u64::MAX,
+                } => Some(MInst::Mov { dst, src }),
+                MInst::AndImm32 {
+                    dst,
+                    src,
+                    imm: u32::MAX,
+                } => Some(MInst::Mov32 { dst, src }),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *instruction = replacement;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -784,6 +814,79 @@ mod tests {
                 kind: CmpKind::Eq
             }
         ));
+    }
+
+    #[test]
+    fn removes_identity_machine_operations() {
+        let mut function = function(vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0,
+            },
+            MInst::Shr {
+                dst: VReg(2),
+                lhs: VReg(1),
+                rhs: VReg(0),
+            },
+            MInst::OrImm {
+                dst: VReg(3),
+                src: VReg(2),
+                imm: 0,
+            },
+            MInst::AddImm {
+                dst: VReg(4),
+                src: VReg(3),
+                imm: 0,
+            },
+            MInst::AndImm {
+                dst: VReg(5),
+                src: VReg(4),
+                imm: u64::MAX,
+            },
+            MInst::Store {
+                base: crate::mir::BaseReg::SimState,
+                offset: 0,
+                src: VReg(5),
+                size: crate::mir::OpSize::S64,
+            },
+            MInst::AndImm32 {
+                dst: VReg(6),
+                src: VReg(7),
+                imm: u32::MAX,
+            },
+            MInst::Store {
+                base: crate::mir::BaseReg::SimState,
+                offset: 8,
+                src: VReg(6),
+                size: crate::mir::OpSize::S64,
+            },
+            MInst::Return,
+        ]);
+
+        optimize(&mut function);
+
+        assert_eq!(
+            function.blocks[0].insts,
+            vec![
+                MInst::Store {
+                    base: crate::mir::BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(1),
+                    size: crate::mir::OpSize::S64,
+                },
+                MInst::Mov32 {
+                    dst: VReg(6),
+                    src: VReg(7),
+                },
+                MInst::Store {
+                    base: crate::mir::BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(6),
+                    size: crate::mir::OpSize::S64,
+                },
+                MInst::Return,
+            ]
+        );
     }
 
     #[test]
