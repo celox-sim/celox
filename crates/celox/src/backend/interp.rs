@@ -546,8 +546,9 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             return;
         }
         // Change detection identical to the compiled backends: the object's
-        // first word is compared against the group-entry snapshot and the
-        // trigger bits are only marked on an actual change.
+        // declared bits are compared against the group-entry snapshot and the
+        // trigger bits are only marked on an actual change. Masking to the
+        // signal width keeps adjacent packed state out of the comparison.
         let absolute = addr.absolute_addr();
         let Some(&snapshot) = self.trigger_snapshots.get(&(absolute, addr.region)) else {
             return;
@@ -556,7 +557,13 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             return;
         };
         // Safety: layout-mapped objects fit inside the merged image.
-        let current = unsafe { self.read_u64(base) };
+        let bits = self.layout.widths[&absolute];
+        let signal_mask = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        let current = unsafe { self.read_u64(base) } & signal_mask;
         if current == snapshot {
             return;
         }
@@ -721,8 +728,19 @@ fn run_units(
             trigger_snapshots: &trigger_snapshots,
         };
         if let Ok(base) = machine.object_offset(&addr) {
+            // Snapshot only the declared signal bits: packed neighbors share
+            // the same word and must not influence change detection.
             // Safety: layout-mapped objects fit inside the merged image.
-            trigger_snapshots.insert((absolute, region), unsafe { read_word(memory, base) });
+            let bits = layout.widths[&absolute];
+            let mask = if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            };
+            trigger_snapshots.insert(
+                (absolute, region),
+                unsafe { read_word(memory, base) } & mask,
+            );
         }
     }
 
@@ -776,6 +794,10 @@ pub struct InterpBackend {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<InterpEventRef>,
     four_state_inits: Vec<(usize, usize)>,
+    /// Units for the fused comb+FF tick of each event, mirroring the
+    /// compiled `comb_apply_func`: fused schedules when present, otherwise
+    /// comb units followed by the clock's FF units.
+    comb_apply_units: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
 }
 
 impl InterpBackend {
@@ -887,6 +909,31 @@ impl InterpBackend {
             }
         }
 
+        // Deferred testbench ticks require the scheduler's combined comb/FF
+        // program; executing independently scheduled comb and FF units can
+        // observe a different pre-edge snapshot around reset and NBA regions,
+        // exactly as with the compiled backends.
+        let mut comb_apply_units: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
+            HashMap::default();
+        for (clock, ff_units) in &laid_out.sir.eval_apply_ffs {
+            let units = if let Some(fused) = laid_out.sir.eval_comb_apply_ffs.get(clock) {
+                fused.clone()
+            } else {
+                let mut combined = laid_out.sir.eval_comb.clone();
+                combined.extend(ff_units.iter().cloned());
+                combined
+            };
+            comb_apply_units.insert(*clock, units);
+        }
+        for (clock, units) in laid_out
+            .sir
+            .eval_only_ffs
+            .iter()
+            .chain(&laid_out.sir.apply_ffs)
+        {
+            comb_apply_units.insert(*clock, units.clone());
+        }
+
         let mut backend = Self {
             program_sir,
             layout,
@@ -900,6 +947,7 @@ impl InterpBackend {
             id_to_addr,
             id_to_event,
             four_state_inits,
+            comb_apply_units,
         };
         backend.install_event_buffers();
         Ok(backend)
@@ -958,6 +1006,16 @@ impl SimBackend for InterpBackend {
                 .eval_apply_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+        )
+    }
+
+    fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        run_units(
+            &mut self.memory,
+            &self.layout,
+            self.four_state,
+            &mut self.comb_capture_enabled,
+            &self.comb_apply_units[&event.addr()],
         )
     }
 

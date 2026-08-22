@@ -308,7 +308,6 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             let lhs_value = regs.get(*lhs)?.clone();
             let rhs_value = regs.get(*rhs)?.clone();
             let dst_width = regs.width(*dst);
-            let lhs_signed = regs.is_signed(*lhs);
             let out = alu_binary(
                 op,
                 &lhs_value,
@@ -316,7 +315,8 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 regs.width(*lhs),
                 regs.width(*rhs),
                 dst_width,
-                lhs_signed,
+                regs.is_signed(*lhs),
+                regs.is_signed(*rhs),
             )?;
             regs.set(*dst, truncate(out, dst_width));
         }
@@ -506,32 +506,26 @@ fn alu_binary(
     rhs_width: usize,
     dst_width: usize,
     lhs_signed: bool,
+    rhs_signed: bool,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
-        BinaryOp::Add => {
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
-            if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                SIRValue::new((&lhs.payload + &rhs.payload) & width_mask(dst_width))
-            } else {
+            // Operands are promoted to the common width with the compiled
+            // extension rule before the wrap-around arithmetic, so a narrow
+            // signed operand keeps its value (4-bit -1 + 8-bit 1 == 0).
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
                 all_x(dst_width)
-            }
-        }
-        BinaryOp::Sub => {
-            // Wrap-safe two's complement subtraction: l + (~r + 1) mod 2^w.
-            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
-            if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                let inverted_rhs = &width_mask(dst_width) ^ &rhs.payload;
-                SIRValue::new((&lhs.payload + inverted_rhs + 1u8) & width_mask(dst_width))
             } else {
-                all_x(dst_width)
-            }
-        }
-        BinaryOp::Mul => {
-            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
-            if lhs.mask.is_zero() && rhs.mask.is_zero() {
-                SIRValue::new((&lhs.payload * &rhs.payload) & width_mask(dst_width))
-            } else {
-                all_x(dst_width)
+                let common = lhs_width.max(rhs_width).max(dst_width);
+                let l = promote_operand(lhs, lhs_signed, lhs_width, common).payload;
+                let r = promote_operand(rhs, rhs_signed, rhs_width, common).payload;
+                let raw = match op {
+                    BinaryOp::Add => l + r,
+                    BinaryOp::Sub => l + (&width_mask(common) ^ &r) + 1u8,
+                    _ => l * r,
+                };
+                SIRValue::new(raw & width_mask(dst_width))
             }
         }
         BinaryOp::DivU | BinaryOp::RemU => {
@@ -570,11 +564,14 @@ fn alu_binary(
             }
         }
         BinaryOp::And => {
-            // Per-bit truth tables evaluated at the common width so padding
-            // above a narrower operand counts as known zero.
+            // Per-bit truth tables evaluated at the common width with the
+            // compiled promotion, so padding above a narrower operand follows
+            // its sign instead of reading as known zero.
             let common = lhs_width.max(rhs_width).max(dst_width);
-            let ones = known_ones(lhs, common) & known_ones(rhs, common);
-            let zeros = known_zeros(lhs, common) | known_zeros(rhs, common);
+            let l = promote_operand(lhs, lhs_signed, lhs_width, common);
+            let r = promote_operand(rhs, rhs_signed, rhs_width, common);
+            let ones = known_ones(&l, common) & known_ones(&r, common);
+            let zeros = known_zeros(&l, common) | known_zeros(&r, common);
             let mask = &width_mask(common) ^ (&ones | &zeros);
             SIRValue {
                 payload: ones,
@@ -583,8 +580,10 @@ fn alu_binary(
         }
         BinaryOp::Or => {
             let common = lhs_width.max(rhs_width).max(dst_width);
-            let ones = known_ones(lhs, common) | known_ones(rhs, common);
-            let zeros = known_zeros(lhs, common) & known_zeros(rhs, common);
+            let l = promote_operand(lhs, lhs_signed, lhs_width, common);
+            let r = promote_operand(rhs, rhs_signed, rhs_width, common);
+            let ones = known_ones(&l, common) | known_ones(&r, common);
+            let zeros = known_zeros(&l, common) & known_zeros(&r, common);
             let mask = &width_mask(common) ^ (&ones | &zeros);
             SIRValue {
                 payload: ones,
@@ -595,10 +594,12 @@ fn alu_binary(
             // SEMANTICS-CHECK: XOR is per-bit independent — an unknown input
             // bit only makes the corresponding output bit unknown (mask union),
             // unlike arithmetic ops where any X poisons the whole result.
-            let common = lhs_width.max(rhs_width);
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let l = promote_operand(lhs, lhs_signed, lhs_width, common);
+            let r = promote_operand(rhs, rhs_signed, rhs_width, common);
             SIRValue {
-                payload: (&lhs.payload ^ &rhs.payload) & width_mask(common),
-                mask: (&lhs.mask | &rhs.mask) & width_mask(common),
+                payload: &l.payload ^ &r.payload,
+                mask: &l.mask | &r.mask,
             }
         }
         BinaryOp::Shl => {
@@ -606,30 +607,34 @@ fn alu_binary(
             // The shift runs on the full left-hand value and the destination
             // keeps the low bits, matching the compiled common-width lowering
             // (a narrow destination still receives surviving low bits).
+            // Counts at or beyond the destination width produce zero without
+            // materializing a huge BigUint shift.
             if !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
                 match shift_amount(&rhs.payload) {
-                    Some(amount) => SIRValue {
+                    Some(amount) if amount < dst_width => SIRValue {
                         payload: (&lhs.payload << amount) & width_mask(dst_width),
                         mask: (&lhs.mask << amount) & width_mask(dst_width),
                     },
-                    None => SIRValue::new(BigUint::zero()),
+                    _ => SIRValue::new(BigUint::zero()),
                 }
             }
         }
         BinaryOp::Shr => {
             // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
             // Logical shift: vacated bits are zero regardless of width.
+            // Overshift counts return zero directly to bound the work.
             if !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
+                let bound = lhs_width.max(dst_width).max(1);
                 match shift_amount(&rhs.payload) {
-                    Some(amount) => SIRValue {
+                    Some(amount) if amount < bound => SIRValue {
                         payload: &lhs.payload >> amount,
                         mask: &lhs.mask >> amount,
                     },
-                    None => SIRValue::new(BigUint::zero()),
+                    _ => SIRValue::new(BigUint::zero()),
                 }
             }
         }
@@ -644,8 +649,9 @@ fn alu_binary(
             } else {
                 let signed_value = to_signed(&lhs.payload, lhs_width);
                 let signed_mask = to_signed(&lhs.mask, lhs_width);
+                let bound = lhs_width.max(dst_width).max(1);
                 match shift_amount(&rhs.payload) {
-                    Some(amount) => {
+                    Some(amount) if amount < bound => {
                         let shifted = signed_value >> amount;
                         let shifted_mask = signed_mask >> amount;
                         SIRValue {
@@ -653,9 +659,9 @@ fn alu_binary(
                             mask: wrap_signed(&shifted_mask, dst_width),
                         }
                     }
-                    None => {
-                        // An unrepresentable shift distance drives every bit,
-                        // including the mask, toward the sign fill.
+                    _ => {
+                        // Overshift or unrepresentable distances drive every
+                        // bit, including the mask, toward the sign fill.
                         if signed_value.is_negative() {
                             all_x(dst_width)
                         } else {
@@ -845,6 +851,19 @@ fn zero_extend(value: &SIRValue, width: usize) -> SIRValue {
     }
 }
 
+/// Promote a payload/mask pair up to `width` using the compiled extension
+/// rule: a signed declaration sign-extends both words, an unsigned one
+/// zero-extends.
+fn promote_operand(value: &SIRValue, signed: bool, from_width: usize, width: usize) -> SIRValue {
+    if !signed || width <= from_width {
+        return zero_extend(value, width);
+    }
+    SIRValue {
+        payload: sign_extend(&value.payload, from_width, width),
+        mask: sign_extend(&value.mask, from_width, width),
+    }
+}
+
 /// Sign-extend the top bit of a `from_width`-wide payload up to `to_width`.
 fn sign_extend(payload: &BigUint, from_width: usize, to_width: usize) -> BigUint {
     if from_width == 0 || to_width <= from_width {
@@ -881,11 +900,20 @@ fn alu_unary(
     src_signed: bool,
     dst_width: usize,
 ) -> Result<SIRValue, InterpError> {
-    // Signedness is carried by dedicated opcodes (e.g. division); unary
-    // operators do not consult the declaration today.
-    let _ = src_signed;
     let out = match op {
-        UnaryOp::Ident => src.clone(),
+        UnaryOp::Ident => {
+            // Identity casts widen with the operand's declared signedness,
+            // matching the compiled promotion: widening a signed negative
+            // value must sign-fill, not zero-fill.
+            if src_signed && dst_width > src_width {
+                SIRValue {
+                    payload: sign_extend(&src.payload, src_width, dst_width),
+                    mask: sign_extend(&src.mask, src_width, dst_width),
+                }
+            } else {
+                src.clone()
+            }
+        }
         UnaryOp::ToTwoState => SIRValue {
             payload: &src.payload & (&width_mask(src_width) ^ &src.mask),
             mask: BigUint::zero(),
