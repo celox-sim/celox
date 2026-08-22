@@ -2470,7 +2470,6 @@ mod host {
         options: &SimulatorOptions,
     ) {
         use crate::HashSet;
-        use crate::ir::InstancePath;
         let mut externally_live = HashSet::default();
 
         // Native testbench expressions bypass SIR and read simulator memory
@@ -2489,20 +2488,10 @@ mod host {
 
         // PreserveTopPorts: auto-collect top module port addresses
         if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
-            if let Some(&top_instance_id) = program.frontend.instance_ids.get(&InstancePath(vec![]))
-            {
-                if let Some(&top_module_id) = program.frontend.instance_module.get(&top_instance_id)
-                {
-                    if let Some(top_vars) = program.frontend.module_variables.get(&top_module_id) {
-                        for info in top_vars.values() {
-                            if info.var_kind.is_port() {
-                                if let Some(address) =
-                                    program.state_address_for_source(top_instance_id, info.id)
-                                {
-                                    externally_live.insert(address);
-                                }
-                            }
-                        }
+            if let Some(instance) = program.design.root_instance() {
+                for address in instance.state_addresses() {
+                    if program.design.variable(address).unwrap().var_kind.is_port() {
+                        externally_live.insert(*address);
                     }
                 }
             }
@@ -2510,16 +2499,10 @@ mod host {
 
         // PreserveAllPorts: collect port addresses from every instance
         if options.dead_store_policy == DeadStorePolicy::PreserveAllPorts {
-            for (&instance_id, &module_id) in &program.frontend.instance_module {
-                if let Some(vars) = program.frontend.module_variables.get(&module_id) {
-                    for info in vars.values() {
-                        if info.var_kind.is_port() {
-                            if let Some(address) =
-                                program.state_address_for_source(instance_id, info.id)
-                            {
-                                externally_live.insert(address);
-                            }
-                        }
+            for instance in program.design.instances() {
+                for address in instance.state_addresses() {
+                    if program.design.variable(address).unwrap().var_kind.is_port() {
+                        externally_live.insert(*address);
                     }
                 }
             }

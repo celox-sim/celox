@@ -66,6 +66,12 @@ therefore remain in the Veryl adapter and its source sidecars; they do not enter
 `celox-frontend-core`, `FrontendLookup`, or `ScheduledRtl`. Scheduled design
 state, SIR, optimization, layout, and backends use `celox-design` identities.
 
+`FrontendLookup` exists only through scheduling and source-testbench lowering.
+The compiler then consumes it into `RuntimeDesign`, whose flattened state table,
+instance hierarchy, and direct path/source indices form the canonical runtime
+metadata. `RuntimeProgram` and serialized native images do not retain frontend
+module-variable tables beside the elaborated design.
+
 `celox-backend-arm64` is wired directly into AArch64 native backend selection
 and emits complete scalar simulation kernels. It lowers SIR into target-owned
 AArch64 MIR and applies its own allocation and emission policy; it does not

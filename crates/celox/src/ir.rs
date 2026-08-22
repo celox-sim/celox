@@ -41,6 +41,341 @@ pub type AbsoluteAddr = celox_design::StateAddr;
 pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
 pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 
+/// Source-facing metadata for one flattened runtime state object.
+///
+/// Storage metadata remains canonical in [`RuntimeDesign::semantic`]; this
+/// record only retains the hierarchy and source properties needed for lookup,
+/// diagnostics, testbench integration, and reflection.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeVariable {
+    pub address: AbsoluteAddr,
+    pub source_id: SourceVarId,
+    pub path: Vec<String>,
+    pub var_kind: VariableKind,
+    pub signed: bool,
+    pub packed_dims: Vec<usize>,
+}
+
+/// One elaborated runtime instance with direct state-address indices.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeInstance {
+    pub id: InstanceId,
+    pub module_id: ModuleId,
+    pub module_name: String,
+    pub path: InstancePath,
+    pub display_path: Vec<String>,
+    state_addresses: Vec<AbsoluteAddr>,
+    source_variables: HashMap<SourceVarId, AbsoluteAddr>,
+    path_index: HashMap<Vec<String>, Option<AbsoluteAddr>>,
+}
+
+impl RuntimeInstance {
+    pub fn state_addresses(&self) -> &[AbsoluteAddr] {
+        &self.state_addresses
+    }
+
+    pub fn resolves_path_to(&self, path: &[String], address: AbsoluteAddr) -> bool {
+        self.path_index.get(path) == Some(&Some(address))
+    }
+}
+
+/// Canonical runtime design model after frontend scheduling.
+///
+/// The semantic state table, hierarchy, paths, and source-facing variable
+/// properties are projected into this model once. The compiler can then drop
+/// [`FrontendLookup`] instead of retaining it beside a duplicate state table.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeDesign {
+    semantic: celox_design::ElaboratedDesign<AbsoluteAddr>,
+    instances: HashMap<InstanceId, RuntimeInstance>,
+    instance_ids: HashMap<InstancePath, InstanceId>,
+    variables: HashMap<AbsoluteAddr, RuntimeVariable>,
+}
+
+impl std::ops::Deref for RuntimeDesign {
+    type Target = celox_design::ElaboratedDesign<AbsoluteAddr>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.semantic
+    }
+}
+
+impl RuntimeDesign {
+    fn from_projection(
+        semantic: celox_design::ElaboratedDesign<AbsoluteAddr>,
+        frontend: FrontendLookup,
+    ) -> Result<Self, DesignProjectionError> {
+        let expected_count = frontend
+            .instance_module
+            .values()
+            .map(|module_id| frontend.module_variables[module_id].len())
+            .sum::<usize>();
+        if semantic.state_objects.len() != expected_count {
+            return Err(DesignProjectionError::StateObjectCount {
+                design: semantic.state_objects.len(),
+                frontend: expected_count,
+            });
+        }
+
+        let mut instances = HashMap::default();
+        let mut variables = HashMap::default();
+        for (path, &instance_id) in &frontend.instance_ids {
+            let module_id = frontend.instance_module[&instance_id];
+            let module_variables = &frontend.module_variables[&module_id];
+            let display_path = frontend.instance_path_segments(path);
+            let mut state_addresses = Vec::with_capacity(module_variables.len());
+            let mut source_variables = HashMap::default();
+
+            for info in module_variables.values() {
+                let source_address = SourceAddr {
+                    instance_id,
+                    var_id: info.id,
+                };
+                let Some(address) = frontend.state_address(&source_address) else {
+                    return Err(DesignProjectionError::MissingStateProjection { source_address });
+                };
+                let Some(metadata) = semantic.state_objects.get(&address) else {
+                    return Err(DesignProjectionError::MissingStateObject { address });
+                };
+                if metadata != &info.metadata {
+                    return Err(DesignProjectionError::MetadataMismatch { address });
+                }
+
+                state_addresses.push(address);
+                source_variables.insert(info.id, address);
+                variables.insert(
+                    address,
+                    RuntimeVariable {
+                        address,
+                        source_id: info.id,
+                        path: info.path.clone(),
+                        var_kind: info.var_kind,
+                        signed: info.signed,
+                        packed_dims: info.packed_dims.clone(),
+                    },
+                );
+            }
+
+            state_addresses.sort_unstable();
+            let path_index = frontend.module_var_path_index[&module_id]
+                .iter()
+                .map(|(path, source_id)| {
+                    (
+                        path.clone(),
+                        source_id.and_then(|source_id| source_variables.get(&source_id).copied()),
+                    )
+                })
+                .collect();
+            instances.insert(
+                instance_id,
+                RuntimeInstance {
+                    id: instance_id,
+                    module_id,
+                    module_name: frontend
+                        .module_names
+                        .get(&module_id)
+                        .cloned()
+                        .unwrap_or_else(|| module_id.to_string()),
+                    path: path.clone(),
+                    display_path,
+                    state_addresses,
+                    source_variables,
+                    path_index,
+                },
+            );
+        }
+
+        let design = Self {
+            semantic,
+            instances,
+            instance_ids: frontend.instance_ids,
+            variables,
+        };
+        design
+            .validate()
+            .map_err(|reason| DesignProjectionError::InvalidRuntimeDesign { reason })?;
+        Ok(design)
+    }
+
+    pub fn semantic(&self) -> &celox_design::ElaboratedDesign<AbsoluteAddr> {
+        &self.semantic
+    }
+
+    pub fn instances(&self) -> impl Iterator<Item = &RuntimeInstance> {
+        self.instances.values()
+    }
+
+    pub fn instance(&self, id: InstanceId) -> Option<&RuntimeInstance> {
+        self.instances.get(&id)
+    }
+
+    pub fn instance_at_path(&self, path: &InstancePath) -> Option<&RuntimeInstance> {
+        self.instance_ids
+            .get(path)
+            .and_then(|instance_id| self.instances.get(instance_id))
+    }
+
+    pub fn root_instance(&self) -> Option<&RuntimeInstance> {
+        self.instance_at_path(&InstancePath(Vec::new()))
+    }
+
+    pub fn variable(&self, address: &AbsoluteAddr) -> Option<&RuntimeVariable> {
+        self.variables.get(address)
+    }
+
+    pub fn instance_variable(
+        &self,
+        instance_id: InstanceId,
+        source_id: SourceVarId,
+    ) -> Option<&RuntimeVariable> {
+        let address = self
+            .instances
+            .get(&instance_id)?
+            .source_variables
+            .get(&source_id)?;
+        self.variables.get(address)
+    }
+
+    pub fn variable_info(&self, address: &AbsoluteAddr) -> Option<VariableInfo> {
+        let variable = self.variables.get(address)?;
+        Some(VariableInfo {
+            id: variable.source_id,
+            path: variable.path.clone(),
+            var_kind: variable.var_kind,
+            signed: variable.signed,
+            metadata: self.semantic.state_objects.get(address)?.clone(),
+            packed_dims: variable.packed_dims.clone(),
+        })
+    }
+
+    pub fn get_path(&self, address: &AbsoluteAddr) -> String {
+        let Some(variable) = self.variables.get(address) else {
+            return address.to_string();
+        };
+        let Some(instance) = self.instances.get(&address.instance_id) else {
+            return address.to_string();
+        };
+        instance
+            .display_path
+            .iter()
+            .chain(&variable.path)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.variables.len() != self.semantic.state_objects.len() {
+            return Err(format!(
+                "state variable count differs: design={} runtime={}",
+                self.semantic.state_objects.len(),
+                self.variables.len()
+            ));
+        }
+        if self.instance_ids.len() != self.instances.len() {
+            return Err(format!(
+                "instance count differs: paths={} instances={}",
+                self.instance_ids.len(),
+                self.instances.len()
+            ));
+        }
+
+        for (path, instance_id) in &self.instance_ids {
+            let instance = self.instances.get(instance_id).ok_or_else(|| {
+                format!("instance path {path:?} references missing {instance_id}")
+            })?;
+            if instance.path != *path || instance.id != *instance_id {
+                return Err(format!("instance path index disagrees for {instance_id}"));
+            }
+        }
+
+        for (instance_id, instance) in &self.instances {
+            if instance.id != *instance_id {
+                return Err(format!("instance map key disagrees for {instance_id}"));
+            }
+            if self.instance_ids.get(&instance.path) != Some(instance_id) {
+                return Err(format!("missing path index for {instance_id}"));
+            }
+            if instance.state_addresses.len() != instance.source_variables.len() {
+                return Err(format!(
+                    "state/source variable count differs for {instance_id}"
+                ));
+            }
+            if instance
+                .state_addresses
+                .windows(2)
+                .any(|addresses| addresses[0] >= addresses[1])
+            {
+                return Err(format!(
+                    "state addresses are not strictly sorted for {instance_id}"
+                ));
+            }
+
+            for address in &instance.state_addresses {
+                if address.instance_id != *instance_id {
+                    return Err(format!(
+                        "state address {address} belongs to another instance"
+                    ));
+                }
+                if !self.semantic.state_objects.contains_key(address) {
+                    return Err(format!("state address {address} has no semantic metadata"));
+                }
+                let variable = self
+                    .variables
+                    .get(address)
+                    .ok_or_else(|| format!("state address {address} has no runtime variable"))?;
+                if variable.address != *address
+                    || instance.source_variables.get(&variable.source_id) != Some(address)
+                {
+                    return Err(format!("source index disagrees for {address}"));
+                }
+            }
+
+            for (path, address) in &instance.path_index {
+                let Some(address) = address else {
+                    continue;
+                };
+                let variable = self
+                    .variables
+                    .get(address)
+                    .ok_or_else(|| format!("path index references missing {address}"))?;
+                if address.instance_id != *instance_id || variable.path != *path {
+                    return Err(format!("path index disagrees for {address}"));
+                }
+            }
+        }
+
+        for address in self.variables.keys() {
+            let instance = self
+                .instances
+                .get(&address.instance_id)
+                .ok_or_else(|| format!("runtime variable {address} references missing instance"))?;
+            if instance.state_addresses.binary_search(address).is_err() {
+                return Err(format!(
+                    "runtime variable {address} is not indexed by instance"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn take_initial_state(
+        &mut self,
+    ) -> Vec<celox_design::InitialStateValue<AbsoluteAddr>> {
+        std::mem::take(&mut self.semantic.initial_state)
+    }
+
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn restore_initial_state(
+        &mut self,
+        initial_state: Vec<celox_design::InitialStateValue<AbsoluteAddr>>,
+    ) {
+        self.semantic.initial_state = initial_state;
+    }
+}
+
 /// Error returned by [`RuntimeProgram::get_addr`] when a path-based variable lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
@@ -52,8 +387,8 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
 }
 
-/// Internal consistency failure while comparing frontend state lookup data
-/// with the source-independent elaborated design.
+/// Internal consistency failure while consuming the frontend projection into
+/// the canonical runtime design.
 #[derive(Debug, Clone, thiserror::Error)]
 pub(crate) enum DesignProjectionError {
     #[error("state object count differs: design={design} frontend={frontend}")]
@@ -64,6 +399,8 @@ pub(crate) enum DesignProjectionError {
     MissingStateObject { address: AbsoluteAddr },
     #[error("metadata differs for flattened state object {address}")]
     MetadataMismatch { address: AbsoluteAddr },
+    #[error("invalid normalized runtime design: {reason}")]
+    InvalidRuntimeDesign { reason: String },
 }
 
 #[cfg(feature = "host-runtime")]
@@ -78,8 +415,7 @@ pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<
 /// backend can therefore discard the compiler artifact after code generation.
 #[derive(Clone)]
 pub struct RuntimeProgram {
-    pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
-    pub frontend: FrontendLookup,
+    pub design: RuntimeDesign,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }
@@ -352,32 +688,18 @@ impl RuntimeProgram {
             module_name: String,
         }
 
-        let root_instance = self
-            .frontend
-            .instance_ids
-            .get(&InstancePath(Vec::new()))
-            .expect("top-level instance exists");
-        let root_module = self.frontend.instance_module[root_instance];
         let root_name = self
-            .frontend
-            .module_names
-            .get(&root_module)
-            .cloned()
-            .unwrap_or_else(|| root_module.to_string());
+            .design
+            .root_instance()
+            .expect("top-level instance exists")
+            .module_name
+            .clone();
 
         let mut scope_sources = self
-            .frontend
-            .instance_ids
-            .iter()
-            .map(|(path, &instance_id)| {
-                let module_id = self.frontend.instance_module[&instance_id];
-                let module_name = self
-                    .frontend
-                    .module_names
-                    .get(&module_id)
-                    .cloned()
-                    .unwrap_or_else(|| module_id.to_string());
-                let segments = self.frontend.instance_path_segments(path);
+            .design
+            .instances()
+            .map(|instance| {
+                let segments = &instance.display_path;
                 let name = segments
                     .last()
                     .cloned()
@@ -395,11 +717,11 @@ impl RuntimeProgram {
                     }
                 });
                 ScopeSource {
-                    instance_id,
+                    instance_id: instance.id,
                     name,
                     full_name,
                     parent_name,
-                    module_name,
+                    module_name: instance.module_name.clone(),
                 }
             })
             .collect::<Vec<_>>();
@@ -454,34 +776,31 @@ impl RuntimeProgram {
 
         let mut signals = Vec::new();
         for scope in &scope_sources {
-            let module_id = self.frontend.instance_module[&scope.instance_id];
-            let variables = &self.frontend.module_variables[&module_id];
-            let path_index = &self.frontend.module_var_path_index[&module_id];
-            for info in variables.values() {
+            let instance = self.design.instance(scope.instance_id).unwrap();
+            for state_address in instance.state_addresses() {
+                let variable = self.design.variable(state_address).unwrap();
                 if matches!(
-                    info.var_kind,
+                    variable.var_kind,
                     VariableKind::Parameter | VariableKind::Constant
                 ) {
                     continue;
                 }
-                if path_index.get(&info.path) != Some(&Some(info.id)) {
+                if instance.path_index.get(&variable.path) != Some(&Some(*state_address)) {
                     continue;
                 }
-                let name = info.path.join(".");
-                let state_address = self
-                    .state_address_for_source(scope.instance_id, info.id)
-                    .expect("frontend state projection is complete");
+                let metadata = &self.design.state_objects[state_address];
+                let name = variable.path.join(".");
                 let array_layout =
                     layout
                         .unpacked_arrays
-                        .get(&state_address)
+                        .get(state_address)
                         .map(|array| SignalArrayLayout {
                             element_width: array.element_width,
                             element_count: array.element_count,
                             element_stride: array.element_stride,
                             plane_size: array.plane_size,
                         });
-                let direction = match info.var_kind {
+                let direction = match variable.var_kind {
                     VariableKind::Input => SignalDirection::Input,
                     VariableKind::Output => SignalDirection::Output,
                     VariableKind::Inout => SignalDirection::Inout,
@@ -491,19 +810,19 @@ impl RuntimeProgram {
                     full_name: format!("{}.{}", scope.full_name, name),
                     name,
                     parent: instance_scopes[&scope.instance_id],
-                    state_address,
+                    state_address: *state_address,
                     signal: SignalRef {
-                        offset: layout.offsets[&state_address],
-                        width: layout.widths[&state_address],
-                        is_4state: layout.is_4states[&state_address],
+                        offset: layout.offsets[state_address],
+                        width: layout.widths[state_address],
+                        is_4state: layout.is_4states[state_address],
                         array_layout,
                     },
                     direction,
-                    domain_kind: info.kind,
-                    signed: info.signed,
-                    packed_dims: info.packed_dims.clone(),
-                    unpacked_dims: info.array_dims.clone(),
-                    type_kind: info.type_kind,
+                    domain_kind: metadata.kind,
+                    signed: variable.signed,
+                    packed_dims: variable.packed_dims.clone(),
+                    unpacked_dims: metadata.array_dims.clone(),
+                    type_kind: metadata.type_kind,
                 });
             }
         }
@@ -520,29 +839,18 @@ impl RuntimeProgram {
         reflection
     }
 
-    pub(crate) fn state_address_for_source(
-        &self,
-        instance_id: InstanceId,
-        var_id: SourceVarId,
-    ) -> Option<AbsoluteAddr> {
-        self.frontend.state_address(&SourceAddr {
-            instance_id,
-            var_id,
-        })
-    }
-
     pub(crate) fn from_scheduled(
         scheduled: celox_frontend_core::ScheduledRtl,
-    ) -> (SirProgram, Self) {
-        (
+    ) -> Result<(SirProgram, Self), DesignProjectionError> {
+        let design = RuntimeDesign::from_projection(scheduled.design, scheduled.frontend_lookup)?;
+        Ok((
             scheduled.sir,
             Self {
-                design: scheduled.design,
-                frontend: scheduled.frontend_lookup,
+                design,
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
             },
-        )
+        ))
     }
 
     pub fn get_addr(
@@ -554,10 +862,9 @@ impl RuntimeProgram {
             .iter()
             .map(|(name, index)| ((*name).to_string(), *index))
             .collect();
-        let instance_id = *self
-            .frontend
-            .instance_ids
-            .get(&InstancePath(instance_path.clone()))
+        let instance = self
+            .design
+            .instance_at_path(&InstancePath(instance_path.clone()))
             .ok_or_else(|| AddrLookupError::InstanceNotFound {
                 path: instance_path
                     .iter()
@@ -565,79 +872,32 @@ impl RuntimeProgram {
                     .collect::<Vec<_>>()
                     .join("."),
             })?;
-        let module_id = self.frontend.instance_module[&instance_id];
         let target_path = var_path
             .iter()
             .map(|segment| (*segment).to_string())
             .collect::<Vec<_>>();
         let path_str = var_path.join(".");
-        let entry = self.frontend.module_var_path_index[&module_id]
-            .get(&target_path)
-            .ok_or_else(|| AddrLookupError::VariableNotFound {
+        let entry = instance.path_index.get(&target_path).ok_or_else(|| {
+            AddrLookupError::VariableNotFound {
                 path: path_str.clone(),
-            })?;
-        let var_id = entry.ok_or_else(|| AddrLookupError::AmbiguousPath { path: path_str })?;
-        let source_addr = SourceAddr {
-            instance_id,
-            var_id,
-        };
-        self.frontend
-            .state_address(&source_addr)
-            .ok_or_else(|| AddrLookupError::VariableNotFound {
-                path: var_path.join("."),
-            })
+            }
+        })?;
+        entry
+            .as_ref()
+            .copied()
+            .ok_or(AddrLookupError::AmbiguousPath { path: path_str })
     }
 
     pub fn get_path(&self, addr: &AbsoluteAddr) -> String {
-        self.frontend.get_state_path(addr)
+        self.design.get_path(addr)
     }
 
-    pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
-        let source = self.frontend.source_address(addr)?;
-        let module_id = self.frontend.instance_module.get(&source.instance_id)?;
-        let module_vars = self.frontend.module_variables.get(module_id)?;
-        module_vars.get(&source.var_id)
+    pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<VariableInfo> {
+        self.design.variable_info(addr)
     }
 
     pub fn num_events(&self) -> usize {
         self.design.events.len()
-    }
-
-    /// Verify the temporary migration projection from frontend lookup tables
-    /// into the source-independent elaborated design. This can be removed once
-    /// the frontend tables are consumed rather than retained beside `design`.
-    pub(crate) fn verify_design_projection(&self) -> Result<(), DesignProjectionError> {
-        let expected_count = self
-            .frontend
-            .instance_module
-            .values()
-            .map(|module_id| self.frontend.module_variables[module_id].len())
-            .sum::<usize>();
-        if self.design.state_objects.len() != expected_count {
-            return Err(DesignProjectionError::StateObjectCount {
-                design: self.design.state_objects.len(),
-                frontend: expected_count,
-            });
-        }
-
-        for (&instance_id, module_id) in &self.frontend.instance_module {
-            for info in self.frontend.module_variables[module_id].values() {
-                let source_address = SourceAddr {
-                    instance_id,
-                    var_id: info.id,
-                };
-                let Some(address) = self.frontend.state_address(&source_address) else {
-                    return Err(DesignProjectionError::MissingStateProjection { source_address });
-                };
-                let Some(metadata) = self.design.state_objects.get(&address) else {
-                    return Err(DesignProjectionError::MissingStateObject { address });
-                };
-                if metadata != &info.metadata {
-                    return Err(DesignProjectionError::MetadataMismatch { address });
-                }
-            }
-        }
-        Ok(())
     }
 }
 

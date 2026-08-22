@@ -773,6 +773,844 @@ fn merges_always_ff_processes_with_the_same_trigger() {
 }
 
 #[test]
+fn builds_whole_unpacked_array_always_ff_assignment() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [7:0] d [2],
+            output logic [7:0] q [2]
+        );
+            always_ff @(posedge clk) q <= d;
+        endmodule
+    "#;
+    Simulator::from_sv_sources(
+        vec![(source, Path::new("whole_array_ff_assignment.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+}
+
+#[test]
+fn connects_whole_unpacked_array_ports() {
+    let source = r#"
+        module Child(
+            input logic [7:0] input_values[2],
+            output logic [7:0] output_values[2]
+        );
+            assign output_values = input_values;
+        endmodule
+        module Top(
+            input logic [7:0] values[2],
+            output logic [7:0] result[2]
+        );
+            Child child(
+                .input_values(values),
+                .output_values(result)
+            );
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("whole_array_ports.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let values = sim.signal("values");
+    let result = sim.signal("result");
+    sim.modify(|io| io.set(values, 0x3412u16)).unwrap();
+    assert_eq!(sim.get(result), 0x3412u16.into());
+}
+
+#[test]
+fn preserves_named_zero_cast_width() {
+    let source = r#"
+        module Top(output logic [8:0] y);
+            typedef logic [7:0] byte_t;
+            assign y = {1'b1, byte_t'(0)};
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("named_zero_cast.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn rejects_loop_substituted_out_of_range_array_indices() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk);
+            logic [7:0] a[0:1][0:2];
+            always_ff @(posedge clk) begin
+                for (int i = 3; i < 4; i++) a[0][i] <= 8'hff;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("always_ff assignment lowering"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn coerces_sized_loop_initializers_to_signed_int() {
+    let source = r#"
+        module Top(input logic clk, output logic q);
+            always_ff @(posedge clk) begin
+                for (int i = 32'hffff_ffff; i < 0; i++) q <= 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("signed_loop_initializer.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
+fn preserves_outer_loop_index_types_during_nested_unrolling() {
+    let source = r#"
+        module Top(input logic clk, output logic [1:0] q);
+            always_ff @(posedge clk) begin
+                q <= 2'b00;
+                for (int i = -1; i < 0; i++) begin
+                    for (int j = 0; j < (i < 32'd1); j++) q[j] <= 1'b1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nested_signed_loop_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+}
+
+#[test]
+fn rejects_out_of_range_packed_array_element_indices() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [7:0] a[0:1], output logic y);
+            assign y = a[0][8];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment expression"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_out_of_range_packed_array_part_select_bounds() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [7:0] a[0:1], output logic [1:0] y);
+            assign y = a[0][9:8];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment expression"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_signedness_in_loop_conditions() {
+    let source = r#"
+        module Top(input logic clk, output logic q, output logic [1:0] result);
+            always_ff @(posedge clk) begin
+                q <= 1'b0;
+                for (int i = -1; i < 32'd1; i++) result[i + 1] <= 1'b1;
+            end
+        endmodule
+        "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("signed_loop_condition.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("result")), 0u8.into());
+}
+
+#[test]
+fn rejects_extra_loop_index_declarations() {
+    cranelift_build_error(
+        r#"
+        module Top #(parameter J = 1) (input logic clk, output logic [1:0] q);
+            always_ff @(posedge clk) begin
+                for (int i = 0, J = 0; i < 1; i++) q[J] <= 1'b1;
+            end
+        endmodule
+        "#,
+    );
+}
+
+#[test]
+fn connects_child_outputs_to_unpacked_array_elements() {
+    let source = r#"
+        module Child(
+            input logic [7:0] input_value,
+            output logic [7:0] output_value
+        );
+            assign output_value = input_value;
+        endmodule
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic [7:0] values[2]
+        );
+            Child first(.input_value(a), .output_value(values[0]));
+            Child second(.input_value(b), .output_value(values[1]));
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_output_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let values = sim.signal("values");
+    sim.modify(|io| {
+        io.set(a, 0x12u8);
+        io.set(b, 0x34u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(values), 0x3412u16.into());
+}
+
+#[test]
+fn connects_child_outputs_to_unpacked_array_ranges() {
+    let source = r#"
+        module Child(output logic [15:0] output_value);
+            assign output_value = 16'h1234;
+        endmodule
+        module Top(
+            output logic [7:0] values[4],
+            output logic [15:0] value
+        );
+            Child child(.output_value(values[1:0]));
+            assign value = values[1:0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_output_range_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("value")), 0x1234u16.into());
+}
+
+#[test]
+fn connects_runtime_selected_unpacked_array_elements_to_child_inputs() {
+    let source = r#"
+        module Child(
+            input logic [7:0] input_value,
+            output logic [7:0] output_value
+        );
+            assign output_value = input_value;
+        endmodule
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] values[4],
+            output logic [7:0] value
+        );
+            Child child(.input_value(values[sel]), .output_value(value));
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_input_dynamic_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(values, 0x44332211u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0x33u8.into());
+}
+
+#[test]
+fn connects_runtime_selected_unpacked_array_elements_to_child_outputs() {
+    let source = r#"
+        module Child(output logic [7:0] output_value);
+            assign output_value = 8'h5a;
+        endmodule
+        module Top(
+            input logic [1:0] sel,
+            output var logic [7:0] values[4],
+            output logic [7:0] value
+        );
+            Child child(.output_value(values[sel]));
+            assign value = values[sel];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("array_output_dynamic_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(sel, 2u8)).unwrap();
+    assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
+fn connects_runtime_selected_packed_subselects_to_child_outputs() {
+    let source = r#"
+        module Child(
+            input logic [3:0] input_value,
+            output logic [3:0] output_value
+        );
+            assign output_value = input_value;
+        endmodule
+        module Top(
+            input logic [1:0] sel,
+            input logic [3:0] input_value,
+            output var logic [7:0] values[4],
+            output logic [3:0] value
+        );
+            Child child(.input_value(input_value), .output_value(values[sel][3:0]));
+            assign value = values[sel][3:0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("array_output_dynamic_packed_subselect.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let input_value = sim.signal("input_value");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(input_value, 0xau8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0xau8.into());
+}
+
+#[test]
+fn rejects_runtime_selected_child_outputs_to_nets() {
+    let error = cranelift_build_error(
+        r#"
+        module Child(output logic [7:0] output_value);
+            assign output_value = 8'h5a;
+        endmodule
+        module Top(input logic [1:0] sel, output logic [7:0] value);
+            wire [7:0] values[4];
+            Child child(.output_value(values[sel]));
+            assign value = values[0];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("undriven net declaration `values`")
+            || error.contains("dynamic child output connection to a net"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reads_unpacked_array_elements_at_runtime_indices() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] sel,
+            input logic [7:0] values[4],
+            output logic [7:0] combinational,
+            output logic [7:0] registered
+        );
+            assign combinational = values[sel];
+            always_ff @(posedge clk) registered <= values[sel];
+        endmodule
+        "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("dynamic_array_index.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let combinational = sim.signal("combinational");
+    let registered = sim.signal("registered");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(values, 0x44332211u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(combinational), 0x33u8.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(registered), 0x33u8.into());
+}
+
+#[test]
+fn returns_unknown_for_invalid_runtime_array_read_indices() {
+    let source = r#"
+        module Top(
+            input bit clk,
+            input logic [2:0] sel,
+            input logic [7:0] values[4],
+            output logic [7:0] combinational,
+            output logic [7:0] registered
+        );
+            assign combinational = values[sel];
+            always_ff @(posedge clk) registered <= values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_invalid_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let combinational = sim.signal("combinational");
+    let registered = sim.signal("registered");
+    sim.modify(|io| {
+        io.set(values, 0x44332211u32);
+        io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8));
+    })
+    .unwrap();
+    let all_x = (BigUint::default(), BigUint::from(0xffu16));
+    assert_eq!(sim.get_four_state(combinational), all_x);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get_four_state(registered), all_x);
+    sim.modify(|io| io.set(sel, 5u8)).unwrap();
+    assert_eq!(sim.get_four_state(combinational), all_x);
+}
+
+#[test]
+fn returns_zero_for_invalid_runtime_two_state_array_read_indices() {
+    let source = r#"
+        module Top(
+            input bit clk,
+            input logic [2:0] sel,
+            input bit [7:0] values[2],
+            output logic [7:0] combinational,
+            output logic [7:0] registered
+        );
+            assign combinational = values[sel];
+            always_ff @(posedge clk) registered <= values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_invalid_two_state_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let combinational = sim.signal("combinational");
+    let registered = sim.signal("registered");
+    sim.modify(|io| {
+        io.set(values, 0x2211u16);
+        io.set(sel, 5u8);
+    })
+    .unwrap();
+    let zero = (BigUint::default(), BigUint::default());
+    assert_eq!(sim.get_four_state(combinational), zero);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get_four_state(registered), zero);
+    sim.modify(|io| io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8)))
+        .unwrap();
+    assert_eq!(sim.get_four_state(combinational), zero);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get_four_state(registered), zero);
+}
+
+#[test]
+fn returns_unknown_for_invalid_inner_runtime_array_indices() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] values[2][3],
+            output logic [7:0] selected
+        );
+            assign selected = values[0][sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_multidimensional_array_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let selected = sim.signal("selected");
+    sim.modify(|io| {
+        io.set(sel, 3u8);
+        io.set_wide(values, BigUint::from(0x6655_4433_2211u64));
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(selected),
+        (BigUint::default(), BigUint::from(0xffu16))
+    );
+}
+
+#[test]
+fn reads_packed_subselects_of_runtime_unpacked_array_elements() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] values[4],
+            output logic selected_bit,
+            output logic [3:0] selected_part
+        );
+            assign selected_bit = values[sel][4];
+            assign selected_part = values[sel][7:4];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_packed_subselect.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let selected_bit = sim.signal("selected_bit");
+    let selected_part = sim.signal("selected_part");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(values, 0x44332211u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected_bit), 1u8.into());
+    assert_eq!(sim.get(selected_part), 3u8.into());
+}
+
+#[test]
+fn writes_unpacked_array_elements_at_runtime_indices() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb values[sel] = data;
+            assign value = values[sel];
+        endmodule
+        "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("dynamic_array_write.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
+fn composes_dynamic_array_writes_after_whole_array_assignments() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] selected,
+            output logic [7:0] cleared
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values = '0;
+                values[sel] = data;
+            end
+            assign selected = values[sel];
+            assign cleared = values[0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_write_after_default.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let selected = sim.signal("selected");
+    let cleared = sim.signal("cleared");
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(data, 0xa5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected), 0xa5u8.into());
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected), 0x5au8.into());
+    assert_eq!(sim.get(cleared), 0u8.into());
+}
+
+#[test]
+fn ignores_unknown_dynamic_array_write_indices() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values = '0;
+                values[sel] = data;
+            end
+            assign value = values[0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_write_unknown_index.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set_four_state(sel, BigUint::default(), BigUint::from(0b11u8));
+        io.set(data, 0xffu8);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::default(), BigUint::default())
+    );
+}
+
+#[test]
+fn rejects_dynamic_array_writes_after_partial_array_assignments() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values[0] = 8'h00;
+                values[sel] = data;
+            end
+            assign value = values[sel];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("dynamic unpacked-array assignment after an earlier partial assignment"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_dynamic_array_writes_in_continuous_assignments() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            wire [7:0] values[4];
+            assign values[sel] = data;
+            assign value = values[sel];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("combinational assignment target `values`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn writes_unpacked_array_elements_at_runtime_indices_in_always_ff() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_ff @(posedge clk) values[sel] <= data;
+            assign value = values[sel];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_ff_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 2u8);
+        io.set(data, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value), 0x5au8.into());
+}
+
+#[test]
+fn writes_packed_subselects_of_runtime_array_elements_in_always_ff() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] sel,
+            input logic [3:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[2];
+            always_ff @(posedge clk) begin
+                values[sel][7:4] <= 4'ha;
+                values[sel][3:0] <= data;
+            end
+            assign value = values[1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_ff_packed_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(data, 0x5u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value), 0xa5u8.into());
+}
+
+#[test]
+fn writes_packed_subselects_of_runtime_array_elements_in_always_comb() {
+    let source = r#"
+        module Top(
+            input logic [1:0] sel,
+            input logic [3:0] data,
+            output logic [7:0] value
+        );
+            logic [7:0] values[2];
+            always_comb begin
+                values = '0;
+                values[sel][7:4] = 4'ha;
+                values[sel][3:0] = data;
+            end
+            assign value = values[1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_comb_packed_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value = sim.signal("value");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(data, 0x5u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0xa5u8.into());
+}
+
+#[test]
+fn ignores_invalid_dynamic_array_indices_in_always_ff() {
+    let source = r#"
+        module Top(
+            input bit clk,
+            input logic [2:0] sel,
+            input logic [7:0] data,
+            output logic [7:0] value0
+        );
+            logic [7:0] values[2];
+            always_ff @(posedge clk) values[sel] <= data;
+            assign value0 = values[0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_array_ff_invalid_write.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let value0 = sim.signal("value0");
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(data, 0x11u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value0), 0x11u8.into());
+    sim.modify(|io| {
+        io.set(sel, 5u8);
+        io.set(data, 0x22u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value0), 0x11u8.into());
+    sim.modify(|io| {
+        io.set_four_state(sel, BigUint::default(), BigUint::from(0b111u8));
+        io.set(data, 0x33u8);
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(value0), 0x11u8.into());
+}
+
+#[test]
 fn uses_the_first_always_ff_event_as_a_negedge_clock() {
     let source = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
@@ -1953,6 +2791,255 @@ fn applies_generate_localparams_inside_always_ff() {
 }
 
 #[test]
+fn rejects_nonpositive_generate_localparam_array_sizes() {
+    let error = cranelift_build_error(
+        r#"
+        module Top();
+            if (1) begin : active
+                localparam N = 0;
+                logic [7:0] values[N];
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("nonpositive unpacked array dimension"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_bit_selects_on_computed_expressions() {
+    let source = r#"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic y
+        );
+            assign y = {a + b}[0];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("computed_expression_bit_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn reads_partial_unpacked_array_selections() {
+    let source = r#"
+        module Top(output logic [23:0] row);
+            logic [7:0] values [0:1][0:2];
+            assign row = values[1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("partial_unpacked_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let values = sim.signal("values");
+    sim.modify(|io| io.set_wide(values, BigUint::from(0x060504030201u64)))
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("row")), 0x060504u32.into());
+}
+
+#[test]
+fn writes_partial_unpacked_array_selections() {
+    let source = r#"
+        module Top(
+            input logic [23:0] row,
+            output logic [7:0] selected[3]
+        );
+            wire [7:0] values[2][3];
+            assign values[0] = row;
+            assign selected = values[0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("partial_unpacked_lvalue_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let row = sim.signal("row");
+    let selected = sim.signal("selected");
+    sim.modify(|io| io.set_wide(row, BigUint::from(0x060504u32)))
+        .unwrap();
+    assert_eq!(sim.get(selected), 0x060504u32.into());
+}
+
+#[test]
+fn reads_runtime_partial_unpacked_array_selections() {
+    let source = r#"
+        module Top(
+            input logic sel,
+            input logic [7:0] values[2][3],
+            output logic [23:0] row
+        );
+            assign row = values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_partial_unpacked_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let values = sim.signal("values");
+    let row = sim.signal("row");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set_wide(values, BigUint::from(0x060504030201u64));
+    })
+    .unwrap();
+    assert_eq!(sim.get(row), 0x060504u32.into());
+}
+
+#[test]
+fn writes_runtime_partial_unpacked_array_selections_in_always_ff() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic sel,
+            input logic [23:0] row,
+            output logic [23:0] selected
+        );
+            logic [7:0] values[2][3];
+            always_ff @(posedge clk) values[sel] <= row;
+            assign selected = values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_partial_unpacked_lvalue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let row = sim.signal("row");
+    let selected = sim.signal("selected");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set_wide(row, BigUint::from(0x060504u32));
+    })
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(selected), 0x060504u32.into());
+}
+
+#[test]
+fn writes_runtime_partial_unpacked_array_selections_in_always_comb() {
+    let source = r#"
+        module Top(
+            input logic sel,
+            input logic [23:0] row,
+            output logic [23:0] selected
+        );
+            logic [7:0] values[2][3];
+            always_comb values[sel] = row;
+            assign selected = values[sel];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dynamic_partial_unpacked_comb_lvalue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let row = sim.signal("row");
+    let selected = sim.signal("selected");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set_wide(row, BigUint::from(0x060504u32));
+    })
+    .unwrap();
+    assert_eq!(sim.get(selected), 0x060504u32.into());
+}
+
+#[test]
+fn reads_unpacked_array_ranges() {
+    let source = r#"
+        module Top(
+            input logic [7:0] source[4],
+            output logic [7:0] selected[2]
+        );
+            assign selected = source[1:0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unpacked_array_range_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let source = sim.signal("source");
+    let selected = sim.signal("selected");
+    sim.modify(|io| io.set_wide(source, BigUint::from(0x04030201u64)))
+        .unwrap();
+    assert_eq!(sim.get(selected), 0x0102u16.into());
+}
+
+#[test]
+fn writes_reversed_unpacked_array_lvalue_ranges() {
+    let source = r#"
+        module Top(
+            input logic [7:0] source[4],
+            output logic [7:0] target[2]
+        );
+            assign target[1:0] = source[0:1];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("reversed_unpacked_array_lvalue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let source = sim.signal("source");
+    let target = sim.signal("target");
+    sim.modify(|io| io.set_wide(source, BigUint::from(0x04030201u64)))
+        .unwrap();
+    assert_eq!(sim.get(target), 0x0102u16.into());
+}
+
+#[test]
+fn reads_bit_selects_of_scalar_array_elements() {
+    let source = r#"
+        module Top(
+            input logic values[2],
+            output logic selected
+        );
+            assign selected = values[0][0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("scalar_array_bit_selection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let values = sim.signal("values");
+    let selected = sim.signal("selected");
+    sim.modify(|io| io.set(values, 1u8)).unwrap();
+    assert_eq!(sim.get(selected), 1u8.into());
+}
+
+#[test]
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
@@ -1981,6 +3068,32 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(); endmodule
             module Top(); for (genvar i = 0; i < 2; i++) Child child(); endmodule
+        "#,
+        ),
+        (
+            "module instance array",
+            r#"
+            module Child(); endmodule
+            module Top(); Child child[1:0](); endmodule
+        "#,
+        ),
+        (
+            "continuous assignment",
+            r#"
+            module Top(output logic y);
+                logic [7:0] values [0:1][0:2];
+                assign y = values[0][3];
+            endmodule
+        "#,
+        ),
+        (
+            "continuous assignment",
+            r#"
+            module Top(output logic y);
+                localparam J = 3;
+                logic [7:0] values [0:1][0:2];
+                assign y = values[0][J];
+            endmodule
         "#,
         ),
         (
@@ -2116,14 +3229,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
                 always_ff @(posedge clk) q <= a ** b;
-            endmodule
-        "#,
-        ),
-        (
-            "unpacked array dimension",
-            r#"
-            module Top(input logic [7:0] mem [0:1], output logic [7:0] y);
-                assign y = mem[0];
             endmodule
         "#,
         ),
@@ -2281,14 +3386,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "cast expression",
-            r#"
-            module Top(input logic a, b, output logic [1:0] y);
-                assign y = {logic'(a), b};
-            endmodule
-        "#,
-        ),
-        (
             "wildcard port connection",
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule
@@ -2300,6 +3397,37 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, d, output logic q);
                 always_ff @(posedge clk) repeat (1) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                integer i;
+                always_ff @(posedge clk) begin
+                    for (i = 0; i < 2; i = i + 1) q <= d;
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                always_ff @(posedge clk) begin
+                    for (logic signed [1:0] i = 2; i < 0; i++) q <= d;
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                always_ff @(posedge clk) begin
+                    for (int i = 0; i < 4; i++, i++) q <= d;
+                end
             endmodule
         "#,
         ),
@@ -2331,6 +3459,57 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
                 assign y = {<<{a}};
+            endmodule
+        "#,
+        ),
+        (
+            "cast expression",
+            r#"
+            module Top(output logic [7:0] y);
+                assign y = 8'(16'h1234);
+            endmodule
+        "#,
+        ),
+        (
+            "cast expression",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                assign y = signed'(value);
+            endmodule
+        "#,
+        ),
+        (
+            "unpacked dimension",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                function automatic logic [7:0] pick(input logic [7:0] values [2]);
+                    return values[1];
+                endfunction
+                assign y = pick('{default: value});
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function local data type",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                function automatic logic [7:0] pick(input logic [7:0] value);
+                    logic [7:0] tmp [2];
+                    return value;
+                endfunction
+                assign y = pick(value);
+            endmodule
+        "#,
+        ),
+        (
+            "unpacked dimension",
+            r#"
+            module Top(input logic [7:0] value, output logic [7:0] y);
+                typedef logic [7:0] pair_t [2];
+                function automatic pair_t make_pair();
+                    return value;
+                endfunction
+                assign y = value;
             endmodule
         "#,
         ),
@@ -2684,6 +3863,24 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top #(parameter W = 2 ** 3)
                       (input logic [W-1:0] a, output logic [W-1:0] y);
                 assign y = a;
+            endmodule
+        "#,
+        ),
+        (
+            "signal width overflow",
+            r#"
+            module Top(output logic y);
+                logic [7:0] values [0:9223372036854775807][0:1];
+                assign y = values[0][0];
+            endmodule
+        "#,
+        ),
+        (
+            "continuous assignment",
+            r#"
+            module Top(output logic y);
+                logic [7:0] values [0:1][0:2];
+                assign y = values[1][3];
             endmodule
         "#,
         ),
@@ -3711,6 +4908,45 @@ fn remaps_trailing_part_select_bounds_in_ascending_packed_dimensions() {
 }
 
 #[test]
+fn preserves_declared_coordinates_for_non_array_packed_part_selects() {
+    let source = r#"
+        module Top(input logic [15:8] a, output logic [3:0] y);
+            assign y = a[15:12];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("non_array_packed_part_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xau8.into());
+}
+
+#[test]
+fn preserves_part_selects_on_concatenation_expressions() {
+    let source = r#"
+        module Top(input logic [7:0] value, output logic [3:0] y);
+            function automatic logic [7:0] get_word(input logic [7:0] value);
+                return value;
+            endfunction
+            assign y = {4'h0, get_word(value)}[3:0];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("concatenation_part_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 0xabu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xbu8.into());
+}
+
+#[test]
 fn appends_use_site_packed_dimensions_to_typedefs() {
     let source = r#"
         module Top(input logic [7:0] value, output logic [7:0] y);
@@ -3729,6 +4965,38 @@ fn appends_use_site_packed_dimensions_to_typedefs() {
     let value = sim.signal("value");
     sim.modify(|io| io.set(value, 0xabu8)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0xabu8.into());
+}
+
+#[test]
+fn prepends_declarator_dimensions_to_typedef_dimensions() {
+    let source = r#"
+        module Top(
+            input logic [7:0] value,
+            output logic [47:0] all
+        );
+            typedef logic [7:0] row_t [0:2];
+            row_t matrix [0:1];
+
+            always_comb begin
+                matrix[0][0] = value;
+                matrix[0][1] = value + 1;
+                matrix[0][2] = value + 2;
+                matrix[1][0] = value + 3;
+                matrix[1][1] = value + 4;
+                matrix[1][2] = value + 5;
+            end
+            assign all = matrix;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typedef_dimension_order.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 0x10u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("all")), 0x151413121110u64.into());
 }
 
 #[test]
