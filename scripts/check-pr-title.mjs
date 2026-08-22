@@ -16,8 +16,17 @@ const titlePattern = new RegExp(
   `^(${typePattern})(\\([a-z0-9][a-z0-9._/-]*\\))?(!)?: \\S(?:.*\\S)?$`,
 );
 
+export function parseConventionalPrTitle(title) {
+  const match = title.match(titlePattern);
+  if (!match) {
+    return null;
+  }
+
+  return { type: match[1], breaking: match[3] === "!" };
+}
+
 export function isConventionalPrTitle(title) {
-  return titlePattern.test(title);
+  return parseConventionalPrTitle(title) !== null;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
