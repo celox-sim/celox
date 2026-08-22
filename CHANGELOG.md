@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 (2026-08-22)
+
+## What's Changed
+* fix(release): avoid crates publish disk exhaustion by @tignear in https://github.com/celox-sim/celox/pull/635
+* feat(backend)!: enable aarch64 natively by default by @tignear in https://github.com/celox-sim/celox/pull/636
+* chore(deps): update ghcr.io/devcontainers/features/node docker tag to v2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/640
+* fix(ci): disable pnpm lifecycle scripts by @tignear in https://github.com/celox-sim/celox/pull/641
+* refactor(arm64): lower SIR into target-owned MIR by @tignear in https://github.com/celox-sim/celox/pull/642
+* feat(frontend-sv): support fixed unpacked arrays by @tignear in https://github.com/celox-sim/celox/pull/619
+* refactor(runtime)!: normalize runtime design metadata by @tignear in https://github.com/celox-sim/celox/pull/645
+* fix(release)!: preserve breaking pull request bumps by @tignear in https://github.com/celox-sim/celox/pull/644
+* fix(ci): restore pull request merge checks by @tignear in https://github.com/celox-sim/celox/pull/651
+* perf(arm64): optimize target MIR before register allocation by @tignear in https://github.com/celox-sim/celox/pull/649
+* perf(arm64): eliminate identity MIR operations by @tignear in https://github.com/celox-sim/celox/pull/653
+* fix(deps): update rust crate wasm-encoder to 0.257 by @renovate[bot] in https://github.com/celox-sim/celox/pull/656
+* chore(deps): update pnpm to v11.22.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/657
+* ci: gate npm publishing behind the npm environment by @tignear in https://github.com/celox-sim/celox/pull/659
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.3.1...v0.4.0
+
 ## 0.3.1 (2026-08-21)
 
 ## What's Changed
