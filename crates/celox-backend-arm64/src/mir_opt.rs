@@ -592,7 +592,6 @@ fn known_u32_values(function: &MFunction) -> BTreeSet<VReg> {
                     | MInst::CmpImm { dst, .. }
                     | MInst::Popcnt { dst, .. }
                     | MInst::Bsf { dst, .. }
-                    | MInst::Bsr { dst, .. }
                     | MInst::BsrOr { dst, .. } => Some(*dst),
                     MInst::Mov { dst, src } if known.contains(src) => Some(*dst),
                     MInst::AndImm { dst, imm, .. } if *imm <= u64::from(u32::MAX) => Some(*dst),
@@ -887,6 +886,60 @@ mod tests {
             MInst::Store {
                 src: VReg(0),
                 offset: 16,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn preserves_mov32_after_unchecked_bsr() {
+        let mut function = function(vec![
+            MInst::Bsr {
+                dst: VReg(1),
+                src: VReg(0),
+            },
+            MInst::Mov32 {
+                dst: VReg(2),
+                src: VReg(1),
+            },
+            MInst::BsrOr {
+                dst: VReg(3),
+                src: VReg(0),
+                zero_value: 0,
+            },
+            MInst::Mov32 {
+                dst: VReg(4),
+                src: VReg(3),
+            },
+            MInst::Store {
+                base: crate::mir::BaseReg::SimState,
+                offset: 0,
+                src: VReg(2),
+                size: crate::mir::OpSize::S64,
+            },
+            MInst::Store {
+                base: crate::mir::BaseReg::SimState,
+                offset: 8,
+                src: VReg(4),
+                size: crate::mir::OpSize::S64,
+            },
+            MInst::Return,
+        ]);
+
+        optimize(&mut function);
+
+        assert!(function.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Mov32 {
+                dst: VReg(2),
+                src: VReg(1)
+            }
+        )));
+        assert!(function.blocks[0].insts.iter().any(|instruction| matches!(
+            instruction,
+            MInst::Store {
+                src: VReg(3),
+                offset: 8,
                 ..
             }
         )));
