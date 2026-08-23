@@ -307,7 +307,11 @@ impl Machine<'_> {
                 .cast::<u8>()
                 .add(RUNTIME_EVENT_HEADER_SIZE + slot_index * self.layout.runtime_event_slot_size);
             let slot_seq = slot_base.add(RUNTIME_EVENT_SLOT_SEQ_OFFSET) as *const AtomicU64;
-            (*slot_seq).store(RUNTIME_EVENT_WRITING, Ordering::Relaxed);
+            // Publish the writing marker with an RMW like the compiled
+            // writer: the exchange orders it ahead of the plain payload
+            // stores below, so a concurrent drain can never observe a torn
+            // mix of the old committed record and the new one.
+            (*slot_seq).swap(RUNTIME_EVENT_WRITING, Ordering::AcqRel);
             slot_base
                 .add(RUNTIME_EVENT_SLOT_SITE_OFFSET)
                 .cast::<u64>()
