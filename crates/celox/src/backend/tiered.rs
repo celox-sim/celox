@@ -1106,7 +1106,15 @@ module Top (
     /// Tracked for follow-up before enabling four-state dynamic arrays on
     /// the native tier.
     #[test]
-    #[ignore = "interp sparse-region state diverges from native after promotion for 4-state strided arrays"]
+    /// Known gap: after promotion to the native tier, the compiled comb
+    /// evaluation reads 4-state dynamically-indexed array elements from
+    /// different bytes than the interpreter wrote. Memory transfer is
+    /// verified byte-exact; pre-promotion interpreted reads are correct.
+    /// Root cause: the native x86 isel has multiple Element-access lowering
+    /// paths and at least one computes addresses differently from the
+    /// interpreter's `index * stride_bytes * 8 + bit_offset` formula.
+    /// Fix requires auditing all native Element lowering paths.
+    #[ignore = "native tier Element access diverges from interp for 4-state strided arrays"]
     fn four_state_unpacked_array_planes_initialize_and_survive_promotion() {
         // Four-state strided objects reserve one value plane and one mask
         // plane per object; the X initialization must cover both planes
@@ -1172,10 +1180,12 @@ module Top (
         }
 
         gate.open();
+
+        // Wait WITHOUT ticking: the first tick after compilation completes
+        // will promote and evaluate entirely on the native tier.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !sim.is_compiled() && std::time::Instant::now() < deadline {
-            sim.tick(clk).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(sim.is_compiled());
 
