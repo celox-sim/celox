@@ -1108,13 +1108,22 @@ fn eval_mux(
     cond_width: usize,
     out_width: usize,
 ) -> SIRValue {
+    // Every outcome is shaped to the destination width like the compiled
+    // selection, so an arm wider than the destination cannot leak excess
+    // bits into later operations.
+    let mask = width_mask(out_width);
     if mux_condition_known_one(cond, cond_width) {
-        return then_value.clone();
+        return SIRValue {
+            payload: &then_value.payload & &mask,
+            mask: &then_value.mask & &mask,
+        };
     }
     if cond.mask.is_zero() {
-        return else_value.clone();
+        return SIRValue {
+            payload: &else_value.payload & &mask,
+            mask: &else_value.mask & &mask,
+        };
     }
-    let mask = width_mask(out_width);
     let tv = &then_value.payload & &mask;
     let ev = &else_value.payload & &mask;
     let tm = &then_value.mask & &mask;
