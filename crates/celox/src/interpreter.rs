@@ -901,7 +901,20 @@ fn compare_holds(
         BinaryOp::LtU | BinaryOp::LeU | BinaryOp::GtU | BinaryOp::GeU => {
             lhs.payload.cmp(&rhs.payload)
         }
-        _ => to_signed(&lhs.payload, lhs_width).cmp(&to_signed(&rhs.payload, rhs_width)),
+        _ => {
+            // Signed orderings interpret two's complement at the operation
+            // width. The compiled wide comparison path zero-fills a narrow
+            // operand's missing chunks before interpreting signedness at the
+            // common width, so crossing 64 bits must zero-pad first.
+            let common = lhs_width.max(rhs_width);
+            if common <= 64 {
+                to_signed(&lhs.payload, lhs_width).cmp(&to_signed(&rhs.payload, rhs_width))
+            } else {
+                let l = zero_extend(lhs, common).payload;
+                let r = zero_extend(rhs, common).payload;
+                to_signed(&l, common).cmp(&to_signed(&r, common))
+            }
+        }
     };
     use std::cmp::Ordering;
     match op {
@@ -995,13 +1008,15 @@ fn alu_unary(
         },
         UnaryOp::Minus => {
             // SEMANTICS-CHECK: negating a value containing X/Z yields all-X.
-            // Minus forces signed promotion in the compiled lowering, so the
-            // operand is sign-extended to the common width before the
+            // Minus forces signed promotion in the compiled narrow lowering,
+            // so the operand is sign-extended to the common width before the
             // two's-complement negation (negating 4-bit 1 into an 8-bit
-            // destination yields 0xff).
+            // destination yields 0xff). The compiled multi-word lowering
+            // instead zero-fills missing chunks, so destinations wider than
+            // 64 bits keep zero padding.
             if src.mask.is_zero() {
                 let common = src_width.max(dst_width);
-                let promoted = promote_operand(src, true, src_width, common).payload;
+                let promoted = promote_operand(src, common <= 64, src_width, common).payload;
                 let inverted = &width_mask(common) ^ &promoted;
                 SIRValue::new((&inverted + 1u8) & width_mask(dst_width))
             } else {
@@ -1010,9 +1025,12 @@ fn alu_unary(
         }
         UnaryOp::BitNot => {
             // Complement at the common width so widened results fill their
-            // new high bits, mirroring the compiled promotion.
+            // new high bits, mirroring the compiled narrow promotion. The
+            // compiled multi-word lowering zero-fills absent chunks before
+            // complementing, so destinations wider than 64 bits keep zero
+            // padding.
             let common = src_width.max(dst_width);
-            let promoted = promote_operand(src, src_signed, src_width, common);
+            let promoted = promote_operand(src, src_signed && common <= 64, src_width, common);
             SIRValue {
                 payload: &width_mask(common) ^ &promoted.payload,
                 mask: promoted.mask,
