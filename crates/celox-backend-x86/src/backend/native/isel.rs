@@ -14777,7 +14777,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -14921,7 +14921,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -15446,7 +15446,7 @@ mod tests {
             mir_legalize::legalize(&mut function);
             mir_opt::optimize(&mut function);
             let allocation = regalloc::run_regalloc(&mut function).unwrap();
-            mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+            mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
             function.verify();
             let emitted = emit::emit(
                 &function,
@@ -15579,7 +15579,7 @@ mod tests {
             mir_legalize::legalize(&mut function);
             mir_opt::optimize(&mut function);
             let allocation = regalloc::run_regalloc(&mut function).unwrap();
-            mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+            mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
             function.verify();
             let emitted = emit::emit(
                 &function,
@@ -15700,7 +15700,7 @@ mod tests {
             mir_legalize::legalize(&mut function);
             mir_opt::optimize(&mut function);
             let allocation = regalloc::run_regalloc(&mut function).unwrap();
-            mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+            mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
             function.verify();
             let emitted = emit::emit(
                 &function,
@@ -16277,7 +16277,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -16404,7 +16404,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -16566,7 +16566,7 @@ mod tests {
         mir_legalize::legalize(&mut direct_function);
         mir_opt::optimize(&mut direct_function);
         let direct_allocation = regalloc::run_regalloc(&mut direct_function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut direct_function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut direct_function, &direct_allocation.assignment);
         direct_function.verify();
         let direct_emitted = emit::emit(
             &direct_function,
@@ -16636,7 +16636,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -16761,7 +16761,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -17034,7 +17034,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -17154,7 +17154,7 @@ mod tests {
             mir_legalize::legalize(&mut function);
             mir_opt::optimize(&mut function);
             let allocation = regalloc::run_regalloc(&mut function).unwrap();
-            mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+            mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
             function.verify();
             let emitted = emit::emit(
                 &function,
@@ -17483,7 +17483,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -17636,7 +17636,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -17860,7 +17860,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -18095,7 +18095,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -18242,7 +18242,7 @@ mod tests {
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -19029,7 +19029,7 @@ mod tests {
         mir_opt::optimize(&mut function);
         function.verify();
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -19209,7 +19209,7 @@ mod tests {
             assert!(!instructions.any(|inst| matches!(inst, MInst::Bsr { .. })));
         }
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -19446,7 +19446,7 @@ mod tests {
         mir_opt::optimize(&mut function);
         function.verify();
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,
@@ -19597,7 +19597,7 @@ mod tests {
         mir_opt::optimize(&mut function);
         function.verify();
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
-        mir_opt::post_regalloc_peephole(&mut function, &regalloc::AssignmentMap::default());
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
         function.verify();
         let emitted = emit::emit(
             &function,

@@ -7078,9 +7078,12 @@ impl AvailableStores {
 
 /// Clamp an inclusive i64 key window into the i32 domain of stored offsets.
 fn clamped_key_range(lo: i64, hi: i64) -> Option<(i32, i32)> {
+    if lo > hi || lo > i64::from(i32::MAX) || hi < i64::from(i32::MIN) {
+        return None;
+    }
     let lo = lo.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
     let hi = hi.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
-    (lo <= hi).then_some((lo as i32, hi as i32))
+    Some((lo as i32, hi as i32))
 }
 
 fn find_best_covering_value(
@@ -7513,6 +7516,31 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A candidate window that is empty or wholly outside the i32 domain
+    /// must never clamp into a nonempty in-domain window: an S8 store at
+    /// `i32::MAX` does not cover an S64 load at the same offset even though
+    /// both window endpoints clamp to `i32::MAX`.
+    #[test]
+    fn find_best_covering_value_ignores_windows_empty_or_outside_i32_domain() {
+        let mut available = AvailableStores::default();
+        available.insert(BaseReg::SimState, i32::MAX, OpSize::S8, VReg(7));
+        assert_eq!(
+            find_best_covering_value(&available, BaseReg::SimState, i32::MAX, OpSize::S64),
+            None,
+        );
+        available.clear();
+        available.insert(BaseReg::SimState, i32::MIN, OpSize::S8, VReg(7));
+        assert_eq!(
+            find_best_covering_value(&available, BaseReg::SimState, i32::MIN, OpSize::S64),
+            None,
+        );
+        assert_eq!(
+            clamped_key_range(0, -1),
+            None,
+            "empty windows stay empty under clamping",
+        );
+    }
 
     /// Differential test: the offset-indexed `AvailableStores` must select
     /// exactly the same covering slots as a brute-force scan over every
