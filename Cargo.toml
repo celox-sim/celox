@@ -42,7 +42,7 @@ license     = "MIT OR Apache-2.0"
 readme      = "README.md"
 edition     = "2024"
 description = "Celox HDL Simulator"
-rust-version = "1.97.1"
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 celox                   = { version = "=0.4.0", path = "crates/celox", default-features = false } # x-release-please-version
