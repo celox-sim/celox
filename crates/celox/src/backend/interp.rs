@@ -70,7 +70,11 @@ impl EventHandle for InterpEventRef {
 /// [`SimulatorErrorCode::DetectedTrueLoopCode`].
 fn error_code(error: InterpError) -> SimulatorErrorCode {
     match error {
-        InterpError::Fatal(code) if code > 0 => SimulatorErrorCode::DetectedTrueLoopCode(code),
+        // The interpreter is not constrained by the compiled function ABI's
+        // "zero return means success" convention, so every fatal code —
+        // including zero-valued assertion site codes — carries its runtime
+        // error info through unchanged.
+        InterpError::Fatal(code) => SimulatorErrorCode::DetectedTrueLoopCode(code),
         _ => SimulatorErrorCode::InternalError,
     }
 }
