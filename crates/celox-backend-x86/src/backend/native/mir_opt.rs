@@ -597,9 +597,27 @@ fn invert_compare_kind(kind: CmpKind) -> CmpKind {
     }
 }
 
-fn unsigned_upper_bound(
+/// Read-only view of the defining instruction of each VReg, so bound proofs
+/// can consume borrowed maps without cloning definitions.
+trait DefLookup {
+    fn def_inst(&self, reg: VReg) -> Option<&MInst>;
+}
+
+impl DefLookup for HashMap<VReg, MInst> {
+    fn def_inst(&self, reg: VReg) -> Option<&MInst> {
+        self.get(&reg)
+    }
+}
+
+impl DefLookup for HashMap<VReg, &MInst> {
+    fn def_inst(&self, reg: VReg) -> Option<&MInst> {
+        self.get(&reg).copied()
+    }
+}
+
+fn unsigned_upper_bound<L: DefLookup>(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &L,
     memo: &mut HashMap<VReg, Option<u64>>,
     visiting: &mut HashSet<VReg>,
 ) -> Option<u64> {
@@ -609,7 +627,7 @@ fn unsigned_upper_bound(
     if !visiting.insert(reg) {
         return None;
     }
-    let bound = match defs.get(&reg)? {
+    let bound = match defs.def_inst(reg)? {
         MInst::LoadImm { value, .. } => Some(*value),
         MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => Some(match size {
             OpSize::S8 => u8::MAX as u64,
@@ -694,7 +712,7 @@ fn unsigned_upper_bound(
 /// immediate-form MIR instruction without changing liveness or adding new
 /// VRegs. The assignment map may still contain the removed VReg; it is simply
 /// no longer referenced by emitted code.
-pub fn post_regalloc_peephole(func: &mut MFunction) {
+pub fn post_regalloc_peephole(func: &mut MFunction, assignment: &AssignmentMap) {
     const IMM_FOLD_SCAN_LIMIT: usize = 8;
 
     let mut use_counts: HashMap<VReg, usize> = HashMap::default();
@@ -802,6 +820,110 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
             rewritten.push(replacements.remove(&idx).unwrap_or_else(|| inst.clone()));
         }
         block.insts = rewritten;
+    }
+
+    eliminate_loads_clobbered_by_same_register_constants(func, assignment);
+}
+
+/// Drop machine loads whose value is immediately overwritten by a
+/// rematerialized constant in the same physical register.
+///
+/// Allocation rematerializes constants as fresh `LoadImm` definitions and may
+/// coalesce one with an adjacent load's destination. The two back-to-back
+/// definitions leave no observable window between them: nothing can read the
+/// shared register before the constant lands, and every later read observes
+/// the constant either way, so the load is pure overhead (one memory access
+/// per occurrence in the emitted tick loop).
+///
+/// The load's VReg is single-definition (enforced by the MIR verifier), so
+/// redirecting all of its uses to the constant VReg preserves semantics:
+/// those uses already read the shared physical register containing the
+/// constant. Elimination only fires when every use of the loaded value is a
+/// plain instruction use later in the same block; phi sources and cross-block
+/// uses keep the load alive.
+fn eliminate_loads_clobbered_by_same_register_constants(
+    func: &mut MFunction,
+    assignment: &AssignmentMap,
+) {
+    let mut global_uses: HashMap<VReg, usize> = HashMap::default();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            for (_, src) in &phi.sources {
+                *global_uses.entry(*src).or_default() += 1;
+            }
+        }
+        for inst in &block.insts {
+            for used in inst.uses() {
+                *global_uses.entry(used).or_default() += 1;
+            }
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut local_uses: HashMap<VReg, Vec<usize>> = HashMap::default();
+        for (idx, inst) in block.insts.iter().enumerate() {
+            for used in inst.uses() {
+                local_uses.entry(used).or_default().push(idx);
+            }
+        }
+
+        let mut eliminated = Vec::<usize>::new();
+        for idx in 0..block.insts.len().saturating_sub(1) {
+            let (load_dst, constant_dst) = match (&block.insts[idx], &block.insts[idx + 1]) {
+                (
+                    MInst::Load {
+                        dst: loaded,
+                        base: _,
+                        offset: _,
+                        size: _,
+                    },
+                    MInst::LoadImm {
+                        dst: constant,
+                        value: _,
+                    },
+                ) => (*loaded, *constant),
+                _ => continue,
+            };
+            let (Some(loaded_reg), Some(constant_reg)) =
+                (assignment.get(load_dst), assignment.get(constant_dst))
+            else {
+                continue;
+            };
+            if loaded_reg != constant_reg {
+                continue;
+            }
+            let Some(use_indices) = local_uses.get(&load_dst) else {
+                // Fully dead loads are handled by ordinary DCE in
+                // post_regalloc_cleanup; leave them alone here.
+                continue;
+            };
+            if use_indices.first().is_some_and(|first| *first <= idx + 1)
+                || global_uses.get(&load_dst).copied().unwrap_or(0) != use_indices.len()
+            {
+                continue;
+            }
+            for &use_idx in use_indices {
+                block.insts[use_idx].rewrite_use(load_dst, constant_dst);
+            }
+            eliminated.push(idx);
+        }
+
+        if !eliminated.is_empty() {
+            let mut next = eliminated.iter();
+            let mut pending = next.next();
+            block.insts = std::mem::take(&mut block.insts)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, inst)| {
+                    if pending == Some(&idx) {
+                        pending = next.next();
+                        None
+                    } else {
+                        Some(inst)
+                    }
+                })
+                .collect();
+        }
     }
 }
 
@@ -6804,7 +6926,7 @@ fn promote_partial_store_round_trips(func: &mut MFunction) {
 fn forward_local_store_loads(func: &mut MFunction) {
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
-        let mut available: HashMap<MemorySlot, VReg> = HashMap::default();
+        let mut available = AvailableStores::default();
         let mut rewritten = Vec::with_capacity(block.insts.len());
 
         for inst in block.insts.drain(..) {
@@ -6815,8 +6937,8 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     src,
                     size,
                 } => {
-                    invalidate_overlapping_slots(&mut available, base, offset, size);
-                    available.insert(MemorySlot { base, offset, size }, src);
+                    available.invalidate_slot(base, offset, size);
+                    available.insert(base, offset, size, src);
                     rewritten.push(MInst::Store {
                         base,
                         offset,
@@ -6830,8 +6952,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     offset,
                     size,
                 } => {
-                    let key = MemorySlot { base, offset, size };
-                    if let Some(&src) = available.get(&key) {
+                    if let Some(src) = available.get(base, offset, size) {
                         rewritten.push(MInst::Mov { dst, src });
                         continue;
                     }
@@ -6851,7 +6972,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                         );
                         continue;
                     }
-                    available.insert(MemorySlot { base, offset, size }, dst);
+                    available.insert(base, offset, size, dst);
                     rewritten.push(MInst::Load {
                         dst,
                         base,
@@ -6875,12 +6996,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                 } => {
                     // The source is read but unchanged. Only values cached for
                     // the written destination range become stale.
-                    invalidate_overlapping_byte_range(
-                        &mut available,
-                        BaseReg::SimState,
-                        dst_offset,
-                        byte_len,
-                    );
+                    available.invalidate_byte_range(BaseReg::SimState, dst_offset, byte_len);
                     rewritten.push(MInst::MemCopy {
                         src_offset,
                         dst_offset,
@@ -6895,36 +7011,122 @@ fn forward_local_store_loads(func: &mut MFunction) {
     }
 }
 
+/// Values still visible in memory at the current program point of a block,
+/// indexed by `(base, size)` and then start offset so coverage queries only
+/// inspect the few offsets a load can overlap instead of every tracked slot.
+#[derive(Default)]
+struct AvailableStores {
+    slots: HashMap<(BaseReg, OpSize), BTreeMap<i32, VReg>>,
+}
+
+impl AvailableStores {
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    fn get(&self, base: BaseReg, offset: i32, size: OpSize) -> Option<VReg> {
+        self.slots.get(&(base, size))?.get(&offset).copied()
+    }
+
+    fn insert(&mut self, base: BaseReg, offset: i32, size: OpSize, value: VReg) {
+        self.slots
+            .entry((base, size))
+            .or_default()
+            .insert(offset, value);
+    }
+
+    fn invalidate_slot(&mut self, base: BaseReg, offset: i32, size: OpSize) {
+        let Some((start, end)) = byte_range(offset, size.bytes() as usize) else {
+            self.invalidate_base(base);
+            return;
+        };
+        self.invalidate_range(base, start, end);
+    }
+
+    fn invalidate_byte_range(&mut self, base: BaseReg, offset: i32, byte_len: usize) {
+        let Some((start, end)) = byte_range(offset, byte_len) else {
+            self.invalidate_base(base);
+            return;
+        };
+        self.invalidate_range(base, start, end);
+    }
+
+    fn invalidate_base(&mut self, base: BaseReg) {
+        self.slots.retain(|(slot_base, _), _| *slot_base != base);
+    }
+
+    /// Drop every tracked value on `base` overlapping the byte range
+    /// `[start, end)`.
+    fn invalidate_range(&mut self, base: BaseReg, start: i64, end: i64) {
+        for ((slot_base, slot_size), slots) in self.slots.iter_mut() {
+            if *slot_base != base {
+                continue;
+            }
+            let width = i64::from(slot_size.bytes());
+            // An entry starting at `o` overlaps when `o + width > start` and
+            // `o < end`, i.e. `start - width + 1 <= o <= end - 1`.
+            let Some((lo, hi)) = clamped_key_range(start - width + 1, end - 1) else {
+                continue;
+            };
+            let overlapping: Vec<i32> = slots.range(lo..=hi).map(|(offset, _)| *offset).collect();
+            for offset in overlapping {
+                slots.remove(&offset);
+            }
+        }
+    }
+}
+
+/// Clamp an inclusive i64 key window into the i32 domain of stored offsets.
+fn clamped_key_range(lo: i64, hi: i64) -> Option<(i32, i32)> {
+    if lo > hi || lo > i64::from(i32::MAX) || hi < i64::from(i32::MIN) {
+        return None;
+    }
+    let lo = lo.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    let hi = hi.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    Some((lo as i32, hi as i32))
+}
+
 fn find_best_covering_value(
-    available: &HashMap<MemorySlot, VReg>,
+    available: &AvailableStores,
     base: BaseReg,
     offset: i32,
     size: OpSize,
 ) -> Option<(MemorySlot, VReg)> {
-    let load_start = offset as i64;
+    let load_start = i64::from(offset);
     let load_end = load_start + i64::from(size.bytes());
-    available
-        .iter()
-        .filter_map(|(slot, &src)| {
-            if slot.base != base {
-                return None;
-            }
-            let value_start = slot.offset as i64;
-            let value_end = value_start + i64::from(slot.size.bytes());
-            (value_start <= load_start && load_end <= value_end).then_some((*slot, src))
-        })
-        // Several earlier loads/stores can cover the same narrow load.  Hash
-        // iteration order is randomized, so select the cheapest extraction
-        // explicitly: least over-read first, then least right shift.  The
-        // final fields make equal-cost selection reproducible as well.
-        .min_by_key(|(slot, src)| {
-            (
-                slot.size.bytes(),
-                load_start - i64::from(slot.offset),
-                slot.offset,
+    let mut best: Option<((MemorySlot, VReg), (u32, i64, i32, u32))> = None;
+    for ((slot_base, slot_size), slots) in &available.slots {
+        if *slot_base != base {
+            continue;
+        }
+        let width = i64::from(slot_size.bytes());
+        // A stored value covers the load when its range
+        // `[value_start, value_start + width)` contains
+        // `[load_start, load_end)`: `load_end - width <= o <= load_start`.
+        let Some((lo, hi)) = clamped_key_range(load_end - width, load_start) else {
+            continue;
+        };
+        for (value_offset, &src) in slots.range(lo..=hi) {
+            let slot = MemorySlot {
+                base,
+                offset: *value_offset,
+                size: *slot_size,
+            };
+            let selection_key = (
+                slot_size.bytes(),
+                load_start - i64::from(*value_offset),
+                *value_offset,
                 src.0,
-            )
-        })
+            );
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_key)| selection_key < *best_key)
+            {
+                best = Some(((slot, src), selection_key));
+            }
+        }
+    }
+    best.map(|(found, _)| found)
 }
 
 fn emit_partial_load_forward(
@@ -7147,35 +7349,6 @@ pub(super) fn eliminate_redundant_local_stores(func: &mut MFunction) {
     }
 }
 
-fn invalidate_overlapping_slots<T>(
-    available: &mut HashMap<MemorySlot, T>,
-    base: BaseReg,
-    offset: i32,
-    size: OpSize,
-) {
-    invalidate_overlapping_byte_range(available, base, offset, size.bytes() as usize);
-}
-
-fn invalidate_overlapping_byte_range<T>(
-    available: &mut HashMap<MemorySlot, T>,
-    base: BaseReg,
-    offset: i32,
-    byte_len: usize,
-) {
-    let Some((start, end)) = byte_range(offset, byte_len) else {
-        available.retain(|slot, _| slot.base != base);
-        return;
-    };
-    available.retain(|slot, _| {
-        if slot.base != base {
-            return true;
-        }
-        let slot_start = slot.offset as i64;
-        let slot_end = slot_start + i64::from(slot.size.bytes());
-        slot_end <= start || end <= slot_start
-    });
-}
-
 /// Copy propagation: replace every full-word copy, and every `Mov32` whose
 /// source is already structurally proven zero-extended to 32 bits, with its
 /// source throughout the function. A `Mov32` from an arbitrary 64-bit source
@@ -7183,11 +7356,13 @@ fn invalidate_overlapping_byte_range<T>(
 fn copy_propagate(func: &mut MFunction) {
     // Build alias map: dst → src (transitively resolved)
     let mut aliases: HashMap<VReg, VReg> = HashMap::default();
+    // Borrowed views of defining instructions suffice for the Mov32
+    // zero-extension proof below; no need to clone every definition.
     let definitions = func
         .blocks
         .iter()
         .flat_map(|block| &block.insts)
-        .filter_map(|inst| inst.def().map(|dst| (dst, inst.clone())))
+        .filter_map(|inst| inst.def().map(|dst| (dst, inst)))
         .collect::<HashMap<_, _>>();
     let mut upper_bounds = HashMap::default();
 
@@ -7341,6 +7516,162 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A candidate window that is empty or wholly outside the i32 domain
+    /// must never clamp into a nonempty in-domain window: an S8 store at
+    /// `i32::MAX` does not cover an S64 load at the same offset even though
+    /// both window endpoints clamp to `i32::MAX`.
+    #[test]
+    fn find_best_covering_value_ignores_windows_empty_or_outside_i32_domain() {
+        let mut available = AvailableStores::default();
+        available.insert(BaseReg::SimState, i32::MAX, OpSize::S8, VReg(7));
+        assert_eq!(
+            find_best_covering_value(&available, BaseReg::SimState, i32::MAX, OpSize::S64),
+            None,
+        );
+        available.clear();
+        available.insert(BaseReg::SimState, i32::MIN, OpSize::S8, VReg(7));
+        assert_eq!(
+            find_best_covering_value(&available, BaseReg::SimState, i32::MIN, OpSize::S64),
+            None,
+        );
+        assert_eq!(
+            clamped_key_range(0, -1),
+            None,
+            "empty windows stay empty under clamping",
+        );
+    }
+
+    /// Differential test: the offset-indexed `AvailableStores` must select
+    /// exactly the same covering slots as a brute-force scan over every
+    /// tracked slot (the previous linear-scan implementation).
+    #[test]
+    fn available_stores_covering_selection_matches_brute_force_scan() {
+        fn naive_find_best_covering_value(
+            available: &HashMap<MemorySlot, VReg>,
+            base: BaseReg,
+            offset: i32,
+            size: OpSize,
+        ) -> Option<(MemorySlot, VReg)> {
+            let load_start = i64::from(offset);
+            let load_end = load_start + i64::from(size.bytes());
+            available
+                .iter()
+                .filter_map(|(slot, &src)| {
+                    if slot.base != base {
+                        return None;
+                    }
+                    let value_start = i64::from(slot.offset);
+                    let value_end = value_start + i64::from(slot.size.bytes());
+                    (value_start <= load_start && load_end <= value_end).then_some((*slot, src))
+                })
+                .min_by_key(|(slot, src)| {
+                    (
+                        slot.size.bytes(),
+                        load_start - i64::from(slot.offset),
+                        slot.offset,
+                        src.0,
+                    )
+                })
+        }
+
+        // Small xorshift PRNG keeps this deterministic without external deps.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let bases = [BaseReg::SimState, BaseReg::StackFrame];
+        let sizes = [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64];
+        for _round in 0..400 {
+            let mut indexed = AvailableStores::default();
+            let mut naive: HashMap<MemorySlot, VReg> = HashMap::default();
+            for step in 0..120 {
+                match next() % 5 {
+                    0 | 1 => {
+                        let base = bases[(next() % 2) as usize];
+                        let offset = (next() % 64) as i32 - 8;
+                        let size = sizes[(next() % 4) as usize];
+                        let value = VReg((next() % 1_000) as u32);
+                        indexed.insert(base, offset, size, value);
+                        naive.insert(MemorySlot { base, offset, size }, value);
+                    }
+                    2 => {
+                        let base = bases[(next() % 2) as usize];
+                        let offset = (next() % 64) as i32 - 8;
+                        let size = sizes[(next() % 4) as usize];
+                        indexed.invalidate_slot(base, offset, size);
+                        let Some((start, end)) = byte_range(offset, size.bytes() as usize) else {
+                            naive.retain(|slot, _| slot.base != base);
+                            continue;
+                        };
+                        naive.retain(|slot, _| {
+                            if slot.base != base {
+                                return true;
+                            }
+                            let slot_start = i64::from(slot.offset);
+                            let slot_end = slot_start + i64::from(slot.size.bytes());
+                            slot_end <= start || end <= slot_start
+                        });
+                    }
+                    3 => {
+                        let offset = (next() % 64) as i32 - 8;
+                        let byte_len = (next() % 9) as usize;
+                        indexed.invalidate_byte_range(BaseReg::SimState, offset, byte_len);
+                        let Some((start, end)) = byte_range(offset, byte_len) else {
+                            naive.retain(|slot, _| slot.base != BaseReg::SimState);
+                            continue;
+                        };
+                        naive.retain(|slot, _| {
+                            if slot.base != BaseReg::SimState {
+                                return true;
+                            }
+                            let slot_start = i64::from(slot.offset);
+                            let slot_end = slot_start + i64::from(slot.size.bytes());
+                            slot_end <= start || end <= slot_start
+                        });
+                    }
+                    _ => {
+                        indexed.clear();
+                        naive.clear();
+                    }
+                }
+
+                // After every mutation, compare full-content and coverage
+                // queries across all loads.
+                let contents: Vec<_> = naive.iter().collect();
+                assert_eq!(
+                    contents.len(),
+                    indexed.slots.values().map(BTreeMap::len).sum::<usize>()
+                );
+                for (slot, &value) in &naive {
+                    assert_eq!(indexed.get(slot.base, slot.offset, slot.size), Some(value));
+                }
+                for base in bases {
+                    for load_offset in -12..72 {
+                        for &load_size in &sizes {
+                            let expected = naive_find_best_covering_value(
+                                &naive,
+                                base,
+                                load_offset,
+                                load_size,
+                            );
+                            let found =
+                                find_best_covering_value(&indexed, base, load_offset, load_size);
+                            assert_eq!(
+                                found, expected,
+                                "coverage mismatch at base={base:?} offset={load_offset} size={load_size:?}"
+                            );
+                        }
+                    }
+                }
+                let _ = step;
+            }
+        }
+    }
 
     fn make_func(insts: Vec<MInst>, vreg_count: u32) -> MFunction {
         let mut vregs = VRegAllocator::new();
@@ -10285,7 +10616,7 @@ mod tests {
             3,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts[1],
@@ -10350,7 +10681,7 @@ mod tests {
             8,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         let expected = [
             (VReg(1), 1, OpSize::S8),
@@ -10370,6 +10701,194 @@ mod tests {
                 } if *actual_dst == dst && *actual_offset == offset && *actual_size == size
             ));
         }
+    }
+
+    #[test]
+    fn post_regalloc_peephole_drops_load_clobbered_by_same_register_constant() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0x78,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 0x5555_5555_5555_5555,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Or {
+                    dst: VReg(2),
+                    lhs: VReg(2),
+                    rhs: VReg(1),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R8);
+        assignment.set(VReg(2), PhysReg::R9);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert_eq!(func.blocks[0].insts.len(), 4);
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0x5555_5555_5555_5555,
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[1],
+            MInst::And {
+                dst: VReg(2),
+                lhs: VReg(1),
+                rhs: VReg(1),
+            }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::Or {
+                dst: VReg(2),
+                lhs: VReg(2),
+                rhs: VReg(1),
+            }
+        ));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_load_when_constant_uses_other_register() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0x78,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 7,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Or {
+                    dst: VReg(2),
+                    lhs: VReg(2),
+                    rhs: VReg(1),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R9);
+        assignment.set(VReg(2), PhysReg::R10);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert_eq!(func.blocks[0].insts.len(), 5);
+        assert!(matches!(
+            func.blocks[0].insts[0],
+            MInst::Load { dst: VReg(0), .. }
+        ));
+        assert!(matches!(
+            func.blocks[0].insts[2],
+            MInst::And {
+                lhs: VReg(0),
+                rhs: VReg(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_load_whose_value_is_used_before_the_constant() {
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0x78,
+                    size: OpSize::S64,
+                },
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 7,
+                },
+                MInst::And {
+                    dst: VReg(2),
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                },
+                MInst::Return,
+            ],
+            3,
+        );
+        let mut assignment = AssignmentMap::default();
+        // Same physical register, but the loaded value feeds an instruction
+        // between the load and the rematerialized constant.
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R8);
+        assignment.set(VReg(2), PhysReg::R9);
+        func.blocks[0].insts.swap(1, 2);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert_eq!(func.blocks[0].insts.len(), 4);
+        assert!(matches!(func.blocks[0].insts[0], MInst::Load { .. }));
+    }
+
+    #[test]
+    fn post_regalloc_peephole_keeps_load_with_cross_block_or_phi_uses() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..3 {
+            vregs.alloc();
+        }
+        let spill_descs = (0..3).map(|_| SpillDesc::transient()).collect();
+        let mut func = MFunction::new(vregs, spill_descs);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0x78,
+                size: OpSize::S64,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 7,
+            },
+        ];
+        func.push_block(entry);
+        let mut exit = MBlock::new(BlockId(1));
+        exit.phis.push(PhiNode {
+            dst: VReg(2),
+            sources: vec![(BlockId(0), VReg(0))],
+        });
+        func.push_block(exit);
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(VReg(0), PhysReg::R8);
+        assignment.set(VReg(1), PhysReg::R8);
+        assignment.set(VReg(2), PhysReg::R9);
+
+        post_regalloc_peephole(&mut func, &assignment);
+
+        assert!(matches!(func.blocks[0].insts[0], MInst::Load { .. }));
+        assert_eq!(func.blocks[1].phis[0].sources, vec![(BlockId(0), VReg(0))],);
     }
 
     #[test]
@@ -10422,7 +10941,7 @@ mod tests {
         assignment.set(VReg(2), PhysReg::R8);
 
         assert_eq!(post_regalloc_direct_load_cse(&mut func, &assignment), 2);
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
         post_regalloc_cleanup(&mut func);
         post_regalloc_direct_load_cse(&mut func, &assignment);
 
@@ -10604,7 +11123,7 @@ mod tests {
             2,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts.as_slice(),
@@ -10658,7 +11177,7 @@ mod tests {
             4,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
         post_regalloc_cleanup(&mut func);
 
         assert!(matches!(
@@ -10706,7 +11225,7 @@ mod tests {
         instructions.push(MInst::Return);
         let mut func = make_func(instructions, 8);
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert_eq!(func.blocks[0].insts.len(), 5);
         for (index, (inst, size)) in func.blocks[0]
@@ -10752,7 +11271,7 @@ mod tests {
             4,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(func.blocks[0].insts[0], MInst::LoadImm { .. }));
         assert_eq!(func.blocks[0].insts.len(), 4);
@@ -10799,7 +11318,7 @@ mod tests {
             4,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(
             !func.blocks[0]
@@ -10855,7 +11374,7 @@ mod tests {
             9,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts[0],
@@ -10911,7 +11430,7 @@ mod tests {
             6,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(func.blocks[0].insts[0], MInst::LoadImm { .. }));
         assert!(matches!(func.blocks[0].insts[1], MInst::Or { .. }));
@@ -10957,7 +11476,7 @@ mod tests {
             9,
         );
 
-        post_regalloc_peephole(&mut func);
+        post_regalloc_peephole(&mut func, &AssignmentMap::default());
 
         assert!(matches!(
             func.blocks[0].insts[0],
