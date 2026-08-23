@@ -724,7 +724,15 @@ fn alu_binary(
                 let common = lhs_width.max(rhs_width).max(dst_width);
                 let signed_value = to_signed(&lhs.payload, lhs_width);
                 let signed_mask = to_signed(&lhs.mask, lhs_width);
-                let bound = lhs_width.max(dst_width).max(1);
+                // The narrow lowering converges once the count reaches the
+                // operand width; the word-based wide lowering keeps reading
+                // sign-filled words until every output word sits past the
+                // source's own chunks.
+                let bound = if common <= 64 {
+                    lhs_width.max(dst_width).max(1)
+                } else {
+                    lhs_width.div_ceil(64) * 64
+                };
                 match shift_amount(&rhs.payload) {
                     Some(amount) if amount < bound => {
                         if common <= 64 {
@@ -733,10 +741,12 @@ fn alu_binary(
                                 mask: wrap_signed(&(signed_mask >> amount), dst_width),
                             }
                         } else {
-                            let payload = (sar_wide_extend(&lhs.payload, lhs_width, common)
+                            let payload =
+                                (sar_wide_extend(&lhs.payload, lhs_width, common, amount)
+                                    >> amount)
+                                    & width_mask(dst_width);
+                            let mask = (sar_wide_extend(&lhs.mask, lhs_width, common, amount)
                                 >> amount)
-                                & width_mask(dst_width);
-                            let mask = (sar_wide_extend(&lhs.mask, lhs_width, common) >> amount)
                                 & width_mask(dst_width);
                             SIRValue { payload, mask }
                         }
@@ -874,14 +884,16 @@ fn shift_amount(value: &BigUint) -> Option<usize> {
 /// Sar lowering does: whole 64-bit words above the source's own chunks are
 /// filled with the declared width's top bit, then the caller shifts
 /// logically. Bits inside the source's partial top word are left untouched.
-fn sar_wide_extend(value: &BigUint, lhs_width: usize, common: usize) -> BigUint {
+fn sar_wide_extend(value: &BigUint, lhs_width: usize, common: usize, amount: usize) -> BigUint {
     let src_words = lhs_width.div_ceil(64);
-    let common_words = common.div_ceil(64);
     if lhs_width == 0 || !value.bit((lhs_width - 1) as u64) {
         return value.clone();
     }
+    // Extend far enough that output words reading past the common width
+    // after the shift still observe sign fill instead of zeroes.
+    let fill_until = common.div_ceil(64) + amount.div_ceil(64) + 1;
     let mut extended = value.clone();
-    for word in src_words..common_words {
+    for word in src_words..fill_until {
         extended |= BigUint::from(u64::MAX) << (word * 64);
     }
     extended
