@@ -171,7 +171,17 @@ impl Machine<'_> {
         }
 
         match offset {
-            SIROffset::Static(bit_offset) => Ok(*bit_offset),
+            SIROffset::Static(bit_offset) => {
+                // Element-strided layouts remap static offsets from logical
+                // packed positions to physical strided positions.
+                if self.layout.unpacked_arrays.contains_key(absolute) {
+                    let (byte, intra) =
+                        self.layout.map_static_bit_offset(absolute, *bit_offset);
+                    Ok(byte * 8 + intra)
+                } else {
+                    Ok(*bit_offset)
+                }
+            }
             SIROffset::Dynamic(_) => dynamic(dynamics, 0),
             SIROffset::Element {
                 element_width,
@@ -193,7 +203,15 @@ impl Machine<'_> {
                 };
                 Ok(index * stride_bits + bit_offset + extra)
             }
-            SIROffset::PackedElements { bit_offset, .. } => Ok(*bit_offset),
+            SIROffset::PackedElements { bit_offset, .. } => {
+                if self.layout.unpacked_arrays.contains_key(absolute) {
+                    let (byte, intra) =
+                        self.layout.map_static_bit_offset(absolute, *bit_offset);
+                    Ok(byte * 8 + intra)
+                } else {
+                    Ok(*bit_offset)
+                }
+            }
         }
     }
 
