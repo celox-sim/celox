@@ -1366,6 +1366,16 @@ impl SimBackend for InterpBackend {
     }
 
     fn get(&self, signal: SignalRef) -> BigUint {
+        if let Some(ref arr) = signal.array_layout {
+            let mut result = BigUint::zero();
+            let base = self.memory.as_ptr() as *const u8;
+            for i in 0..arr.element_count {
+                // Byte-aligned elements: read directly from the stride slot.
+                let byte = unsafe { *base.add(signal.offset + i * arr.element_stride) };
+                result |= BigUint::from(byte >> 0) << (i * arr.element_width);
+            }
+            return result;
+        }
         let byte_size = get_byte_size(signal.width);
         let ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let byte_slice = unsafe { std::slice::from_raw_parts(ptr, byte_size) };
