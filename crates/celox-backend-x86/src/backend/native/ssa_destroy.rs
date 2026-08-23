@@ -1895,8 +1895,10 @@ mod tests {
         let mut state = vec![0_u8; 56];
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
         let actual = state
-            .chunks_exact(8)
-            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
         assert_eq!(actual, [11, 22, 33, 77, 44, 33, 77]);
     }

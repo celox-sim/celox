@@ -5396,7 +5396,7 @@ pub fn emit_prepared_eu(
         );
     }
     let post_regalloc_start = timing.then(crate::timing::now);
-    super::mir_opt::post_regalloc_peephole(&mut mfunc);
+    super::mir_opt::post_regalloc_peephole(&mut mfunc, &ra.assignment);
     super::mir_opt::post_regalloc_cleanup(&mut mfunc);
     super::mir_opt::post_regalloc_direct_load_cse(&mut mfunc, &ra.assignment);
     if cfg!(debug_assertions) || diagnostics.verify_regalloc {

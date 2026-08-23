@@ -167,7 +167,7 @@ pub fn allocate_scalar_mir(
         assignment,
         spill_frame_size,
     } = super::regalloc::run_regalloc_with_label(&mut prepared.function, label)?;
-    super::mir_opt::post_regalloc_peephole(&mut prepared.function);
+    super::mir_opt::post_regalloc_peephole(&mut prepared.function, &assignment);
     super::mir_opt::post_regalloc_cleanup(&mut prepared.function);
     super::mir_opt::post_regalloc_direct_load_cse(&mut prepared.function, &assignment);
     super::regalloc::verify_assignment(&prepared.function, &assignment)?;
