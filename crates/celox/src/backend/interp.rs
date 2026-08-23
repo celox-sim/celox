@@ -775,12 +775,15 @@ fn run_units(
     four_state: bool,
     comb_capture_enabled: &mut [u8],
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    trigger_addrs: &[(AbsoluteAddr, u32)],
     emit_triggers: bool,
 ) -> Result<(), SimulatorErrorCode> {
     // Snapshot the first word of every trigger-bearing object at group
-    // entry; trigger detection compares the stored range against it.
+    // entry; trigger detection compares the stored range against it. The
+    // trigger-bearing addresses are precomputed per group so a tick only
+    // pays for the snapshot reads themselves.
     let mut trigger_snapshots: HashMap<(AbsoluteAddr, u32), u64> = HashMap::default();
-    for (absolute, region) in collect_trigger_addrs(units) {
+    for &(absolute, region) in trigger_addrs {
         let addr = RegionedAbsoluteAddrBase::from_absolute_addr(region, absolute);
         let machine = Machine {
             memory: &mut *memory,
@@ -853,6 +856,10 @@ pub struct InterpBackend {
     /// compiled `comb_apply_func`: fused schedules when present, otherwise
     /// comb units followed by the clock's FF units.
     comb_apply_units: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    /// Trigger-bearing addresses per schedule group, precomputed so a group
+    /// invocation only performs snapshot reads.
+    comb_trigger_addrs: Vec<(AbsoluteAddr, u32)>,
+    event_trigger_addrs: HashMap<AbsoluteAddr, Vec<(AbsoluteAddr, u32)>>,
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
@@ -985,6 +992,24 @@ impl InterpBackend {
         }
         // Only eval/apply clocks receive combined ticks; eval-only and
         // apply-only groups fall back to the default two-phase evaluation.
+        let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
+        let mut event_trigger_addrs: HashMap<AbsoluteAddr, Vec<(AbsoluteAddr, u32)>> =
+            HashMap::default();
+        for (clock, ff_units) in &laid_out.sir.eval_apply_ffs {
+            let mut addrs = comb_trigger_addrs.clone();
+            addrs.extend(collect_trigger_addrs(ff_units));
+            addrs.sort_unstable();
+            addrs.dedup();
+            event_trigger_addrs.insert(*clock, addrs);
+        }
+        for (clock, units) in laid_out
+            .sir
+            .eval_only_ffs
+            .iter()
+            .chain(&laid_out.sir.apply_ffs)
+        {
+            event_trigger_addrs.insert(*clock, collect_trigger_addrs(units));
+        }
 
         let mut backend = Self {
             program_sir,
@@ -1000,6 +1025,8 @@ impl InterpBackend {
             id_to_event,
             four_state_inits,
             comb_apply_units,
+            comb_trigger_addrs,
+            event_trigger_addrs,
             emit_triggers: options.emit_triggers,
         };
         backend.install_event_buffers();
@@ -1046,6 +1073,7 @@ impl SimBackend for InterpBackend {
             self.four_state,
             &mut self.comb_capture_enabled,
             &self.program_sir.eval_comb,
+            &self.comb_trigger_addrs,
             self.emit_triggers,
         )
     }
@@ -1060,6 +1088,9 @@ impl SimBackend for InterpBackend {
                 .eval_apply_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+            self.event_trigger_addrs
+                .get(&event.addr())
+                .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             self.emit_triggers,
         )
     }
@@ -1076,6 +1107,7 @@ impl SimBackend for InterpBackend {
             self.four_state,
             &mut self.comb_capture_enabled,
             units,
+            &self.event_trigger_addrs[&event.addr()],
             self.emit_triggers,
         )
     }
@@ -1090,6 +1122,9 @@ impl SimBackend for InterpBackend {
                 .eval_only_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+            self.event_trigger_addrs
+                .get(&event.addr())
+                .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             self.emit_triggers,
         )
     }
@@ -1104,6 +1139,9 @@ impl SimBackend for InterpBackend {
                 .apply_ffs
                 .get(&event.addr())
                 .expect("scheduled event missing from SIR program"),
+            self.event_trigger_addrs
+                .get(&event.addr())
+                .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             self.emit_triggers,
         )
     }
