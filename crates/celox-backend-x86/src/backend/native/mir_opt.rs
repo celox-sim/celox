@@ -597,9 +597,27 @@ fn invert_compare_kind(kind: CmpKind) -> CmpKind {
     }
 }
 
-fn unsigned_upper_bound(
+/// Read-only view of the defining instruction of each VReg, so bound proofs
+/// can consume borrowed maps without cloning definitions.
+trait DefLookup {
+    fn def_inst(&self, reg: VReg) -> Option<&MInst>;
+}
+
+impl DefLookup for HashMap<VReg, MInst> {
+    fn def_inst(&self, reg: VReg) -> Option<&MInst> {
+        self.get(&reg)
+    }
+}
+
+impl DefLookup for HashMap<VReg, &MInst> {
+    fn def_inst(&self, reg: VReg) -> Option<&MInst> {
+        self.get(&reg).copied()
+    }
+}
+
+fn unsigned_upper_bound<L: DefLookup>(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &L,
     memo: &mut HashMap<VReg, Option<u64>>,
     visiting: &mut HashSet<VReg>,
 ) -> Option<u64> {
@@ -609,7 +627,7 @@ fn unsigned_upper_bound(
     if !visiting.insert(reg) {
         return None;
     }
-    let bound = match defs.get(&reg)? {
+    let bound = match defs.def_inst(reg)? {
         MInst::LoadImm { value, .. } => Some(*value),
         MInst::Load { size, .. } | MInst::LoadIndexed { size, .. } => Some(match size {
             OpSize::S8 => u8::MAX as u64,
@@ -6908,7 +6926,7 @@ fn promote_partial_store_round_trips(func: &mut MFunction) {
 fn forward_local_store_loads(func: &mut MFunction) {
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
-        let mut available: HashMap<MemorySlot, VReg> = HashMap::default();
+        let mut available = AvailableStores::default();
         let mut rewritten = Vec::with_capacity(block.insts.len());
 
         for inst in block.insts.drain(..) {
@@ -6919,8 +6937,8 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     src,
                     size,
                 } => {
-                    invalidate_overlapping_slots(&mut available, base, offset, size);
-                    available.insert(MemorySlot { base, offset, size }, src);
+                    available.invalidate_slot(base, offset, size);
+                    available.insert(base, offset, size, src);
                     rewritten.push(MInst::Store {
                         base,
                         offset,
@@ -6934,8 +6952,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     offset,
                     size,
                 } => {
-                    let key = MemorySlot { base, offset, size };
-                    if let Some(&src) = available.get(&key) {
+                    if let Some(src) = available.get(base, offset, size) {
                         rewritten.push(MInst::Mov { dst, src });
                         continue;
                     }
@@ -6955,7 +6972,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                         );
                         continue;
                     }
-                    available.insert(MemorySlot { base, offset, size }, dst);
+                    available.insert(base, offset, size, dst);
                     rewritten.push(MInst::Load {
                         dst,
                         base,
@@ -6979,12 +6996,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                 } => {
                     // The source is read but unchanged. Only values cached for
                     // the written destination range become stale.
-                    invalidate_overlapping_byte_range(
-                        &mut available,
-                        BaseReg::SimState,
-                        dst_offset,
-                        byte_len,
-                    );
+                    available.invalidate_byte_range(BaseReg::SimState, dst_offset, byte_len);
                     rewritten.push(MInst::MemCopy {
                         src_offset,
                         dst_offset,
@@ -6999,36 +7011,119 @@ fn forward_local_store_loads(func: &mut MFunction) {
     }
 }
 
+/// Values still visible in memory at the current program point of a block,
+/// indexed by `(base, size)` and then start offset so coverage queries only
+/// inspect the few offsets a load can overlap instead of every tracked slot.
+#[derive(Default)]
+struct AvailableStores {
+    slots: HashMap<(BaseReg, OpSize), BTreeMap<i32, VReg>>,
+}
+
+impl AvailableStores {
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    fn get(&self, base: BaseReg, offset: i32, size: OpSize) -> Option<VReg> {
+        self.slots.get(&(base, size))?.get(&offset).copied()
+    }
+
+    fn insert(&mut self, base: BaseReg, offset: i32, size: OpSize, value: VReg) {
+        self.slots
+            .entry((base, size))
+            .or_default()
+            .insert(offset, value);
+    }
+
+    fn invalidate_slot(&mut self, base: BaseReg, offset: i32, size: OpSize) {
+        let Some((start, end)) = byte_range(offset, size.bytes() as usize) else {
+            self.invalidate_base(base);
+            return;
+        };
+        self.invalidate_range(base, start, end);
+    }
+
+    fn invalidate_byte_range(&mut self, base: BaseReg, offset: i32, byte_len: usize) {
+        let Some((start, end)) = byte_range(offset, byte_len) else {
+            self.invalidate_base(base);
+            return;
+        };
+        self.invalidate_range(base, start, end);
+    }
+
+    fn invalidate_base(&mut self, base: BaseReg) {
+        self.slots.retain(|(slot_base, _), _| *slot_base != base);
+    }
+
+    /// Drop every tracked value on `base` overlapping the byte range
+    /// `[start, end)`.
+    fn invalidate_range(&mut self, base: BaseReg, start: i64, end: i64) {
+        for ((slot_base, slot_size), slots) in self.slots.iter_mut() {
+            if *slot_base != base {
+                continue;
+            }
+            let width = i64::from(slot_size.bytes());
+            // An entry starting at `o` overlaps when `o + width > start` and
+            // `o < end`, i.e. `start - width + 1 <= o <= end - 1`.
+            let Some((lo, hi)) = clamped_key_range(start - width + 1, end - 1) else {
+                continue;
+            };
+            let overlapping: Vec<i32> = slots.range(lo..=hi).map(|(offset, _)| *offset).collect();
+            for offset in overlapping {
+                slots.remove(&offset);
+            }
+        }
+    }
+}
+
+/// Clamp an inclusive i64 key window into the i32 domain of stored offsets.
+fn clamped_key_range(lo: i64, hi: i64) -> Option<(i32, i32)> {
+    let lo = lo.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    let hi = hi.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    (lo <= hi).then_some((lo as i32, hi as i32))
+}
+
 fn find_best_covering_value(
-    available: &HashMap<MemorySlot, VReg>,
+    available: &AvailableStores,
     base: BaseReg,
     offset: i32,
     size: OpSize,
 ) -> Option<(MemorySlot, VReg)> {
-    let load_start = offset as i64;
+    let load_start = i64::from(offset);
     let load_end = load_start + i64::from(size.bytes());
-    available
-        .iter()
-        .filter_map(|(slot, &src)| {
-            if slot.base != base {
-                return None;
-            }
-            let value_start = slot.offset as i64;
-            let value_end = value_start + i64::from(slot.size.bytes());
-            (value_start <= load_start && load_end <= value_end).then_some((*slot, src))
-        })
-        // Several earlier loads/stores can cover the same narrow load.  Hash
-        // iteration order is randomized, so select the cheapest extraction
-        // explicitly: least over-read first, then least right shift.  The
-        // final fields make equal-cost selection reproducible as well.
-        .min_by_key(|(slot, src)| {
-            (
-                slot.size.bytes(),
-                load_start - i64::from(slot.offset),
-                slot.offset,
+    let mut best: Option<((MemorySlot, VReg), (u32, i64, i32, u32))> = None;
+    for ((slot_base, slot_size), slots) in &available.slots {
+        if *slot_base != base {
+            continue;
+        }
+        let width = i64::from(slot_size.bytes());
+        // A stored value covers the load when its range
+        // `[value_start, value_start + width)` contains
+        // `[load_start, load_end)`: `load_end - width <= o <= load_start`.
+        let Some((lo, hi)) = clamped_key_range(load_end - width, load_start) else {
+            continue;
+        };
+        for (value_offset, &src) in slots.range(lo..=hi) {
+            let slot = MemorySlot {
+                base,
+                offset: *value_offset,
+                size: *slot_size,
+            };
+            let selection_key = (
+                slot_size.bytes(),
+                load_start - i64::from(*value_offset),
+                *value_offset,
                 src.0,
-            )
-        })
+            );
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_key)| selection_key < *best_key)
+            {
+                best = Some(((slot, src), selection_key));
+            }
+        }
+    }
+    best.map(|(found, _)| found)
 }
 
 fn emit_partial_load_forward(
@@ -7251,35 +7346,6 @@ pub(super) fn eliminate_redundant_local_stores(func: &mut MFunction) {
     }
 }
 
-fn invalidate_overlapping_slots<T>(
-    available: &mut HashMap<MemorySlot, T>,
-    base: BaseReg,
-    offset: i32,
-    size: OpSize,
-) {
-    invalidate_overlapping_byte_range(available, base, offset, size.bytes() as usize);
-}
-
-fn invalidate_overlapping_byte_range<T>(
-    available: &mut HashMap<MemorySlot, T>,
-    base: BaseReg,
-    offset: i32,
-    byte_len: usize,
-) {
-    let Some((start, end)) = byte_range(offset, byte_len) else {
-        available.retain(|slot, _| slot.base != base);
-        return;
-    };
-    available.retain(|slot, _| {
-        if slot.base != base {
-            return true;
-        }
-        let slot_start = slot.offset as i64;
-        let slot_end = slot_start + i64::from(slot.size.bytes());
-        slot_end <= start || end <= slot_start
-    });
-}
-
 /// Copy propagation: replace every full-word copy, and every `Mov32` whose
 /// source is already structurally proven zero-extended to 32 bits, with its
 /// source throughout the function. A `Mov32` from an arbitrary 64-bit source
@@ -7287,11 +7353,13 @@ fn invalidate_overlapping_byte_range<T>(
 fn copy_propagate(func: &mut MFunction) {
     // Build alias map: dst → src (transitively resolved)
     let mut aliases: HashMap<VReg, VReg> = HashMap::default();
+    // Borrowed views of defining instructions suffice for the Mov32
+    // zero-extension proof below; no need to clone every definition.
     let definitions = func
         .blocks
         .iter()
         .flat_map(|block| &block.insts)
-        .filter_map(|inst| inst.def().map(|dst| (dst, inst.clone())))
+        .filter_map(|inst| inst.def().map(|dst| (dst, inst)))
         .collect::<HashMap<_, _>>();
     let mut upper_bounds = HashMap::default();
 
@@ -7445,6 +7513,137 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Differential test: the offset-indexed `AvailableStores` must select
+    /// exactly the same covering slots as a brute-force scan over every
+    /// tracked slot (the previous linear-scan implementation).
+    #[test]
+    fn available_stores_covering_selection_matches_brute_force_scan() {
+        fn naive_find_best_covering_value(
+            available: &HashMap<MemorySlot, VReg>,
+            base: BaseReg,
+            offset: i32,
+            size: OpSize,
+        ) -> Option<(MemorySlot, VReg)> {
+            let load_start = i64::from(offset);
+            let load_end = load_start + i64::from(size.bytes());
+            available
+                .iter()
+                .filter_map(|(slot, &src)| {
+                    if slot.base != base {
+                        return None;
+                    }
+                    let value_start = i64::from(slot.offset);
+                    let value_end = value_start + i64::from(slot.size.bytes());
+                    (value_start <= load_start && load_end <= value_end).then_some((*slot, src))
+                })
+                .min_by_key(|(slot, src)| {
+                    (
+                        slot.size.bytes(),
+                        load_start - i64::from(slot.offset),
+                        slot.offset,
+                        src.0,
+                    )
+                })
+        }
+
+        // Small xorshift PRNG keeps this deterministic without external deps.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let bases = [BaseReg::SimState, BaseReg::StackFrame];
+        let sizes = [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64];
+        for _round in 0..400 {
+            let mut indexed = AvailableStores::default();
+            let mut naive: HashMap<MemorySlot, VReg> = HashMap::default();
+            for step in 0..120 {
+                match next() % 5 {
+                    0 | 1 => {
+                        let base = bases[(next() % 2) as usize];
+                        let offset = (next() % 64) as i32 - 8;
+                        let size = sizes[(next() % 4) as usize];
+                        let value = VReg((next() % 1_000) as u32);
+                        indexed.insert(base, offset, size, value);
+                        naive.insert(MemorySlot { base, offset, size }, value);
+                    }
+                    2 => {
+                        let base = bases[(next() % 2) as usize];
+                        let offset = (next() % 64) as i32 - 8;
+                        let size = sizes[(next() % 4) as usize];
+                        indexed.invalidate_slot(base, offset, size);
+                        let Some((start, end)) = byte_range(offset, size.bytes() as usize) else {
+                            naive.retain(|slot, _| slot.base != base);
+                            continue;
+                        };
+                        naive.retain(|slot, _| {
+                            if slot.base != base {
+                                return true;
+                            }
+                            let slot_start = i64::from(slot.offset);
+                            let slot_end = slot_start + i64::from(slot.size.bytes());
+                            slot_end <= start || end <= slot_start
+                        });
+                    }
+                    3 => {
+                        let offset = (next() % 64) as i32 - 8;
+                        let byte_len = (next() % 9) as usize;
+                        indexed.invalidate_byte_range(BaseReg::SimState, offset, byte_len);
+                        let Some((start, end)) = byte_range(offset, byte_len) else {
+                            naive.retain(|slot, _| slot.base != BaseReg::SimState);
+                            continue;
+                        };
+                        naive.retain(|slot, _| {
+                            if slot.base != BaseReg::SimState {
+                                return true;
+                            }
+                            let slot_start = i64::from(slot.offset);
+                            let slot_end = slot_start + i64::from(slot.size.bytes());
+                            slot_end <= start || end <= slot_start
+                        });
+                    }
+                    _ => {
+                        indexed.clear();
+                        naive.clear();
+                    }
+                }
+
+                // After every mutation, compare full-content and coverage
+                // queries across all loads.
+                let contents: Vec<_> = naive.iter().collect();
+                assert_eq!(
+                    contents.len(),
+                    indexed.slots.values().map(BTreeMap::len).sum::<usize>()
+                );
+                for (slot, &value) in &naive {
+                    assert_eq!(indexed.get(slot.base, slot.offset, slot.size), Some(value));
+                }
+                for base in bases {
+                    for load_offset in -12..72 {
+                        for &load_size in &sizes {
+                            let expected = naive_find_best_covering_value(
+                                &naive,
+                                base,
+                                load_offset,
+                                load_size,
+                            );
+                            let found =
+                                find_best_covering_value(&indexed, base, load_offset, load_size);
+                            assert_eq!(
+                                found, expected,
+                                "coverage mismatch at base={base:?} offset={load_offset} size={load_size:?}"
+                            );
+                        }
+                    }
+                }
+                let _ = step;
+            }
+        }
+    }
 
     fn make_func(insts: Vec<MInst>, vreg_count: u32) -> MFunction {
         let mut vregs = VRegAllocator::new();
