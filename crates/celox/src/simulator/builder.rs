@@ -1991,6 +1991,48 @@ mod host {
             Ok(sim)
         }
 
+        /// Compiles SIR, finalizes the state layout, and returns a simulator
+        /// that starts executing on the Tier-0 interpreter immediately while
+        /// the Cranelift tier is compiled in the background.
+        ///
+        /// The first scheduler safe point after background compilation
+        /// completes adopts the compiled code and moves the live memory image
+        /// across without translation; both tiers share the same packed
+        /// layout ABI. If background compilation fails the simulator keeps
+        /// running on the interpreter.
+        pub fn build_tiered(
+            self,
+        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError> {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let phase_start = phase_timing.then(crate::timing::now);
+
+            let (laid_out, warnings, options, vcd_path, injected_components) = self
+                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+
+            if let Some(s) = phase_start {
+                tracing::debug!(
+                    "[phase-timing] compile_and_layout (total): {:?}",
+                    s.elapsed()
+                );
+            }
+
+            let backend = crate::backend::TieredBackend::new(&laid_out, &options);
+
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            sim.apply_initial_values();
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            Ok(sim)
+        }
+
         /// Compiles using the selected native code-generation architecture.
         #[cfg(any(
             target_arch = "x86_64",

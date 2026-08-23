@@ -53,6 +53,14 @@ pub struct InterpEventRef {
     id: usize,
 }
 
+impl InterpEventRef {
+    /// Rebuild a handle from its parts, e.g. when a tiered simulation
+    /// translates its stable event ids back onto the interpreted tier.
+    pub(crate) fn from_parts(addr: AbsoluteAddr, id: usize) -> Self {
+        Self { addr, id }
+    }
+}
+
 impl EventHandle for InterpEventRef {
     fn id(&self) -> usize {
         self.id
@@ -1071,6 +1079,18 @@ impl InterpBackend {
     /// `(offset, allocated_size)` for diagnostics and tests.
     pub fn four_state_regions(&self) -> &[(usize, usize)] {
         &self.four_state_inits
+    }
+
+    /// Hand the live simulation state to a successor backend during tier
+    /// promotion. The returned memory image is byte-compatible with the
+    /// compiled backends (same packed layout), and the event buffer `Arc`
+    /// keeps its allocation so state-header pointers stay valid.
+    pub(crate) fn tier_transfer(&mut self) -> (Vec<u64>, Arc<RuntimeEventBuffer>, Vec<u8>) {
+        (
+            std::mem::take(&mut self.memory),
+            Arc::clone(&self.runtime_event_buffer),
+            std::mem::take(&mut self.comb_capture_enabled),
+        )
     }
 }
 

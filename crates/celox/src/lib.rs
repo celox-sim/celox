@@ -62,10 +62,11 @@ pub use veryl_metadata::{ClockType, ResetType};
 #[cfg(feature = "host-runtime")]
 mod host_api {
     use crate::SimBackend;
+    pub use crate::backend::tiered::TieredEventRef;
     pub use crate::backend::wasm_runtime::WasmBackend;
     pub use crate::backend::{
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
-        JitBackend, RegallocAlgorithm, SharedJitCode,
+        JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;

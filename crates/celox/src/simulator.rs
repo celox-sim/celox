@@ -1515,6 +1515,21 @@ mod host {
         }
     }
 
+    impl Simulator<crate::backend::TieredBackend> {
+        /// Whether this tiered simulation has adopted its compiled tier.
+        ///
+        /// False while background compilation is still running or after it
+        /// failed (the interpreter then remains the permanent tier).
+        pub fn is_compiled(&self) -> bool {
+            self.backend.is_compiled()
+        }
+
+        /// Why promotion has not happened yet, for diagnostics.
+        pub fn promotion_error(&self) -> Option<&SimulatorError> {
+            self.backend.promotion_error()
+        }
+    }
+
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
