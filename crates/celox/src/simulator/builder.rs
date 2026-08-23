@@ -2046,6 +2046,7 @@ mod host {
             F: FnOnce(
                     &crate::ir::LaidOutProgram,
                     &SimulatorOptions,
+                    &crate::backend::compile_cancel::CompileCancel,
                 )
                     -> Result<crate::backend::tiered::CompiledCode, SimulatorError>
                 + Send

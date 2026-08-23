@@ -1528,6 +1528,15 @@ mod host {
         pub fn promotion_error(&self) -> Option<&SimulatorError> {
             self.backend.promotion_error()
         }
+
+        /// Request cancellation of background compilation.
+        ///
+        /// The simulation stays on the interpreter permanently and
+        /// [`Simulator::promotion_error`] reports the cancellation. Returns
+        /// whether a background compilation was still pending.
+        pub fn cancel_background_compilation(&self) -> bool {
+            self.backend.cancel_background_compilation()
+        }
     }
 
     #[cfg(any(

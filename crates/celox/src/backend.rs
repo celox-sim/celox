@@ -1,4 +1,6 @@
 #[cfg(feature = "host-runtime")]
+pub(crate) mod compile_cancel;
+#[cfg(feature = "host-runtime")]
 pub(crate) mod interp;
 pub(crate) mod memory_layout;
 #[cfg(all(

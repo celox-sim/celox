@@ -25,6 +25,7 @@ use crate::ir::{
 use crate::{CodegenError, HashMap, HashSet, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
+use super::super::compile_cancel::{CompileCancel, cancelled, cancelled_error};
 use super::super::traits::SimulatorErrorCode;
 use super::super::{MemoryLayout, get_byte_size};
 #[cfg(any(
@@ -546,6 +547,7 @@ fn prepare_merged_sir(
     label: &str,
     first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
+    cancel: Option<&CompileCancel>,
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
     let verify_enabled = cfg!(debug_assertions) || diagnostics.verify_boundaries;
     if verify_enabled {
@@ -578,6 +580,9 @@ fn prepare_merged_sir(
     };
 
     verify(&sir_eu, "before x86 merged-SIR optimization")?;
+    if cancelled(cancel) {
+        return Err(cancelled_error());
+    }
     if let Some(first_ff_unit) = first_ff_unit {
         let removed = crate::optimizer::sir::eliminate_unobserved_comb_state_stores(
             &mut sir_eu,
@@ -613,6 +618,9 @@ fn prepare_merged_sir(
         &boundaries,
     );
     verify(&sir_eu, "after x86 direct working rewrite")?;
+    if cancelled(cancel) {
+        return Err(cancelled_error());
+    }
     let promoted_working =
         crate::optimizer::sir::promote_eval_apply_working_round_trips(&mut sir_eu);
     if promoted_working {
@@ -620,18 +628,26 @@ fn prepare_merged_sir(
         crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after x86 working StateSSA DCE")?;
     }
+    if cancelled(cancel) {
+        return Err(cancelled_error());
+    }
     crate::optimizer::sir::optimize_native_merged_chain(
         &mut sir_eu,
         layout,
         four_state,
         label == "eval_comb_apply_ff",
         diagnostics,
+        || cancelled(cancel),
     )
     .map_err(|source| {
-        codegen_err(CodegenError::Optimization {
-            context: "native merged-chain optimization",
-            source,
-        })
+        if source.kind() == celox_sir_opt::OptimizationErrorKind::Cancelled {
+            codegen_err(CodegenError::Cancelled)
+        } else {
+            codegen_err(CodegenError::Optimization {
+                context: "native merged-chain optimization",
+                source,
+            })
+        }
     })?;
     verify(&sir_eu, "after x86 merged-chain cleanup")?;
     Ok(sir_eu)
@@ -645,6 +661,7 @@ fn compile_units(
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
+    cancel: Option<&CompileCancel>,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     let units = units.iter().collect::<Vec<_>>();
     compile_unit_refs(
@@ -656,6 +673,7 @@ fn compile_units(
         x86_options,
         capture_trace,
         diagnostics,
+        cancel,
     )
 }
 
@@ -668,7 +686,11 @@ fn compile_unit_refs(
     x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
+    cancel: Option<&CompileCancel>,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
+    if cancelled(cancel) {
+        return Err(cancelled_error());
+    }
     let timing = x86_options.diagnostics.phase_timing;
     if units.is_empty() {
         // Empty function: just return 0
@@ -743,7 +765,18 @@ fn compile_unit_refs(
         );
     }
     let start = timing.then(crate::timing::now);
-    let sir_eu = prepare_merged_sir(units, layout, four_state, label, first_ff_unit, diagnostics)?;
+    let sir_eu = prepare_merged_sir(
+        units,
+        layout,
+        four_state,
+        label,
+        first_ff_unit,
+        diagnostics,
+        cancel,
+    )?;
+    if cancelled(cancel) {
+        return Err(cancelled_error());
+    }
     let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
     #[cfg(any(
         feature = "x86_64-codegen",
@@ -1593,6 +1626,7 @@ fn compile_program(
     laid_out: &LaidOutProgram,
     options: &SimulatorOptions,
     capture_trace: bool,
+    cancel: Option<&CompileCancel>,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
 
@@ -1604,6 +1638,9 @@ fn compile_program(
         let four_state = options.four_state;
         let x86_options = &options.x86_options;
         let comb_handle = scope.spawn(move || {
+            if cancelled(cancel) {
+                return Err(cancelled_error());
+            }
             compile_units(
                 &sir.sir.eval_comb,
                 layout,
@@ -1612,6 +1649,7 @@ fn compile_program(
                 x86_options,
                 capture_trace,
                 &options.optimize_options.diagnostics,
+                cancel,
             )
         });
         let task_worker_count = compile_tasks
@@ -1624,6 +1662,9 @@ fn compile_program(
                 scope.spawn(move || {
                     let mut compiled = Vec::new();
                     loop {
+                        if cancelled(cancel) {
+                            return Err(cancelled_error());
+                        }
                         let task_id = next_task.fetch_add(1, Ordering::Relaxed);
                         let Some(task) = compile_tasks.get(task_id) else {
                             break;
@@ -1637,6 +1678,7 @@ fn compile_program(
                             x86_options,
                             capture_trace,
                             &options.optimize_options.diagnostics,
+                            cancel,
                         )?;
                         compiled.push((task_id, code));
                     }
@@ -1680,6 +1722,9 @@ fn compile_program(
         .iter()
         .enumerate()
         .map(|(index, unit)| {
+            if cancelled(cancel) {
+                return Err(cancelled_error());
+            }
             compile_unit_refs(
                 &[unit],
                 layout,
@@ -1689,6 +1734,7 @@ fn compile_program(
                 &options.x86_options,
                 false,
                 &options.optimize_options.diagnostics,
+                cancel,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2022,7 +2068,24 @@ impl NativeBackend {
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<NativeProgramImage, SimulatorError> {
-        let (image, trace) = compile_program(laid_out, options, false)?;
+        let (image, trace) = compile_program(laid_out, options, false, None)?;
+        debug_assert!(trace.is_none());
+        Ok(image)
+    }
+
+    /// Compile with cooperative cancellation observed at task and phase
+    /// boundaries.
+    ///
+    /// When `cancel` is triggered the pipeline unwinds with
+    /// [`CodegenError::Cancelled`] as soon as the unit in flight completes;
+    /// an uncancelled run is unchanged apart from one flag load per
+    /// boundary.
+    pub(crate) fn compile_image_with_cancel(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<NativeProgramImage, SimulatorError> {
+        let (image, trace) = compile_program(laid_out, options, false, Some(cancel))?;
         debug_assert!(trace.is_none());
         Ok(image)
     }
@@ -2031,7 +2094,7 @@ impl NativeBackend {
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<(NativeProgramImage, NativeCodegenTrace), SimulatorError> {
-        let (image, trace) = compile_program(laid_out, options, true)?;
+        let (image, trace) = compile_program(laid_out, options, true, None)?;
         Ok((
             image,
             trace.expect("trace-enabled native compilation must return a trace"),

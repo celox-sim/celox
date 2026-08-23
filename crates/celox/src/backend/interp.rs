@@ -175,8 +175,7 @@ impl Machine<'_> {
                 // Element-strided layouts remap static offsets from logical
                 // packed positions to physical strided positions.
                 if self.layout.unpacked_arrays.contains_key(absolute) {
-                    let (byte, intra) =
-                        self.layout.map_static_bit_offset(absolute, *bit_offset);
+                    let (byte, intra) = self.layout.map_static_bit_offset(absolute, *bit_offset);
                     Ok(byte * 8 + intra)
                 } else {
                     Ok(*bit_offset)
@@ -205,8 +204,7 @@ impl Machine<'_> {
             }
             SIROffset::PackedElements { bit_offset, .. } => {
                 if self.layout.unpacked_arrays.contains_key(absolute) {
-                    let (byte, intra) =
-                        self.layout.map_static_bit_offset(absolute, *bit_offset);
+                    let (byte, intra) = self.layout.map_static_bit_offset(absolute, *bit_offset);
                     Ok(byte * 8 + intra)
                 } else {
                     Ok(*bit_offset)
@@ -1331,6 +1329,23 @@ impl SimBackend for InterpBackend {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        if let Some(ref arr) = signal.array_layout {
+            let base = self.memory.as_mut_ptr() as *mut u8;
+            for i in 0..arr.element_count {
+                let voff = signal.offset + i * arr.element_stride;
+                let moff = voff + arr.plane_size;
+                let shift = i * arr.element_width;
+                let v_shifted = &value >> shift;
+                let m_shifted = &mask >> shift;
+                let v_chunk = v_shifted.to_bytes_le().first().copied().unwrap_or(0);
+                let m_chunk = m_shifted.to_bytes_le().first().copied().unwrap_or(0);
+                unsafe {
+                    *base.add(voff) = v_chunk;
+                    *base.add(moff) = m_chunk;
+                }
+            }
+            return;
+        }
         let allocated_size = get_byte_size(signal.width);
 
         let mut v_bytes = value.to_bytes_le();
@@ -1372,7 +1387,7 @@ impl SimBackend for InterpBackend {
             for i in 0..arr.element_count {
                 // Byte-aligned elements: read directly from the stride slot.
                 let byte = unsafe { *base.add(signal.offset + i * arr.element_stride) };
-                result |= BigUint::from(byte >> 0) << (i * arr.element_width);
+                result |= BigUint::from(byte) << (i * arr.element_width);
             }
             return result;
         }
@@ -1422,6 +1437,20 @@ impl SimBackend for InterpBackend {
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
+        if let Some(ref arr) = signal.array_layout {
+            let base = self.memory.as_ptr() as *const u8;
+            let mut v_val = BigUint::zero();
+            let mut m_val = BigUint::zero();
+            for i in 0..arr.element_count {
+                let voff = signal.offset + i * arr.element_stride;
+                let moff = voff + arr.plane_size;
+                let v_byte = unsafe { *base.add(voff) };
+                let m_byte = unsafe { *base.add(moff) };
+                v_val |= BigUint::from(v_byte) << (i * arr.element_width);
+                m_val |= BigUint::from(m_byte) << (i * arr.element_width);
+            }
+            return (v_val, m_val);
+        }
         let byte_size = get_byte_size(signal.width);
         let v_ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let v_slice = unsafe { std::slice::from_raw_parts(v_ptr, byte_size) };
