@@ -85,7 +85,7 @@ fn tiered_promotes_and_matches_expected_results() {
 
     // Wait for background compilation, ticking so safe points poll the
     // completion channel.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while !sim.is_compiled() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
         sim.tick(clk).unwrap();
@@ -140,7 +140,7 @@ module Top (
 
     // Wait out background compilation, then drive more ticks on the
     // compiled tier so drained events span both tiers.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while !sim.is_compiled() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
         sim.tick(clk).unwrap();

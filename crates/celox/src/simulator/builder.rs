@@ -2092,9 +2092,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
             let (laid_out, warnings, options, vcd_path, injected_components) = self
-                .into_laid_out_program(
-                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
-                )?;
+                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",

@@ -170,7 +170,7 @@ pub struct SharedNativeCode {
     layout: MemoryLayout,
     /// Simulation-state bytes plus the largest native spill/scratch arena
     /// required by any compiled function.
-    native_memory_size: usize,
+    pub(crate) native_memory_size: usize,
     options: NativeRuntimeOptions,
     /// (offset, byte_size) pairs for 4-state variables that need X initialization.
     four_state_inits: Vec<(usize, usize)>,

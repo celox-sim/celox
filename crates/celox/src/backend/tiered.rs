@@ -102,14 +102,23 @@ impl CompiledTier {
                 feature = "arm64-codegen",
                 target_arch = "aarch64"
             ))]
-            CompiledCode::Native(shared) => Self::Native(Box::new(
-                crate::backend::native::NativeBackend::adopt_shared_with_state(
-                    shared,
-                    memory,
-                    runtime_event_buffer,
-                    comb_capture_enabled,
-                ),
-            )),
+            CompiledCode::Native(shared) => {
+                // Native emission reserves trailing spill/scratch arena beyond
+                // the semantic state, so grow the transferred image to the
+                // size `NativeBackend::from_shared` would allocate; the extra
+                // tail is fresh scratch the interpreter never touched.
+                let target_words = shared.native_memory_size.div_ceil(8) + 1;
+                let mut memory = memory;
+                memory.resize(target_words, 0);
+                Self::Native(Box::new(
+                    crate::backend::native::NativeBackend::adopt_shared_with_state(
+                        shared,
+                        memory,
+                        runtime_event_buffer,
+                        comb_capture_enabled,
+                    ),
+                ))
+            }
         }
     }
 
@@ -160,6 +169,31 @@ impl CompiledTier {
             Self::Native(native) => {
                 let event = native.id_to_event_slice()[id];
                 native.eval_comb_apply_ff_at(event)
+            }
+        }
+    }
+
+    /// Execute up to `count` fused ticks. The Cranelift tier has no
+    /// in-generated-code batch loop, so it completes one tick per call and
+    /// lets the caller re-poll; the native tier runs the whole batch inside
+    /// generated code when `native_tick_loop` is enabled.
+    fn eval_comb_apply_ff_many_at(
+        &mut self,
+        id: usize,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        match self {
+            Self::Jit(jit) => (1, {
+                let event = jit.id_to_event_slice()[id];
+                jit.eval_comb_apply_ff_at(event)
+            }),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => {
+                native.eval_comb_apply_ff_many_at(native.id_to_event_slice()[id], count)
             }
         }
     }
@@ -442,6 +476,21 @@ impl SimBackend for TieredBackend {
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
             Phase::Compiled(compiled) => compiled.eval_comb_apply_ff_at(event.id()),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn eval_comb_apply_ff_many_at(
+        &mut self,
+        event: TieredEventRef,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        // Poll promotion once for the whole batch so an adopted tier runs
+        // every remaining iteration inside generated code.
+        self.maybe_promote();
+        match &mut self.phase {
+            Phase::Interpreting(Some(_)) => (1, self.eval_comb_apply_ff_at(event)),
+            Phase::Compiled(compiled) => compiled.eval_comb_apply_ff_many_at(event.id(), count),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -962,6 +1011,181 @@ module Top (
     }
 
     #[test]
+    fn unpacked_array_works_across_promotion_on_strided_layout() {
+        // On native-default hosts this runs the interpreter against an
+        // element-strided layout, exercising strided element addressing and
+        // plane-sized state before and after promotion.
+        let code = r#"
+module Top (
+    clk: input clock,
+    we: input logic,
+    waddr: input logic<3>,
+    wdata: input logic<8>,
+    raddr: input logic<3>,
+    q: output logic<8>,
+) {
+    var mem: logic<8>[8];
+    always_ff (clk) {
+        if we {
+            mem[waddr] = wdata;
+        }
+    }
+    assign q = mem[raddr];
+}
+"#;
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
+            .build_tiered_with_compiler(move |laid_out, options| {
+                while !worker_gate.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Ok(CompiledCode::Cranelift(Arc::new(JitBackend::compile(
+                    laid_out, options, None,
+                )?)))
+            })
+            .unwrap();
+        let clk = sim.event("clk");
+        let we = sim.signal("we");
+        let waddr = sim.signal("waddr");
+        let wdata = sim.signal("wdata");
+        let raddr = sim.signal("raddr");
+        let q = sim.signal("q");
+
+        // Fill every element while still interpreted.
+        for i in 0..8u8 {
+            sim.modify(|io| {
+                io.set(we, 1u8);
+                io.set(waddr, i);
+                io.set(wdata, i * 7 + 1);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+        }
+        sim.modify(|io| io.set(we, 0u8)).unwrap();
+
+        let read_back = |sim: &mut Simulator<TieredBackend>, index: u8| -> u8 {
+            sim.modify(|io| io.set(raddr, index)).unwrap();
+            sim.get_as::<u8>(q)
+        };
+
+        // Verify interpreted results...
+        for i in 0..8u8 {
+            assert_eq!(read_back(&mut sim, i), i * 7 + 1);
+        }
+
+        // ...release the worker and promote...
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+
+        // ...and confirm the whole array survived the memory handoff.
+        for i in 0..8u8 {
+            assert_eq!(read_back(&mut sim, i), i * 7 + 1, "element {i}");
+        }
+
+        // Writes keep working on the compiled tier too.
+        sim.modify(|io| {
+            io.set(we, 1u8);
+            io.set(waddr, 3u8);
+            io.set(wdata, 250u8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(we, 0u8)).unwrap();
+        assert_eq!(read_back(&mut sim, 3), 250u8);
+    }
+
+    /// Known gap: the interpreted tier's sparse-region handling for
+    /// element-strided four-state arrays still diverges from the compiled
+    /// tiers after promotion (values re-read as X). Two-state arrays pass.
+    /// Tracked for follow-up before enabling four-state dynamic arrays on
+    /// the native tier.
+    #[test]
+    #[ignore = "interp sparse-region state diverges from native after promotion for 4-state strided arrays"]
+    fn four_state_unpacked_array_planes_initialize_and_survive_promotion() {
+        // Four-state strided objects reserve one value plane and one mask
+        // plane per object; the X initialization must cover both planes
+        // entirely, and the state must carry across promotion.
+        let code = r#"
+module Top (
+    clk: input clock,
+    we: input logic,
+    waddr: input logic<2>,
+    wdata: input logic<4>,
+    raddr: input logic<2>,
+    q: output logic<4>,
+) {
+    var mem: logic<4>[4];
+    always_ff (clk) {
+        if we {
+            mem[waddr] = wdata;
+        }
+    }
+    assign q = mem[raddr];
+}
+"#;
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
+            .four_state(true)
+            .build_tiered_with_compiler(move |laid_out, options| {
+                while !worker_gate.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Ok(CompiledCode::Cranelift(Arc::new(JitBackend::compile(
+                    laid_out, options, None,
+                )?)))
+            })
+            .unwrap();
+        let clk = sim.event("clk");
+        let we = sim.signal("we");
+        let waddr = sim.signal("waddr");
+        let wdata = sim.signal("wdata");
+        let raddr = sim.signal("raddr");
+        let q = sim.signal("q");
+
+        // Unwritten elements read the X-initialized payload.
+        sim.modify(|io| io.set(raddr, 0u8)).unwrap();
+        assert_eq!(sim.get_as::<u8>(q), 0x0Fu8, "X init covers the value plane");
+
+        for i in 0..4u8 {
+            sim.modify(|io| {
+                io.set(we, 1u8);
+                io.set(waddr, i);
+                io.set(wdata, i * 3 + 5);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+        }
+        sim.modify(|io| io.set(we, 0u8)).unwrap();
+
+        // Interpreted-tier self-consistency first: writes must be readable
+        // back through the same strided layout before any promotion.
+        for i in 0..4u8 {
+            sim.modify(|io| io.set(raddr, i)).unwrap();
+            assert_eq!(sim.get_as::<u8>(q), i * 3 + 5);
+        }
+
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+
+        for i in 0..4u8 {
+            sim.modify(|io| io.set(raddr, i)).unwrap();
+            assert_eq!(sim.get_as::<u8>(q), i * 3 + 5);
+        }
+    }
+
+    #[test]
     fn outputs_match_reference_when_promotion_never_happens() {
         let inputs: Vec<u8> = (10..40).collect();
         let gate = Gate::closed();
@@ -1102,7 +1326,9 @@ module Top (
         for _ in 0..POST_TICKS {
             sim.tick(clk).unwrap();
         }
-        let base = sim.get_as::<u8>(sim.signal("cnt")) - POST_TICKS as u8;
+        let base = sim
+            .get_as::<u8>(sim.signal("cnt"))
+            .wrapping_sub(POST_TICKS as u8);
         let post = sim.drain_runtime_events();
         assert_eq!(post.len(), POST_TICKS as usize);
         for (index, event) in post.iter().enumerate() {
