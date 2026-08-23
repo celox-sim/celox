@@ -3,10 +3,12 @@
 //! [`TieredBackend`] starts every simulation on the Tier-0 interpreter so
 //! execution begins the moment the state layout is finalized, hiding the
 //! code-generation latency behind the first simulated steps. A worker thread
-//! compiles the program for the Cranelift JIT in the background; the next
-//! scheduler safe point after completion adopts the compiled code and moves
-//! the live memory image across without any translation, because both tiers
-//! share the same packed layout ABI and event-buffer pointer conventions.
+//! compiles the program for the host's default compiled tier in the
+//! background — the direct native backend where available (matching
+//! [`crate::DefaultBackend`]'s selection), Cranelift otherwise — and the next
+//! scheduler safe point after completion adopts the compiled code, moving the
+//! live memory image across without any translation because both tiers run
+//! against the same finalized layout.
 //!
 //! Promotion is whole-program: once the compiled tier is adopted it is used
 //! for the remainder of the simulation. The interpreter remains the permanent
@@ -22,11 +24,194 @@ use num_bigint::BigUint;
 use super::{
     EventHandle, MemoryLayout, RuntimeEventBuffer, SharedJitCode, SimBackend, SimulatorErrorCode,
 };
+#[cfg(any(
+    target_arch = "x86_64",
+    feature = "arm64-codegen",
+    target_arch = "aarch64"
+))]
+use crate::backend::native::SharedNativeCode;
 use crate::backend::{InterpBackend, JitBackend};
 use crate::{
     SimulatorError, SimulatorOptions,
     ir::{AbsoluteAddr, LaidOutProgram, SignalRef},
 };
+
+/// Whether this host's default compiled tier is the direct native backend
+/// (mirroring [`crate::DefaultBackend`]'s selection) rather than Cranelift.
+pub(crate) fn native_is_default_target() -> bool {
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
+    {
+        true
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    )))]
+    {
+        false
+    }
+}
+
+/// The memory-layout mode the selected compiled tier requires. The
+/// interpreter runs on whichever mode that tier needs, because it reads the
+/// generic layout tables instead of embedded addressing.
+pub(crate) fn default_target_layout_mode() -> crate::backend::memory_layout::MemoryLayoutMode {
+    if native_is_default_target() {
+        // The native backend's unpacked-array addressing assumes
+        // element-strided planes, matching `SimulatorBuilder::build_native`.
+        crate::backend::memory_layout::MemoryLayoutMode::ElementStrided
+    } else {
+        crate::backend::memory_layout::MemoryLayoutMode::Packed
+    }
+}
+
+/// The adopted compiled tier.
+enum CompiledTier {
+    Jit(Box<JitBackend>),
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    Native(Box<crate::backend::native::NativeBackend>),
+}
+
+impl CompiledTier {
+    /// Bind compiled code to a live simulation state handed over by the
+    /// interpreter during promotion.
+    fn adopt(
+        code: CompiledCode,
+        memory: Vec<u64>,
+        runtime_event_buffer: Arc<RuntimeEventBuffer>,
+        comb_capture_enabled: Vec<u8>,
+    ) -> Self {
+        match code {
+            CompiledCode::Cranelift(shared) => {
+                Self::Jit(Box::new(JitBackend::adopt_shared_with_state(
+                    shared,
+                    memory,
+                    runtime_event_buffer,
+                    comb_capture_enabled,
+                )))
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            CompiledCode::Native(shared) => Self::Native(Box::new(
+                crate::backend::native::NativeBackend::adopt_shared_with_state(
+                    shared,
+                    memory,
+                    runtime_event_buffer,
+                    comb_capture_enabled,
+                ),
+            )),
+        }
+    }
+
+    fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
+        match self {
+            Self::Jit(jit) => jit.eval_comb(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => native.eval_comb(),
+        }
+    }
+
+    /// Resolve the tier's own event handle for a shared trigger id. Every
+    /// backend indexes its event table by the same deterministic id space,
+    /// so translation is an array lookup.
+    fn eval_apply_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
+        match self {
+            Self::Jit(jit) => {
+                let event = jit.id_to_event_slice()[id];
+                jit.eval_apply_ff_at(event)
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => {
+                let event = native.id_to_event_slice()[id];
+                native.eval_apply_ff_at(event)
+            }
+        }
+    }
+
+    fn eval_comb_apply_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
+        match self {
+            Self::Jit(jit) => {
+                let event = jit.id_to_event_slice()[id];
+                jit.eval_comb_apply_ff_at(event)
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => {
+                let event = native.id_to_event_slice()[id];
+                native.eval_comb_apply_ff_at(event)
+            }
+        }
+    }
+
+    fn eval_only_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
+        match self {
+            Self::Jit(jit) => {
+                let event = jit.id_to_event_slice()[id];
+                jit.eval_only_ff_at(event)
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => {
+                let event = native.id_to_event_slice()[id];
+                native.eval_only_ff_at(event)
+            }
+        }
+    }
+
+    fn apply_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
+        match self {
+            Self::Jit(jit) => {
+                let event = jit.id_to_event_slice()[id];
+                jit.apply_ff_at(event)
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => {
+                let event = native.id_to_event_slice()[id];
+                native.apply_ff_at(event)
+            }
+        }
+    }
+}
+
+/// Compiled code produced by the background worker, before it is bound to a
+/// live simulation state at promotion time.
+pub(crate) enum CompiledCode {
+    Cranelift(Arc<SharedJitCode>),
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    Native(Arc<SharedNativeCode>),
+}
 
 /// Stable event handle for the tiered backend.
 ///
@@ -52,13 +237,13 @@ impl EventHandle for TieredEventRef {
 
 enum Phase {
     Interpreting(Option<Box<InterpBackend>>),
-    Compiled(Box<JitBackend>),
+    Compiled(CompiledTier),
 }
 
 enum Promotion {
     /// Background compilation still running; the receiver yields exactly one
     /// result when it finishes.
-    Pending(mpsc::Receiver<Result<SharedJitCode, SimulatorError>>),
+    Pending(mpsc::Receiver<Result<CompiledCode, SimulatorError>>),
     /// Compilation failed permanently; remain on the interpreter forever.
     Failed(SimulatorError),
     Promoted,
@@ -75,25 +260,54 @@ pub struct TieredBackend {
 }
 
 impl TieredBackend {
-    /// Build a tiered simulation: ready to run immediately on the
-    /// interpreter while the compiled tier is prepared in the background.
+    /// Build a tiered simulation targeting this host's default compiled
+    /// tier: ready to run immediately on the interpreter while the compiled
+    /// tier is prepared in the background.
     pub fn new(laid_out: &LaidOutProgram, options: &SimulatorOptions) -> Self {
-        Self::with_compiler(laid_out, options, |laid_out, options| {
-            JitBackend::compile(laid_out, options, None)
-        })
+        if native_is_default_target() {
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            {
+                Self::with_compiler(laid_out, options, |laid_out, options| {
+                    use crate::backend::native::{NativeBackend, SharedNativeCode};
+                    let image = NativeBackend::compile_image(laid_out, options)?;
+                    // Safety: the image was produced in-process by the Celox
+                    // compiler above.
+                    let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+                    Ok(CompiledCode::Native(shared))
+                })
+            }
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            )))]
+            {
+                unreachable!("native tier selected on a host without native support")
+            }
+        } else {
+            Self::with_compiler(laid_out, options, |laid_out, options| {
+                Ok(CompiledCode::Cranelift(Arc::new(JitBackend::compile(
+                    laid_out, options, None,
+                )?)))
+            })
+        }
     }
 
     /// Build a tiered simulation with a custom compilation step.
     ///
     /// `compile` runs on the worker thread. Tests use this to gate or stub
     /// compilation so promotion timing is deterministic.
-    pub fn with_compiler<F>(
+    pub(crate) fn with_compiler<F>(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
         compile: F,
     ) -> Self
     where
-        F: FnOnce(&LaidOutProgram, &SimulatorOptions) -> Result<SharedJitCode, SimulatorError>
+        F: FnOnce(&LaidOutProgram, &SimulatorOptions) -> Result<CompiledCode, SimulatorError>
             + Send
             + 'static,
     {
@@ -164,19 +378,10 @@ impl TieredBackend {
         let Promotion::Pending(receiver) = &self.promotion else {
             return;
         };
-        match receiver.try_recv() {
-            Ok(result) => self.handle_compile_result(result),
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                // The worker died before reporting; stay interpreted forever
-                // rather than promoting with unknown state.
-                self.promotion =
-                    Promotion::Failed(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
-            }
-        }
-    }
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
 
-    fn handle_compile_result(&mut self, result: Result<SharedJitCode, SimulatorError>) {
         let Ok(code) = result else {
             // Compilation errors keep the simulation on the interpreter;
             // the reason stays retrievable via promotion_error().
@@ -187,22 +392,21 @@ impl TieredBackend {
             return;
         };
 
-        let shared = Arc::new(code);
         let mut adopted = None;
         if let Phase::Interpreting(slot) = &mut self.phase {
             if let Some(mut interp) = slot.take() {
                 let (memory, runtime_event_buffer, comb_capture_enabled) = interp.tier_transfer();
                 drop(interp);
-                adopted = Some(Box::new(JitBackend::adopt_shared_with_state(
-                    shared,
+                adopted = Some(CompiledTier::adopt(
+                    code,
                     memory,
                     runtime_event_buffer,
                     comb_capture_enabled,
-                )));
+                ));
             }
         }
-        if let Some(jit) = adopted {
-            self.phase = Phase::Compiled(jit);
+        if let Some(compiled) = adopted {
+            self.phase = Phase::Compiled(compiled);
             self.promotion = Promotion::Promoted;
         }
     }
@@ -215,7 +419,7 @@ impl SimBackend for TieredBackend {
         self.maybe_promote();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb(),
-            Phase::Compiled(jit) => jit.eval_comb(),
+            Phase::Compiled(compiled) => compiled.eval_comb(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -226,7 +430,7 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => interp.eval_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
-            Phase::Compiled(jit) => jit.eval_apply_ff_at(jit.id_to_event_slice()[event.id()]),
+            Phase::Compiled(compiled) => compiled.eval_apply_ff_at(event.id()),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -237,7 +441,7 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => interp.eval_comb_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
-            Phase::Compiled(jit) => jit.eval_comb_apply_ff_at(jit.id_to_event_slice()[event.id()]),
+            Phase::Compiled(compiled) => compiled.eval_comb_apply_ff_at(event.id()),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -248,7 +452,7 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => interp.eval_only_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
-            Phase::Compiled(jit) => jit.eval_only_ff_at(jit.id_to_event_slice()[event.id()]),
+            Phase::Compiled(compiled) => compiled.eval_only_ff_at(event.id()),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -259,7 +463,7 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => interp.apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
-            Phase::Compiled(jit) => jit.apply_ff_at(jit.id_to_event_slice()[event.id()]),
+            Phase::Compiled(compiled) => compiled.apply_ff_at(event.id()),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -267,7 +471,13 @@ impl SimBackend for TieredBackend {
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.resolve_signal(addr),
-            Phase::Compiled(jit) => jit.resolve_signal(addr),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.resolve_signal(addr),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.resolve_signal(addr),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -281,8 +491,20 @@ impl SimBackend for TieredBackend {
                     id: ev.id(),
                 }
             }
-            Phase::Compiled(jit) => {
+            Phase::Compiled(CompiledTier::Jit(jit)) => {
                 let ev = jit.resolve_event(addr);
+                TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                }
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                let ev = native.resolve_event(addr);
                 TieredEventRef {
                     addr: ev.addr(),
                     id: ev.id(),
@@ -300,10 +522,23 @@ impl SimBackend for TieredBackend {
                     id: ev.id(),
                 })
             }
-            Phase::Compiled(jit) => jit.resolve_event_opt(addr).map(|ev| TieredEventRef {
-                addr: ev.addr(),
-                id: ev.id(),
-            }),
+            Phase::Compiled(CompiledTier::Jit(jit)) => {
+                jit.resolve_event_opt(addr).map(|ev| TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                })
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                native.resolve_event_opt(addr).map(|ev| TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                })
+            }
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -318,10 +553,23 @@ impl SimBackend for TieredBackend {
                         id: ev.id(),
                     })
             }
-            Phase::Compiled(jit) => jit.resolve_eval_only_event(addr).map(|ev| TieredEventRef {
-                addr: ev.addr(),
-                id: ev.id(),
-            }),
+            Phase::Compiled(CompiledTier::Jit(jit)) => {
+                jit.resolve_eval_only_event(addr).map(|ev| TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                })
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native
+                .resolve_eval_only_event(addr)
+                .map(|ev| TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                }),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -334,10 +582,23 @@ impl SimBackend for TieredBackend {
                     id: ev.id(),
                 })
             }
-            Phase::Compiled(jit) => jit.resolve_apply_event(addr).map(|ev| TieredEventRef {
-                addr: ev.addr(),
-                id: ev.id(),
-            }),
+            Phase::Compiled(CompiledTier::Jit(jit)) => {
+                jit.resolve_apply_event(addr).map(|ev| TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                })
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                native.resolve_apply_event(addr).map(|ev| TieredEventRef {
+                    addr: ev.addr(),
+                    id: ev.id(),
+                })
+            }
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -345,7 +606,13 @@ impl SimBackend for TieredBackend {
     fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set(signal, value),
-            Phase::Compiled(jit) => jit.set(signal, value),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.set(signal, value),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.set(signal, value),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -353,7 +620,13 @@ impl SimBackend for TieredBackend {
     fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set_wide(signal, value),
-            Phase::Compiled(jit) => jit.set_wide(signal, value),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.set_wide(signal, value),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.set_wide(signal, value),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -361,7 +634,15 @@ impl SimBackend for TieredBackend {
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set_four_state(signal, value, mask),
-            Phase::Compiled(jit) => jit.set_four_state(signal, value, mask),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.set_four_state(signal, value, mask),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                native.set_four_state(signal, value, mask)
+            }
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -369,7 +650,13 @@ impl SimBackend for TieredBackend {
     fn get(&self, signal: SignalRef) -> BigUint {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get(signal),
-            Phase::Compiled(jit) => jit.get(signal),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.get(signal),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.get(signal),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -377,7 +664,13 @@ impl SimBackend for TieredBackend {
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_as(signal),
-            Phase::Compiled(jit) => jit.get_as(signal),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_as(signal),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.get_as(signal),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -385,7 +678,13 @@ impl SimBackend for TieredBackend {
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_four_state(signal),
-            Phase::Compiled(jit) => jit.get_four_state(signal),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_four_state(signal),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.get_four_state(signal),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -393,7 +692,13 @@ impl SimBackend for TieredBackend {
     fn memory_as_ptr(&self) -> (*const u8, usize) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.memory_as_ptr(),
-            Phase::Compiled(jit) => jit.memory_as_ptr(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_as_ptr(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.memory_as_ptr(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -401,7 +706,13 @@ impl SimBackend for TieredBackend {
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.memory_as_mut_ptr(),
-            Phase::Compiled(jit) => jit.memory_as_mut_ptr(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_as_mut_ptr(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.memory_as_mut_ptr(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -409,7 +720,13 @@ impl SimBackend for TieredBackend {
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.runtime_event_buffer_as_ptr(),
-            Phase::Compiled(jit) => jit.runtime_event_buffer_as_ptr(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.runtime_event_buffer_as_ptr(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.runtime_event_buffer_as_ptr(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -417,7 +734,13 @@ impl SimBackend for TieredBackend {
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.runtime_event_buffer(),
-            Phase::Compiled(jit) => Some(jit.runtime_event_buffer().clone()),
+            Phase::Compiled(CompiledTier::Jit(jit)) => Some(jit.runtime_event_buffer().clone()),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.runtime_event_buffer(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -427,7 +750,17 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => {
                 interp.set_comb_capture_event_enabled(active_sites)
             }
-            Phase::Compiled(jit) => jit.set_comb_capture_event_enabled(active_sites),
+            Phase::Compiled(CompiledTier::Jit(jit)) => {
+                jit.set_comb_capture_event_enabled(active_sites)
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                native.set_comb_capture_event_enabled(active_sites)
+            }
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -435,7 +768,13 @@ impl SimBackend for TieredBackend {
     fn stable_region_size(&self) -> usize {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.stable_region_size(),
-            Phase::Compiled(jit) => jit.stable_region_size(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.stable_region_size(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.stable_region_size(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -443,7 +782,13 @@ impl SimBackend for TieredBackend {
     fn layout(&self) -> &MemoryLayout {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.layout(),
-            Phase::Compiled(jit) => jit.layout(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.layout(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.layout(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -451,7 +796,13 @@ impl SimBackend for TieredBackend {
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr] {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.id_to_addr_slice(),
-            Phase::Compiled(jit) => jit.id_to_addr_slice(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.id_to_addr_slice(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.id_to_addr_slice(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -463,7 +814,13 @@ impl SimBackend for TieredBackend {
     fn num_events(&self) -> usize {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.num_events(),
-            Phase::Compiled(jit) => jit.num_events(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.num_events(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.num_events(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -471,7 +828,13 @@ impl SimBackend for TieredBackend {
     fn clear_triggered_bits(&mut self) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.clear_triggered_bits(),
-            Phase::Compiled(jit) => jit.clear_triggered_bits(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.clear_triggered_bits(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.clear_triggered_bits(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -479,7 +842,13 @@ impl SimBackend for TieredBackend {
     fn mark_triggered_bit(&mut self, id: usize) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.mark_triggered_bit(id),
-            Phase::Compiled(jit) => jit.mark_triggered_bit(id),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.mark_triggered_bit(id),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.mark_triggered_bit(id),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -487,7 +856,13 @@ impl SimBackend for TieredBackend {
     fn get_triggered_bits(&self) -> bit_set::BitSet {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_triggered_bits(),
-            Phase::Compiled(jit) => jit.get_triggered_bits(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_triggered_bits(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.get_triggered_bits(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -534,6 +909,9 @@ module Top (
         }
     }
 
+    /// Compile through the Cranelift tier behind a gate. The native tier is
+    /// covered end-to-end by the public `build_tiered` integration tests on
+    /// native hosts; gating lets these unit tests pin promotion timing.
     fn build_gated(gate: &Gate) -> Simulator<TieredBackend> {
         let worker_gate = gate.0.clone();
         SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
@@ -541,7 +919,9 @@ module Top (
                 while !worker_gate.load(Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                JitBackend::compile(laid_out, options, None)
+                Ok(CompiledCode::Cranelift(Arc::new(JitBackend::compile(
+                    laid_out, options, None,
+                )?)))
             })
             .unwrap()
     }
@@ -569,13 +949,9 @@ module Top (
             sim.modify(|io| io.set(d, value)).unwrap();
             sim.tick(clk).unwrap();
             sim.tick(clk).unwrap();
-            observed.push(sim.get_as::<u8>(q_signal(sim)));
+            observed.push(sim.get_as::<u8>(sim.signal("q")));
         }
         observed
-    }
-
-    fn q_signal(sim: &Simulator<TieredBackend>) -> crate::SignalRef {
-        sim.signal("q")
     }
 
     fn reference_outputs(inputs: &[u8]) -> Vec<u8> {
@@ -620,7 +996,7 @@ module Top (
             sim.modify(|io| io.set(d, value)).unwrap();
             sim.tick(clk).unwrap();
             sim.tick(clk).unwrap();
-            observed.push(sim.get_as::<u8>(q_signal(&sim)));
+            observed.push(sim.get_as::<u8>(sim.signal("q")));
         }
 
         // Release the worker; the next safe points adopt the compiled tier.
@@ -638,7 +1014,7 @@ module Top (
             sim.modify(|io| io.set(d, value)).unwrap();
             sim.tick(clk).unwrap();
             sim.tick(clk).unwrap();
-            observed.push(sim.get_as::<u8>(q_signal(&sim)));
+            observed.push(sim.get_as::<u8>(sim.signal("q")));
         }
 
         assert_eq!(observed, reference_outputs(&inputs));
@@ -690,7 +1066,9 @@ module Top (
                 while !worker_gate.load(Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                JitBackend::compile(laid_out, options, None)
+                Ok(CompiledCode::Cranelift(Arc::new(JitBackend::compile(
+                    laid_out, options, None,
+                )?)))
             })
             .unwrap();
         let clk = sim.event("clk");

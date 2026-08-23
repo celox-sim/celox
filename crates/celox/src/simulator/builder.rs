@@ -1993,35 +1993,21 @@ mod host {
 
         /// Compiles SIR, finalizes the state layout, and returns a simulator
         /// that starts executing on the Tier-0 interpreter immediately while
-        /// the Cranelift tier is compiled in the background.
+        /// the host's default compiled tier (native where available,
+        /// Cranelift otherwise) is compiled in the background.
         ///
         /// The first scheduler safe point after background compilation
         /// completes adopts the compiled code and moves the live memory image
-        /// across without translation; both tiers share the same packed
-        /// layout ABI. If background compilation fails the simulator keeps
-        /// running on the interpreter.
-        /// Build a tiered simulator with a caller-provided compilation step.
-        ///
-        /// Used by tests to make promotion timing deterministic; `compile`
-        /// runs on the background worker thread.
-        #[cfg(test)]
-        pub(crate) fn build_tiered_with_compiler<F>(
+        /// across without translation. If background compilation fails the
+        /// simulator keeps running on the interpreter.
+        pub fn build_tiered(
             self,
-            compile: F,
-        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError>
-        where
-            F: FnOnce(
-                    &crate::ir::LaidOutProgram,
-                    &SimulatorOptions,
-                ) -> Result<crate::backend::SharedJitCode, SimulatorError>
-                + Send
-                + 'static,
-        {
+        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
-                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            let (laid_out, warnings, options, vcd_path, injected_components) =
+                self.into_laid_out_program(crate::backend::tiered::default_target_layout_mode())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2030,8 +2016,7 @@ mod host {
                 );
             }
 
-            let backend =
-                crate::backend::TieredBackend::with_compiler(&laid_out, &options, compile);
+            let backend = crate::backend::TieredBackend::new(&laid_out, &options);
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
@@ -2048,14 +2033,29 @@ mod host {
             Ok(sim)
         }
 
-        pub fn build_tiered(
+        /// Build a tiered simulator with a caller-provided compilation step.
+        ///
+        /// Used by tests to make promotion timing deterministic; `compile`
+        /// runs on the background worker thread.
+        #[cfg(test)]
+        pub(crate) fn build_tiered_with_compiler<F>(
             self,
-        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError> {
+            compile: F,
+        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError>
+        where
+            F: FnOnce(
+                    &crate::ir::LaidOutProgram,
+                    &SimulatorOptions,
+                )
+                    -> Result<crate::backend::tiered::CompiledCode, SimulatorError>
+                + Send
+                + 'static,
+        {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
-                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            let (laid_out, warnings, options, vcd_path, injected_components) =
+                self.into_laid_out_program(crate::backend::tiered::default_target_layout_mode())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2064,7 +2064,8 @@ mod host {
                 );
             }
 
-            let backend = crate::backend::TieredBackend::new(&laid_out, &options);
+            let backend =
+                crate::backend::TieredBackend::with_compiler(&laid_out, &options, compile);
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);

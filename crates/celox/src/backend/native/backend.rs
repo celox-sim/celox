@@ -2109,6 +2109,27 @@ impl NativeBackend {
         backend
     }
 
+    /// Build a backend from compiled code plus an existing live simulation
+    /// state, e.g. when a tiered simulation promotes from the interpreter.
+    ///
+    /// The caller must guarantee the state was produced against the same
+    /// laid-out program (identical layout), and that the event buffer `Arc`
+    /// is the one referenced by the state header so its pointer stays valid.
+    pub(crate) fn adopt_shared_with_state(
+        shared: Arc<SharedNativeCode>,
+        memory: Vec<u64>,
+        runtime_event_buffer: Arc<RuntimeEventBuffer>,
+        comb_capture_enabled: Vec<u8>,
+    ) -> Self {
+        Self {
+            compiled: shared,
+            memory,
+            runtime_event_buffer,
+            comb_capture_enabled,
+            execution_timing: None,
+        }
+    }
+
     fn apply_initial_values(&mut self, initial_state: &[InitialStateValue<AbsoluteAddr>]) {
         for init in initial_state {
             let signal = self.resolve_signal(&init.address);
