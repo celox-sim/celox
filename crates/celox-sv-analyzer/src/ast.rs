@@ -220,7 +220,10 @@ impl Module {
             });
         }
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
-        let parameter_values = parameter_value_env(&parameters, &const_env);
+        let mut parameter_values = parameter_value_env(&parameters, &const_env);
+        for (name, value) in enum_member_constants_from_module_node(node.clone(), syntax_tree)? {
+            parameter_values.entry(name).or_insert(value);
+        }
         let mut expression_signedness = ports
             .iter()
             .map(|port| (port.name().to_string(), port.r#type().is_signed()))
@@ -608,6 +611,9 @@ fn cast_target_type(
             expr_type_from_type(type_aliases.get(&name)?, const_env)
         }
         sv_parser::CastingType::ConstantPrimary(primary) => {
+            if let Some(r#type) = size_system_function_expr_type(primary, syntax_tree, const_env) {
+                return Some(r#type);
+            }
             let target = const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)?;
             if let ConstExpr::Ident(name) = &target {
                 return expr_type_from_type(type_aliases.get(name)?, const_env);
@@ -620,6 +626,33 @@ fn cast_target_type(
         }
         _ => None,
     }
+}
+
+fn size_system_function_expr_type(
+    primary: &sv_parser::ConstantPrimary,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Option<ExprType> {
+    let sv_parser::ConstantPrimary::ConstantFunctionCall(call) = primary else {
+        return None;
+    };
+    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0 else {
+        return None;
+    };
+    let sv_parser::SystemTfCall::ArgDataType(call) = &**system_call else {
+        return None;
+    };
+    let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
+    if name != "$bits" && name != "$size" {
+        return None;
+    }
+    let data_type = unwrap_node!(
+        RefNode::SystemTfCallArgDataType(call),
+        DataTypeVector,
+        DataTypeAtom
+    )?;
+    let r#type = type_from_ref_node(data_type.clone(), syntax_tree)?;
+    expr_type_from_type(&r#type, const_env)
 }
 
 fn expr_type_from_type(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<ExprType> {
@@ -655,7 +688,7 @@ fn constant_cast_is_supported(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
-    constant_cast_zero_type(cast, syntax_tree, const_env, type_aliases).is_some()
+    constant_cast_const_expr(cast, syntax_tree, const_env, type_aliases).is_some()
 }
 
 fn cast_zero_type(
@@ -684,12 +717,12 @@ fn cast_zero_type(
     })
 }
 
-fn constant_cast_zero_type(
+fn constant_cast_const_expr(
     cast: &sv_parser::ConstantCast,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-) -> Option<ExprType> {
+) -> Option<ConstExpr> {
     let ConstExpr::Literal(literal) = const_expr_from_ref_node(
         RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
         syntax_tree,
@@ -698,27 +731,23 @@ fn constant_cast_zero_type(
         return None;
     };
     let literal = typecheck::parse_integral_literal(&literal)?;
-    if literal.value != 0u8.into() || literal.mask != 0u8.into() {
+    if literal.mask != 0u8.into() {
         return None;
     }
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
-    let signed = if matches!(cast.nodes.0, sv_parser::CastingType::ConstantPrimary(_)) {
-        literal.signed
+    let value = if literal.value.bits() > target_type.width as u64 {
+        literal.value
+            & ((num_bigint::BigUint::from(1usize) << target_type.width)
+                - num_bigint::BigUint::from(1usize))
     } else {
-        target_type.signed
+        literal.value.clone()
     };
-    Some(ExprType {
-        signed,
-        ..target_type
-    })
-}
-
-fn typed_zero_literal(r#type: ExprType) -> String {
-    format!(
-        "{}'{}d0",
-        r#type.width,
-        if r#type.signed { "s" } else { "" }
-    )
+    Some(ConstExpr::Literal(format!(
+        "{}'{}d{}",
+        target_type.width,
+        if target_type.signed { "s" } else { "" },
+        value
+    )))
 }
 
 fn for_loop_variable_lvalue_name(
@@ -844,18 +873,6 @@ fn reject_silently_ignored_constructs(
                     ));
                 }
                 let body = RefNode::Statement(&always.nodes.1);
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
-                    && body.clone().into_iter().any(|node| {
-                        matches!(
-                            node,
-                            RefNode::ConditionalStatement(_) | RefNode::CaseStatement(_)
-                        )
-                    })
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "control flow inside always_comb".to_string(),
-                    ));
-                }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
                     && body
                         .clone()
@@ -3059,6 +3076,50 @@ fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128
     } else {
         bits as i128
     }
+}
+
+/// Collect enum member constants declared by module-level `typedef enum`
+/// declarations. Members must carry explicit values, matching what Veryl
+/// emits; the values become literal expressions usable anywhere in the
+/// module body.
+fn enum_member_constants_from_module_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<HashMap<String, Expr>, AnalyzerError> {
+    let mut constants = HashMap::default();
+    for item in module_non_port_items(node) {
+        let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
+            continue;
+        };
+        let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) = declaration else {
+            continue;
+        };
+        let sv_parser::DataDeclaration::TypeDeclaration(type_declaration) = &**data else {
+            continue;
+        };
+        let sv_parser::TypeDeclaration::DataType(type_declaration) = &**type_declaration else {
+            continue;
+        };
+        let sv_parser::DataType::Enum(r#enum) = &type_declaration.nodes.1 else {
+            continue;
+        };
+        for member in r#enum.nodes.2.nodes.1.contents() {
+            let name = identifier_text(RefNode::Identifier(&member.nodes.0.nodes.0), syntax_tree)
+                .ok_or_else(|| {
+                AnalyzerError::Unsupported("enum member identifier".to_string())
+            })?;
+            let Some((_, value)) = &member.nodes.2 else {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "enum member `{name}` without an explicit value"
+                )));
+            };
+            let value = const_expr_from_ref_node(RefNode::ConstantExpression(value), syntax_tree)
+                .map(const_expr_to_expr)
+                .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
+            constants.insert(name, value);
+        }
+    }
+    Ok(constants)
 }
 
 fn parameter_value_env(
@@ -6964,23 +7025,199 @@ fn comb_process_from_always_construct(
         return Ok(None);
     }
     validate_always_comb_statement(&always.nodes.1)?;
-    let assignments = assignments_from_statement(&always.nodes.1, syntax_tree, packed_dimensions);
-    let assignment_count = RefNode::Statement(&always.nodes.1)
-        .into_iter()
-        .filter(|node| matches!(node, RefNode::BlockingAssignment(_)))
-        .count();
-    if assignments.len() != assignment_count {
-        return Err(AnalyzerError::Unsupported(
-            "always_comb assignment expression".to_string(),
-        ));
-    }
+    let mut guarded_assignments = Vec::new();
+    conditional_assignments_from_statement(
+        &always.nodes.1,
+        None,
+        true,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        packed_dimensions,
+        &mut guarded_assignments,
+    )?;
+    let assignments = comb_assignments_from_guarded(guarded_assignments)?;
     Ok((!assignments.is_empty())
         .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments)))
 }
 
+/// Merge guarded always_comb assignments into per-target multiplexer chains.
+///
+/// Groups made up solely of unconditional writes stay untouched so the
+/// downstream ordered-assignment semantics (and its dependency checks) keep
+/// applying. Once a conditional write participates, the group folds
+/// back-to-front into nested muxes so earlier branches take priority. A
+/// conditional write with no later unconditional fallback would keep the
+/// previous value, which infers a latch, and is rejected.
+fn comb_assignments_from_guarded(
+    guarded: Vec<ConditionalAssignment>,
+) -> Result<Vec<Assignment>, AnalyzerError> {
+    let mut targets: Vec<LValue> = Vec::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, conditional) in guarded.iter().enumerate() {
+        let target = conditional.assignment().lhs_value();
+        match targets.iter().position(|existing| existing == target) {
+            Some(group) => groups[group].push(index),
+            None => {
+                targets.push(target.clone());
+                groups.push(vec![index]);
+            }
+        }
+    }
+    // Merged groups land on the slot of their last write so relative
+    // statement ordering across different targets is preserved.
+    let mut slots: Vec<Option<Assignment>> = Vec::with_capacity(guarded.len());
+    slots.extend((0..guarded.len()).map(|_| None));
+    for (target, indices) in targets.into_iter().zip(groups) {
+        if indices
+            .iter()
+            .all(|index| guarded[*index].condition().is_none())
+        {
+            for index in indices {
+                slots[index] = Some(guarded[index].assignment().clone());
+            }
+            continue;
+        }
+        let mut current: Option<Expr> = None;
+        for index in indices.iter().rev() {
+            let write = &guarded[*index];
+            let value = write.assignment().rhs().clone();
+            current = Some(match write.condition() {
+                None => value,
+                Some(condition) => {
+                    // A conditional write with no later unconditional
+                    // fallback would keep the previous value, which infers
+                    // a latch; represent that tentatively with a
+                    // self-reference and reject it below.
+                    let otherwise = current
+                        .unwrap_or_else(|| lvalue_self_reference(write.assignment().lhs_value()));
+                    Expr::Mux {
+                        condition: Box::new(condition.clone()),
+                        then_expr: Box::new(value),
+                        else_expr: Box::new(otherwise),
+                    }
+                }
+            });
+        }
+        let rhs = current.expect("guarded writes exist");
+        if expr_references_signal(&rhs, write_target_base_name(&target)) {
+            return Err(AnalyzerError::Unsupported(
+                "latch inference inside always_comb".to_string(),
+            ));
+        }
+        slots[*indices.last().expect("group is non-empty")] = Some(Assignment::new(target, rhs));
+    }
+    Ok(slots.into_iter().flatten().collect())
+}
+
+fn lvalue_self_reference(target: &LValue) -> Expr {
+    match target {
+        LValue::Ident(name) => Expr::Ident(name.clone()),
+        LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed,
+            ..
+        } => Expr::Select {
+            expr: Box::new(Expr::Ident(name.clone())),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: *signed,
+        },
+    }
+}
+
+fn write_target_base_name(target: &LValue) -> Option<&str> {
+    match target {
+        LValue::Ident(name) => Some(name),
+        LValue::Select { name, .. } => Some(name),
+    }
+}
+
+fn expr_references_signal(expr: &Expr, signal: Option<&str>) -> bool {
+    let Some(signal) = signal else {
+        return false;
+    };
+    match expr {
+        Expr::Ident(name) => name == signal,
+        Expr::Literal(_) => false,
+        Expr::Select { expr, msb, lsb, .. } => {
+            expr_references_signal(expr, Some(signal))
+                || const_expr_references_signal(msb, signal)
+                || const_expr_references_signal(lsb, signal)
+        }
+        Expr::Concat(parts) => parts
+            .iter()
+            .any(|part| expr_references_signal(part, Some(signal))),
+        Expr::RepeatConcat { parts, .. } => parts
+            .iter()
+            .any(|part| expr_references_signal(part, Some(signal))),
+        Expr::Resize { expr, .. } => expr_references_signal(expr, Some(signal)),
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_signal(arg, Some(signal))),
+        Expr::Unary { expr, .. } => expr_references_signal(expr, Some(signal)),
+        Expr::Binary { left, right, .. } => {
+            expr_references_signal(left, Some(signal))
+                || expr_references_signal(right, Some(signal))
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_references_signal(condition, Some(signal))
+                || expr_references_signal(then_expr, Some(signal))
+                || expr_references_signal(else_expr, Some(signal))
+        }
+    }
+}
+
+fn const_expr_references_signal(expr: &ConstExpr, signal: &str) -> bool {
+    match expr {
+        ConstExpr::Ident(name) => name == signal,
+        ConstExpr::Literal(_) => false,
+        ConstExpr::Select { expr, bit } => {
+            const_expr_references_signal(expr, signal) || const_expr_references_signal(bit, signal)
+        }
+        ConstExpr::Function { args, .. } => args
+            .iter()
+            .any(|arg| const_expr_references_signal(arg, signal)),
+        ConstExpr::Unary { expr, .. } => const_expr_references_signal(expr, signal),
+        ConstExpr::Binary { left, right, .. } => {
+            const_expr_references_signal(left, signal)
+                || const_expr_references_signal(right, signal)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_expr_references_signal(condition, signal)
+                || const_expr_references_signal(then_expr, signal)
+                || const_expr_references_signal(else_expr, signal)
+        }
+    }
+}
+
 fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), AnalyzerError> {
     match &stmt.nodes.2 {
-        sv_parser::StatementItem::BlockingAssignment(_) => Ok(()),
+        sv_parser::StatementItem::BlockingAssignment(_)
+        | sv_parser::StatementItem::ConditionalStatement(_) => Ok(()),
+        sv_parser::StatementItem::CaseStatement(case) => {
+            let sv_parser::CaseStatement::Normal(case) = &**case else {
+                return Err(AnalyzerError::Unsupported(
+                    "casez, casex, or pattern case inside always_comb".to_string(),
+                ));
+            };
+            if matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_)) {
+                Ok(())
+            } else {
+                Err(AnalyzerError::Unsupported(
+                    "casez or casex inside always_comb".to_string(),
+                ))
+            }
+        }
         sv_parser::StatementItem::SeqBlock(block) => {
             for stmt in &block.nodes.3 {
                 if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
@@ -7216,6 +7453,7 @@ fn ff_process_from_always_construct(
     conditional_assignments_from_statement_or_null(
         body,
         None,
+        false,
         syntax_tree,
         const_env,
         packed_dimensions,
@@ -7306,6 +7544,7 @@ fn ff_events_from_event_expression(
 fn conditional_assignments_from_statement_or_null(
     stmt: &sv_parser::StatementOrNull,
     condition: Option<Expr>,
+    exhaustive_fallback: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -7315,6 +7554,7 @@ fn conditional_assignments_from_statement_or_null(
         conditional_assignments_from_statement(
             stmt,
             condition,
+            exhaustive_fallback,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7327,12 +7567,56 @@ fn conditional_assignments_from_statement_or_null(
 fn conditional_assignments_from_statement(
     stmt: &sv_parser::Statement,
     condition: Option<Expr>,
+    exhaustive_fallback: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
     match &stmt.nodes.2 {
+        sv_parser::StatementItem::BlockingAssignment(assignment) => {
+            let lowered = match &assignment.0 {
+                sv_parser::BlockingAssignment::Variable(assignment) => {
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                        .zip(expr_from_expression_with_types(
+                            &assignment.nodes.3,
+                            syntax_tree,
+                            packed_dimensions,
+                        ))
+                }
+                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
+                    let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
+                    let lhs = variable_lvalue_from_node(
+                        &assignment.nodes.0,
+                        syntax_tree,
+                        packed_dimensions,
+                    );
+                    let rhs = expr_from_expression_with_types(
+                        &assignment.nodes.2,
+                        syntax_tree,
+                        packed_dimensions,
+                    );
+                    match (lhs, rhs, op) {
+                        (Some(lhs), Some(rhs), Some("=")) => Some((lhs, rhs)),
+                        (Some(lhs), Some(rhs), Some(op)) => {
+                            assignment_op_expr(&lhs, op, rhs.clone(), packed_dimensions)
+                                .map(|rhs| (lhs, rhs))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some((lhs, rhs)) = lowered else {
+                return Err(AnalyzerError::Unsupported(
+                    "always_comb assignment expression".to_string(),
+                ));
+            };
+            assignments.push(ConditionalAssignment::new(
+                condition,
+                Assignment::new(lhs, rhs),
+            ));
+        }
         sv_parser::StatementItem::NonblockingAssignment(assignment) => {
             let lhs =
                 variable_lvalue_from_node(&assignment.0.nodes.0, syntax_tree, packed_dimensions)
@@ -7357,6 +7641,7 @@ fn conditional_assignments_from_statement(
                 conditional_assignments_from_statement_or_null(
                     stmt,
                     condition.clone(),
+                    exhaustive_fallback,
                     syntax_tree,
                     const_env,
                     packed_dimensions,
@@ -7368,6 +7653,7 @@ fn conditional_assignments_from_statement(
             conditional_assignments_from_conditional_statement(
                 stmt,
                 condition,
+                exhaustive_fallback,
                 syntax_tree,
                 const_env,
                 packed_dimensions,
@@ -7378,6 +7664,7 @@ fn conditional_assignments_from_statement(
             conditional_assignments_from_case_statement(
                 stmt,
                 condition,
+                exhaustive_fallback,
                 syntax_tree,
                 const_env,
                 packed_dimensions,
@@ -7411,6 +7698,7 @@ fn conditional_assignments_from_statement(
                 conditional_assignments_from_statement_or_null(
                     body,
                     condition.clone(),
+                    exhaustive_fallback,
                     syntax_tree,
                     &loop_const_env,
                     &loop_packed_dimensions,
@@ -7441,6 +7729,7 @@ fn conditional_assignments_from_statement(
 fn conditional_assignments_from_conditional_statement(
     stmt: &sv_parser::ConditionalStatement,
     parent_condition: Option<Expr>,
+    exhaustive_fallback: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -7456,6 +7745,7 @@ fn conditional_assignments_from_conditional_statement(
     conditional_assignments_from_statement_or_null(
         &stmt.nodes.3,
         then_condition,
+        false,
         syntax_tree,
         const_env,
         packed_dimensions,
@@ -7475,6 +7765,7 @@ fn conditional_assignments_from_conditional_statement(
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
+            false,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7484,10 +7775,15 @@ fn conditional_assignments_from_conditional_statement(
     }
 
     if let Some((_, branch)) = &stmt.nodes.5 {
-        let condition = combine_expr_condition_terms(parent_condition, prior_false);
+        let condition = if exhaustive_fallback {
+            None
+        } else {
+            combine_expr_condition_terms(parent_condition, prior_false)
+        };
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
+            false,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7510,6 +7806,7 @@ fn procedural_false_condition(condition: Expr) -> Expr {
 fn conditional_assignments_from_case_statement(
     stmt: &sv_parser::CaseStatement,
     parent_condition: Option<Expr>,
+    exhaustive_fallback: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -7569,6 +7866,7 @@ fn conditional_assignments_from_case_statement(
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
+            exhaustive_fallback,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7581,10 +7879,15 @@ fn conditional_assignments_from_case_statement(
     }
 
     if let Some(branch) = default_branch {
-        let condition = combine_expr_condition_terms(parent_condition, prior_false);
+        let condition = if exhaustive_fallback {
+            None
+        } else {
+            combine_expr_condition_terms(parent_condition, prior_false)
+        };
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
+            false,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7626,72 +7929,6 @@ fn combine_expr_condition_terms(parent: Option<Expr>, terms: Vec<Expr>) -> Optio
         },
         None => condition,
     })
-}
-
-fn assignments_from_statement(
-    stmt: &sv_parser::Statement,
-    syntax_tree: &SyntaxTree,
-    packed_dimensions: &PackedDimensions,
-) -> Vec<Assignment> {
-    match &stmt.nodes.2 {
-        sv_parser::StatementItem::BlockingAssignment(assignment) => match &assignment.0 {
-            sv_parser::BlockingAssignment::Variable(assignment) => {
-                let lhs =
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions);
-                let rhs = expr_from_expression_with_types(
-                    &assignment.nodes.3,
-                    syntax_tree,
-                    packed_dimensions,
-                );
-                match (lhs, rhs) {
-                    (Some(lhs), Some(rhs)) => vec![Assignment::new(lhs, rhs)],
-                    _ => Vec::new(),
-                }
-            }
-            sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
-                let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
-                let lhs =
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions);
-                let rhs = expr_from_expression_with_types(
-                    &assignment.nodes.2,
-                    syntax_tree,
-                    packed_dimensions,
-                );
-                match (lhs, rhs, op) {
-                    (Some(lhs), Some(rhs), Some("=")) => vec![Assignment::new(lhs, rhs)],
-                    (Some(lhs), Some(rhs), Some(op)) => {
-                        assignment_op_expr(&lhs, op, rhs, packed_dimensions)
-                            .map(|rhs| vec![Assignment::new(lhs, rhs)])
-                            .unwrap_or_default()
-                    }
-                    _ => Vec::new(),
-                }
-            }
-            _ => Vec::new(),
-        },
-        sv_parser::StatementItem::SeqBlock(block) => block
-            .nodes
-            .3
-            .iter()
-            .flat_map(|stmt| {
-                assignments_from_statement_or_null(stmt, syntax_tree, packed_dimensions)
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn assignments_from_statement_or_null(
-    stmt: &sv_parser::StatementOrNull,
-    syntax_tree: &SyntaxTree,
-    packed_dimensions: &PackedDimensions,
-) -> Vec<Assignment> {
-    match stmt {
-        sv_parser::StatementOrNull::Statement(stmt) => {
-            assignments_from_statement(stmt, syntax_tree, packed_dimensions)
-        }
-        sv_parser::StatementOrNull::Attribute(_) => Vec::new(),
-    }
 }
 
 fn assignment_op_expr(
@@ -9660,10 +9897,12 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                         .map(ConstExpr::Ident)
                 })
             }
-            sv_parser::ConstantPrimary::ConstantCast(cast) => {
-                constant_cast_zero_type(cast, syntax_tree, &HashMap::default(), &HashMap::default())
-                    .map(|r#type| ConstExpr::Literal(typed_zero_literal(r#type)))
-            }
+            sv_parser::ConstantPrimary::ConstantCast(cast) => constant_cast_const_expr(
+                cast,
+                syntax_tree,
+                &HashMap::default(),
+                &HashMap::default(),
+            ),
             sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
                     const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)

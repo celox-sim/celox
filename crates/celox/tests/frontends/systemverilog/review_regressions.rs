@@ -3097,14 +3097,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "control flow inside always_comb",
-            r#"
-            module Top(input logic s, a, b, output logic y);
-                always_comb if (s) y = a; else y = b;
-            endmodule
-        "#,
-        ),
-        (
             "unsupported statement inside always_comb",
             r#"
             module Top(input logic a, output logic y);
