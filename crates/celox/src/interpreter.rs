@@ -24,7 +24,7 @@ use celox_sir::{
     SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
 };
 use num_bigint::{BigInt, BigUint};
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{Signed, Zero};
 
 use crate::HashMap;
 
@@ -713,29 +713,38 @@ fn alu_binary(
         }
         BinaryOp::Sar => {
             // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
-            // The frontend emits `Sar` only for genuinely signed sources, and
-            // the compiled backends sign-fill unconditionally for this opcode,
-            // so the source value and its unknown-bit mask are interpreted as
-            // two's complement at their declared width before shifting.
+            // The narrow (<= 64-bit) compiled lowering sign-promotes the
+            // source and shifts arithmetically. The multi-word lowering
+            // instead sign-fills whole words above the source's own chunks —
+            // based on the declared width's top bit — and shifts logically,
+            // for the value and the mask alike.
             if !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {
+                let common = lhs_width.max(rhs_width).max(dst_width);
                 let signed_value = to_signed(&lhs.payload, lhs_width);
                 let signed_mask = to_signed(&lhs.mask, lhs_width);
                 let bound = lhs_width.max(dst_width).max(1);
                 match shift_amount(&rhs.payload) {
                     Some(amount) if amount < bound => {
-                        let shifted = signed_value >> amount;
-                        let shifted_mask = signed_mask >> amount;
-                        SIRValue {
-                            payload: wrap_signed(&shifted, dst_width),
-                            mask: wrap_signed(&shifted_mask, dst_width),
+                        if common <= 64 {
+                            SIRValue {
+                                payload: wrap_signed(&(signed_value >> amount), dst_width),
+                                mask: wrap_signed(&(signed_mask >> amount), dst_width),
+                            }
+                        } else {
+                            let payload = (sar_wide_extend(&lhs.payload, lhs_width, common)
+                                >> amount)
+                                & width_mask(dst_width);
+                            let mask = (sar_wide_extend(&lhs.mask, lhs_width, common) >> amount)
+                                & width_mask(dst_width);
+                            SIRValue { payload, mask }
                         }
                     }
                     _ => {
                         // Overshift or unrepresentable distances converge the
                         // value and the mask toward their own sign fills
-                        // independently, exactly like the normal branch.
+                        // independently, exactly like the normal branches.
                         let payload = if signed_value.is_negative() {
                             width_mask(dst_width)
                         } else {
@@ -851,10 +860,31 @@ fn alu_binary(
     Ok(normalize(truncate(out, dst_width)))
 }
 
-/// Interpret a shift amount register value as `usize`, or `None` when it
-/// exceeds any meaningful shift distance.
+/// Interpret a shift amount register value as `usize`.
+///
+/// The compiled wide lowerings consume only the low 64-bit chunk of the
+/// count register, so upper chunks are ignored here as well. Returns `None`
+/// when even the low chunk is unrepresentable (overshift).
 fn shift_amount(value: &BigUint) -> Option<usize> {
-    value.to_usize()
+    let low = value.to_u64_digits().first().copied().unwrap_or(0);
+    usize::try_from(low).ok()
+}
+
+/// Extend a value across the common width the way the compiled multi-word
+/// Sar lowering does: whole 64-bit words above the source's own chunks are
+/// filled with the declared width's top bit, then the caller shifts
+/// logically. Bits inside the source's partial top word are left untouched.
+fn sar_wide_extend(value: &BigUint, lhs_width: usize, common: usize) -> BigUint {
+    let src_words = lhs_width.div_ceil(64);
+    let common_words = common.div_ceil(64);
+    if lhs_width == 0 || !value.bit((lhs_width - 1) as u64) {
+        return value.clone();
+    }
+    let mut extended = value.clone();
+    for word in src_words..common_words {
+        extended |= BigUint::from(u64::MAX) << (word * 64);
+    }
+    extended
 }
 
 /// Two's complement interpretation of `width`-truncated `value`.

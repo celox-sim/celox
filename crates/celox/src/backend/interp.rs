@@ -1006,13 +1006,20 @@ impl InterpBackend {
             addrs.dedup();
             event_trigger_addrs.insert(*clock, addrs);
         }
+        // Split scheduling can register the same canonical clock under both
+        // maps; merge the address sets so neither phase loses snapshots.
         for (clock, units) in laid_out
             .sir
             .eval_only_ffs
             .iter()
             .chain(&laid_out.sir.apply_ffs)
         {
-            event_trigger_addrs.insert(*clock, collect_trigger_addrs(units));
+            let entry = event_trigger_addrs.entry(*clock).or_default();
+            let mut addrs = collect_trigger_addrs(units);
+            addrs.extend(entry.iter().copied());
+            addrs.sort_unstable();
+            addrs.dedup();
+            *entry = addrs;
         }
 
         let mut backend = Self {
