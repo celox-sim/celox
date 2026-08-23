@@ -1181,11 +1181,11 @@ module Top (
 
         gate.open();
 
-        // Wait WITHOUT ticking: the first tick after compilation completes
-        // will promote and evaluate entirely on the native tier.
+        // Wait for compilation, ticking so safe points poll the channel.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !sim.is_compiled() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            sim.tick(clk).unwrap();
         }
         assert!(sim.is_compiled());
 
