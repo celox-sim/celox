@@ -78,6 +78,25 @@ impl TieredBackend {
     /// Build a tiered simulation: ready to run immediately on the
     /// interpreter while the compiled tier is prepared in the background.
     pub fn new(laid_out: &LaidOutProgram, options: &SimulatorOptions) -> Self {
+        Self::with_compiler(laid_out, options, |laid_out, options| {
+            JitBackend::compile(laid_out, options, None)
+        })
+    }
+
+    /// Build a tiered simulation with a custom compilation step.
+    ///
+    /// `compile` runs on the worker thread. Tests use this to gate or stub
+    /// compilation so promotion timing is deterministic.
+    pub fn with_compiler<F>(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+        compile: F,
+    ) -> Self
+    where
+        F: FnOnce(&LaidOutProgram, &SimulatorOptions) -> Result<SharedJitCode, SimulatorError>
+            + Send
+            + 'static,
+    {
         let interp = Box::new(
             InterpBackend::new(laid_out, options)
                 .expect("interpreter construction cannot fail for a laid-out program"),
@@ -102,7 +121,7 @@ impl TieredBackend {
                 // A panicked worker surfaces as a disconnected channel and
                 // keeps the simulation on the interpreter permanently.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    JitBackend::compile(&background_laid_out, &background_options, None)
+                    compile(&background_laid_out, &background_options)
                 }))
                 .unwrap_or_else(|_| {
                     Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
@@ -470,6 +489,252 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => interp.get_triggered_bits(),
             Phase::Compiled(jit) => jit.get_triggered_bits(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RuntimeEvent, Simulator, SimulatorBuilder};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Two-stage pipeline: `q` trails `d` by two clock edges.
+    const PIPELINE: &str = r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    var stage1: logic<8>;
+    var stage2: logic<8>;
+    always_ff (clk, rst) {
+        if_reset {
+            stage1 = 0;
+            stage2 = 0;
+        } else {
+            stage1 = d;
+            stage2 = stage1;
+        }
+    }
+    assign q = stage2;
+}
+"#;
+
+    struct Gate(Arc<AtomicBool>);
+
+    impl Gate {
+        fn closed() -> Self {
+            Self(Arc::new(AtomicBool::new(false)))
+        }
+
+        fn open(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn build_gated(gate: &Gate) -> Simulator<TieredBackend> {
+        let worker_gate = gate.0.clone();
+        SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+            .build_tiered_with_compiler(move |laid_out, options| {
+                while !worker_gate.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                JitBackend::compile(laid_out, options, None)
+            })
+            .unwrap()
+    }
+
+    /// Drive the pipeline through a reset and an input sweep, recording `q`
+    /// after every tick. Identical inputs must produce identical outputs no
+    /// matter when (or whether) promotion lands, because both tiers are
+    /// bit-exact.
+    fn drive(sim: &mut Simulator<TieredBackend>, inputs: &[u8]) -> Vec<u8> {
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let d = sim.signal("d");
+
+        sim.modify(|io| {
+            io.set(rst, 0u8);
+            io.set(d, inputs[0]);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+        let mut observed = Vec::new();
+        for &value in inputs {
+            sim.modify(|io| io.set(d, value)).unwrap();
+            sim.tick(clk).unwrap();
+            sim.tick(clk).unwrap();
+            observed.push(sim.get_as::<u8>(q_signal(sim)));
+        }
+        observed
+    }
+
+    fn q_signal(sim: &Simulator<TieredBackend>) -> crate::SignalRef {
+        sim.signal("q")
+    }
+
+    fn reference_outputs(inputs: &[u8]) -> Vec<u8> {
+        // Each iteration ticks twice before sampling, which fully absorbs
+        // the pipeline's two-cycle latency: the sampled output equals the
+        // current input.
+        inputs.to_vec()
+    }
+
+    #[test]
+    fn outputs_match_reference_when_promotion_never_happens() {
+        let inputs: Vec<u8> = (10..40).collect();
+        let gate = Gate::closed();
+        let mut sim = build_gated(&gate);
+        let observed = drive(&mut sim, &inputs);
+        assert_eq!(observed, reference_outputs(&inputs));
+        assert!(!sim.is_compiled());
+        assert!(sim.promotion_error().is_none(), "gate still closed");
+    }
+
+    #[test]
+    fn outputs_match_reference_when_promotion_lands_mid_run() {
+        let inputs: Vec<u8> = (10..40).collect();
+        let gate = Gate::closed();
+        let mut sim = build_gated(&gate);
+
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let d = sim.signal("d");
+        sim.modify(|io| {
+            io.set(rst, 0u8);
+            io.set(d, inputs[0]);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+        // Run the first half strictly interpreted.
+        let mut observed = Vec::new();
+        for &value in &inputs[..inputs.len() / 2] {
+            sim.modify(|io| io.set(d, value)).unwrap();
+            sim.tick(clk).unwrap();
+            sim.tick(clk).unwrap();
+            observed.push(sim.get_as::<u8>(q_signal(&sim)));
+        }
+
+        // Release the worker; the next safe points adopt the compiled tier.
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            // Hold the input steady so any extra ticks are unobservable.
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
+
+        for &value in &inputs[inputs.len() / 2..] {
+            sim.modify(|io| io.set(d, value)).unwrap();
+            sim.tick(clk).unwrap();
+            sim.tick(clk).unwrap();
+            observed.push(sim.get_as::<u8>(q_signal(&sim)));
+        }
+
+        assert_eq!(observed, reference_outputs(&inputs));
+    }
+
+    #[test]
+    fn compilation_failure_keeps_the_interpreter() {
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+            .build_tiered_with_compiler(|_, _| {
+                Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+            })
+            .unwrap();
+
+        let inputs: Vec<u8> = (10..20).collect();
+        let observed = drive(&mut sim, &inputs);
+        assert_eq!(observed, reference_outputs(&inputs));
+        assert!(!sim.is_compiled());
+
+        // The worker reports its failure through the channel; keep polling
+        // safe points until it lands (thread start may lag under load).
+        let clk = sim.event("clk");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while sim.promotion_error().is_none() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.promotion_error().is_some());
+    }
+
+    #[test]
+    fn runtime_events_stay_continuous_across_promotion() {
+        let code = r#"
+module Top (
+    clk: input clock,
+    cnt: output logic<8>,
+) {
+    var c: logic<8>;
+    always_ff (clk) {
+        c = c + 1;
+        $display("tick %0d", c);
+    }
+    assign cnt = c;
+}
+"#;
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
+            .build_tiered_with_compiler(move |laid_out, options| {
+                while !worker_gate.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                JitBackend::compile(laid_out, options, None)
+            })
+            .unwrap();
+        let clk = sim.event("clk");
+
+        // Five interpreted ticks emit tick 0..4 (display observes the
+        // pre-increment value).
+        for _ in 0..5 {
+            sim.tick(clk).unwrap();
+        }
+        let pre = sim.drain_runtime_events();
+        assert_eq!(pre.len(), 5);
+        for (index, event) in pre.iter().enumerate() {
+            let RuntimeEvent::Display { message } = event else {
+                panic!("unexpected event {event:?}");
+            };
+            assert_eq!(message.as_str(), format!("tick {index}"));
+        }
+
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+        // Discard the unbounded wait-loop events.
+        let _ = sim.drain_runtime_events();
+
+        // Eight compiled-tier ticks continue the counter seamlessly.
+        const POST_TICKS: u32 = 8;
+        for _ in 0..POST_TICKS {
+            sim.tick(clk).unwrap();
+        }
+        let base = sim.get_as::<u8>(sim.signal("cnt")) - POST_TICKS as u8;
+        let post = sim.drain_runtime_events();
+        assert_eq!(post.len(), POST_TICKS as usize);
+        for (index, event) in post.iter().enumerate() {
+            let RuntimeEvent::Display { message } = event else {
+                panic!("unexpected event {event:?}");
+            };
+            assert_eq!(
+                message.as_str(),
+                format!("tick {}", base.wrapping_add(index as u8))
+            );
         }
     }
 }
