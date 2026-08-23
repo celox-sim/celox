@@ -1015,7 +1015,7 @@ inst u_sub: Sub ( i: 8'h0F, o: o );
 
     fn test_hierarchical_concat_feedback_runtime(sim) {
         @omit_veryl;
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
 a: input logic<2>,
@@ -1054,7 +1054,7 @@ assign out = v[0];
 
     fn test_hierarchical_concat_feedback_runtime_multi_observe(sim) {
         @omit_veryl;
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
 a: input logic<2>,
@@ -1093,7 +1093,7 @@ assign out1 = v[1];
 
     fn test_hierarchical_concat_feedback_with_constant_middle_bit(sim) {
         @omit_veryl;
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
 a: input logic<3>,
@@ -1134,7 +1134,7 @@ assign mid = v[1];
 
     fn test_hierarchical_dynamic_index_feedback_runtime(sim) {
         @omit_veryl;
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -1209,7 +1209,7 @@ assign out_dyn = d;
 
     fn test_hierarchical_dual_dynamic_readers_feedback_runtime(sim) {
         @omit_veryl;
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -1305,7 +1305,7 @@ assign out1 = d1;
     }
 
     fn test_hierarchical_overlapping_partial_write_dynamic_index_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
@@ -1409,7 +1409,7 @@ assign out_v1 = v[1];
     }
 
     fn test_hierarchical_concat_then_overlap_dynamic_index_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, sv);
+        @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
 a: input logic<3>,
