@@ -5,8 +5,12 @@ pub mod veryl_sv;
 #[allow(dead_code)]
 pub mod veryl_std;
 
-/// Generates native, cranelift, wasm, and Veryl reference tests, plus an SV
-/// frontend test when the `systemverilog` feature is enabled.
+/// Generates native, cranelift, wasm, interpreter, and Veryl reference tests,
+/// plus an SV frontend test when the `systemverilog` feature is enabled.
+///
+/// The `interp` arm calls `build_interpreter()`, which executes every
+/// execution unit on the Tier-0 SIR interpreter against the same memory
+/// image ABI as the compiled backends.
 ///
 /// ```rust
 /// all_backends! {
@@ -61,6 +65,15 @@ macro_rules! all_backends {
     };
     (@with_ignore veryl; ($first:ident $(, $rest:ident)*); { $($item:tt)* }) => {
         all_backends!(@with_ignore veryl; ($($rest),*); { $($item)* });
+    };
+
+    (@with_ignore interp; (); { $($item:tt)* }) => { $($item)* };
+    (@with_ignore interp; (interp $(, $rest:ident)*); { $($item:tt)* }) => {
+        #[ignore]
+        $($item)*
+    };
+    (@with_ignore interp; ($first:ident $(, $rest:ident)*); { $($item:tt)* }) => {
+        all_backends!(@with_ignore interp; ($($rest),*); { $($item)* });
     };
 
     // ── internal: emit the SV frontend test ─────────────────────────
@@ -172,6 +185,17 @@ macro_rules! all_backends {
                 fn wasm() {
                     $($setup)*
                     let mut $sim = { $builder }.build_wasm().unwrap();
+                    $($body)*
+                }
+            });
+
+            all_backends!(@with_ignore interp; $ignore_list; {
+                #[test]
+                $(#[$meta])*
+                #[allow(unused_mut, unused_variables)]
+                fn interp() {
+                    $($setup)*
+                    let mut $sim = { $builder }.build_interpreter().unwrap();
                     $($body)*
                 }
             });

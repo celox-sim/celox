@@ -11,6 +11,7 @@ pub use component::{
 };
 mod debug;
 mod diagnostics;
+mod interpreter;
 mod ir;
 mod optimizer;
 mod parser;
@@ -40,6 +41,9 @@ pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
+pub use interpreter::{
+    InterpError, InterpMachine, ResolvedAccess, StoreSnapshot, UnitExit, execute_unit,
+};
 pub use ir::{
     AbsoluteAddr, AddrLookupError, FrontendLookup, InstancePath, LaidOutProgram, OptimizedSir,
     PortTypeKind, RuntimeDesign, RuntimeErrorInfo, RuntimeInstance, RuntimeProgram,
@@ -60,8 +64,8 @@ mod host_api {
     use crate::SimBackend;
     pub use crate::backend::wasm_runtime::WasmBackend;
     pub use crate::backend::{
-        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, JitBackend,
-        RegallocAlgorithm, SharedJitCode,
+        CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
+        JitBackend, RegallocAlgorithm, SharedJitCode,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
