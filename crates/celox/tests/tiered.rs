@@ -162,32 +162,98 @@ module Top (
         POST_TICKS as usize,
         "the compiled tier keeps emitting one display per tick"
     );
-    // The counter value at promotion is the base; messages continue from it.
+    // The counter value at promotion is the base; messages continue from it,
+    // wrapping at the signal's four-bit modulus.
     for (index, event) in post.iter().enumerate() {
         let celox::RuntimeEvent::Display { message } = event else {
             panic!("unexpected event {event:?}");
         };
-        assert_eq!(message, &format!("tick {}", base.wrapping_add(index as u8)));
+        let expected = (u32::from(base) + index as u32) % 16;
+        assert_eq!(message, &format!("tick {expected}"));
     }
 
-    assert_eq!(
-        sim.get_as::<u8>(sim.signal("cnt")),
-        base.wrapping_add(POST_TICKS as u8)
-    );
+    let expected_final = (u32::from(base) + POST_TICKS) % 16;
+    assert_eq!(sim.get_as::<u8>(sim.signal("cnt")), expected_final as u8);
 }
 
 #[test]
 fn tiered_four_state_matches_two_state_across_promotion() {
-    let mut sim = SimulatorBuilder::new(COUNTER, "Top")
+    let code = r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    var stage1: logic<8>;
+    var stage2: logic<8>;
+
+    always_ff (clk, rst) {
+        if_reset {
+            stage1 = 0;
+            stage2 = 0;
+        } else {
+            stage1 = d;
+            stage2 = stage1;
+        }
+    }
+    assign q = stage2;
+}
+"#;
+    let mut sim = SimulatorBuilder::new(code, "Top")
         .four_state(true)
         .build_tiered()
         .unwrap();
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    let d = sim.signal("d");
+    let q = sim.signal("q");
 
-    for _ in 0..16 {
+    // Active-low reset with a known input, then absorb the pipeline.
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(d, 9u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+    // Drive inputs while interpreted and record the observed outputs.
+    let mut observed = Vec::new();
+    for value in 0..16u8 {
+        sim.modify(|io| io.set(d, value)).unwrap();
+        sim.tick(clk).unwrap();
+        sim.tick(clk).unwrap();
+        observed.push(sim.get_as::<u8>(q));
+    }
+
+    // Wait for background compilation so the promotion actually happens
+    // inside this test instead of silently staying on the interpreter.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !sim.is_compiled() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
         sim.tick(clk).unwrap();
     }
+    assert!(
+        sim.is_compiled(),
+        "background compilation should complete during simulation"
+    );
     assert!(sim.promotion_error().is_none());
+
+    // The compiled tier must keep producing the same results: the two-stage
+    // pipeline delivers each input exactly two ticks later, four-state X
+    // handling notwithstanding.
+    for value in 20..36u8 {
+        sim.modify(|io| io.set(d, value)).unwrap();
+        sim.tick(clk).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get_as::<u8>(q), value, "input {value}");
+    }
+
+    // Sanity on the recorded interpreted-tier window: each sampled output
+    // equals the input driven in that iteration.
+    for (index, observed_value) in observed.iter().enumerate() {
+        assert_eq!(*observed_value, index as u8);
+    }
 }

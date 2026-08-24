@@ -2006,8 +2006,12 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) =
-                self.into_laid_out_program(crate::backend::tiered::default_target_layout_mode())?;
+            let (laid_out, warnings, options, vcd_path, injected_components) = {
+                let vcd_recording = self.vcd_path.is_some();
+                self.into_laid_out_program(crate::backend::tiered::tiered_layout_mode(
+                    vcd_recording,
+                ))?
+            };
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2055,8 +2059,12 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) =
-                self.into_laid_out_program(crate::backend::tiered::default_target_layout_mode())?;
+            let (laid_out, warnings, options, vcd_path, injected_components) = {
+                let vcd_recording = self.vcd_path.is_some();
+                self.into_laid_out_program(crate::backend::tiered::tiered_layout_mode(
+                    vcd_recording,
+                ))?
+            };
 
             if let Some(s) = phase_start {
                 tracing::debug!(

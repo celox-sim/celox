@@ -75,6 +75,21 @@ pub(crate) fn default_target_layout_mode() -> crate::backend::memory_layout::Mem
     }
 }
 
+/// The layout mode for one tiered build.
+///
+/// VCD tracing reads whole signals as contiguous packed bytes, so a build
+/// that records traces selects the packed layout; element-strided arrays are
+/// not representable in the current VCD descriptor format.
+pub(crate) fn tiered_layout_mode(
+    vcd_recording: bool,
+) -> crate::backend::memory_layout::MemoryLayoutMode {
+    if vcd_recording {
+        crate::backend::memory_layout::MemoryLayoutMode::Packed
+    } else {
+        default_target_layout_mode()
+    }
+}
+
 /// The adopted compiled tier.
 enum CompiledTier {
     Jit(Box<JitBackend>),
@@ -229,10 +244,18 @@ impl CompiledTier {
         }
     }
 
-    fn eval_only_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
+    /// Resolve the phase-specific evaluate-only event for a shared trigger
+    /// address and execute it.
+    ///
+    /// Evaluate-only and apply functions live in their own per-phase id
+    /// spaces, so the combined `id_to_event_slice` entry must not be used
+    /// here; the address resolves through each tier's phase-specific map.
+    fn eval_only_ff_at_addr(&mut self, addr: &AbsoluteAddr) -> Result<(), SimulatorErrorCode> {
         match self {
             Self::Jit(jit) => {
-                let event = jit.id_to_event_slice()[id];
+                let event = jit
+                    .resolve_eval_only_event(addr)
+                    .unwrap_or_else(|| panic!("eval-only event not found for {addr:?}"));
                 jit.eval_only_ff_at(event)
             }
             #[cfg(any(
@@ -241,16 +264,22 @@ impl CompiledTier {
                 target_arch = "aarch64"
             ))]
             Self::Native(native) => {
-                let event = native.id_to_event_slice()[id];
+                let event = native
+                    .resolve_eval_only_event(addr)
+                    .unwrap_or_else(|| panic!("eval-only event not found for {addr:?}"));
                 native.eval_only_ff_at(event)
             }
         }
     }
 
-    fn apply_ff_at(&mut self, id: usize) -> Result<(), SimulatorErrorCode> {
+    /// Resolve the phase-specific apply event for a shared trigger address
+    /// and execute it.
+    fn apply_ff_at_addr(&mut self, addr: &AbsoluteAddr) -> Result<(), SimulatorErrorCode> {
         match self {
             Self::Jit(jit) => {
-                let event = jit.id_to_event_slice()[id];
+                let event = jit
+                    .resolve_apply_event(addr)
+                    .unwrap_or_else(|| panic!("apply event not found for {addr:?}"));
                 jit.apply_ff_at(event)
             }
             #[cfg(any(
@@ -259,7 +288,9 @@ impl CompiledTier {
                 target_arch = "aarch64"
             ))]
             Self::Native(native) => {
-                let event = native.id_to_event_slice()[id];
+                let event = native
+                    .resolve_apply_event(addr)
+                    .unwrap_or_else(|| panic!("apply event not found for {addr:?}"));
                 native.apply_ff_at(event)
             }
         }
@@ -325,6 +356,11 @@ pub struct TieredBackend {
     /// Shared with the background worker; flagged on drop or on an explicit
     /// cancellation request so the worker unwinds at the next task boundary.
     cancel: CompileCancel,
+    /// Evaluate-only events whose apply phase has not run yet. Promotion is
+    /// deferred while this is non-zero so the compiled apply phase always
+    /// observes the interpreted evaluate-only results through an intact
+    /// sparse-metadata image.
+    pending_split_applies: usize,
 }
 
 impl TieredBackend {
@@ -363,9 +399,19 @@ impl TieredBackend {
             }
         } else {
             Self::with_compiler(laid_out, options, |laid_out, options, _cancel| {
-                Ok(CompiledCode::Cranelift(Arc::new(JitBackend::compile(
-                    laid_out, options, None,
-                )?)))
+                let mut trace = crate::debug::CompilationTrace::default();
+                let wants_codegen_trace = options.trace.pre_optimized_clif
+                    || options.trace.post_optimized_clif
+                    || options.trace.native;
+                let shared = Arc::new(JitBackend::compile(
+                    laid_out,
+                    options,
+                    wants_codegen_trace.then_some(&mut trace),
+                )?);
+                if options.trace.output_to_stdout {
+                    trace.print();
+                }
+                Ok(CompiledCode::Cranelift(shared))
             })
         }
     }
@@ -408,7 +454,10 @@ impl TieredBackend {
         let background_options = options.clone();
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
-        std::thread::Builder::new()
+        // A failed spawn keeps the interpreter as the permanent tier with the
+        // reason recorded, matching the background-failure policy instead of
+        // panicking the embedding application.
+        let promotion = match std::thread::Builder::new()
             .name("celox-jit-compile".to_string())
             .spawn(move || {
                 // The result is delivered through the channel instead of the
@@ -422,14 +471,21 @@ impl TieredBackend {
                     Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
                 });
                 let _ = sender.send(result);
-            })
-            .expect("spawning the background compiler thread must succeed");
+            }) {
+            Ok(_handle) => Promotion::Pending(receiver),
+            Err(error) => Promotion::Failed(SimulatorError::new(
+                crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
+                    "failed to spawn the background compiler thread: {error}"
+                ))),
+            )),
+        };
 
         Self {
             phase: Phase::Interpreting(Some(interp)),
-            promotion: Promotion::Pending(receiver),
+            promotion,
             events,
             cancel,
+            pending_split_applies: 0,
         }
     }
 
@@ -453,12 +509,18 @@ impl TieredBackend {
     ///
     /// The native-tier worker unwinds at its next task boundary and the
     /// simulation stays on the interpreter permanently; the reason becomes
-    /// retrievable through [`TieredBackend::promotion_error`]. Returns
-    /// whether a background compilation was still pending, so callers that
-    /// only want to reclaim a finished worker can ignore the call cheaply.
-    pub fn cancel_background_compilation(&self) -> bool {
+    /// retrievable through [`TieredBackend::promotion_error`]. A result that
+    /// already reached the channel (or arrives afterwards, for example from
+    /// a tier that ignores the token) is rejected so cancellation is
+    /// honored regardless of compiler timing. Returns whether a background
+    /// compilation was still pending, so callers that only want to reclaim
+    /// a finished worker can ignore the call cheaply.
+    pub fn cancel_background_compilation(&mut self) -> bool {
         let pending = matches!(self.promotion, Promotion::Pending(_));
         self.cancel.cancel();
+        if pending {
+            self.promotion = Promotion::Failed(super::compile_cancel::cancelled_error());
+        }
         pending
     }
 
@@ -470,9 +532,21 @@ impl TieredBackend {
         if !matches!(self.phase, Phase::Interpreting(Some(_))) {
             return;
         }
+        // Never promote inside a split evaluate/apply pair: the compiled
+        // apply phase must observe the interpreted evaluate-only results,
+        // and adoption clears the sparse metadata they are tracked in.
+        if self.pending_split_applies > 0 {
+            return;
+        }
         let Promotion::Pending(receiver) = &self.promotion else {
             return;
         };
+        // Cancellation wins over a queued success: a compile that finished
+        // before (or ignores) the flag must not adopt after the request.
+        if self.cancel.is_cancelled() {
+            self.promotion = Promotion::Failed(super::compile_cancel::cancelled_error());
+            return;
+        }
         let Ok(result) = receiver.try_recv() else {
             return;
         };
@@ -591,24 +665,31 @@ impl SimBackend for TieredBackend {
 
     fn eval_only_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
-        match &mut self.phase {
+        let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_only_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
-            Phase::Compiled(compiled) => compiled.eval_only_ff_at(event.id()),
+            Phase::Compiled(compiled) => compiled.eval_only_ff_at_addr(&event.addr()),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
-        }
+        };
+        // The paired apply phase must run on the same tier; defer promotion
+        // until it completes.
+        self.pending_split_applies = self.pending_split_applies.saturating_add(1);
+        result
     }
 
     fn apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
+        // Never promote between the evaluate-only and apply phases.
         self.maybe_promote();
-        match &mut self.phase {
+        let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
             ),
-            Phase::Compiled(compiled) => compiled.apply_ff_at(event.id()),
+            Phase::Compiled(compiled) => compiled.apply_ff_at_addr(&event.addr()),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
-        }
+        };
+        self.pending_split_applies = self.pending_split_applies.saturating_sub(1);
+        result
     }
 
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {

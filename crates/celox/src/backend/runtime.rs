@@ -628,6 +628,15 @@ impl JitBackend {
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
+        // A MemorySpilled compile plan extends the compiled layout with
+        // backend scratch beyond the semantic state the interpreter owned.
+        // Grow the transferred image so generated spilled chunks never touch
+        // memory past the allocation; the tail is fresh zeroed scratch.
+        let target_words = shared.layout.merged_total_size.div_ceil(8);
+        let mut memory = memory;
+        if memory.len() < target_words {
+            memory.resize(target_words, 0);
+        }
         let comb_func = shared.comb_func;
         Self {
             shared,

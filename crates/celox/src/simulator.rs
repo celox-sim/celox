@@ -1534,7 +1534,7 @@ mod host {
         /// The simulation stays on the interpreter permanently and
         /// [`Simulator::promotion_error`] reports the cancellation. Returns
         /// whether a background compilation was still pending.
-        pub fn cancel_background_compilation(&self) -> bool {
+        pub fn cancel_background_compilation(&mut self) -> bool {
             self.backend.cancel_background_compilation()
         }
     }
