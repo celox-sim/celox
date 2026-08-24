@@ -45,7 +45,12 @@ fn build_tiered_counter() -> TieredSimulator {
 #[test]
 fn tiered_promotes_and_matches_expected_results() {
     let mut sim = build_tiered_counter();
-    assert!(!sim.is_compiled(), "tiered starts on the interpreter");
+    // NOTE: the initial tier is intentionally not asserted here — a tiny
+    // design can finish background compilation before the builder's final
+    // stabilization safe point, so the simulator may legitimately already be
+    // compiled when this test starts. Deterministic initial-tier coverage
+    // lives in the gated in-crate unit tests; this test verifies that both
+    // tiers produce identical results whenever promotion lands.
 
     let clk = sim.event("clk");
     let rst = sim.signal("rst");

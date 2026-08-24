@@ -617,7 +617,15 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         if addr.region == SPARSE_WORKING_REGION {
             let absolute = addr.absolute_addr();
             let bit_offset = self.access_bit_offset(&absolute, access.offset, &access.dynamics)?;
-            self.prepare_sparse_store(addr, bit_offset, bits)?;
+            // A whole-object transfer on an element-strided array writes
+            // every physical byte of its plane; mark dirty chunks across
+            // that physical extent even when padding expands it past the
+            // logical width.
+            let marked_bits = match self.whole_strided_array(&absolute, bit_offset, bits) {
+                Some(array) => array.plane_size * 8,
+                None => bits,
+            };
+            self.prepare_sparse_store(addr, bit_offset, marked_bits)?;
         }
         Ok(())
     }

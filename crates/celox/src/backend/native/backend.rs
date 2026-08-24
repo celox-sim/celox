@@ -2104,6 +2104,19 @@ impl NativeBackend {
         Ok(image)
     }
 
+    /// Compile with cooperative cancellation plus code-generation tracing.
+    pub(crate) fn compile_image_with_cancel_and_trace(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<(NativeProgramImage, NativeCodegenTrace), SimulatorError> {
+        let (image, trace) = compile_program(laid_out, options, true, Some(cancel))?;
+        Ok((
+            image,
+            trace.expect("trace-enabled native compilation must return a trace"),
+        ))
+    }
+
     pub(crate) fn compile_image_with_codegen_trace(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,

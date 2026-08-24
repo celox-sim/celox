@@ -381,8 +381,29 @@ impl TieredBackend {
             {
                 Self::with_compiler(laid_out, options, |laid_out, options, cancel| {
                     use crate::backend::native::{NativeBackend, SharedNativeCode};
-                    let image =
-                        NativeBackend::compile_image_with_cancel(laid_out, options, cancel)?;
+                    // Honor native/MIR tracing requests the same way the
+                    // direct compile_native path does: capture the codegen
+                    // trace and print it when output was requested.
+                    let wants_native_trace = options.trace.native || options.trace.mir;
+                    let image = if wants_native_trace {
+                        let (image, native_trace) =
+                            NativeBackend::compile_image_with_cancel_and_trace(
+                                laid_out, options, cancel,
+                            )?;
+                        let compilation = crate::debug::CompilationTrace {
+                            native_optimized_sir: Some(native_trace.optimized_sir),
+                            mir: Some(native_trace.mir),
+                            reactive_event_graph: Some(native_trace.reactive_graph),
+                            native_state_layout: Some(native_trace.state_layout),
+                            ..crate::debug::CompilationTrace::default()
+                        };
+                        if options.trace.output_to_stdout {
+                            compilation.print();
+                        }
+                        image
+                    } else {
+                        NativeBackend::compile_image_with_cancel(laid_out, options, cancel)?
+                    };
                     // Safety: the image was produced in-process by the Celox
                     // compiler above.
                     let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
