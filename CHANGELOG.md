@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 (2026-08-24)
+
+## What's Changed
+* perf(x86): eliminate dead loads and cut mir_opt compile time by @tignear in https://github.com/celox-sim/celox/pull/663
+* feat(backend): add tier-0 SIR interpreter for tiered execution by @tignear in https://github.com/celox-sim/celox/pull/655
+* fix(deps): update cranelift crates to 0.135.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/669
+* chore(deps): update rust toolchain to v1.98.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/671
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.0...v0.4.1
+
 ## 0.4.0 (2026-08-22)
 
 ## What's Changed
