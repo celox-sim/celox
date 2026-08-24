@@ -1,4 +1,6 @@
 #[cfg(feature = "host-runtime")]
+pub(crate) mod compile_cancel;
+#[cfg(feature = "host-runtime")]
 pub(crate) mod interp;
 pub(crate) mod memory_layout;
 #[cfg(all(
@@ -12,6 +14,8 @@ pub(crate) mod memory_layout;
 pub(crate) mod native;
 #[cfg(feature = "host-runtime")]
 mod runtime;
+#[cfg(feature = "host-runtime")]
+pub(crate) mod tiered;
 pub use celox_backend_wasm as wasm_codegen;
 pub use celox_runtime::backend as traits;
 #[cfg(feature = "host-runtime")]
@@ -26,6 +30,7 @@ pub use traits::{EventHandle, SimBackend};
 mod host {
     pub use super::interp::InterpBackend;
     pub use super::runtime::{EventRef, JitBackend, SharedJitCode};
+    pub use super::tiered::TieredBackend;
     pub(crate) use celox_backend_cranelift::JitEngine;
     pub use celox_backend_cranelift::{
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
