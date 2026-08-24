@@ -176,7 +176,7 @@ impl JitBackend {
     }
 
     /// Build the shared JIT code from finalized SIR and layout.
-    fn compile(
+    pub(crate) fn compile(
         laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
@@ -613,6 +613,38 @@ impl JitBackend {
         };
         backend.install_event_buffers();
         backend
+    }
+
+    /// Build a backend from compiled code plus an existing live simulation
+    /// state, e.g. when a tiered simulation promotes from the interpreter.
+    ///
+    /// The caller must guarantee the state was produced against the same
+    /// laid-out program (identical packed layout), and that the event buffer
+    /// `Arc` is the one referenced by the state header so its pointer stays
+    /// valid without reinstallation.
+    pub(crate) fn adopt_shared_with_state(
+        shared: Arc<SharedJitCode>,
+        memory: Vec<u64>,
+        runtime_event_buffer: Arc<RuntimeEventBuffer>,
+        comb_capture_enabled: Vec<u8>,
+    ) -> Self {
+        // A MemorySpilled compile plan extends the compiled layout with
+        // backend scratch beyond the semantic state the interpreter owned.
+        // Grow the transferred image so generated spilled chunks never touch
+        // memory past the allocation; the tail is fresh zeroed scratch.
+        let target_words = shared.layout.merged_total_size.div_ceil(8);
+        let mut memory = memory;
+        if memory.len() < target_words {
+            memory.resize(target_words, 0);
+        }
+        let comb_func = shared.comb_func;
+        Self {
+            shared,
+            memory,
+            runtime_event_buffer,
+            comb_capture_enabled,
+            comb_func,
+        }
     }
 
     fn install_event_buffers(&mut self) {
