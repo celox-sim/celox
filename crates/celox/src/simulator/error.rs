@@ -189,6 +189,11 @@ pub enum CodegenError {
     #[cfg(feature = "host-runtime")]
     #[error("{message}")]
     Message { message: String },
+
+    /// A compilation pipeline observed its cancellation token and unwound
+    /// before producing a result.
+    #[error("compilation was cancelled")]
+    Cancelled,
 }
 
 #[cfg(feature = "host-runtime")]

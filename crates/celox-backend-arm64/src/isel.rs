@@ -14767,9 +14767,16 @@ mod tests {
         let layout = layout_for(absolute, 8, false);
         let unit = scalar_store_unit(address, false);
 
-        let result =
-            crate::scalar::emit_prepared_eu(&unit, &layout, false, "eval_comb", false, None)
-                .unwrap();
+        let result = crate::scalar::emit_prepared_eu(
+            &unit,
+            &layout,
+            false,
+            "eval_comb",
+            false,
+            None,
+            || false,
+        )
+        .unwrap();
 
         assert!(!result.code.is_empty());
         assert_eq!(result.text_size % 4, 0);
@@ -14794,8 +14801,10 @@ mod tests {
         let unit = scalar_store_unit(address, true);
 
         let result =
-            crate::scalar::emit_prepared_eu(&unit, &layout, true, "eval_comb", false, None)
-                .unwrap();
+            crate::scalar::emit_prepared_eu(&unit, &layout, true, "eval_comb", false, None, || {
+                false
+            })
+            .unwrap();
 
         assert!(!result.code.is_empty());
         assert_eq!(result.text_size % 4, 0);

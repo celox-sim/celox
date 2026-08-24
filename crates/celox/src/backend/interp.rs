@@ -39,7 +39,7 @@ use crate::interpreter::{InterpError, InterpMachine, ResolvedAccess, StoreSnapsh
 use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,
-    ir::{AbsoluteAddr, LaidOutProgram, RegionedAbsoluteAddr, SignalRef},
+    ir::{AbsoluteAddr, LaidOutProgram, RegionedAbsoluteAddr, SignalArrayLayout, SignalRef},
 };
 
 /// Opaque handle to an interpreted event (clock / async-reset) group.
@@ -51,6 +51,14 @@ use crate::{
 pub struct InterpEventRef {
     addr: AbsoluteAddr,
     id: usize,
+}
+
+impl InterpEventRef {
+    /// Rebuild a handle from its parts, e.g. when a tiered simulation
+    /// translates its stable event ids back onto the interpreted tier.
+    pub(crate) fn from_parts(addr: AbsoluteAddr, id: usize) -> Self {
+        Self { addr, id }
+    }
 }
 
 impl EventHandle for InterpEventRef {
@@ -85,6 +93,52 @@ fn low_mask(bits: usize) -> BigUint {
     } else {
         (BigUint::from(1u8) << bits) - 1u8
     }
+}
+
+/// Write `value` into element-strided storage: each element's low
+/// `element_width` bits land at its stride slot, masked to the element width
+/// so no padding bits leak inside or past the slot.
+///
+/// # Safety
+/// Callers must bound `offset + (element_count - 1) * stride +
+/// ceil(element_width / 8)` inside the allocation `base` points at.
+unsafe fn scatter_strided(
+    base: *mut u8,
+    offset: usize,
+    array: &SignalArrayLayout,
+    value: &BigUint,
+) {
+    let element_bytes = array.element_width.div_ceil(8);
+    let element_mask = low_mask(array.element_width);
+    for index in 0..array.element_count {
+        let chunk = ((value >> (index * array.element_width)) & &element_mask).to_bytes_le();
+        unsafe {
+            let dst = base.add(offset + index * array.element_stride);
+            for byte in 0..element_bytes {
+                *dst.add(byte) = chunk.get(byte).copied().unwrap_or(0);
+            }
+        }
+    }
+}
+
+/// Read element-strided storage back into a packed logical value, gathering
+/// every byte of each element and dropping per-element padding bits.
+///
+/// # Safety
+/// Callers must bound `offset + (element_count - 1) * stride +
+/// ceil(element_width / 8)` inside the allocation `base` points at.
+unsafe fn gather_strided(base: *const u8, offset: usize, array: &SignalArrayLayout) -> BigUint {
+    let element_bytes = array.element_width.div_ceil(8);
+    let element_mask = low_mask(array.element_width);
+    let mut result = BigUint::zero();
+    for index in 0..array.element_count {
+        unsafe {
+            let start = base.add(offset + index * array.element_stride);
+            let raw = BigUint::from_bytes_le(std::slice::from_raw_parts(start, element_bytes));
+            result |= (raw & &element_mask) << (index * array.element_width);
+        }
+    }
+    result
 }
 
 /// Interpreter view over one backend's live memory image.
@@ -142,8 +196,13 @@ impl Machine<'_> {
     }
 
     /// Resolve a SIR access to its bit offset within the addressed object.
+    ///
+    /// `absolute` selects the object so element-strided layouts can convert
+    /// an `Element` access's logical index into its physical word stride;
+    /// packed layouts keep contiguous logical addressing.
     fn access_bit_offset(
         &self,
+        absolute: &AbsoluteAddr,
         offset: &SIROffset,
         dynamics: &[Option<&SIRValue>; 2],
     ) -> Result<usize, InterpError> {
@@ -158,7 +217,16 @@ impl Machine<'_> {
         }
 
         match offset {
-            SIROffset::Static(bit_offset) => Ok(*bit_offset),
+            SIROffset::Static(bit_offset) => {
+                // Element-strided layouts remap static offsets from logical
+                // packed positions to physical strided positions.
+                if self.layout.unpacked_arrays.contains_key(absolute) {
+                    let (byte, intra) = self.layout.map_static_bit_offset(absolute, *bit_offset);
+                    Ok(byte * 8 + intra)
+                } else {
+                    Ok(*bit_offset)
+                }
+            }
             SIROffset::Dynamic(_) => dynamic(dynamics, 0),
             SIROffset::Element {
                 element_width,
@@ -171,10 +239,37 @@ impl Machine<'_> {
                 } else {
                     0
                 };
-                Ok(index * element_width + bit_offset + extra)
+                // Element-strided storage spaces elements by the layout's
+                // byte stride (matching the native backend's addressing);
+                // packed storage keeps elements logically contiguous.
+                let stride_bits = match self.layout.unpacked_arrays.get(absolute) {
+                    Some(array) => array.element_stride * 8,
+                    None => *element_width,
+                };
+                Ok(index * stride_bits + bit_offset + extra)
             }
-            SIROffset::PackedElements { bit_offset, .. } => Ok(*bit_offset),
+            SIROffset::PackedElements { bit_offset, .. } => {
+                if self.layout.unpacked_arrays.contains_key(absolute) {
+                    let (byte, intra) = self.layout.map_static_bit_offset(absolute, *bit_offset);
+                    Ok(byte * 8 + intra)
+                } else {
+                    Ok(*bit_offset)
+                }
+            }
         }
+    }
+
+    /// Byte size of one addressable plane (value or mask) of the object.
+    ///
+    /// Element-strided objects reserve a whole plane per state bit kind;
+    /// packed objects store the value plane immediately followed by the mask
+    /// plane of the same total byte width.
+    fn plane_byte_size(&self, absolute: &AbsoluteAddr) -> usize {
+        self.layout
+            .unpacked_arrays
+            .get(absolute)
+            .map(|array| array.plane_size)
+            .unwrap_or_else(|| get_byte_size(self.width_of(absolute)))
     }
 
     fn width_of(&self, absolute: &AbsoluteAddr) -> usize {
@@ -189,6 +284,26 @@ impl Machine<'_> {
                 .get(absolute)
                 .copied()
                 .unwrap_or(false)
+    }
+
+    /// The array layout when the access spans an entire element-strided
+    /// object, whose elements must transfer per stride slot instead of one
+    /// contiguous span across element padding.
+    fn whole_strided_array(
+        &self,
+        absolute: &AbsoluteAddr,
+        bit_offset: usize,
+        bits: usize,
+    ) -> Option<SignalArrayLayout> {
+        let array = self.layout.unpacked_arrays.get(absolute)?;
+        (bit_offset == 0 && bits == array.element_count * array.element_width).then_some({
+            SignalArrayLayout {
+                element_width: array.element_width,
+                element_count: array.element_count,
+                element_stride: array.element_stride,
+                plane_size: array.plane_size,
+            }
+        })
     }
 
     /// Read `bits` starting at `bit_offset` within the object at
@@ -375,7 +490,7 @@ impl Machine<'_> {
         };
         let stable_base = self.layout.offsets[&absolute];
         let sparse_base = self.layout.sparse_base_offset + self.layout.sparse_offsets[&absolute];
-        let byte_size = get_byte_size(self.layout.widths[&absolute]);
+        let plane_size = self.plane_byte_size(&absolute);
         let plane_count = if self.four_state && self.is_4state_object(&absolute) {
             2
         } else {
@@ -395,7 +510,7 @@ impl Machine<'_> {
             let was_dirty = unsafe { self.read_u64(dirty_word_addr) } & dirty_mask != 0;
             if !was_dirty {
                 for plane in 0..plane_count {
-                    let delta = plane * byte_size + chunk * 8;
+                    let delta = plane * plane_size + chunk * 8;
                     // Safety: both chunks live inside the merged allocation.
                     let stable_chunk = unsafe { self.read_u64(stable_base + delta) };
                     unsafe { self.write_u64(sparse_base + delta, stable_chunk) };
@@ -430,14 +545,14 @@ impl Machine<'_> {
         };
         let dst_base = self.layout.offsets[&absolute];
         let src_base = self.layout.sparse_base_offset + self.layout.sparse_offsets[&absolute];
-        let byte_size = get_byte_size(self.layout.widths[&absolute]);
+        let plane_size = self.plane_byte_size(&absolute);
         let plane_count = if self.four_state && self.is_4state_object(&absolute) {
             2
         } else {
             1
         };
         let last_chunk = sparse.chunk_count.saturating_sub(1);
-        let last_len = byte_size.saturating_sub(last_chunk * 8);
+        let last_len = plane_size.saturating_sub(last_chunk * 8);
 
         for summary_index in 0..sparse.summary_word_count {
             let summary_addr = sparse.summary_words_offset + summary_index * 8;
@@ -454,7 +569,7 @@ impl Machine<'_> {
                     let chunk = word_index * 64 + dirty_bits.trailing_zeros() as usize;
                     let len = if chunk == last_chunk { last_len } else { 8 };
                     for plane in 0..plane_count {
-                        let delta = plane * byte_size + chunk * 8;
+                        let delta = plane * plane_size + chunk * 8;
                         for byte in 0..len {
                             // Safety: both chunks live inside the merged
                             // allocation; `delta + byte` stays in bounds.
@@ -479,11 +594,13 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
     ) -> Result<SIRValue, InterpError> {
         let object = self.object_offset(addr)?;
-        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let absolute_addr_ref = addr.absolute_addr();
+        let bit_offset =
+            self.access_bit_offset(&absolute_addr_ref, access.offset, &access.dynamics)?;
         let absolute = addr.absolute_addr();
         let payload = self.read_bits(object, bit_offset, bits);
         if self.is_4state_object(&absolute) {
-            let mask_offset = object + get_byte_size(self.width_of(&absolute));
+            let mask_offset = object + self.plane_byte_size(&absolute);
             let mask = self.read_bits(mask_offset, bit_offset, bits);
             Ok(SIRValue::new_four_state(payload, mask))
         } else {
@@ -498,8 +615,17 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
     ) -> Result<(), InterpError> {
         if addr.region == SPARSE_WORKING_REGION {
-            let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
-            self.prepare_sparse_store(addr, bit_offset, bits)?;
+            let absolute = addr.absolute_addr();
+            let bit_offset = self.access_bit_offset(&absolute, access.offset, &access.dynamics)?;
+            // A whole-object transfer on an element-strided array writes
+            // every physical byte of its plane; mark dirty chunks across
+            // that physical extent even when padding expands it past the
+            // logical width.
+            let marked_bits = match self.whole_strided_array(&absolute, bit_offset, bits) {
+                Some(array) => array.plane_size * 8,
+                None => bits,
+            };
+            self.prepare_sparse_store(addr, bit_offset, marked_bits)?;
         }
         Ok(())
     }
@@ -512,11 +638,23 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         value: &SIRValue,
     ) -> Result<(), InterpError> {
         let object = self.object_offset(addr)?;
-        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let absolute_addr_ref = addr.absolute_addr();
+        let bit_offset =
+            self.access_bit_offset(&absolute_addr_ref, access.offset, &access.dynamics)?;
         let absolute = addr.absolute_addr();
+        if let Some(array) = self.whole_strided_array(&absolute, bit_offset, bits) {
+            let base = self.memory.as_mut_ptr() as *mut u8;
+            unsafe {
+                scatter_strided(base, object, &array, &value.payload);
+                if self.is_4state_object(&absolute) {
+                    scatter_strided(base, object + array.plane_size, &array, &value.mask);
+                }
+            }
+            return Ok(());
+        }
         self.write_bits(object, bit_offset, bits, &value.payload);
         if self.is_4state_object(&absolute) {
-            let mask_offset = object + get_byte_size(self.width_of(&absolute));
+            let mask_offset = object + self.plane_byte_size(&absolute);
             self.write_bits(mask_offset, bit_offset, bits, &value.mask);
         }
         Ok(())
@@ -557,9 +695,37 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         if src.region == SPARSE_WORKING_REGION {
             return self.commit_sparse_object(src);
         }
+        let src_absolute = src.absolute_addr();
+        let bit_offset = self.access_bit_offset(&src_absolute, access.offset, &access.dynamics)?;
         let src_object = self.object_offset(src)?;
         let dst_object = self.object_offset(dst)?;
-        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+
+        if let Some(array) = self.whole_strided_array(&src_absolute, bit_offset, bits) {
+            let src_base = self.memory.as_ptr() as *const u8;
+            let payload = unsafe { gather_strided(src_base, src_object, &array) };
+            let dst_base = self.memory.as_mut_ptr() as *mut u8;
+            unsafe {
+                scatter_strided(dst_base, dst_object, &array, &payload);
+            }
+            let dst_absolute = dst.absolute_addr();
+            if self.is_4state_object(&dst_absolute) {
+                let mask = if self
+                    .layout
+                    .is_4states
+                    .get(&src_absolute)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    unsafe { gather_strided(src_base, src_object + array.plane_size, &array) }
+                } else {
+                    BigUint::zero()
+                };
+                unsafe {
+                    scatter_strided(dst_base, dst_object + array.plane_size, &array, &mask);
+                }
+            }
+            return Ok(());
+        }
 
         let payload = self.read_bits(src_object, bit_offset, bits);
         self.write_bits(dst_object, bit_offset, bits, &payload);
@@ -575,14 +741,14 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
                 .unwrap_or(false)
             {
                 self.read_bits(
-                    src_object + get_byte_size(self.width_of(&src_absolute)),
+                    src_object + self.plane_byte_size(&src_absolute),
                     bit_offset,
                     bits,
                 )
             } else {
                 BigUint::zero()
             };
-            let dst_mask_offset = dst_object + get_byte_size(self.width_of(&dst_absolute));
+            let dst_mask_offset = dst_object + self.plane_byte_size(&dst_absolute);
             self.write_bits(dst_mask_offset, bit_offset, bits, &mask);
         }
         Ok(())
@@ -606,7 +772,7 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             return Ok(());
         };
         let base = self.object_offset(addr)?;
-        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let bit_offset = self.access_bit_offset(&absolute, access.offset, &access.dynamics)?;
         let range_mask = if bits >= 64 {
             u64::MAX
         } else {
@@ -643,11 +809,13 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
     ) -> Result<StoreSnapshot, InterpError> {
         let object = self.object_offset(addr)?;
-        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let absolute_addr_ref = addr.absolute_addr();
+        let bit_offset =
+            self.access_bit_offset(&absolute_addr_ref, access.offset, &access.dynamics)?;
         let absolute = addr.absolute_addr();
         let value_words = Self::value_words(&self.read_bits(object, bit_offset, bits));
         let mask_words = if self.is_4state_object(&absolute) {
-            let mask_offset = object + get_byte_size(self.width_of(&absolute));
+            let mask_offset = object + self.plane_byte_size(&absolute);
             Self::value_words(&self.read_bits(mask_offset, bit_offset, bits))
         } else {
             Vec::new()
@@ -670,13 +838,15 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             return Ok(());
         }
         let object = self.object_offset(addr)?;
-        let bit_offset = self.access_bit_offset(access.offset, &access.dynamics)?;
+        let absolute_addr_ref = addr.absolute_addr();
+        let bit_offset =
+            self.access_bit_offset(&absolute_addr_ref, access.offset, &access.dynamics)?;
         let absolute = addr.absolute_addr();
         let changed = Self::value_words(&self.read_bits(object, bit_offset, bits))
             != before.value_words
             || (self.is_4state_object(&absolute)
                 && Self::value_words(&self.read_bits(
-                    object + get_byte_size(self.width_of(&absolute)),
+                    object + self.plane_byte_size(&absolute),
                     bit_offset,
                     bits,
                 )) != before.mask_words);
@@ -938,6 +1108,14 @@ impl InterpBackend {
         // start as all-X), mirroring SharedJitCode.
         let mut four_state_inits = Vec::new();
         if four_state {
+            // Element-strided objects reserve a whole plane per state bit
+            // kind; both planes must be filled to their full plane size.
+            let plane_size = |addr: &AbsoluteAddr| -> usize {
+                match layout.unpacked_arrays.get(addr) {
+                    Some(array) => array.plane_size,
+                    None => get_byte_size(layout.widths[addr]),
+                }
+            };
             for (addr, &offset) in &layout.offsets {
                 if laid_out
                     .design
@@ -945,7 +1123,7 @@ impl InterpBackend {
                     .get(addr)
                     .is_some_and(|metadata| metadata.is_4state)
                 {
-                    four_state_inits.push((offset, get_byte_size(layout.widths[addr])));
+                    four_state_inits.push((offset, plane_size(addr)));
                 }
             }
             for (addr, &relative) in &layout.working_offsets {
@@ -955,10 +1133,8 @@ impl InterpBackend {
                     .get(addr)
                     .is_some_and(|metadata| metadata.is_4state)
                 {
-                    four_state_inits.push((
-                        layout.working_base_offset + relative,
-                        get_byte_size(layout.widths[addr]),
-                    ));
+                    four_state_inits
+                        .push((layout.working_base_offset + relative, plane_size(addr)));
                 }
             }
         }
@@ -1072,6 +1248,18 @@ impl InterpBackend {
     pub fn four_state_regions(&self) -> &[(usize, usize)] {
         &self.four_state_inits
     }
+
+    /// Hand the live simulation state to a successor backend during tier
+    /// promotion. The returned memory image is byte-compatible with the
+    /// compiled backends (same packed layout), and the event buffer `Arc`
+    /// keeps its allocation so state-header pointers stay valid.
+    pub(crate) fn tier_transfer(&mut self) -> (Vec<u64>, Arc<RuntimeEventBuffer>, Vec<u8>) {
+        (
+            std::mem::take(&mut self.memory),
+            Arc::clone(&self.runtime_event_buffer),
+            std::mem::take(&mut self.comb_capture_enabled),
+        )
+    }
 }
 
 impl SimBackend for InterpBackend {
@@ -1161,11 +1349,21 @@ impl SimBackend for InterpBackend {
         let offset = self.layout.offsets[addr];
         let width = self.layout.widths[addr];
         let is_4state = self.layout.is_4states[addr];
+        let array_layout =
+            self.layout
+                .unpacked_arrays
+                .get(addr)
+                .map(|array| celox_runtime::SignalArrayLayout {
+                    element_width: array.element_width,
+                    element_count: array.element_count,
+                    element_stride: array.element_stride,
+                    plane_size: array.plane_size,
+                });
         SignalRef {
             offset,
             width,
             is_4state,
-            array_layout: None,
+            array_layout,
         }
     }
 
@@ -1195,6 +1393,20 @@ impl SimBackend for InterpBackend {
 
         assert!(provided_size <= allocated_size);
 
+        if signal.array_layout.is_some() {
+            let mut bytes = vec![0u8; provided_size];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &value as *const T as *const u8,
+                    bytes.as_mut_ptr(),
+                    provided_size,
+                );
+            }
+            let wide = BigUint::from_bytes_le(&bytes);
+            self.set_wide(signal, wide);
+            return;
+        }
+
         unsafe {
             let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
             if !clear_mask && allocated_size == 1 {
@@ -1220,6 +1432,16 @@ impl SimBackend for InterpBackend {
     }
 
     fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        if let Some(ref arr) = signal.array_layout {
+            let base = self.memory.as_mut_ptr() as *mut u8;
+            unsafe {
+                scatter_strided(base, signal.offset, arr, &value);
+                if self.four_state && signal.is_4state {
+                    scatter_strided(base, signal.offset + arr.plane_size, arr, &BigUint::zero());
+                }
+            }
+            return;
+        }
         let allocated_size = get_byte_size(signal.width);
         let mut bytes = value.to_bytes_le();
 
@@ -1242,6 +1464,19 @@ impl SimBackend for InterpBackend {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        if let Some(ref arr) = signal.array_layout {
+            let base = self.memory.as_mut_ptr() as *mut u8;
+            unsafe {
+                scatter_strided(base, signal.offset, arr, &value);
+                // Two-state objects have no mask plane in strided storage;
+                // only touch the mask plane when four-state storage is
+                // enabled for this signal.
+                if self.four_state && signal.is_4state {
+                    scatter_strided(base, signal.offset + arr.plane_size, arr, &mask);
+                }
+            }
+            return;
+        }
         let allocated_size = get_byte_size(signal.width);
 
         let mut v_bytes = value.to_bytes_le();
@@ -1277,6 +1512,10 @@ impl SimBackend for InterpBackend {
     }
 
     fn get(&self, signal: SignalRef) -> BigUint {
+        if let Some(ref arr) = signal.array_layout {
+            let base = self.memory.as_ptr() as *const u8;
+            return unsafe { gather_strided(base, signal.offset, arr) };
+        }
         let byte_size = get_byte_size(signal.width);
         let ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let byte_slice = unsafe { std::slice::from_raw_parts(ptr, byte_size) };
@@ -1291,6 +1530,25 @@ impl SimBackend for InterpBackend {
     }
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        if signal.array_layout.is_some() {
+            // Gather through the wide path, then truncate into the requested
+            // type; `T::default()` supplies zero bytes beyond the value.
+            let byte_size = get_byte_size(signal.width);
+            assert!(
+                byte_size <= std::mem::size_of::<T>(),
+                "Provided type is too small for signal width"
+            );
+            let bytes = self.get(signal).to_bytes_le();
+            let mut val = T::default();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    &mut val as *mut T as *mut u8,
+                    byte_size.min(bytes.len()),
+                );
+            }
+            return val;
+        }
         let byte_size = get_byte_size(signal.width);
         let ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let byte_slice = unsafe { std::slice::from_raw_parts(ptr, byte_size) };
@@ -1323,6 +1581,16 @@ impl SimBackend for InterpBackend {
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
+        if let Some(ref arr) = signal.array_layout {
+            let base = self.memory.as_ptr() as *const u8;
+            let value = unsafe { gather_strided(base, signal.offset, arr) };
+            let mask = if self.four_state && signal.is_4state {
+                unsafe { gather_strided(base, signal.offset + arr.plane_size, arr) }
+            } else {
+                BigUint::zero()
+            };
+            return (value, mask);
+        }
         let byte_size = get_byte_size(signal.width);
         let v_ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let v_slice = unsafe { std::slice::from_raw_parts(v_ptr, byte_size) };

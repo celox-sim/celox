@@ -99,6 +99,27 @@ impl RegallocError {
     }
 }
 
+/// Phase marker carried by cancellation errors so the emission boundary can
+/// recognize them without string parsing.
+const CANCELLED_PHASE: &str = "compilation cancelled";
+
+/// The error produced when the allocation pipeline observes cancellation.
+pub(crate) fn cancellation_error() -> RegallocError {
+    RegallocError::new(
+        CANCELLED_PHASE,
+        "CANCELLED",
+        None,
+        None,
+        Vec::new(),
+        "cancellation was requested",
+    )
+}
+
+/// Whether this error reports cancellation rather than an allocation bug.
+pub(crate) fn is_cancellation(error: &RegallocError) -> bool {
+    std::ptr::eq(error.phase, CANCELLED_PHASE)
+}
+
 impl fmt::Display for RegallocError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "register allocation {} [{}]", self.phase, self.rule)?;
@@ -236,7 +257,14 @@ pub(crate) fn run_regalloc_with_label_and_trace(
         verify_regalloc: true,
         ..crate::NativeDiagnostics::default()
     };
-    run_regalloc_with_label_and_trace_and_diagnostics(func, label, trace, &diagnostics, true)
+    run_regalloc_with_label_and_trace_and_diagnostics(
+        func,
+        label,
+        trace,
+        &diagnostics,
+        true,
+        || false,
+    )
 }
 
 pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
@@ -245,12 +273,19 @@ pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
     trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation =
-        run_regalloc_in_place(&mut working, label, trace, diagnostics, native_tick_loop)?;
+    let allocation = run_regalloc_in_place(
+        &mut working,
+        label,
+        trace,
+        diagnostics,
+        native_tick_loop,
+        is_cancelled,
+    )?;
     *func = working;
     Ok(allocation)
 }
@@ -267,8 +302,16 @@ pub(crate) fn run_regalloc_for_codegen(
     trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
-    run_regalloc_in_place(func, label, trace, diagnostics, native_tick_loop)
+    run_regalloc_in_place(
+        func,
+        label,
+        trace,
+        diagnostics,
+        native_tick_loop,
+        is_cancelled,
+    )
 }
 
 fn run_regalloc_in_place(
@@ -277,9 +320,23 @@ fn run_regalloc_in_place(
     mut trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
+    // Shared borrow so the checkpoint closure and downstream callees observe
+    // the same predicate without moving it.
+    let is_cancelled = &is_cancelled;
     let timing = diagnostics.regalloc_timing || diagnostics.phase_timing;
     let verify = cfg!(debug_assertions) || diagnostics.verify_regalloc;
+    // Observed between allocation stages so a cancelled compile unwinds at
+    // the next boundary instead of finishing the remaining phases. Callers
+    // without cancellation pass `|| false`, which folds away after inlining.
+    let checkpoint = || -> Result<(), RegallocError> {
+        if is_cancelled() {
+            Err(cancellation_error())
+        } else {
+            Ok(())
+        }
+    };
     // Allocation must never depend on callers having run the optional MIR
     // optimization pipeline. Select flag-consuming register branches at the
     // allocation boundary so their unmaterialized boolean result cannot
@@ -306,6 +363,7 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
+    checkpoint()?;
     let total_start = timing.then(crate::timing::now);
     let stats_start = timing.then(crate::timing::now);
     let before_stats = diagnostics
@@ -337,6 +395,7 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
+    checkpoint()?;
     let allocation_constraints =
         constraints::ConstraintModel::build_for_codegen(func, &normalized_cfg, verify)
             .map_err(|error| constraint_error("placement constraint construction", error))?;
@@ -358,6 +417,7 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
+    checkpoint()?;
     let next_use_start = timing.then(crate::timing::now);
     let next_use = next_use::analyze(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use analysis", error))?;
@@ -379,6 +439,7 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
+    checkpoint()?;
     let alloc_start = timing.then(crate::timing::now);
     let allocation = ssa::allocate(
         func,
@@ -389,6 +450,7 @@ fn run_regalloc_in_place(
         trace,
         timing,
         verify,
+        is_cancelled,
     )?;
     let mut assignment = allocation.assignment;
     let mut spill_frame_size = allocation.spill_frame_size;

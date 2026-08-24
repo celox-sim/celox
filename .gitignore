@@ -61,3 +61,4 @@ linear_sec_p6_*.txt
 .DS_Store
 crates/celox/examples/bench_n4000.rs
 crates/celox/examples/bench_scaling.rs
+.aider*

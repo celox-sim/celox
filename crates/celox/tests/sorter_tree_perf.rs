@@ -12,7 +12,34 @@ use celox::SimulatorBuilder;
 #[macro_use]
 #[allow(unused_macros)]
 mod test_utils;
-use std::time::Instant;
+
+/// Process CPU time (user + system) consumed so far.
+///
+/// Scaling ratios are asserted on CPU time rather than wall-clock time: the
+/// suite runs alongside other heavyweight test binaries, and wall-clock
+/// measurements inflate when they contend for cores while CPU time stays
+/// stable.
+fn process_cpu_time() -> std::time::Duration {
+    #[cfg(unix)]
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        assert_eq!(libc::getrusage(libc::RUSAGE_SELF, &mut usage), 0);
+        std::time::Duration::from_micros(
+            (usage.ru_utime.tv_sec as u64) * 1_000_000
+                + usage.ru_utime.tv_usec as u64
+                + (usage.ru_stime.tv_sec as u64) * 1_000_000
+                + usage.ru_stime.tv_usec as u64,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        // Wall-clock fallback for platforms without getrusage; the primary
+        // CI hosts are Unix.
+        use std::sync::OnceLock;
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
+}
 
 fn load_sorter_sources() -> String {
     [
@@ -28,14 +55,14 @@ fn load_sorter_sources() -> String {
 
 fn build_sorter(n: u64) -> std::time::Duration {
     let code = load_sorter_sources();
-    let start = Instant::now();
+    let start = process_cpu_time();
     SimulatorBuilder::new(&code, "SorterTreeDistEntry")
         .param("N", n)
         .param("LEAF_DEPTH", 4)
         .param("OUT_DEPTH", 16)
         .build()
         .unwrap();
-    start.elapsed()
+    process_cpu_time() - start
 }
 
 /// Compilation-scaling regression across small, medium, and large designs.
@@ -55,7 +82,7 @@ fn sorter_tree_compilation_scales() {
     let ratio_16_64 = t64.as_secs_f64() / t16.as_secs_f64();
     let ratio_32_128 = t128.as_secs_f64() / t32.as_secs_f64();
     println!(
-        "SorterTreeDistEntry compile times: N=4 {t4:?}, N=8 {t8:?}, N=16 {t16:?}, \
+        "SorterTreeDistEntry compile CPU times: N=4 {t4:?}, N=8 {t8:?}, N=16 {t16:?}, \
          N=32 {t32:?}, N=64 {t64:?}, N=128 {t128:?}; ratios: \
          N=8/N=4 {ratio_4_8:.2}x, N=64/N=16 {ratio_16_64:.2}x, \
          N=128/N=32 {ratio_32_128:.2}x"
