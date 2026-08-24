@@ -789,8 +789,15 @@ fn compile_unit_refs(
         label,
         x86_options,
         trace.as_mut(),
+        || cancelled(cancel),
     )
-    .map_err(|source| codegen_err(CodegenError::NativePipeline { source }))?;
+    .map_err(|source| {
+        if matches!(source, emit::ChainedEmitError::Cancelled) {
+            codegen_err(CodegenError::Cancelled)
+        } else {
+            codegen_err(CodegenError::NativePipeline { source })
+        }
+    })?;
     #[cfg(any(
         feature = "arm64-codegen",
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
