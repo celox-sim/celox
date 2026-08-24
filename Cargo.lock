@@ -1017,7 +1017,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1872,7 +1872,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2472,7 +2472,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3722,7 +3722,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4191,10 +4191,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4571,7 +4571,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "veryl-aligner"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "veryl-parser",
 ]
@@ -4579,7 +4579,7 @@ dependencies = [
 [[package]]
 name = "veryl-analyzer"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "bimap",
  "daggy",
@@ -4602,7 +4602,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
  "vcd",
- "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230)",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814)",
  "veryl-metadata",
  "veryl-parser",
 ]
@@ -4616,12 +4616,12 @@ checksum = "6b79b55aefeb953c53c719399b6bd185f9a2f5a196af6bb08586d22568449b5e"
 [[package]]
 name = "veryl-component-sys"
 version = "0.1.1"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 
 [[package]]
 name = "veryl-emitter"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "serde",
  "veryl-aligner",
@@ -4635,7 +4635,7 @@ dependencies = [
 [[package]]
 name = "veryl-metadata"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "log",
  "miette",
@@ -4651,7 +4651,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "url",
  "uuid",
- "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230)",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814)",
  "veryl-parser",
  "veryl-path",
  "veryl-std",
@@ -4662,7 +4662,7 @@ dependencies = [
 [[package]]
 name = "veryl-parser"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "anyhow",
  "bimap",
@@ -4680,7 +4680,7 @@ dependencies = [
 [[package]]
 name = "veryl-path"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "directories",
  "fs4",
@@ -4694,12 +4694,12 @@ dependencies = [
 [[package]]
 name = "veryl-pretty"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 
 [[package]]
 name = "veryl-simulator"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "clap",
  "cranelift 0.134.2",
@@ -4724,7 +4724,7 @@ dependencies = [
  "twox-hash",
  "vcd",
  "veryl-analyzer",
- "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230)",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814)",
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",
@@ -4734,7 +4734,7 @@ dependencies = [
 [[package]]
 name = "veryl-sourcemap"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "miette",
  "relative-path",
@@ -4745,7 +4745,7 @@ dependencies = [
 [[package]]
 name = "veryl-std"
 version = "0.20.3"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=cab4176b94c016db65ee9fc20edbf03d763c5230#cab4176b94c016db65ee9fc20edbf03d763c5230"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=0783385d7cf4a8e57490c840b16a1e877a339814#0783385d7cf4a8e57490c840b16a1e877a339814"
 dependencies = [
  "merkle_hash",
  "miette",
@@ -5430,7 +5430,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
