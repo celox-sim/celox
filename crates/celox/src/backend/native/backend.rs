@@ -809,8 +809,15 @@ fn compile_unit_refs(
         label,
         x86_options.native_tick_loop,
         trace.as_mut(),
+        || cancelled(cancel),
     )
-    .map_err(|source| codegen_err(CodegenError::NativePipeline { source }))?;
+    .map_err(|source| {
+        if matches!(source, emit::ChainedEmitError::Cancelled) {
+            codegen_err(CodegenError::Cancelled)
+        } else {
+            codegen_err(CodegenError::NativePipeline { source })
+        }
+    })?;
     if let Some(start) = start {
         tracing::debug!(
             "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
