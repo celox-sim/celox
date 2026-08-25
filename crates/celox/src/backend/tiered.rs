@@ -19,6 +19,12 @@
 //! until the interpreter has executed a minimum number of evaluation steps,
 //! protecting short simulations from the promotion cost.
 //!
+//! Adoption never moves the live memory image: tiered builds reserve arena
+//! headroom up front and grow within that allocation, so views handed out
+//! before promotion (for example zero-copy host buffers) stay valid. If a
+//! compiled image would exceed the reserved arena, adoption is declined and
+//! the reason is reported through [`TieredBackend::promotion_error`].
+//!
 //! Background compilation is cooperatively cancellable on the native tier:
 //! dropping the backend (or calling
 //! [`TieredBackend::cancel_background_compilation`]) flags the worker, which
@@ -106,15 +112,42 @@ enum CompiledTier {
     Native(Box<crate::backend::native::NativeBackend>),
 }
 
+impl CompiledCode {
+    /// Image size in `u64` words the compiled tier requires its host
+    /// allocation to cover, or `None` when the transferred interpreter image
+    /// is adopted as-is.
+    fn required_image_words(&self) -> usize {
+        match self {
+            CompiledCode::Cranelift(_) => 0,
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            CompiledCode::Native(shared) => shared.native_memory_size.div_ceil(8) + 1,
+        }
+    }
+}
+
 impl CompiledTier {
     /// Bind compiled code to a live simulation state handed over by the
     /// interpreter during promotion.
+    ///
+    /// Callers must have verified [`CompiledCode::required_image_words`]
+    /// against the image's spare capacity first: growth stays within the
+    /// existing allocation so promotion never moves the live memory image,
+    /// which external views (zero-copy host buffers) may still reference.
     fn adopt(
         code: CompiledCode,
-        memory: Vec<u64>,
+        mut memory: Vec<u64>,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
+        debug_assert!(memory.capacity() >= code.required_image_words());
+        if memory.len() < code.required_image_words() {
+            // Growth within capacity never reallocates.
+            memory.resize(code.required_image_words(), 0);
+        }
         match code {
             CompiledCode::Cranelift(shared) => {
                 Self::Jit(Box::new(JitBackend::adopt_shared_with_state(
@@ -129,23 +162,14 @@ impl CompiledTier {
                 feature = "arm64-codegen",
                 target_arch = "aarch64"
             ))]
-            CompiledCode::Native(shared) => {
-                // Native emission reserves trailing spill/scratch arena beyond
-                // the semantic state, so grow the transferred image to the
-                // size `NativeBackend::from_shared` would allocate; the extra
-                // tail is fresh scratch the interpreter never touched.
-                let target_words = shared.native_memory_size.div_ceil(8) + 1;
-                let mut memory = memory;
-                memory.resize(target_words, 0);
-                Self::Native(Box::new(
-                    crate::backend::native::NativeBackend::adopt_shared_with_state(
-                        shared,
-                        memory,
-                        runtime_event_buffer,
-                        comb_capture_enabled,
-                    ),
-                ))
-            }
+            CompiledCode::Native(shared) => Self::Native(Box::new(
+                crate::backend::native::NativeBackend::adopt_shared_with_state(
+                    shared,
+                    memory,
+                    runtime_event_buffer,
+                    comb_capture_enabled,
+                ),
+            )),
         }
     }
 
@@ -471,10 +495,21 @@ impl TieredBackend {
             + Send
             + 'static,
     {
-        let interp = Box::new(
+        let mut interp = Box::new(
             InterpBackend::new(laid_out, options)
                 .expect("interpreter construction cannot fail for a laid-out program"),
         );
+        // Reserve promotion headroom before anything can observe the image:
+        // native emission appends a spill/scratch arena beyond the semantic
+        // state, and adoption must grow within this allocation so the live
+        // image never moves. The slack covers the measured arena sizes with
+        // margin; a design that outgrows it declines promotion (recorded via
+        // `promotion_error`) instead of reallocating.
+        if native_is_default_target() {
+            let len = interp.image_word_len();
+            let slack = len.max(1024) / 8;
+            interp.reserve_image_capacity(len + slack.max(1024));
+        }
         let events = interp
             .id_to_event_slice()
             .iter()
@@ -624,6 +659,25 @@ impl TieredBackend {
             };
             return;
         };
+        // Adoption grows the transferred image within its existing allocation
+        // so promotion never moves the live memory image (external views such
+        // as zero-copy host buffers may still reference it). If the compiled
+        // tier outgrew the reserved interpreter arena, decline promotion and
+        // stay interpreted instead of reallocating.
+        if let Phase::Interpreting(Some(interp)) = &mut self.phase {
+            let required = code.required_image_words();
+            if interp.image_word_capacity() < required {
+                self.promotion = Promotion::Failed(SimulatorError::new(
+                    crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
+                        "native image needs {required} words but the reserved interpreter \
+                         image only has {} words of capacity; refusing to move the live \
+                         memory image and staying interpreted",
+                        interp.image_word_capacity()
+                    ))),
+                ));
+                return;
+            }
+        }
         let mut adopted = None;
         if let Phase::Interpreting(slot) = &mut self.phase {
             if let Some(mut interp) = slot.take() {
