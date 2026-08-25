@@ -1238,6 +1238,15 @@ mod host {
             self.backend.layout()
         }
 
+        /// Take ownership of the VCD writer, if one was configured at build time.
+        ///
+        /// Builders create the writer themselves so that layout selection can
+        /// account for VCD recording; callers building handles around a backend
+        /// use this to keep tracing alive without rebuilding descriptors.
+        pub fn take_vcd_writer(&mut self) -> Option<crate::VcdWriter> {
+            self.vcd_writer.take()
+        }
+
         /// Build VCD signal descriptors for all instances.
         ///
         /// The returned descriptors are self-contained (no IR references) and can

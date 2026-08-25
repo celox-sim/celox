@@ -8,6 +8,7 @@
  * `celox-napi` native addon compiled from the Rust simulator.
  */
 
+import { readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { readFourState } from "./dut.js";
@@ -3388,5 +3389,86 @@ module InjectedFailureTb {
 
 		expect(result.passed).toBe(false);
 		expect(result.error).toContain("TypeScript component failed");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Tiered + VCD e2e tests
+// ---------------------------------------------------------------------------
+
+const TIERED_VCD_ARRAY_SOURCE = `
+module TieredVcdArray (
+    clk: input clock,
+    rst: input reset,
+    d: input logic<3>,
+    widx: input logic<2>,
+    ridx: input logic<2>,
+    q0: output logic<3>,
+) {
+    var mem: logic<3>[4];
+    always_ff (clk, rst) {
+        if_reset {
+            mem[0] = 3'd0;
+        } else {
+            mem[widx] = d;
+        }
+    }
+    assign q0 = mem[ridx];
+}
+`;
+
+describe("E2E: tiered + VCD", () => {
+	test("tiered build with vcd records packed array traces", () => {
+		const addon = loadNativeAddon();
+		if (!addon.NativeSimulatorHandle.newTiered) {
+			return; // addon built before tiering was exposed
+		}
+
+		const vcdPath = path.join(
+			import.meta.dirname ?? __dirname,
+			"tiered_vcd_array.tmp.vcd",
+		);
+		const sim = Simulator.fromSource(
+			TIERED_VCD_ARRAY_SOURCE,
+			"TieredVcdArray",
+			{
+				tier: true,
+				vcd: vcdPath,
+			},
+		);
+
+		const dut = sim.dut as unknown as Record<string, bigint>;
+		dut.rst = 1n;
+		for (let lane = 0; lane < 4; lane++) {
+			dut.d = BigInt(lane + 1);
+			dut.widx = BigInt(lane);
+			sim.tick();
+		}
+		dut.ridx = 0n;
+		expect(dut.q0).toBe(1n);
+		sim.dump(10);
+		sim.dispose();
+
+		try {
+			const content = readFileSync(vcdPath, "utf8");
+			// The array must be dumped as one contiguous packed value; a
+			// strided layout would place element padding between lanes and
+			// yield a different bit pattern.
+			const varMatch = content.match(/\$var wire (\d+) (.) mem \$end/);
+			expect(varMatch).not.toBeNull();
+			const valueLines = [
+				...content.matchAll(new RegExp(`^b([01]+) ${varMatch![2]}$`, "gm")),
+			];
+			expect(valueLines.length).toBeGreaterThan(0);
+			const dumped = BigInt(`0b${valueLines.at(-1)![1]}`);
+			const lanes = [1n, 2n, 3n, 4n];
+			const expected = lanes.reduce(
+				(acc, lane, index) => acc | (lane << BigInt(3 * index)),
+				0n,
+			);
+			expect(dumped).toBe(expected);
+		} finally {
+			rmSync(vcdPath, { force: true });
+		}
 	});
 });

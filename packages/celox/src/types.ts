@@ -293,8 +293,8 @@ export interface SimulatorOptions {
 	 * Default: false (compile up front before the first tick).
 	 *
 	 * Honored by `Simulator.create`, `fromSource`, and `fromProject`;
-	 * rejected by `fromFrontendArtifact`, which has no tiered build path.
-	 * Throws when the loaded addon lacks tiered support (e.g. WASM).
+	 * rejected by `fromFrontendArtifact`, the time-based `Simulation`
+	 * factories, and addons without tiered support (e.g. WASM).
 	 */
 	tier?: boolean;
 }

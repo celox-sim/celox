@@ -417,4 +417,25 @@ describe("Simulation", () => {
 
 		expect(() => sim.reset("nonexistent")).toThrow("Unknown port");
 	});
+
+	test("tier: rejected on every entry point instead of silently ignored", () => {
+		const message = "tiered execution is not supported";
+		expect(() => Simulation.create(TopModule, { tier: true })).toThrow(message);
+		expect(() =>
+			Simulation.fromSource("module T {}", "T", { tier: true }),
+		).toThrow(message);
+		expect(() =>
+			Simulation.fromProject("./project", "T", { tier: true }),
+		).toThrow(message);
+	});
+
+	test("tier: rejected when it arrives through module.defaultOptions", () => {
+		const moduleWithTier: ModuleDefinition<TopPorts> = {
+			...TopModule,
+			defaultOptions: { tier: true },
+		};
+		expect(() => Simulation.create(moduleWithTier)).toThrow(
+			"tiered execution is not supported",
+		);
+	});
 });

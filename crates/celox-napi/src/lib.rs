@@ -1008,10 +1008,11 @@ impl NativeSimulatorHandle {
     /// Mirrors [`Self::build_and_cache`] minus the shared-code cache: the
     /// tiered backend owns its interpreter state and compiles in the
     /// background, so there is no compiled artifact to reuse yet.
-    fn build_and_cache_tiered(
-        sim: celox::Simulator<celox::TieredBackend>,
-        vcd_path: Option<&str>,
-    ) -> Result<Self> {
+    fn build_and_cache_tiered(mut sim: celox::Simulator<celox::TieredBackend>) -> Result<Self> {
+        // The builder creates the VCD writer itself when recording was
+        // requested, selecting a VCD-compatible packed layout in the process;
+        // reuse that writer instead of rebuilding descriptors here.
+        let vcd_writer = sim.take_vcd_writer();
         let four_state = sim.layout().four_state;
         let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
@@ -1019,7 +1020,6 @@ impl NativeSimulatorHandle {
         let hierarchy = sim.named_hierarchy();
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
-        let vcd_descs = sim.build_vcd_descs(four_state);
         let runtime_errors = runtime_errors_by_name(sim.program());
 
         let layout_map = build_signal_layout(&signals, four_state);
@@ -1032,15 +1032,6 @@ impl NativeSimulatorHandle {
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
         let hierarchy_json = serde_json::to_string(&hierarchy_node)
             .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
-
-        let vcd_writer = if let Some(path) = vcd_path {
-            Some(
-                celox::VcdWriter::new(path, &vcd_descs)
-                    .map_err(|e| Error::from_reason(format!("Failed to create VCD: {}", e)))?,
-            )
-        } else {
-            None
-        };
 
         // Extract the backend from Simulator (drops runtime metadata which is
         // no longer needed).
@@ -1150,12 +1141,18 @@ impl NativeSimulatorHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        let mut builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        // Forward VCD before building: tiered layout selection must know that
+        // recording was requested so it picks the packed layout the VCD
+        // descriptors require (see `build_and_cache_tiered`).
+        if let Some(path) = opts.vcd.as_deref() {
+            builder = builder.vcd(path);
+        }
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache_tiered(sim, opts.vcd.as_deref())
+        Self::build_and_cache_tiered(sim)
     }
 
     /// Create a new tiered simulator from a Veryl project directory.
@@ -1180,15 +1177,21 @@ impl NativeSimulatorHandle {
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
-        let builder = apply_options(
+        let mut builder = apply_options(
             celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
+        // Forward VCD before building: tiered layout selection must know that
+        // recording was requested so it picks the packed layout the VCD
+        // descriptors require (see `build_and_cache_tiered`).
+        if let Some(path) = opts.vcd.as_deref() {
+            builder = builder.vcd(path);
+        }
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache_tiered(sim, opts.vcd.as_deref())
+        Self::build_and_cache_tiered(sim)
     }
 
     /// Create a simulator from a versioned external-frontend artifact.
