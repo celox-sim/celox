@@ -103,7 +103,11 @@ impl Cli {
     }
 
     fn builder(&self) -> SimulatorBuilder<'static> {
-        let mut builder = Simulator::builder(self.source(), self.top());
+        let mut builder = Simulator::builder(self.source(), self.top())
+            // Explicit active-high reset: the sorter fixture's plain `reset`
+            // port would otherwise default to AsyncLow and invert the
+            // assert/deassert sequence below.
+            .reset_type(celox::ResetType::AsyncHigh);
         if let Workload::Sorter { n } = self.workload() {
             builder = builder
                 .param("N", n)
@@ -158,7 +162,10 @@ impl Promotion {
 }
 
 enum BenchSim {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
     Native(Box<celox::Simulator<celox::NativeBackend>>),
     Cranelift(Box<celox::Simulator<celox::JitBackend>>),
     Interpreter(Box<celox::Simulator<celox::InterpBackend>>),
@@ -181,12 +188,20 @@ impl BenchSim {
     fn build(mode: Mode, cli: &Cli) -> Result<(Self, Duration), BenchError> {
         let build_start = Instant::now();
         let sim = match mode {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             Mode::Native => {
                 let mut sim = cli.builder().build_native()?;
                 setup(&mut sim, cli)?;
                 BenchSim::Native(Box::new(sim))
             }
+            #[cfg(not(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            )))]
+            Mode::Native => unreachable!("native availability checked in run()"),
             Mode::Cranelift => {
                 let mut sim = cli.builder().build_cranelift()?;
                 setup(&mut sim, cli)?;
@@ -213,7 +228,10 @@ impl BenchSim {
 
     fn clk_event_id(&self) -> usize {
         match self {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             BenchSim::Native(sim) => clk_id(sim),
             BenchSim::Cranelift(sim) => clk_id(sim),
             BenchSim::Interpreter(sim) => clk_id(sim),
@@ -223,7 +241,10 @@ impl BenchSim {
 
     fn tick_chunk(&mut self, event_id: usize, chunk: u32) -> Result<(), RuntimeErrorCode> {
         match self {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             BenchSim::Native(sim) => sim.tick_by_id_n(event_id, chunk),
             BenchSim::Cranelift(sim) => sim.tick_by_id_n(event_id, chunk),
             BenchSim::Interpreter(sim) => sim.tick_by_id_n(event_id, chunk),
@@ -233,16 +254,25 @@ impl BenchSim {
 
     fn is_compiled(&self) -> bool {
         match self {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             BenchSim::Native(_) => true,
-            BenchSim::Cranelift(_) | BenchSim::Interpreter(_) => true,
+            BenchSim::Cranelift(_) => true,
+            // The interpreter has no compiled tier; report it as such so the
+            // machine-readable records classify the baseline correctly.
+            BenchSim::Interpreter(_) => false,
             BenchSim::Tiered(sim) => sim.is_compiled(),
         }
     }
 
     fn output_hex(&mut self, workload: Workload) -> String {
         match self {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             BenchSim::Native(sim) => output_hex(sim, workload),
             BenchSim::Cranelift(sim) => output_hex(sim, workload),
             BenchSim::Interpreter(sim) => output_hex(sim, workload),
@@ -268,7 +298,25 @@ fn setup<B: celox::SimBackend>(
             let d = sim.signal("d");
             sim.modify(|io| io.set(d, 0x9E37_79B9_7F4A_7C15u64))?;
         }
-        Workload::Sorter { .. } => {
+        Workload::Sorter { n } => {
+            // Drive non-trivial stimulus so the timed ticks exercise real
+            // sort/merge paths instead of an idle pipeline: continuous
+            // pushes of distinct per-lane data.
+            let d_in = sim.signal("d_in");
+            let mut pattern = Vec::with_capacity(8 * n as usize);
+            for lane in 0..n {
+                let value = 0x0100_0000_0000_0001u64.wrapping_mul(lane + 1);
+                pattern.extend_from_slice(&value.to_le_bytes());
+            }
+            let push = sim.signal("push");
+            let last = sim.signal("last");
+            let merge_en = sim.signal("merge_en");
+            sim.modify(|io| {
+                io.set_wide(d_in, celox::BigUint::from_bytes_le(&pattern));
+                io.set(push, 1u8);
+                io.set(last, 1u8);
+                io.set(merge_en, 1u8);
+            })?;
             let rst = sim.signal("rst");
             sim.modify(|io| io.set(rst, 1u8))?;
             let clk = clk_id(sim);
@@ -314,7 +362,17 @@ fn run() -> Result<(), BenchError> {
     let cli = Cli::parse();
     if matches!(cli.mode, Mode::Native) && !native_available() {
         return Err(BenchError::InvalidConfiguration {
-            message: "the native backend is unavailable on this host",
+            message: "the native backend is unavailable on this host or target",
+        });
+    }
+    if cli.chunk == 0 {
+        return Err(BenchError::InvalidConfiguration {
+            message: "--chunk must be at least 1",
+        });
+    }
+    if cli.tick_count() == 0 {
+        return Err(BenchError::InvalidConfiguration {
+            message: "--ticks must be at least 1",
         });
     }
     let workload = cli.workload();
@@ -343,17 +401,19 @@ fn run() -> Result<(), BenchError> {
     let first_tick_start = Instant::now();
     sim.tick_chunk(clk, 1)?;
     let first_tick_elapsed = first_tick_start.elapsed();
+    // The first tick is measured separately; remember whether it already
+    // promoted so the promotion record matches this observation.
+    let compiled_after_first_tick = sim.is_compiled();
     println!(
-        "CELOX_TIERED_FIRST_TICK workload={} mode={} first_tick_ns={} compiled_after_first_tick={}",
+        "CELOX_TIERED_FIRST_TICK workload={} mode={} first_tick_ns={} compiled_after_first_tick={compiled_after_first_tick}",
         workload.as_str(),
         cli.mode.as_str(),
-        first_tick_elapsed.as_nanos(),
-        sim.is_compiled()
+        first_tick_elapsed.as_nanos()
     );
 
     let run_start = Instant::now();
     let mut executed: u64 = 1;
-    let mut promoted_at: Option<u64> = None;
+    let mut promoted_at: Option<u64> = compiled_after_first_tick.then_some(1);
     while executed < ticks {
         let chunk = u32::try_from(ticks - executed)
             .unwrap_or(u32::MAX)
@@ -379,12 +439,13 @@ fn run() -> Result<(), BenchError> {
             cli.mode.as_str()
         );
     }
+    let timed_ticks = executed - 1;
     println!(
-        "CELOX_TIERED_RUN workload={} mode={} ticks={executed} total_ns={} ns_per_tick={} promoted={} output={}",
+        "CELOX_TIERED_RUN workload={} mode={} ticks={timed_ticks} total_ns={} ns_per_tick={} promoted={} output={}",
         workload.as_str(),
         cli.mode.as_str(),
         run_elapsed.as_nanos(),
-        run_elapsed.as_nanos() / u128::from(executed.max(1)),
+        run_elapsed.as_nanos() / u128::from(timed_ticks.max(1)),
         sim.is_compiled(),
         sim.output_hex(workload)
     );
@@ -392,5 +453,8 @@ fn run() -> Result<(), BenchError> {
 }
 
 fn native_available() -> bool {
-    cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
+    cfg!(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))
 }
