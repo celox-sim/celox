@@ -192,19 +192,23 @@ export class Simulator<P = Record<string, unknown>> {
 		options?: SimulatorOptions & { nativeAddonPath?: string },
 	): Simulator<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
+		if (options?.tier && !addon.NativeSimulatorHandle.newTiered) {
+			throw new Error(
+				"The loaded Celox native addon does not support tiered execution.",
+			);
+		}
 		const napiOpts = buildNapiOpts(options);
-		const raw =
-			options?.tier && addon.NativeSimulatorHandle.newTiered
-				? addon.NativeSimulatorHandle.newTiered(
-						[{ content: source, path: "" }],
-						top,
-						napiOpts,
-					)
-				: new addon.NativeSimulatorHandle(
-						[{ content: source, path: "" }],
-						top,
-						napiOpts,
-					);
+		const raw = options?.tier
+			? addon.NativeSimulatorHandle.newTiered!(
+					[{ content: source, path: "" }],
+					top,
+					napiOpts,
+				)
+			: new addon.NativeSimulatorHandle(
+					[{ content: source, path: "" }],
+					top,
+					napiOpts,
+				);
 		const isWasm = isWasmHandle(raw);
 
 		const layout =
@@ -364,15 +368,19 @@ export class Simulator<P = Record<string, unknown>> {
 		options?: SimulatorOptions & { nativeAddonPath?: string },
 	): Simulator<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
+		if (options?.tier && !addon.NativeSimulatorHandle.newTieredFromProject) {
+			throw new Error(
+				"The loaded Celox native addon does not support tiered execution.",
+			);
+		}
 		const napiOpts = buildNapiOpts(options);
-		const raw =
-			options?.tier && addon.NativeSimulatorHandle.newTieredFromProject
-				? addon.NativeSimulatorHandle.newTieredFromProject(
-						projectPath,
-						top,
-						napiOpts,
-					)
-				: addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
+		const raw = options?.tier
+			? addon.NativeSimulatorHandle.newTieredFromProject!(
+					projectPath,
+					top,
+					napiOpts,
+				)
+			: addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
 		const isWasm = isWasmHandle(raw);
 
 		const layout =

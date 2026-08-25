@@ -294,6 +294,7 @@ export interface SimulatorOptions {
 	 *
 	 * Honored by `Simulator.create`, `fromSource`, and `fromProject`;
 	 * rejected by `fromFrontendArtifact`, which has no tiered build path.
+	 * Throws when the loaded addon lacks tiered support (e.g. WASM).
 	 */
 	tier?: boolean;
 }

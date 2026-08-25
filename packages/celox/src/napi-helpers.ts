@@ -882,14 +882,15 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 			content: s.content,
 			path: s.path,
 		}));
-		const raw =
-			options.tier && addon.NativeSimulatorHandle.newTiered
-				? addon.NativeSimulatorHandle.newTiered(
-						napiSources,
-						moduleName,
-						napiOpts,
-					)
-				: new addon.NativeSimulatorHandle(napiSources, moduleName, napiOpts);
+		const handleCtor = addon.NativeSimulatorHandle;
+		if (options.tier && !handleCtor.newTiered) {
+			throw new Error(
+				"The loaded Celox native addon does not support tiered execution.",
+			);
+		}
+		const raw = options.tier
+			? handleCtor.newTiered!(napiSources, moduleName, napiOpts)
+			: new handleCtor(napiSources, moduleName, napiOpts);
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);

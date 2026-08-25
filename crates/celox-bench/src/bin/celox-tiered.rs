@@ -343,7 +343,7 @@ fn output_hex<B: celox::SimBackend>(sim: &mut celox::Simulator<B>, workload: Wor
             let done = sim.signal("done");
             let lanes = sim.get(d_out);
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for (index, limb) in lanes.iter_u64_digits().enumerate().take(16) {
+            for (index, limb) in lanes.iter_u64_digits().enumerate() {
                 hash = hash.rotate_left(11) ^ hash.wrapping_add(limb.rotate_left(index as u32 % 7));
             }
             hash ^= u64::from(sim.get_as::<u8>(done));
