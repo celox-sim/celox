@@ -1158,6 +1158,39 @@ impl NativeSimulatorHandle {
         Self::build_and_cache_tiered(sim, opts.vcd.as_deref())
     }
 
+    /// Create a new tiered simulator from a Veryl project directory.
+    ///
+    /// Tiered counterpart of [`Self::from_project`]: searches upward from
+    /// `project_path` for `Veryl.toml`, starts on the interpreter
+    /// immediately, and promotes to the host's default compiled tier in the
+    /// background. Bypasses the JIT cache for the same reason as
+    /// [`Self::new_tiered`].
+    #[napi(factory)]
+    pub fn new_tiered_from_project(
+        project_path: String,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        append_extra_source(&mut sources, &opts.extra_source);
+
+        let source_refs: Vec<(&str, &std::path::Path)> = sources
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+
+        let builder = apply_options(
+            celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
+            &opts,
+        );
+        let sim = builder
+            .build_tiered()
+            .map_err(|e| Error::from_reason(format!("{}", e)))?;
+
+        Self::build_and_cache_tiered(sim, opts.vcd.as_deref())
+    }
+
     /// Create a simulator from a versioned external-frontend artifact.
     #[napi(factory)]
     pub fn from_frontend_artifact(

@@ -205,6 +205,15 @@ export interface RawNapiAddon {
 			top: string,
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
+		/**
+		 * Tiered counterpart of `fromProject`. Optional — absent on addons
+		 * built before tiering was exposed.
+		 */
+		newTieredFromProject?(
+			projectPath: string,
+			top: string,
+			options?: NapiOptions,
+		): RawNapiSimulatorHandle;
 	};
 	NativeSimulationHandle?: {
 		new (

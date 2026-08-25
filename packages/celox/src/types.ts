@@ -291,6 +291,9 @@ export interface SimulatorOptions {
 	 * host's compiled tier is prepared on a background thread, and the
 	 * simulation adopts it at the next safe point after compilation.
 	 * Default: false (compile up front before the first tick).
+	 *
+	 * Honored by `Simulator.create`, `fromSource`, and `fromProject`;
+	 * rejected by `fromFrontendArtifact`, which has no tiered build path.
 	 */
 	tier?: boolean;
 }

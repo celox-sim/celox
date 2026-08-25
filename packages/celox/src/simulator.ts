@@ -191,11 +191,18 @@ export class Simulator<P = Record<string, unknown>> {
 	): Simulator<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
-		const raw = new addon.NativeSimulatorHandle(
-			[{ content: source, path: "" }],
-			top,
-			napiOpts,
-		);
+		const raw =
+			options?.tier && addon.NativeSimulatorHandle.newTiered
+				? addon.NativeSimulatorHandle.newTiered(
+						[{ content: source, path: "" }],
+						top,
+						napiOpts,
+					)
+				: new addon.NativeSimulatorHandle(
+						[{ content: source, path: "" }],
+						top,
+						napiOpts,
+					);
 		const isWasm = isWasmHandle(raw);
 
 		const layout =
@@ -260,6 +267,11 @@ export class Simulator<P = Record<string, unknown>> {
 		artifactJson: string,
 		options?: SimulatorOptions & { nativeAddonPath?: string },
 	): Simulator<P> {
+		if (options?.tier) {
+			throw new Error(
+				"tiered execution is not supported for frontend artifact handles.",
+			);
+		}
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const factory = addon.NativeSimulatorHandle.fromFrontendArtifact;
 		if (!factory) {
@@ -351,11 +363,18 @@ export class Simulator<P = Record<string, unknown>> {
 	): Simulator<P> {
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
-		const raw = addon.NativeSimulatorHandle.fromProject(
-			projectPath,
-			top,
-			napiOpts,
-		);
+		const raw =
+			options?.tier && addon.NativeSimulatorHandle.newTieredFromProject
+				? addon.NativeSimulatorHandle.newTieredFromProject(
+						projectPath,
+						top,
+						napiOpts,
+					)
+				: addon.NativeSimulatorHandle.fromProject(
+						projectPath,
+						top,
+						napiOpts,
+					);
 		const isWasm = isWasmHandle(raw);
 
 		const layout =
