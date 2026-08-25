@@ -12,7 +12,12 @@
 //!
 //! Promotion is whole-program: once the compiled tier is adopted it is used
 //! for the remainder of the simulation. The interpreter remains the permanent
-//! fallback whenever background compilation fails.
+//! fallback whenever background compilation fails, and
+//! [`TierPromotion::Never`] skips background compilation entirely so the
+//! simulation stays interpreted without paying for a worker thread.
+//! [`TierPromotion::AfterSteps`] keeps compiling eagerly but delays adoption
+//! until the interpreter has executed a minimum number of evaluation steps,
+//! protecting short simulations from the promotion cost.
 //!
 //! Background compilation is cooperatively cancellable on the native tier:
 //! dropping the backend (or calling
@@ -342,6 +347,9 @@ enum Promotion {
     Pending(mpsc::Receiver<Result<CompiledCode, SimulatorError>>),
     /// Compilation failed permanently; remain on the interpreter forever.
     Failed(SimulatorError),
+    /// [`TierPromotion::Never`] — no worker was ever spawned and the
+    /// simulation stays interpreted by policy (not by failure).
+    Disabled,
     Promoted,
 }
 
@@ -361,6 +369,12 @@ pub struct TieredBackend {
     /// observes the interpreted evaluate-only results through an intact
     /// sparse-metadata image.
     pending_split_applies: usize,
+    /// Minimum number of interpreted evaluation steps required before
+    /// adoption ([`TierPromotion::AfterSteps`]). Zero means "as soon as the
+    /// compiled tier is ready".
+    promotion_threshold: u64,
+    /// Evaluation steps executed on the interpreted tier so far.
+    interpreted_steps: u64,
 }
 
 impl TieredBackend {
@@ -470,35 +484,49 @@ impl TieredBackend {
             })
             .collect();
 
-        let (sender, receiver) = mpsc::channel();
-        let background_laid_out = laid_out.clone();
-        let background_options = options.clone();
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the background-failure policy instead of
         // panicking the embedding application.
-        let promotion = match std::thread::Builder::new()
-            .name("celox-jit-compile".to_string())
-            .spawn(move || {
-                // The result is delivered through the channel instead of the
-                // join handle so safe-point polls never block on compilation.
-                // A panicked worker surfaces as a disconnected channel and
-                // keeps the simulation on the interpreter permanently.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compile(&background_laid_out, &background_options, &worker_cancel)
-                }))
-                .unwrap_or_else(|_| {
-                    Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
-                });
-                let _ = sender.send(result);
-            }) {
-            Ok(_handle) => Promotion::Pending(receiver),
-            Err(error) => Promotion::Failed(SimulatorError::new(
-                crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
-                    "failed to spawn the background compiler thread: {error}"
-                ))),
-            )),
+        let promotion = if matches!(
+            options.tier_promotion,
+            crate::simulator::TierPromotion::Never
+        ) {
+            // Policy says interpreted-only: skip the worker entirely so a
+            // never-promoted simulation pays nothing beyond the interpreter.
+            Promotion::Disabled
+        } else {
+            let (sender, receiver) = mpsc::channel();
+            let background_laid_out = laid_out.clone();
+            let background_options = options.clone();
+            match std::thread::Builder::new()
+                .name("celox-jit-compile".to_string())
+                .spawn(move || {
+                    // The result is delivered through the channel instead of the
+                    // join handle so safe-point polls never block on compilation.
+                    // A panicked worker surfaces as a disconnected channel and
+                    // keeps the simulation on the interpreter permanently.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compile(&background_laid_out, &background_options, &worker_cancel)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    });
+                    let _ = sender.send(result);
+                }) {
+                Ok(_handle) => Promotion::Pending(receiver),
+                Err(error) => Promotion::Failed(SimulatorError::new(
+                    crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
+                        "failed to spawn the background compiler thread: {error}"
+                    ))),
+                )),
+            }
+        };
+
+        let promotion_threshold = match options.tier_promotion {
+            crate::simulator::TierPromotion::AfterSteps(steps) => steps,
+            _ => 0,
         };
 
         Self {
@@ -507,6 +535,8 @@ impl TieredBackend {
             events,
             cancel,
             pending_split_applies: 0,
+            promotion_threshold,
+            interpreted_steps: 0,
         }
     }
 
@@ -545,6 +575,14 @@ impl TieredBackend {
         pending
     }
 
+    /// Record one evaluation step executed on the interpreted tier. Feeds
+    /// the [`TierPromotion::AfterSteps`] adoption threshold.
+    fn count_interpreted_step_if_interpreting(&mut self) {
+        if matches!(self.phase, Phase::Interpreting(Some(_))) {
+            self.interpreted_steps = self.interpreted_steps.saturating_add(1);
+        }
+    }
+
     /// Adopt the compiled tier if background compilation finished. Called at
     /// scheduler safe points (between evaluation phases) where no unit is
     /// mid-execution and the memory image can move atomically from the
@@ -557,6 +595,11 @@ impl TieredBackend {
         // apply phase must observe the interpreted evaluate-only results,
         // and adoption clears the sparse metadata they are tracked in.
         if self.pending_split_applies > 0 {
+            return;
+        }
+        // Honor the minimum interpreted-step count so short simulations are
+        // not disrupted by an adoption their remaining run cannot amortize.
+        if self.interpreted_steps < self.promotion_threshold {
             return;
         }
         let Promotion::Pending(receiver) = &self.promotion else {
@@ -637,6 +680,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb(),
             Phase::Compiled(compiled) => compiled.eval_comb(),
@@ -646,6 +690,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -657,6 +702,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -677,6 +723,8 @@ impl SimBackend for TieredBackend {
             return (0, Ok(()));
         }
         self.maybe_promote();
+        // The interpreting arm below delegates to `eval_comb_apply_ff_at`,
+        // which performs the step count itself.
         match &mut self.phase {
             Phase::Interpreting(Some(_)) => (1, self.eval_comb_apply_ff_at(event)),
             Phase::Compiled(compiled) => compiled.eval_comb_apply_ff_many_at(event.id(), count),
@@ -686,6 +734,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_only_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_only_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -702,6 +751,7 @@ impl SimBackend for TieredBackend {
     fn apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         // Never promote between the evaluate-only and apply phases.
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -1713,5 +1763,68 @@ module Top (
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(saw_cancel.load(Ordering::Acquire));
+    }
+
+    /// `TierPromotion::Never` never spawns the background worker and keeps
+    /// the simulation interpreted permanently without recording an error.
+    #[test]
+    fn tier_promotion_never_skips_background_compilation() {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let worker_invoked = Arc::clone(&invoked);
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+            .tier_promotion(crate::TierPromotion::Never)
+            .build_tiered_with_compiler(move |_laid_out, _options, _cancel| {
+                worker_invoked.store(true, Ordering::SeqCst);
+                Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+            })
+            .unwrap();
+
+        // Give a hypothetical worker ample time to start; the policy must
+        // have prevented the spawn entirely.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(!sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
+
+        // The interpreted tier still produces correct results.
+        let inputs: Vec<u8> = (0..8).collect();
+        assert_eq!(drive(&mut sim, &inputs), reference_outputs(&inputs));
+    }
+
+    /// `TierPromotion::AfterSteps` lets background compilation finish but
+    /// defers adoption until the interpreter crosses the step threshold.
+    #[test]
+    fn tier_promotion_after_steps_defers_adoption() {
+        const THRESHOLD: u64 = 1000;
+        let sim_build: Simulator<TieredBackend> =
+            SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+                .tier_promotion(crate::TierPromotion::AfterSteps(THRESHOLD))
+                .build_tiered_with_compiler(|laid_out, options, _cancel| {
+                    let image = NativeBackend::compile_image(laid_out, options)?;
+                    let shared = unsafe { SharedNativeCode::from_image(image)? };
+                    Ok(CompiledCode::Native(Arc::new(shared)))
+                })
+                .unwrap();
+        let mut sim = sim_build;
+        let clk = sim.event("clk");
+
+        // A handful of ticks stay far below the threshold; even once the
+        // compiled tier is ready, adoption must not land.
+        for _ in 0..4 {
+            sim.tick(clk).unwrap();
+        }
+        assert!(
+            !sim.is_compiled(),
+            "adopted before the interpreted-step threshold"
+        );
+
+        // Crossing the threshold lets subsequent safe points adopt.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
     }
 }

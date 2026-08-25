@@ -1043,6 +1043,23 @@ mod host {
         PreserveAllPorts,
     }
 
+    /// Controls when the tiered backend adopts background-compiled code.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TierPromotion {
+        /// Adopt compiled code at the first scheduler safe point after
+        /// background compilation completes. Default.
+        Always,
+        /// Adopt compiled code only once the interpreter has executed at
+        /// least this many evaluation steps. Background compilation still
+        /// starts immediately; short simulations that finish before the
+        /// threshold simply never pay the adoption cost. `AfterSteps(0)`
+        /// behaves like [`TierPromotion::Always`].
+        AfterSteps(u64),
+        /// Stay interpreted permanently and skip background compilation
+        /// entirely — no worker thread is spawned.
+        Never,
+    }
+
     #[derive(Debug, Clone)]
     pub struct SimulatorOptions {
         pub four_state: bool,
@@ -1066,6 +1083,8 @@ mod host {
         pub native_force_support: bool,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
+        /// When the tiered backend adopts background-compiled code.
+        pub tier_promotion: TierPromotion,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1237,6 +1256,7 @@ mod host {
                 emit_triggers: false,
                 native_force_support: false,
                 dead_store_policy: DeadStorePolicy::Off,
+                tier_promotion: TierPromotion::Always,
             }
         }
     }
@@ -1470,6 +1490,12 @@ mod host {
         /// Set the dead store elimination policy.
         pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
             self.options.dead_store_policy = policy;
+            self
+        }
+
+        /// Set when the tiered backend adopts background-compiled code.
+        pub fn tier_promotion(mut self, policy: TierPromotion) -> Self {
+            self.options.tier_promotion = policy;
             self
         }
 
