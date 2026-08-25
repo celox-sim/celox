@@ -370,11 +370,7 @@ export class Simulator<P = Record<string, unknown>> {
 						top,
 						napiOpts,
 					)
-				: addon.NativeSimulatorHandle.fromProject(
-						projectPath,
-						top,
-						napiOpts,
-					);
+				: addon.NativeSimulatorHandle.fromProject(projectPath, top, napiOpts);
 		const isWasm = isWasmHandle(raw);
 
 		const layout =
