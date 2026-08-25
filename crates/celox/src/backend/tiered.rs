@@ -114,11 +114,14 @@ enum CompiledTier {
 
 impl CompiledCode {
     /// Image size in `u64` words the compiled tier requires its host
-    /// allocation to cover, or `None` when the transferred interpreter image
-    /// is adopted as-is.
+    /// allocation to cover.
     fn required_image_words(&self) -> usize {
         match self {
-            CompiledCode::Cranelift(_) => 0,
+            // A MemorySpilled Cranelift plan extends the layout with backend
+            // scratch beyond the semantic state, and adoption resizes the
+            // transferred image to the compiled layout's total size; report
+            // that requirement so promotion stays inside the reservation.
+            CompiledCode::Cranelift(shared) => shared.layout.merged_total_size.div_ceil(8),
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
@@ -500,17 +503,16 @@ impl TieredBackend {
                 .expect("interpreter construction cannot fail for a laid-out program"),
         );
         // Reserve promotion headroom before anything can observe the image:
-        // native emission appends a spill/scratch arena beyond the semantic
-        // state, and adoption must grow within this allocation so the live
-        // image never moves. The slack covers the measured arena sizes with
+        // the compiled tier's adoption may grow the image beyond the semantic
+        // state (native spill/scratch arenas, Cranelift MemorySpilled plans),
+        // and adoption must grow within this allocation so the live image
+        // never moves. The slack covers the measured arena sizes with
         // margin; a design that outgrows it declines promotion (recorded via
         // `promotion_error`) instead of reallocating.
-        if native_is_default_target()
-            && !matches!(
-                options.tier_promotion,
-                crate::simulator::TierPromotion::Never
-            )
-        {
+        if !matches!(
+            options.tier_promotion,
+            crate::simulator::TierPromotion::Never
+        ) {
             let len = interp.image_word_len();
             let slack = len.max(1024) / 8;
             interp.reserve_image_capacity(len + slack.max(1024));
@@ -1885,5 +1887,63 @@ module Top (
         }
         assert!(sim.is_compiled());
         assert!(sim.promotion_error().is_none());
+    }
+
+    /// Promoting to the Cranelift tier must report an image requirement that
+    /// covers adoption's resize target (a MemorySpilled plan grows the layout
+    /// beyond the interpreter's semantic state), and the growth must stay
+    /// within the reserved arena so the live image never moves.
+    #[test]
+    fn cranelift_promotion_covers_its_image_requirement_without_moving_the_image() {
+        use std::sync::Mutex;
+
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let observed: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
+        let worker_observed = observed.clone();
+
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
+                while !worker_gate.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let shared = Arc::new(JitBackend::compile(laid_out, options, None)?);
+                let code = CompiledCode::Cranelift(Arc::clone(&shared));
+                // (adoption resize target in words, reported requirement)
+                *worker_observed.lock().unwrap() = Some((
+                    shared.layout.merged_total_size.div_ceil(8),
+                    code.required_image_words(),
+                ));
+                Ok(code)
+            })
+            .unwrap();
+
+        let clk = sim.event("clk");
+        for _ in 0..2 {
+            sim.tick(clk).unwrap();
+        }
+        let (base_before, _) = sim.memory_as_ptr();
+
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
+
+        let (adopt_target, required) = observed.lock().unwrap().expect("compiler ran");
+        assert!(
+            required >= adopt_target,
+            "required_image_words ({required}) must cover the Cranelift \
+             adoption resize target ({adopt_target})"
+        );
+
+        let (base_after, _) = sim.memory_as_ptr();
+        assert_eq!(
+            base_before, base_after,
+            "promotion must not move the live memory image"
+        );
     }
 }

@@ -90,15 +90,19 @@ mod tests {
             "VCD recording must force the packed layout for tiered builds"
         );
 
-        // Sanity: without VCD the same build does adopt element-strided
-        // storage for `mem`, so this test actually exercises both layouts.
-        let strided = SimulatorBuilder::new(code, "Top").build_tiered().unwrap();
-        assert_eq!(
-            strided.layout().unpacked_arrays.len(),
-            1,
-            "expected `mem` to be element-strided when not recording VCD"
-        );
-        drop(strided);
+        // Sanity: without VCD the same build adopts element-strided storage
+        // for `mem` on hosts whose default compiled tier is native, so the
+        // trace comparison really exercises both layouts. Cross-codegen
+        // builds default to Cranelift, whose tiered target layout is packed
+        // either way.
+        if native_default_compiled_tier() {
+            let strided = SimulatorBuilder::new(code, "Top").build_tiered().unwrap();
+            assert_eq!(
+                strided.layout().unpacked_arrays.len(),
+                1,
+                "expected `mem` to be element-strided when not recording VCD"
+            );
+        }
 
         drive(&mut reference);
         dump_at(&mut reference, 10);
@@ -110,6 +114,27 @@ mod tests {
 
         fs::remove_file(reference_path).unwrap();
         fs::remove_file(tiered_path).unwrap();
+    }
+
+    /// Whether the host's default compiled tier is the native backend.
+    ///
+    /// Mirrors the crate's `native_is_default_target` selection, which is
+    /// not public; cross-codegen builds fall back to Cranelift.
+    fn native_default_compiled_tier() -> bool {
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        {
+            true
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )))]
+        {
+            false
+        }
     }
 
     /// Identical stimulus for every backend under comparison.
