@@ -195,6 +195,16 @@ export interface RawNapiAddon {
 			artifactJson: string,
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
+		/**
+		 * Create a tiered simulator: interprets immediately while the
+		 * compiled tier is prepared on a background thread. Optional —
+		 * absent on addons built before tiering was exposed.
+		 */
+		newTiered?(
+			sources: NapiSourceFile[],
+			top: string,
+			options?: NapiOptions,
+		): RawNapiSimulatorHandle;
 	};
 	NativeSimulationHandle?: {
 		new (
@@ -778,6 +788,11 @@ export function wrapDirectSimulatorHandle(
 		dispose(): void {
 			raw.dispose();
 		},
+		tierCompiled(): boolean | null {
+			const value = (raw as { tierCompiled?: boolean | null | undefined })
+				.tierCompiled;
+			return value ?? null;
+		},
 	};
 }
 
@@ -858,12 +873,14 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 			content: s.content,
 			path: s.path,
 		}));
-		const raw = new addon.NativeSimulatorHandle(
-			napiSources,
-			moduleName,
-			napiOpts,
-		);
-
+		const raw =
+			options.tier && addon.NativeSimulatorHandle.newTiered
+				? addon.NativeSimulatorHandle.newTiered(
+						napiSources,
+						moduleName,
+						napiOpts,
+					)
+				: new addon.NativeSimulatorHandle(napiSources, moduleName, napiOpts);
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
