@@ -128,6 +128,7 @@ export class Simulator<P = Record<string, unknown>> {
 			resetType,
 			parameters,
 			deadStorePolicy,
+			tier,
 		} = merged ?? {};
 		const result = createFn(module.sources, module.name, {
 			fourState,
@@ -139,6 +140,7 @@ export class Simulator<P = Record<string, unknown>> {
 			resetType,
 			parameters,
 			deadStorePolicy,
+			tier,
 		});
 		const state: DirtyState = { dirty: false };
 

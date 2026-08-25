@@ -505,7 +505,12 @@ impl TieredBackend {
         // image never moves. The slack covers the measured arena sizes with
         // margin; a design that outgrows it declines promotion (recorded via
         // `promotion_error`) instead of reallocating.
-        if native_is_default_target() {
+        if native_is_default_target()
+            && !matches!(
+                options.tier_promotion,
+                crate::simulator::TierPromotion::Never
+            )
+        {
             let len = interp.image_word_len();
             let slack = len.max(1024) / 8;
             interp.reserve_image_capacity(len + slack.max(1024));

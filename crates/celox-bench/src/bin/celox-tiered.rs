@@ -308,12 +308,15 @@ fn setup<B: celox::SimBackend>(
                 let value = 0x0100_0000_0000_0001u64.wrapping_mul(lane + 1);
                 pattern.extend_from_slice(&value.to_le_bytes());
             }
+            // `push` is an N-wide per-lane vector: assert every lane so
+            // each distinct d_in value is actually inserted.
+            let all_lanes = (celox::BigUint::from(1u8) << n as usize) - 1u8;
             let push = sim.signal("push");
             let last = sim.signal("last");
             let merge_en = sim.signal("merge_en");
             sim.modify(|io| {
                 io.set_wide(d_in, celox::BigUint::from_bytes_le(&pattern));
-                io.set(push, 1u8);
+                io.set_wide(push, all_lanes);
                 io.set(last, 1u8);
                 io.set(merge_en, 1u8);
             })?;
