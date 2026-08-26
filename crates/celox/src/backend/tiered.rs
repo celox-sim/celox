@@ -12,7 +12,18 @@
 //!
 //! Promotion is whole-program: once the compiled tier is adopted it is used
 //! for the remainder of the simulation. The interpreter remains the permanent
-//! fallback whenever background compilation fails.
+//! fallback whenever background compilation fails, and
+//! [`TierPromotion::Never`] skips background compilation entirely so the
+//! simulation stays interpreted without paying for a worker thread.
+//! [`TierPromotion::AfterSteps`] keeps compiling eagerly but delays adoption
+//! until the interpreter has executed a minimum number of evaluation steps,
+//! protecting short simulations from the promotion cost.
+//!
+//! Adoption never moves the live memory image: tiered builds reserve arena
+//! headroom up front and grow within that allocation, so views handed out
+//! before promotion (for example zero-copy host buffers) stay valid. If a
+//! compiled image would exceed the reserved arena, adoption is declined and
+//! the reason is reported through [`TieredBackend::promotion_error`].
 //!
 //! Background compilation is cooperatively cancellable on the native tier:
 //! dropping the backend (or calling
@@ -101,15 +112,45 @@ enum CompiledTier {
     Native(Box<crate::backend::native::NativeBackend>),
 }
 
+impl CompiledCode {
+    /// Image size in `u64` words the compiled tier requires its host
+    /// allocation to cover.
+    fn required_image_words(&self) -> usize {
+        match self {
+            // A MemorySpilled Cranelift plan extends the layout with backend
+            // scratch beyond the semantic state, and adoption resizes the
+            // transferred image to the compiled layout's total size; report
+            // that requirement so promotion stays inside the reservation.
+            CompiledCode::Cranelift(shared) => shared.layout.merged_total_size.div_ceil(8),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            CompiledCode::Native(shared) => shared.native_memory_size.div_ceil(8) + 1,
+        }
+    }
+}
+
 impl CompiledTier {
     /// Bind compiled code to a live simulation state handed over by the
     /// interpreter during promotion.
+    ///
+    /// Callers must have verified [`CompiledCode::required_image_words`]
+    /// against the image's spare capacity first: growth stays within the
+    /// existing allocation so promotion never moves the live memory image,
+    /// which external views (zero-copy host buffers) may still reference.
     fn adopt(
         code: CompiledCode,
-        memory: Vec<u64>,
+        mut memory: Vec<u64>,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
+        debug_assert!(memory.capacity() >= code.required_image_words());
+        if memory.len() < code.required_image_words() {
+            // Growth within capacity never reallocates.
+            memory.resize(code.required_image_words(), 0);
+        }
         match code {
             CompiledCode::Cranelift(shared) => {
                 Self::Jit(Box::new(JitBackend::adopt_shared_with_state(
@@ -124,23 +165,14 @@ impl CompiledTier {
                 feature = "arm64-codegen",
                 target_arch = "aarch64"
             ))]
-            CompiledCode::Native(shared) => {
-                // Native emission reserves trailing spill/scratch arena beyond
-                // the semantic state, so grow the transferred image to the
-                // size `NativeBackend::from_shared` would allocate; the extra
-                // tail is fresh scratch the interpreter never touched.
-                let target_words = shared.native_memory_size.div_ceil(8) + 1;
-                let mut memory = memory;
-                memory.resize(target_words, 0);
-                Self::Native(Box::new(
-                    crate::backend::native::NativeBackend::adopt_shared_with_state(
-                        shared,
-                        memory,
-                        runtime_event_buffer,
-                        comb_capture_enabled,
-                    ),
-                ))
-            }
+            CompiledCode::Native(shared) => Self::Native(Box::new(
+                crate::backend::native::NativeBackend::adopt_shared_with_state(
+                    shared,
+                    memory,
+                    runtime_event_buffer,
+                    comb_capture_enabled,
+                ),
+            )),
         }
     }
 
@@ -342,6 +374,9 @@ enum Promotion {
     Pending(mpsc::Receiver<Result<CompiledCode, SimulatorError>>),
     /// Compilation failed permanently; remain on the interpreter forever.
     Failed(SimulatorError),
+    /// [`TierPromotion::Never`] — no worker was ever spawned and the
+    /// simulation stays interpreted by policy (not by failure).
+    Disabled,
     Promoted,
 }
 
@@ -361,6 +396,12 @@ pub struct TieredBackend {
     /// observes the interpreted evaluate-only results through an intact
     /// sparse-metadata image.
     pending_split_applies: usize,
+    /// Minimum number of interpreted evaluation steps required before
+    /// adoption ([`TierPromotion::AfterSteps`]). Zero means "as soon as the
+    /// compiled tier is ready".
+    promotion_threshold: u64,
+    /// Evaluation steps executed on the interpreted tier so far.
+    interpreted_steps: u64,
 }
 
 impl TieredBackend {
@@ -457,10 +498,25 @@ impl TieredBackend {
             + Send
             + 'static,
     {
-        let interp = Box::new(
+        let mut interp = Box::new(
             InterpBackend::new(laid_out, options)
                 .expect("interpreter construction cannot fail for a laid-out program"),
         );
+        // Reserve promotion headroom before anything can observe the image:
+        // the compiled tier's adoption may grow the image beyond the semantic
+        // state (native spill/scratch arenas, Cranelift MemorySpilled plans),
+        // and adoption must grow within this allocation so the live image
+        // never moves. The slack covers the measured arena sizes with
+        // margin; a design that outgrows it declines promotion (recorded via
+        // `promotion_error`) instead of reallocating.
+        if !matches!(
+            options.tier_promotion,
+            crate::simulator::TierPromotion::Never
+        ) {
+            let len = interp.image_word_len();
+            let slack = len.max(1024) / 8;
+            interp.reserve_image_capacity(len + slack.max(1024));
+        }
         let events = interp
             .id_to_event_slice()
             .iter()
@@ -470,35 +526,49 @@ impl TieredBackend {
             })
             .collect();
 
-        let (sender, receiver) = mpsc::channel();
-        let background_laid_out = laid_out.clone();
-        let background_options = options.clone();
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the background-failure policy instead of
         // panicking the embedding application.
-        let promotion = match std::thread::Builder::new()
-            .name("celox-jit-compile".to_string())
-            .spawn(move || {
-                // The result is delivered through the channel instead of the
-                // join handle so safe-point polls never block on compilation.
-                // A panicked worker surfaces as a disconnected channel and
-                // keeps the simulation on the interpreter permanently.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compile(&background_laid_out, &background_options, &worker_cancel)
-                }))
-                .unwrap_or_else(|_| {
-                    Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
-                });
-                let _ = sender.send(result);
-            }) {
-            Ok(_handle) => Promotion::Pending(receiver),
-            Err(error) => Promotion::Failed(SimulatorError::new(
-                crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
-                    "failed to spawn the background compiler thread: {error}"
-                ))),
-            )),
+        let promotion = if matches!(
+            options.tier_promotion,
+            crate::simulator::TierPromotion::Never
+        ) {
+            // Policy says interpreted-only: skip the worker entirely so a
+            // never-promoted simulation pays nothing beyond the interpreter.
+            Promotion::Disabled
+        } else {
+            let (sender, receiver) = mpsc::channel();
+            let background_laid_out = laid_out.clone();
+            let background_options = options.clone();
+            match std::thread::Builder::new()
+                .name("celox-jit-compile".to_string())
+                .spawn(move || {
+                    // The result is delivered through the channel instead of the
+                    // join handle so safe-point polls never block on compilation.
+                    // A panicked worker surfaces as a disconnected channel and
+                    // keeps the simulation on the interpreter permanently.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compile(&background_laid_out, &background_options, &worker_cancel)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    });
+                    let _ = sender.send(result);
+                }) {
+                Ok(_handle) => Promotion::Pending(receiver),
+                Err(error) => Promotion::Failed(SimulatorError::new(
+                    crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
+                        "failed to spawn the background compiler thread: {error}"
+                    ))),
+                )),
+            }
+        };
+
+        let promotion_threshold = match options.tier_promotion {
+            crate::simulator::TierPromotion::AfterSteps(steps) => steps,
+            _ => 0,
         };
 
         Self {
@@ -507,6 +577,8 @@ impl TieredBackend {
             events,
             cancel,
             pending_split_applies: 0,
+            promotion_threshold,
+            interpreted_steps: 0,
         }
     }
 
@@ -545,6 +617,14 @@ impl TieredBackend {
         pending
     }
 
+    /// Record one evaluation step executed on the interpreted tier. Feeds
+    /// the [`TierPromotion::AfterSteps`] adoption threshold.
+    fn count_interpreted_step_if_interpreting(&mut self) {
+        if matches!(self.phase, Phase::Interpreting(Some(_))) {
+            self.interpreted_steps = self.interpreted_steps.saturating_add(1);
+        }
+    }
+
     /// Adopt the compiled tier if background compilation finished. Called at
     /// scheduler safe points (between evaluation phases) where no unit is
     /// mid-execution and the memory image can move atomically from the
@@ -557,6 +637,11 @@ impl TieredBackend {
         // apply phase must observe the interpreted evaluate-only results,
         // and adoption clears the sparse metadata they are tracked in.
         if self.pending_split_applies > 0 {
+            return;
+        }
+        // Honor the minimum interpreted-step count so short simulations are
+        // not disrupted by an adoption their remaining run cannot amortize.
+        if self.interpreted_steps < self.promotion_threshold {
             return;
         }
         let Promotion::Pending(receiver) = &self.promotion else {
@@ -581,6 +666,25 @@ impl TieredBackend {
             };
             return;
         };
+        // Adoption grows the transferred image within its existing allocation
+        // so promotion never moves the live memory image (external views such
+        // as zero-copy host buffers may still reference it). If the compiled
+        // tier outgrew the reserved interpreter arena, decline promotion and
+        // stay interpreted instead of reallocating.
+        if let Phase::Interpreting(Some(interp)) = &mut self.phase {
+            let required = code.required_image_words();
+            if interp.image_word_capacity() < required {
+                self.promotion = Promotion::Failed(SimulatorError::new(
+                    crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
+                        "native image needs {required} words but the reserved interpreter \
+                         image only has {} words of capacity; refusing to move the live \
+                         memory image and staying interpreted",
+                        interp.image_word_capacity()
+                    ))),
+                ));
+                return;
+            }
+        }
         let mut adopted = None;
         if let Phase::Interpreting(slot) = &mut self.phase {
             if let Some(mut interp) = slot.take() {
@@ -637,6 +741,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb(),
             Phase::Compiled(compiled) => compiled.eval_comb(),
@@ -646,6 +751,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -657,6 +763,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -677,6 +784,8 @@ impl SimBackend for TieredBackend {
             return (0, Ok(()));
         }
         self.maybe_promote();
+        // The interpreting arm below delegates to `eval_comb_apply_ff_at`,
+        // which performs the step count itself.
         match &mut self.phase {
             Phase::Interpreting(Some(_)) => (1, self.eval_comb_apply_ff_at(event)),
             Phase::Compiled(compiled) => compiled.eval_comb_apply_ff_many_at(event.id(), count),
@@ -686,6 +795,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_only_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_only_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -702,6 +812,7 @@ impl SimBackend for TieredBackend {
     fn apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         // Never promote between the evaluate-only and apply phases.
         self.maybe_promote();
+        self.count_interpreted_step_if_interpreting();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -1713,5 +1824,126 @@ module Top (
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(saw_cancel.load(Ordering::Acquire));
+    }
+
+    /// `TierPromotion::Never` never spawns the background worker and keeps
+    /// the simulation interpreted permanently without recording an error.
+    #[test]
+    fn tier_promotion_never_skips_background_compilation() {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let worker_invoked = Arc::clone(&invoked);
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+            .tier_promotion(crate::TierPromotion::Never)
+            .build_tiered_with_compiler(move |_laid_out, _options, _cancel| {
+                worker_invoked.store(true, Ordering::SeqCst);
+                Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+            })
+            .unwrap();
+
+        // Give a hypothetical worker ample time to start; the policy must
+        // have prevented the spawn entirely.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(!sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
+
+        // The interpreted tier still produces correct results.
+        let inputs: Vec<u8> = (0..8).collect();
+        assert_eq!(drive(&mut sim, &inputs), reference_outputs(&inputs));
+    }
+
+    /// `TierPromotion::AfterSteps` lets background compilation finish but
+    /// defers adoption until the interpreter crosses the step threshold.
+    #[test]
+    fn tier_promotion_after_steps_defers_adoption() {
+        const THRESHOLD: u64 = 1000;
+        let sim_build: Simulator<TieredBackend> =
+            SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+                .tier_promotion(crate::TierPromotion::AfterSteps(THRESHOLD))
+                .build_tiered_with_compiler(|laid_out, options, _cancel| {
+                    let image = NativeBackend::compile_image(laid_out, options)?;
+                    let shared = unsafe { SharedNativeCode::from_image(image)? };
+                    Ok(CompiledCode::Native(Arc::new(shared)))
+                })
+                .unwrap();
+        let mut sim = sim_build;
+        let clk = sim.event("clk");
+
+        // A handful of ticks stay far below the threshold; even once the
+        // compiled tier is ready, adoption must not land.
+        for _ in 0..4 {
+            sim.tick(clk).unwrap();
+        }
+        assert!(
+            !sim.is_compiled(),
+            "adopted before the interpreted-step threshold"
+        );
+
+        // Crossing the threshold lets subsequent safe points adopt.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
+    }
+
+    /// Promoting to the Cranelift tier must report an image requirement that
+    /// covers adoption's resize target (a MemorySpilled plan grows the layout
+    /// beyond the interpreter's semantic state), and the growth must stay
+    /// within the reserved arena so the live image never moves.
+    #[test]
+    fn cranelift_promotion_covers_its_image_requirement_without_moving_the_image() {
+        use std::sync::Mutex;
+
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let observed: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
+        let worker_observed = observed.clone();
+
+        let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
+                while !worker_gate.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let shared = Arc::new(JitBackend::compile(laid_out, options, None)?);
+                let code = CompiledCode::Cranelift(Arc::clone(&shared));
+                // (adoption resize target in words, reported requirement)
+                *worker_observed.lock().unwrap() = Some((
+                    shared.layout.merged_total_size.div_ceil(8),
+                    code.required_image_words(),
+                ));
+                Ok(code)
+            })
+            .unwrap();
+
+        let clk = sim.event("clk");
+        for _ in 0..2 {
+            sim.tick(clk).unwrap();
+        }
+        let (base_before, _) = sim.memory_as_ptr();
+
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            sim.tick(clk).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled());
+        assert!(sim.promotion_error().is_none());
+
+        let (adopt_target, required) = observed.lock().unwrap().expect("compiler ran");
+        assert!(
+            required >= adopt_target,
+            "required_image_words ({required}) must cover the Cranelift \
+             adoption resize target ({adopt_target})"
+        );
+
+        let (base_after, _) = sim.memory_as_ptr();
+        assert_eq!(
+            base_before, base_after,
+            "promotion must not move the live memory image"
+        );
     }
 }

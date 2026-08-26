@@ -1260,6 +1260,26 @@ impl InterpBackend {
             std::mem::take(&mut self.comb_capture_enabled),
         )
     }
+
+    /// Current image length in `u64` words.
+    pub(crate) fn image_word_len(&self) -> usize {
+        self.memory.len()
+    }
+
+    /// Current image allocation capacity in `u64` words.
+    pub(crate) fn image_word_capacity(&self) -> usize {
+        self.memory.capacity()
+    }
+
+    /// Reserve capacity so the image can grow to `total_words` words without
+    /// reallocating. Tiered builds use this up front so a later promotion
+    /// grows within the existing allocation and never moves the live image.
+    pub(crate) fn reserve_image_capacity(&mut self, total_words: usize) {
+        let spare = total_words.saturating_sub(self.memory.capacity());
+        if spare > 0 {
+            self.memory.reserve(spare);
+        }
+    }
 }
 
 impl SimBackend for InterpBackend {
