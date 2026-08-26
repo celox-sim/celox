@@ -109,6 +109,10 @@ name = "compilation"
 harness = false
 bench = false
 
+[[bench]]
+name = "tiered"
+harness = false
+
 [[example]]
 name = "frontend_binary"
 path = "examples/frontend_binary.rs"

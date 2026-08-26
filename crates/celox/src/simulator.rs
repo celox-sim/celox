@@ -1533,6 +1533,14 @@ mod host {
             self.backend.is_compiled()
         }
 
+        /// Return deterministic tier lifecycle and evaluation measurements.
+        ///
+        /// The snapshot contains counts rather than ad-hoc wall-clock samples;
+        /// use a statistical benchmark harness to measure elapsed time.
+        pub fn tiered_execution_stats(&self) -> crate::TieredExecutionStats {
+            self.backend.execution_stats()
+        }
+
         /// Why promotion has not happened yet, for diagnostics.
         pub fn promotion_error(&self) -> Option<&SimulatorError> {
             self.backend.promotion_error()
