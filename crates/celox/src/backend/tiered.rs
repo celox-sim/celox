@@ -28,13 +28,16 @@
 //! Background compilation is cooperatively cancellable on the native tier:
 //! dropping the backend (or calling
 //! [`TieredBackend::cancel_background_compilation`]) flags the worker, which
-//! unwinds at the next task boundary instead of finishing the image. The
-//! Cranelift tier runs to completion once started.
+//! unwinds at the next task boundary instead of finishing the image. Drop
+//! joins the owned worker so compilation never leaks beyond the backend's
+//! lifetime. The Cranelift tier runs to completion once started, so its drop
+//! may wait for that compilation to finish.
 
 #![cfg(feature = "host-runtime")]
 
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 
 use num_bigint::BigUint;
 
@@ -380,6 +383,59 @@ enum Promotion {
     Promoted,
 }
 
+/// Active execution tier reported by [`TieredExecutionStats`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TieredExecutionTier {
+    /// Evaluation is currently performed by the SIR interpreter.
+    Interpreter,
+    /// Evaluation is currently performed by generated code.
+    Compiled,
+}
+
+/// State of background compilation and promotion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TieredPromotionStatus {
+    /// The background compiler has not yet delivered a result.
+    Pending,
+    /// Compilation or adoption failed and execution will remain interpreted.
+    Failed,
+    /// Promotion was disabled by policy, so no compiler worker was started.
+    Disabled,
+    /// Generated code has been adopted.
+    Promoted,
+}
+
+/// Deterministic execution measurements for one tiered simulator.
+///
+/// This snapshot deliberately contains counts and lifecycle state rather than
+/// wall-clock samples. Applications can correlate it with structured
+/// `celox.tiered.compile` and `celox.tiered.promote` tracing spans, while
+/// performance tests should measure operations with a statistical benchmark
+/// harness such as Criterion. Reading a snapshot has no side effects and does
+/// not poll the compiler worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TieredExecutionStats {
+    /// Tier that will execute the next evaluation.
+    pub tier: TieredExecutionTier,
+    /// Background compilation and promotion state.
+    pub promotion: TieredPromotionStatus,
+    /// Evaluation iterations attempted by the interpreter.
+    pub interpreted_evaluations: u64,
+    /// Evaluation iterations attempted by generated code.
+    pub compiled_evaluations: u64,
+    /// Interpreter evaluation count at the point generated code was adopted.
+    pub promoted_after_interpreted_evaluations: Option<u64>,
+    /// Number of scheduler safe-point polls performed while interpreted.
+    pub safe_point_polls: u64,
+    /// Polls that could not promote because an evaluate/apply pair was open.
+    pub split_apply_deferrals: u64,
+    /// Polls that were held below the configured promotion threshold.
+    pub threshold_deferrals: u64,
+}
+
 /// A [`SimBackend`] that interprets immediately and promotes to generated
 /// code as soon as background compilation completes.
 pub struct TieredBackend {
@@ -391,6 +447,10 @@ pub struct TieredBackend {
     /// Shared with the background worker; flagged on drop or on an explicit
     /// cancellation request so the worker unwinds at the next task boundary.
     cancel: CompileCancel,
+    /// Owned worker handle. Keeping this attached to the backend lets drop
+    /// cancel and join compilation instead of leaking work into later users
+    /// of the process (notably subsequent benchmark samples).
+    compiler_worker: Option<JoinHandle<()>>,
     /// Evaluate-only events whose apply phase has not run yet. Promotion is
     /// deferred while this is non-zero so the compiled apply phase always
     /// observes the interpreted evaluate-only results through an intact
@@ -402,6 +462,16 @@ pub struct TieredBackend {
     promotion_threshold: u64,
     /// Evaluation steps executed on the interpreted tier so far.
     interpreted_steps: u64,
+    /// Evaluation iterations executed after adopting generated code.
+    compiled_steps: u64,
+    /// Interpreter count captured at the successful promotion boundary.
+    promoted_after_interpreted_steps: Option<u64>,
+    /// Scheduler safe-point polls made while the interpreter was active.
+    safe_point_polls: u64,
+    /// Safe-point polls deferred by a split evaluate/apply pair.
+    split_apply_deferrals: u64,
+    /// Safe-point polls deferred by the configured step threshold.
+    threshold_deferrals: u64,
 }
 
 impl TieredBackend {
@@ -531,13 +601,13 @@ impl TieredBackend {
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the background-failure policy instead of
         // panicking the embedding application.
-        let promotion = if matches!(
+        let (promotion, compiler_worker) = if matches!(
             options.tier_promotion,
             crate::simulator::TierPromotion::Never
         ) {
             // Policy says interpreted-only: skip the worker entirely so a
             // never-promoted simulation pays nothing beyond the interpreter.
-            Promotion::Disabled
+            (Promotion::Disabled, None)
         } else {
             let (sender, receiver) = mpsc::channel();
             let background_laid_out = laid_out.clone();
@@ -549,20 +619,41 @@ impl TieredBackend {
                     // join handle so safe-point polls never block on compilation.
                     // A panicked worker surfaces as a disconnected channel and
                     // keeps the simulation on the interpreter permanently.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compile(&background_laid_out, &background_options, &worker_cancel)
-                    }))
-                    .unwrap_or_else(|_| {
-                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    let span = tracing::info_span!(
+                        "celox.tiered.compile",
+                        target = if native_is_default_target() {
+                            "native"
+                        } else {
+                            "cranelift"
+                        }
+                    );
+                    let result = span.in_scope(|| {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            compile(&background_laid_out, &background_options, &worker_cancel)
+                        }))
+                        .unwrap_or_else(|_| {
+                            Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                        });
+                        match &result {
+                            Ok(_) => tracing::info!("tiered background compilation completed"),
+                            Err(error) => tracing::warn!(
+                                error = %error,
+                                "tiered background compilation failed"
+                            ),
+                        }
+                        result
                     });
                     let _ = sender.send(result);
                 }) {
-                Ok(_handle) => Promotion::Pending(receiver),
-                Err(error) => Promotion::Failed(SimulatorError::new(
-                    crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
-                        "failed to spawn the background compiler thread: {error}"
+                Ok(handle) => (Promotion::Pending(receiver), Some(handle)),
+                Err(error) => (
+                    Promotion::Failed(SimulatorError::new(crate::SimulatorErrorKind::Codegen(
+                        crate::CodegenError::message(format!(
+                            "failed to spawn the background compiler thread: {error}"
+                        )),
                     ))),
-                )),
+                    None,
+                ),
             }
         };
 
@@ -576,15 +667,44 @@ impl TieredBackend {
             promotion,
             events,
             cancel,
+            compiler_worker,
             pending_split_applies: 0,
             promotion_threshold,
             interpreted_steps: 0,
+            compiled_steps: 0,
+            promoted_after_interpreted_steps: None,
+            safe_point_polls: 0,
+            split_apply_deferrals: 0,
+            threshold_deferrals: 0,
         }
     }
 
     /// Whether the compiled tier has been adopted.
     pub fn is_compiled(&self) -> bool {
         matches!(self.phase, Phase::Compiled(_))
+    }
+
+    /// Return deterministic lifecycle and execution measurements.
+    pub fn execution_stats(&self) -> TieredExecutionStats {
+        TieredExecutionStats {
+            tier: if self.is_compiled() {
+                TieredExecutionTier::Compiled
+            } else {
+                TieredExecutionTier::Interpreter
+            },
+            promotion: match &self.promotion {
+                Promotion::Pending(_) => TieredPromotionStatus::Pending,
+                Promotion::Failed(_) => TieredPromotionStatus::Failed,
+                Promotion::Disabled => TieredPromotionStatus::Disabled,
+                Promotion::Promoted => TieredPromotionStatus::Promoted,
+            },
+            interpreted_evaluations: self.interpreted_steps,
+            compiled_evaluations: self.compiled_steps,
+            promoted_after_interpreted_evaluations: self.promoted_after_interpreted_steps,
+            safe_point_polls: self.safe_point_polls,
+            split_apply_deferrals: self.split_apply_deferrals,
+            threshold_deferrals: self.threshold_deferrals,
+        }
     }
 
     /// Why promotion has not happened yet, for diagnostics.
@@ -617,11 +737,14 @@ impl TieredBackend {
         pending
     }
 
-    /// Record one evaluation step executed on the interpreted tier. Feeds
-    /// the [`TierPromotion::AfterSteps`] adoption threshold.
-    fn count_interpreted_step_if_interpreting(&mut self) {
+    /// Record one evaluation iteration against the currently active tier.
+    /// Interpreter iterations also feed the [`TierPromotion::AfterSteps`]
+    /// adoption threshold.
+    fn count_evaluation_for_current_tier(&mut self) {
         if matches!(self.phase, Phase::Interpreting(Some(_))) {
             self.interpreted_steps = self.interpreted_steps.saturating_add(1);
+        } else if matches!(self.phase, Phase::Compiled(_)) {
+            self.compiled_steps = self.compiled_steps.saturating_add(1);
         }
     }
 
@@ -633,15 +756,18 @@ impl TieredBackend {
         if !matches!(self.phase, Phase::Interpreting(Some(_))) {
             return;
         }
+        self.safe_point_polls = self.safe_point_polls.saturating_add(1);
         // Never promote inside a split evaluate/apply pair: the compiled
         // apply phase must observe the interpreted evaluate-only results,
         // and adoption clears the sparse metadata they are tracked in.
         if self.pending_split_applies > 0 {
+            self.split_apply_deferrals = self.split_apply_deferrals.saturating_add(1);
             return;
         }
         // Honor the minimum interpreted-step count so short simulations are
         // not disrupted by an adoption their remaining run cannot amortize.
         if self.interpreted_steps < self.promotion_threshold {
+            self.threshold_deferrals = self.threshold_deferrals.saturating_add(1);
             return;
         }
         let Promotion::Pending(receiver) = &self.promotion else {
@@ -699,6 +825,11 @@ impl TieredBackend {
             }
         }
         if let Some(mut compiled) = adopted {
+            let promotion_span = tracing::info_span!(
+                "celox.tiered.promote",
+                interpreted_evaluations = self.interpreted_steps
+            );
+            let _entered = promotion_span.enter();
             // Clear sparse metadata so the compiled tier starts with clean
             // tracking; stale dirty bits from interpreted-tier evaluation
             // could confuse the compiled commit logic.
@@ -726,6 +857,8 @@ impl TieredBackend {
             }
             self.phase = Phase::Compiled(compiled);
             self.promotion = Promotion::Promoted;
+            self.promoted_after_interpreted_steps = Some(self.interpreted_steps);
+            tracing::info!("tiered backend adopted generated code");
         }
     }
 }
@@ -733,6 +866,9 @@ impl TieredBackend {
 impl Drop for TieredBackend {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(worker) = self.compiler_worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -741,7 +877,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
-        self.count_interpreted_step_if_interpreting();
+        self.count_evaluation_for_current_tier();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb(),
             Phase::Compiled(compiled) => compiled.eval_comb(),
@@ -751,7 +887,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
-        self.count_interpreted_step_if_interpreting();
+        self.count_evaluation_for_current_tier();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -763,7 +899,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
-        self.count_interpreted_step_if_interpreting();
+        self.count_evaluation_for_current_tier();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb_apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -784,18 +920,29 @@ impl SimBackend for TieredBackend {
             return (0, Ok(()));
         }
         self.maybe_promote();
-        // The interpreting arm below delegates to `eval_comb_apply_ff_at`,
-        // which performs the step count itself.
         match &mut self.phase {
-            Phase::Interpreting(Some(_)) => (1, self.eval_comb_apply_ff_at(event)),
-            Phase::Compiled(compiled) => compiled.eval_comb_apply_ff_many_at(event.id(), count),
+            Phase::Interpreting(Some(interp)) => {
+                self.interpreted_steps = self.interpreted_steps.saturating_add(1);
+                (
+                    1,
+                    interp.eval_comb_apply_ff_at(super::interp::InterpEventRef::from_parts(
+                        event.addr(),
+                        event.id(),
+                    )),
+                )
+            }
+            Phase::Compiled(compiled) => {
+                let (completed, result) = compiled.eval_comb_apply_ff_many_at(event.id(), count);
+                self.compiled_steps = self.compiled_steps.saturating_add(completed);
+                (completed, result)
+            }
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
 
     fn eval_only_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
-        self.count_interpreted_step_if_interpreting();
+        self.count_evaluation_for_current_tier();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_only_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -812,7 +959,7 @@ impl SimBackend for TieredBackend {
     fn apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         // Never promote between the evaluate-only and apply phases.
         self.maybe_promote();
-        self.count_interpreted_step_if_interpreting();
+        self.count_evaluation_for_current_tier();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.apply_ff_at(
                 super::interp::InterpEventRef::from_parts(event.addr(), event.id()),
@@ -1266,16 +1413,27 @@ module Top (
         }
     }
 
+    fn wait_for_gate_or_cancel(
+        gate: &AtomicBool,
+        cancel: &CompileCancel,
+    ) -> Result<(), SimulatorError> {
+        while !gate.load(Ordering::Acquire) {
+            if cancel.is_cancelled() {
+                return Err(super::super::compile_cancel::cancelled_error());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
     /// Compile through the Cranelift tier behind a gate. The native tier is
     /// covered end-to-end by the public `build_tiered` integration tests on
     /// native hosts; gating lets these unit tests pin promotion timing.
     fn build_gated(gate: &Gate) -> Simulator<TieredBackend> {
         let worker_gate = gate.0.clone();
         SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
                     let image = NativeBackend::compile_image(laid_out, options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1346,10 +1504,8 @@ module Top (
         let gate = Gate::closed();
         let worker_gate = gate.0.clone();
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
                     let image = NativeBackend::compile_image(laid_out, options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1440,10 +1596,8 @@ module Top (
         let worker_gate = gate.0.clone();
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
             .four_state(true)
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 let image = NativeBackend::compile_image(laid_out, options)?;
                 let shared = unsafe { SharedNativeCode::from_image(image)? };
                 Ok(CompiledCode::Native(Arc::new(shared)))
@@ -1543,10 +1697,8 @@ module Top (
         let mut strided_sim: Simulator<TieredBackend> =
             SimulatorBuilder::<Simulator>::new(code, "Top")
                 .four_state(true)
-                .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                    while !worker_gate.load(Ordering::Acquire) {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                    wait_for_gate_or_cancel(&worker_gate, cancel)?;
                     {
                         let image = NativeBackend::compile_image(laid_out, options)?;
                         let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1704,10 +1856,8 @@ module Top (
         let gate = Gate::closed();
         let worker_gate = gate.0.clone();
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
                     let image = NativeBackend::compile_image(laid_out, options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1800,8 +1950,7 @@ module Top (
         assert_eq!(drive(&mut sim, &inputs), reference_outputs(&inputs));
     }
 
-    /// Dropping the simulator flags the worker so a blocked compilation
-    /// unwinds instead of running to completion.
+    /// Dropping the simulator cancels and joins the worker before returning.
     #[test]
     fn drop_cancels_pending_background_compilation() {
         let saw_cancel = Arc::new(AtomicBool::new(false));
@@ -1818,11 +1967,6 @@ module Top (
             })
             .unwrap();
         drop(sim);
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !saw_cancel.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
         assert!(saw_cancel.load(Ordering::Acquire));
     }
 
@@ -1846,10 +1990,17 @@ module Top (
         assert!(!invoked.load(Ordering::SeqCst));
         assert!(!sim.is_compiled());
         assert!(sim.promotion_error().is_none());
+        let before = sim.tiered_execution_stats();
+        assert_eq!(before.tier, TieredExecutionTier::Interpreter);
+        assert_eq!(before.promotion, TieredPromotionStatus::Disabled);
+        assert_eq!(before.compiled_evaluations, 0);
 
         // The interpreted tier still produces correct results.
         let inputs: Vec<u8> = (0..8).collect();
         assert_eq!(drive(&mut sim, &inputs), reference_outputs(&inputs));
+        let after = sim.tiered_execution_stats();
+        assert!(after.interpreted_evaluations > before.interpreted_evaluations);
+        assert_eq!(after.compiled_evaluations, 0);
     }
 
     /// `TierPromotion::AfterSteps` lets background compilation finish but
@@ -1868,6 +2019,8 @@ module Top (
                 .unwrap();
         let mut sim = sim_build;
         let clk = sim.event("clk");
+        let initial = sim.tiered_execution_stats();
+        assert!(initial.interpreted_evaluations < THRESHOLD);
 
         // A handful of ticks stay far below the threshold; even once the
         // compiled tier is ready, adoption must not land.
@@ -1887,6 +2040,18 @@ module Top (
         }
         assert!(sim.is_compiled());
         assert!(sim.promotion_error().is_none());
+        let promoted = sim.tiered_execution_stats();
+        assert_eq!(promoted.tier, TieredExecutionTier::Compiled);
+        assert_eq!(promoted.promotion, TieredPromotionStatus::Promoted);
+        assert!(promoted.interpreted_evaluations >= THRESHOLD);
+        assert_eq!(
+            promoted.promoted_after_interpreted_evaluations,
+            Some(promoted.interpreted_evaluations)
+        );
+        assert!(promoted.threshold_deferrals > 0);
+
+        sim.tick(clk).unwrap();
+        assert!(sim.tiered_execution_stats().compiled_evaluations > promoted.compiled_evaluations);
     }
 
     /// Promoting to the Cranelift tier must report an image requirement that
@@ -1903,10 +2068,8 @@ module Top (
         let worker_observed = observed.clone();
 
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 let shared = Arc::new(JitBackend::compile(laid_out, options, None)?);
                 let code = CompiledCode::Cranelift(Arc::clone(&shared));
                 // (adoption resize target in words, reported requirement)

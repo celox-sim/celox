@@ -66,7 +66,8 @@ mod host_api {
     pub use crate::backend::wasm_runtime::WasmBackend;
     pub use crate::backend::{
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
-        JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend,
+        JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend, TieredExecutionStats,
+        TieredExecutionTier, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;

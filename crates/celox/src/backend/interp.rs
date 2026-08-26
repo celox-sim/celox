@@ -35,7 +35,10 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
 };
-use crate::interpreter::{InterpError, InterpMachine, ResolvedAccess, StoreSnapshot, execute_unit};
+use crate::interpreter::{
+    InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot,
+    execute_unit_with_registers,
+};
 use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,
@@ -153,13 +156,20 @@ struct Machine<'a> {
     comb_capture_enabled: &'a mut [u8],
     /// First-word snapshots of trigger-bearing objects taken at group entry,
     /// used by per-kind trigger edge detection.
-    trigger_snapshots: &'a HashMap<(AbsoluteAddr, u32), u64>,
+    trigger_snapshots: &'a [((AbsoluteAddr, u32), u64)],
     /// Whether trigger detection may mark bits; mirrors the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
 }
 
 impl Machine<'_> {
+    fn trigger_snapshot(&self, key: (AbsoluteAddr, u32)) -> Option<u64> {
+        self.trigger_snapshots
+            .binary_search_by_key(&key, |&(entry, _)| entry)
+            .ok()
+            .map(|index| self.trigger_snapshots[index].1)
+    }
+
     fn byte_slice(&self, start: usize, len: usize) -> &[u8] {
         // Safety: the layout guarantees every mapped object, its mask region,
         // and the trigger bitset fit inside the merged memory allocation.
@@ -671,7 +681,7 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             return Ok(());
         }
         let absolute = addr.absolute_addr();
-        let Some(&snapshot) = self.trigger_snapshots.get(&(absolute, addr.region)) else {
+        let Some(snapshot) = self.trigger_snapshot((absolute, addr.region)) else {
             return Ok(());
         };
         let base = self.object_offset(addr)?;
@@ -768,7 +778,7 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         // stored range's old value comes from the group-entry snapshot and
         // its new value from live memory, both confined to the first word.
         let absolute = addr.absolute_addr();
-        let Some(&snapshot) = self.trigger_snapshots.get(&(absolute, addr.region)) else {
+        let Some(snapshot) = self.trigger_snapshot((absolute, addr.region)) else {
             return Ok(());
         };
         let base = self.object_offset(addr)?;
@@ -938,7 +948,9 @@ fn collect_trigger_addrs(
             }
         }
     }
-    addrs.into_iter().collect()
+    let mut addrs: Vec<_> = addrs.into_iter().collect();
+    addrs.sort_unstable();
+    addrs
 }
 
 /// Execute every unit in `units` against the split backend storage.
@@ -950,28 +962,33 @@ fn run_units(
     comb_capture_enabled: &mut [u8],
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     trigger_addrs: &[(AbsoluteAddr, u32)],
+    trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
+    registers: &mut Registers,
     emit_triggers: bool,
 ) -> Result<(), SimulatorErrorCode> {
     // Snapshot the first word of every trigger-bearing object at group
     // entry; trigger detection compares the stored range against it. The
     // trigger-bearing addresses are precomputed per group so a tick only
     // pays for the snapshot reads themselves.
-    let mut trigger_snapshots: HashMap<(AbsoluteAddr, u32), u64> = HashMap::default();
-    for &(absolute, region) in trigger_addrs {
-        let addr = RegionedAbsoluteAddrBase::from_absolute_addr(region, absolute);
-        let machine = Machine {
-            memory: &mut *memory,
-            layout,
-            four_state,
-            comb_capture_enabled: &mut *comb_capture_enabled,
-            trigger_snapshots: &trigger_snapshots,
-            emit_triggers,
-        };
-        if let Ok(base) = machine.object_offset(&addr) {
-            // Snapshot the raw first word; trigger detection extracts the
-            // stored range from it, so packed neighbors never leak in.
-            // Safety: layout-mapped objects fit inside the merged image.
-            trigger_snapshots.insert((absolute, region), unsafe { read_word(memory, base) });
+    trigger_snapshots.clear();
+    if emit_triggers {
+        trigger_snapshots.reserve(trigger_addrs.len());
+        for &(absolute, region) in trigger_addrs {
+            let addr = RegionedAbsoluteAddrBase::from_absolute_addr(region, absolute);
+            let machine = Machine {
+                memory: &mut *memory,
+                layout,
+                four_state,
+                comb_capture_enabled: &mut *comb_capture_enabled,
+                trigger_snapshots,
+                emit_triggers,
+            };
+            if let Ok(base) = machine.object_offset(&addr) {
+                // Snapshot the raw first word; trigger detection extracts the
+                // stored range from it, so packed neighbors never leak in.
+                // Safety: layout-mapped objects fit inside the merged image.
+                trigger_snapshots.push(((absolute, region), unsafe { read_word(memory, base) }));
+            }
         }
     }
 
@@ -983,13 +1000,14 @@ fn run_units(
             layout,
             four_state,
             comb_capture_enabled: &mut *comb_capture_enabled,
-            trigger_snapshots: &trigger_snapshots,
+            trigger_snapshots,
             emit_triggers,
         };
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
-        execute_unit(unit, &mut machine, &[], four_state).map_err(error_code)?;
+        execute_unit_with_registers(unit, &mut machine, &[], four_state, registers)
+            .map_err(error_code)?;
     }
     Ok(())
 }
@@ -1034,6 +1052,10 @@ pub struct InterpBackend {
     /// invocation only performs snapshot reads.
     comb_trigger_addrs: Vec<(AbsoluteAddr, u32)>,
     event_trigger_addrs: HashMap<AbsoluteAddr, Vec<(AbsoluteAddr, u32)>>,
+    /// Reused group-entry trigger snapshots; sorted by address and region.
+    trigger_snapshots: Vec<((AbsoluteAddr, u32), u64)>,
+    /// Register storage reused across sequential execution-unit invocations.
+    registers: Registers,
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
@@ -1214,6 +1236,8 @@ impl InterpBackend {
             comb_apply_units,
             comb_trigger_addrs,
             event_trigger_addrs,
+            trigger_snapshots: Vec::new(),
+            registers: Registers::default(),
             emit_triggers: options.emit_triggers,
         };
         backend.install_event_buffers();
@@ -1293,6 +1317,8 @@ impl SimBackend for InterpBackend {
             &mut self.comb_capture_enabled,
             &self.program_sir.eval_comb,
             &self.comb_trigger_addrs,
+            &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1310,6 +1336,8 @@ impl SimBackend for InterpBackend {
             self.event_trigger_addrs
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
+            &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1327,6 +1355,8 @@ impl SimBackend for InterpBackend {
             &mut self.comb_capture_enabled,
             units,
             &self.event_trigger_addrs[&event.addr()],
+            &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1344,6 +1374,8 @@ impl SimBackend for InterpBackend {
             self.event_trigger_addrs
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
+            &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1361,6 +1393,8 @@ impl SimBackend for InterpBackend {
             self.event_trigger_addrs
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
+            &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
