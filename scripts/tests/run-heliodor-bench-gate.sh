@@ -35,13 +35,13 @@ write_valid_gate_logs() {
     local celox_reported="$((celox_compile + celox_execute + 1))"
     mkdir -p "$directory"
     printf '%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=00d83790 x3=00000000000000aa pass=1" \
+        "v4 SoC linux boot smoke: cy=0087cda0 x3=00000000000000aa pass=1" \
         "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false compile_only=false" \
         "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$veryl_compile execute_ns=$veryl_execute" \
         "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$veryl_reported" \
         >"$directory/veryl.log"
     printf '%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1" \
+        "v4 SoC linux boot smoke: cy=87a690 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
         "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$celox_compile execute_ns=$celox_execute jit_execute_ns=$celox_jit_execute" \
         "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$celox_reported" \
@@ -211,14 +211,14 @@ fi
 
 bad_veryl_cycle="$TMP/bad-veryl-cycle"
 write_gate_results "$bad_veryl_cycle" 200 100
-sed -i 's/cy=00d83790/cy=00d83800/' "$bad_veryl_cycle/veryl.log"
+sed -i 's/cy=0087cda0/cy=0087cda1/' "$bad_veryl_cycle/veryl.log"
 if validate_gate_results "$bad_veryl_cycle/results.tsv" "$bad_veryl_cycle" 2>/dev/null; then
     fail "gate accepted the wrong Veryl architectural completion cycle"
 fi
 
 bad_celox_cycle="$TMP/bad-celox-cycle"
 write_gate_results "$bad_celox_cycle" 200 100
-sed -i 's/cy=d83790/cy=d83800/' "$bad_celox_cycle/celox.log"
+sed -i 's/cy=87a690/cy=87a691/' "$bad_celox_cycle/celox.log"
 if validate_gate_results "$bad_celox_cycle/results.tsv" "$bad_celox_cycle" 2>/dev/null; then
     fail "gate accepted the wrong Celox architectural completion cycle"
 fi
@@ -498,7 +498,7 @@ run_one() {
             compile_elapsed=30
             execute_elapsed=40
             printf '%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=00d83790 x3=00000000000000aa pass=1' \
+                'v4 SoC linux boot smoke: cy=0087cda0 x3=00000000000000aa pass=1' \
                 "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false compile_only=false" \
                 "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
                 "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$reported" >"$log"
@@ -515,7 +515,7 @@ run_one() {
                 elapsed=NA
             fi
             printf '%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1' \
+                'v4 SoC linux boot smoke: cy=87a690 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
                 "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=$jit_execute_elapsed" \
                 "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=$reported" >"$log"
