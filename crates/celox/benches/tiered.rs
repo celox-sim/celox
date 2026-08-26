@@ -7,7 +7,7 @@
 use std::{hint::black_box, time::Duration};
 
 use celox::{EventHandle, Simulator, SimulatorBuilder, TieredExecutionTier, TieredPromotionStatus};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 const LCG_SOURCE: &str = r#"
 module TieredBenchTop (
@@ -48,28 +48,52 @@ fn benchmark_startup(c: &mut Criterion) {
     let mut group = c.benchmark_group("tiered/startup");
 
     group.bench_function("lcg/interpreter", |b| {
-        b.iter(|| black_box(lcg_builder().build_interpreter().unwrap()));
+        b.iter_batched(
+            || (),
+            |_| black_box(lcg_builder().build_interpreter().unwrap()),
+            BatchSize::PerIteration,
+        );
     });
     group.bench_function("lcg/native", |b| {
-        b.iter(|| black_box(lcg_builder().build_native().unwrap()));
+        b.iter_batched(
+            || (),
+            |_| black_box(lcg_builder().build_native().unwrap()),
+            BatchSize::PerIteration,
+        );
     });
     group.bench_function("lcg/tiered", |b| {
-        b.iter(|| {
-            let sim = lcg_builder().build_tiered().unwrap();
-            black_box(sim.tiered_execution_stats());
-            black_box(sim)
-        });
+        b.iter_batched(
+            || (),
+            |_| {
+                let sim = lcg_builder().build_tiered().unwrap();
+                black_box(sim.tiered_execution_stats());
+                black_box(sim)
+            },
+            BatchSize::PerIteration,
+        );
     });
 
     group.sample_size(10);
     group.bench_function("sorter_n8/interpreter", |b| {
-        b.iter(|| black_box(sorter_builder().build_interpreter().unwrap()));
+        b.iter_batched(
+            || (),
+            |_| black_box(sorter_builder().build_interpreter().unwrap()),
+            BatchSize::PerIteration,
+        );
     });
     group.bench_function("sorter_n8/native", |b| {
-        b.iter(|| black_box(sorter_builder().build_native().unwrap()));
+        b.iter_batched(
+            || (),
+            |_| black_box(sorter_builder().build_native().unwrap()),
+            BatchSize::PerIteration,
+        );
     });
     group.bench_function("sorter_n8/tiered", |b| {
-        b.iter(|| black_box(sorter_builder().build_tiered().unwrap()));
+        b.iter_batched(
+            || (),
+            |_| black_box(sorter_builder().build_tiered().unwrap()),
+            BatchSize::PerIteration,
+        );
     });
 
     group.finish();

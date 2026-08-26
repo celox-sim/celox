@@ -28,13 +28,16 @@
 //! Background compilation is cooperatively cancellable on the native tier:
 //! dropping the backend (or calling
 //! [`TieredBackend::cancel_background_compilation`]) flags the worker, which
-//! unwinds at the next task boundary instead of finishing the image. The
-//! Cranelift tier runs to completion once started.
+//! unwinds at the next task boundary instead of finishing the image. Drop
+//! joins the owned worker so compilation never leaks beyond the backend's
+//! lifetime. The Cranelift tier runs to completion once started, so its drop
+//! may wait for that compilation to finish.
 
 #![cfg(feature = "host-runtime")]
 
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 
 use num_bigint::BigUint;
 
@@ -444,6 +447,10 @@ pub struct TieredBackend {
     /// Shared with the background worker; flagged on drop or on an explicit
     /// cancellation request so the worker unwinds at the next task boundary.
     cancel: CompileCancel,
+    /// Owned worker handle. Keeping this attached to the backend lets drop
+    /// cancel and join compilation instead of leaking work into later users
+    /// of the process (notably subsequent benchmark samples).
+    compiler_worker: Option<JoinHandle<()>>,
     /// Evaluate-only events whose apply phase has not run yet. Promotion is
     /// deferred while this is non-zero so the compiled apply phase always
     /// observes the interpreted evaluate-only results through an intact
@@ -594,13 +601,13 @@ impl TieredBackend {
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the background-failure policy instead of
         // panicking the embedding application.
-        let promotion = if matches!(
+        let (promotion, compiler_worker) = if matches!(
             options.tier_promotion,
             crate::simulator::TierPromotion::Never
         ) {
             // Policy says interpreted-only: skip the worker entirely so a
             // never-promoted simulation pays nothing beyond the interpreter.
-            Promotion::Disabled
+            (Promotion::Disabled, None)
         } else {
             let (sender, receiver) = mpsc::channel();
             let background_laid_out = laid_out.clone();
@@ -638,12 +645,15 @@ impl TieredBackend {
                     });
                     let _ = sender.send(result);
                 }) {
-                Ok(_handle) => Promotion::Pending(receiver),
-                Err(error) => Promotion::Failed(SimulatorError::new(
-                    crate::SimulatorErrorKind::Codegen(crate::CodegenError::message(format!(
-                        "failed to spawn the background compiler thread: {error}"
+                Ok(handle) => (Promotion::Pending(receiver), Some(handle)),
+                Err(error) => (
+                    Promotion::Failed(SimulatorError::new(crate::SimulatorErrorKind::Codegen(
+                        crate::CodegenError::message(format!(
+                            "failed to spawn the background compiler thread: {error}"
+                        )),
                     ))),
-                )),
+                    None,
+                ),
             }
         };
 
@@ -657,6 +667,7 @@ impl TieredBackend {
             promotion,
             events,
             cancel,
+            compiler_worker,
             pending_split_applies: 0,
             promotion_threshold,
             interpreted_steps: 0,
@@ -855,6 +866,9 @@ impl TieredBackend {
 impl Drop for TieredBackend {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(worker) = self.compiler_worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -1399,16 +1413,27 @@ module Top (
         }
     }
 
+    fn wait_for_gate_or_cancel(
+        gate: &AtomicBool,
+        cancel: &CompileCancel,
+    ) -> Result<(), SimulatorError> {
+        while !gate.load(Ordering::Acquire) {
+            if cancel.is_cancelled() {
+                return Err(super::super::compile_cancel::cancelled_error());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
     /// Compile through the Cranelift tier behind a gate. The native tier is
     /// covered end-to-end by the public `build_tiered` integration tests on
     /// native hosts; gating lets these unit tests pin promotion timing.
     fn build_gated(gate: &Gate) -> Simulator<TieredBackend> {
         let worker_gate = gate.0.clone();
         SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
                     let image = NativeBackend::compile_image(laid_out, options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1479,10 +1504,8 @@ module Top (
         let gate = Gate::closed();
         let worker_gate = gate.0.clone();
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
                     let image = NativeBackend::compile_image(laid_out, options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1573,10 +1596,8 @@ module Top (
         let worker_gate = gate.0.clone();
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
             .four_state(true)
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 let image = NativeBackend::compile_image(laid_out, options)?;
                 let shared = unsafe { SharedNativeCode::from_image(image)? };
                 Ok(CompiledCode::Native(Arc::new(shared)))
@@ -1676,10 +1697,8 @@ module Top (
         let mut strided_sim: Simulator<TieredBackend> =
             SimulatorBuilder::<Simulator>::new(code, "Top")
                 .four_state(true)
-                .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                    while !worker_gate.load(Ordering::Acquire) {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                    wait_for_gate_or_cancel(&worker_gate, cancel)?;
                     {
                         let image = NativeBackend::compile_image(laid_out, options)?;
                         let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1837,10 +1856,8 @@ module Top (
         let gate = Gate::closed();
         let worker_gate = gate.0.clone();
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(code, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
                     let image = NativeBackend::compile_image(laid_out, options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
@@ -1933,8 +1950,7 @@ module Top (
         assert_eq!(drive(&mut sim, &inputs), reference_outputs(&inputs));
     }
 
-    /// Dropping the simulator flags the worker so a blocked compilation
-    /// unwinds instead of running to completion.
+    /// Dropping the simulator cancels and joins the worker before returning.
     #[test]
     fn drop_cancels_pending_background_compilation() {
         let saw_cancel = Arc::new(AtomicBool::new(false));
@@ -1951,11 +1967,6 @@ module Top (
             })
             .unwrap();
         drop(sim);
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !saw_cancel.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
         assert!(saw_cancel.load(Ordering::Acquire));
     }
 
@@ -2057,10 +2068,8 @@ module Top (
         let worker_observed = observed.clone();
 
         let mut sim: Simulator<TieredBackend> = SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
-            .build_tiered_with_compiler(move |laid_out, options, _cancel| {
-                while !worker_gate.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+            .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 let shared = Arc::new(JitBackend::compile(laid_out, options, None)?);
                 let code = CompiledCode::Cranelift(Arc::clone(&shared));
                 // (adoption resize target in words, reported requirement)
