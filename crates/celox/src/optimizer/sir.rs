@@ -93,6 +93,7 @@ pub(crate) fn optimize_native_merged_chain(
     four_state: bool,
     recover_merged_effect_regions: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<(), celox_sir_opt::OptimizationError> {
     let element_widths = Arc::new(
         layout
@@ -122,6 +123,7 @@ pub(crate) fn optimize_native_merged_chain(
         four_state,
         recover_merged_effect_regions,
         diagnostics,
+        is_cancelled,
     )
 }
 

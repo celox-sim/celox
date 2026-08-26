@@ -58,6 +58,7 @@ pub(crate) enum TargetRegallocError {
         value: VReg,
     },
     SpillFrameOverflow,
+    Cancelled,
 }
 
 impl fmt::Display for TargetRegallocError {
@@ -121,6 +122,7 @@ impl fmt::Display for TargetRegallocError {
             Self::SpillFrameOverflow => {
                 formatter.write_str("AArch64 spill frame exceeds the supported i32 offset range")
             }
+            Self::Cancelled => formatter.write_str("compilation was cancelled"),
         }
     }
 }
@@ -271,8 +273,15 @@ pub(crate) struct TargetAllocation {
 /// policy and rewriting on the target side.
 pub(crate) fn allocate_with_spills(
     mut function: MFunction,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<TargetAllocation, TargetRegallocError> {
+    // Observed once per spill-retry round so a cancelled compile unwinds at
+    // the next round instead of finishing the remaining iterations. Callers
+    // without cancellation pass `|| false`, which folds away after inlining.
     let initial_facts = build_facts(&function)?;
+    if is_cancelled() {
+        return Err(TargetRegallocError::Cancelled);
+    }
     let mut candidates = initial_facts
         .blocks
         .iter()
@@ -311,6 +320,9 @@ pub(crate) fn allocate_with_spills(
     let mut spill_frame_size = 0_u32;
 
     loop {
+        if is_cancelled() {
+            return Err(TargetRegallocError::Cancelled);
+        }
         let facts = build_facts(&function)?;
         let intervals = analyze_live_intervals(&facts)
             .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
@@ -1251,14 +1263,17 @@ mod tests {
             size: OpSize::S64,
         }));
         instructions.push(MInst::Return);
-        let allocation = allocate_with_spills(MFunction::new(
-            vec![MBlock {
-                id: BlockId(0),
-                phis: Vec::new(),
-                insts: instructions,
-            }],
-            Vec::new(),
-        ))
+        let allocation = allocate_with_spills(
+            MFunction::new(
+                vec![MBlock {
+                    id: BlockId(0),
+                    phis: Vec::new(),
+                    insts: instructions,
+                }],
+                Vec::new(),
+            ),
+            || false,
+        )
         .unwrap();
 
         assert!(allocation.spill_frame_size >= 8);
@@ -1363,14 +1378,17 @@ mod tests {
             }));
         }
         instructions.push(MInst::Return);
-        let allocation = allocate_with_spills(MFunction::new(
-            vec![MBlock {
-                id: BlockId(0),
-                phis: Vec::new(),
-                insts: instructions,
-            }],
-            Vec::new(),
-        ))
+        let allocation = allocate_with_spills(
+            MFunction::new(
+                vec![MBlock {
+                    id: BlockId(0),
+                    phis: Vec::new(),
+                    insts: instructions,
+                }],
+                Vec::new(),
+            ),
+            || false,
+        )
         .unwrap();
 
         let spill_count = allocation.allocated.function.spill_homes.len();
@@ -1485,5 +1503,37 @@ mod tests {
                 .iter()
                 .any(|(_, register)| (19..=27).contains(&register.number()))
         );
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::mir::{MBlock, MFunction, MInst};
+
+    #[test]
+    fn cancelled_allocation_reports_cancellation_before_spilling() {
+        let mut instructions = Vec::new();
+        for value in 0..8_u32 {
+            instructions.push(MInst::LoadImm {
+                dst: VReg(value),
+                value: u64::from(value),
+            });
+        }
+        instructions.push(MInst::Return);
+        let function = MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        );
+
+        let error = allocate_with_spills(function, || true)
+            .err()
+            .expect("a cancelled allocation must not return a result");
+
+        assert!(matches!(error, TargetRegallocError::Cancelled));
     }
 }

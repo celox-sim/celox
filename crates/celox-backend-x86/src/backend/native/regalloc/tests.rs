@@ -628,3 +628,50 @@ fn test_many_phi_edge_sources_are_materialized_without_pin_overflow() {
     assert_eq!(unsafe { jit.call(&mut state) }, 0);
     assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), 3_728);
 }
+
+#[test]
+fn cancelled_allocation_reports_a_cancellation_error() {
+    let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+    let mut entry = MBlock::new(BlockId(0));
+    entry.push(MInst::Return);
+    func.push_block(entry);
+
+    let error = match super::run_regalloc_for_codegen(
+        &mut func,
+        "cancelled_test",
+        None,
+        &crate::NativeDiagnostics::default(),
+        false,
+        || true,
+    ) {
+        Ok(_) => panic!("a cancelled allocation must not return a result"),
+        Err(error) => error,
+    };
+
+    assert!(super::is_cancellation(&error));
+    assert_eq!(error.phase, "compilation cancelled");
+}
+
+#[test]
+fn uncancelled_allocation_never_reports_cancellation() {
+    let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+
+    // An empty function is rejected for CFG reasons under verification, but
+    // that rejection must not be classified as cancellation.
+    let error = match super::run_regalloc_with_label_and_trace_and_diagnostics(
+        &mut func,
+        "uncancelled_test",
+        None,
+        &crate::NativeDiagnostics {
+            verify_regalloc: true,
+            ..crate::NativeDiagnostics::default()
+        },
+        false,
+        || false,
+    ) {
+        Ok(_) => panic!("empty MIR is rejected"),
+        Err(error) => error,
+    };
+
+    assert!(!super::is_cancellation(&error));
+}

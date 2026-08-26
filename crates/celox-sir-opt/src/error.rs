@@ -12,6 +12,7 @@ pub enum OptimizationErrorKind {
     StateSsa,
     Verification,
     Invariant,
+    Cancelled,
 }
 
 /// Structured failure from a fallible SIR optimization operation.
@@ -43,6 +44,15 @@ impl OptimizationError {
 
     pub(crate) fn invariant(stage: &'static str, detail: impl Into<String>) -> Self {
         Self::without_source(OptimizationErrorKind::Invariant, stage, detail)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancelled(stage: &'static str) -> Self {
+        Self::without_source(
+            OptimizationErrorKind::Cancelled,
+            stage,
+            "cancellation was requested",
+        )
     }
 
     pub(crate) fn control_flow(stage: &'static str, source: SirCfgError) -> Self {

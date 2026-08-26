@@ -26,7 +26,17 @@ pub(super) fn allocate(
     trace: Option<&mut super::RegallocTrace>,
     timing: bool,
     verify: bool,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<Allocation, super::RegallocError> {
+    // Observed between allocation stages so a cancelled compile unwinds at
+    // the next boundary instead of finishing the remaining phases.
+    let checkpoint = || -> Result<(), super::RegallocError> {
+        if is_cancelled() {
+            Err(super::cancellation_error())
+        } else {
+            Ok(())
+        }
+    };
     let register_count = func.target_features.allocatable_register_count();
     let phase = timing.then(crate::timing::now);
     let mut plan = super::spill_plan::plan_with_integrated_schedule(
@@ -68,6 +78,7 @@ pub(super) fn allocate(
             start.elapsed()
         );
     }
+    checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
     super::ssa_state_home::select(func, cfg, &mut plan).map_err(|error| {
@@ -100,6 +111,7 @@ pub(super) fn allocate(
             start.elapsed()
         );
     }
+    checkpoint()?;
 
     // Edge coupling operations are chosen by the spill planner, so their
     // materialization points do not exist as MIR uses during the first recipe
@@ -181,6 +193,7 @@ pub(super) fn allocate(
             start.elapsed()
         );
     }
+    checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
     let reconstruction = super::reconstruct::reconstruct(
@@ -241,6 +254,7 @@ pub(super) fn allocate(
         None
     };
     let cfg = reconstructed_cfg.as_ref().unwrap_or(cfg);
+    checkpoint()?;
 
     if verify {
         super::materialized_state_home::verify_materialized_state_homes(
@@ -331,6 +345,7 @@ pub(super) fn allocate(
             start.elapsed()
         );
     }
+    checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
     let analysis = super::analysis::analyze(func);

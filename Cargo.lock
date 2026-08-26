@@ -445,6 +445,7 @@ dependencies = [
  "fxhash",
  "insta",
  "itertools 0.15.0",
+ "libc",
  "libloading",
  "miette",
  "num-bigint",
