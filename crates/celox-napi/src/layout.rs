@@ -1,8 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
-use celox::{DefaultBackend, InstanceHierarchy, NamedSignal, get_byte_size};
+use celox::{InstanceHierarchy, NamedSignal, get_byte_size};
 use celox::{PortTypeKind, VariableKind};
-#[cfg(not(target_arch = "wasm32"))]
-type NamedEvent = celox::NamedEvent<DefaultBackend>;
 #[cfg(not(target_arch = "wasm32"))]
 use fxhash::FxHashMap as HashMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -134,7 +132,10 @@ pub fn build_hierarchy_node(h: &InstanceHierarchy, four_state: bool) -> Hierarch
 
 /// Build a map of event name -> event ID from named events.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn build_event_map(events: &[NamedEvent]) -> HashMap<String, u32> {
+pub fn build_event_map<B>(events: &[celox::NamedEvent<B>]) -> HashMap<String, u32>
+where
+    B: celox::SimBackend,
+{
     let mut map = HashMap::default();
     for ne in events {
         map.insert(ne.name.clone(), ne.id as u32);

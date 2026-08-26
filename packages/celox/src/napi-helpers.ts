@@ -195,6 +195,25 @@ export interface RawNapiAddon {
 			artifactJson: string,
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
+		/**
+		 * Create a tiered simulator: interprets immediately while the
+		 * compiled tier is prepared on a background thread. Optional —
+		 * absent on addons built before tiering was exposed.
+		 */
+		newTiered?(
+			sources: NapiSourceFile[],
+			top: string,
+			options?: NapiOptions,
+		): RawNapiSimulatorHandle;
+		/**
+		 * Tiered counterpart of `fromProject`. Optional — absent on addons
+		 * built before tiering was exposed.
+		 */
+		newTieredFromProject?(
+			projectPath: string,
+			top: string,
+			options?: NapiOptions,
+		): RawNapiSimulatorHandle;
 	};
 	NativeSimulationHandle?: {
 		new (
@@ -778,6 +797,11 @@ export function wrapDirectSimulatorHandle(
 		dispose(): void {
 			raw.dispose();
 		},
+		tierCompiled(): boolean | null {
+			const value = (raw as { tierCompiled?: boolean | null | undefined })
+				.tierCompiled;
+			return value ?? null;
+		},
 	};
 }
 
@@ -858,12 +882,15 @@ export function createSimulatorBridge(addon: RawNapiAddon): NativeCreateFn {
 			content: s.content,
 			path: s.path,
 		}));
-		const raw = new addon.NativeSimulatorHandle(
-			napiSources,
-			moduleName,
-			napiOpts,
-		);
-
+		const handleCtor = addon.NativeSimulatorHandle;
+		if (options.tier && !handleCtor.newTiered) {
+			throw new Error(
+				"The loaded Celox native addon does not support tiered execution.",
+			);
+		}
+		const raw = options.tier
+			? handleCtor.newTiered!(napiSources, moduleName, napiOpts)
+			: new handleCtor(napiSources, moduleName, napiOpts);
 		const layout = parseLegacyLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
