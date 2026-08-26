@@ -822,13 +822,72 @@ fn napi_runtime_error(
     }
 }
 
+/// The backend driving a [`NativeSimulatorHandle`].
+///
+/// Either the default compiled backend (as before) or the tiered backend,
+/// which starts on the interpreter and promotes to generated code in the
+/// background. Dispatch goes through the shared [`SimBackend`] surface the
+/// handle actually uses.
+#[cfg(not(target_arch = "wasm32"))]
+enum HandleBackend {
+    Default(celox::DefaultBackend),
+    Tiered(Box<celox::TieredBackend>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HandleBackend {
+    fn eval_comb(&mut self) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        match self {
+            Self::Default(backend) => backend.eval_comb(),
+            Self::Tiered(backend) => backend.eval_comb(),
+        }
+    }
+
+    fn eval_apply_ff_at(
+        &mut self,
+        event_id: usize,
+    ) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        match self {
+            Self::Default(backend) => {
+                let event = backend.id_to_event_slice()[event_id];
+                backend.eval_apply_ff_at(event)
+            }
+            Self::Tiered(backend) => {
+                let event = backend.id_to_event_slice()[event_id];
+                backend.eval_apply_ff_at(event)
+            }
+        }
+    }
+
+    fn memory_as_ptr(&self) -> (*const u8, usize) {
+        match self {
+            Self::Default(backend) => backend.memory_as_ptr(),
+            Self::Tiered(backend) => backend.memory_as_ptr(),
+        }
+    }
+
+    fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        match self {
+            Self::Default(backend) => backend.memory_as_mut_ptr(),
+            Self::Tiered(backend) => backend.memory_as_mut_ptr(),
+        }
+    }
+
+    fn stable_region_size(&self) -> usize {
+        match self {
+            Self::Default(backend) => backend.stable_region_size(),
+            Self::Tiered(backend) => backend.stable_region_size(),
+        }
+    }
+}
+
 /// Low-level handle wrapping the default backend and optional VCD writer.
 ///
 /// JS holds this as an opaque class; all operations go through methods.
 #[cfg(not(target_arch = "wasm32"))]
 #[napi]
 pub struct NativeSimulatorHandle {
-    backend: Option<celox::DefaultBackend>,
+    backend: Option<HandleBackend>,
     runtime_errors: HashMap<i64, (String, Vec<String>)>,
     vcd_writer: Option<celox::VcdWriter>,
     layout_json: String,
@@ -929,7 +988,54 @@ impl NativeSimulatorHandle {
         };
 
         // Extract the backend from Simulator (drops runtime metadata which is no longer needed)
-        let backend = sim.into_backend();
+        let backend = HandleBackend::Default(sim.into_backend());
+
+        Ok(Self {
+            backend: Some(backend),
+            runtime_errors,
+            vcd_writer,
+            layout_json,
+            events_json,
+            hierarchy_json,
+            warnings_json,
+            stable_size: stable_size as u32,
+            total_size: total_size as u32,
+        })
+    }
+
+    /// Extract metadata from a tiered simulator and wrap its backend.
+    ///
+    /// Mirrors [`Self::build_and_cache`] minus the shared-code cache: the
+    /// tiered backend owns its interpreter state and compiles in the
+    /// background, so there is no compiled artifact to reuse yet.
+    fn build_and_cache_tiered(mut sim: celox::Simulator<celox::TieredBackend>) -> Result<Self> {
+        // The builder creates the VCD writer itself when recording was
+        // requested, selecting a VCD-compatible packed layout in the process;
+        // reuse that writer instead of rebuilding descriptors here.
+        let vcd_writer = sim.take_vcd_writer();
+        let four_state = sim.layout().four_state;
+        let warnings_json = format_warnings_json(sim.warnings());
+        let signals = sim.named_signals();
+        let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
+        let (_, total_size) = sim.memory_as_ptr();
+        let stable_size = sim.stable_region_size();
+        let runtime_errors = runtime_errors_by_name(sim.program());
+
+        let layout_map = build_signal_layout(&signals, four_state);
+        let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, four_state);
+
+        let layout_json = serde_json::to_string(&layout_map)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize layout: {}", e)))?;
+        let events_json = serde_json::to_string(&event_map)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node)
+            .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
+
+        // Extract the backend from Simulator (drops runtime metadata which is
+        // no longer needed).
+        let backend = HandleBackend::Tiered(Box::new(sim.into_backend()));
 
         Ok(Self {
             backend: Some(backend),
@@ -947,9 +1053,13 @@ impl NativeSimulatorHandle {
     /// Create a handle from a cached build (shared compiled code + fresh memory).
     fn from_cached(cached: &CachedBuild, vcd_path: Option<&str>) -> Result<Self> {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        let backend = celox::NativeBackend::from_shared(Arc::clone(&cached.shared_code));
+        let backend = HandleBackend::Default(celox::NativeBackend::from_shared(Arc::clone(
+            &cached.shared_code,
+        )));
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        let backend = celox::JitBackend::from_shared(Arc::clone(&cached.shared_code));
+        let backend = HandleBackend::Default(celox::JitBackend::from_shared(Arc::clone(
+            &cached.shared_code,
+        )));
         let vcd_writer = if let Some(path) = vcd_path {
             Some(
                 celox::VcdWriter::new(path, &cached.vcd_descs)
@@ -1004,6 +1114,84 @@ impl NativeSimulatorHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
         Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
+    }
+
+    /// Create a new tiered simulator from Veryl source code.
+    ///
+    /// Execution starts on the interpreter immediately while the host's
+    /// default compiled tier (native where available) is prepared on a
+    /// background thread. The first safe point after compilation completes
+    /// adopts the compiled code; observe progress through
+    /// [`Self::tier_compiled`](Self::tier_compiled). Tiered builds bypass the
+    /// JIT cache because the interpreter already removes startup latency.
+    #[napi(factory)]
+    pub fn new_tiered(
+        sources: Vec<NapiSourceFile>,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+            .into_iter()
+            .map(|s| (s.content, std::path::PathBuf::from(s.path)))
+            .collect();
+        append_extra_source(&mut src_pairs, &opts.extra_source);
+
+        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let mut builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        // Forward VCD before building: tiered layout selection must know that
+        // recording was requested so it picks the packed layout the VCD
+        // descriptors require (see `build_and_cache_tiered`).
+        if let Some(path) = opts.vcd.as_deref() {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
+            .build_tiered()
+            .map_err(|e| Error::from_reason(format!("{}", e)))?;
+
+        Self::build_and_cache_tiered(sim)
+    }
+
+    /// Create a new tiered simulator from a Veryl project directory.
+    ///
+    /// Tiered counterpart of [`Self::from_project`]: searches upward from
+    /// `project_path` for `Veryl.toml`, starts on the interpreter
+    /// immediately, and promotes to the host's default compiled tier in the
+    /// background. Bypasses the JIT cache for the same reason as
+    /// [`Self::new_tiered`].
+    #[napi(factory)]
+    pub fn new_tiered_from_project(
+        project_path: String,
+        top: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        append_extra_source(&mut sources, &opts.extra_source);
+
+        let source_refs: Vec<(&str, &std::path::Path)> = sources
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+
+        let mut builder = apply_options(
+            celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
+            &opts,
+        );
+        // Forward VCD before building: tiered layout selection must know that
+        // recording was requested so it picks the packed layout the VCD
+        // descriptors require (see `build_and_cache_tiered`).
+        if let Some(path) = opts.vcd.as_deref() {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
+            .build_tiered()
+            .map_err(|e| Error::from_reason(format!("{}", e)))?;
+
+        Self::build_and_cache_tiered(sim)
     }
 
     /// Create a simulator from a versioned external-frontend artifact.
@@ -1093,6 +1281,25 @@ impl NativeSimulatorHandle {
         self.total_size
     }
 
+    /// Whether this handle drives the tiered backend.
+    #[napi(getter)]
+    pub fn is_tiered(&self) -> bool {
+        matches!(self.backend, Some(HandleBackend::Tiered(_)))
+    }
+
+    /// Whether the tiered backend has adopted its compiled tier.
+    ///
+    /// `None` when the handle is not tiered; `false` while background
+    /// compilation is still running or after it failed (the interpreter then
+    /// remains the permanent tier).
+    #[napi(getter)]
+    pub fn tier_compiled(&self) -> Option<bool> {
+        match &self.backend {
+            Some(HandleBackend::Tiered(backend)) => Some(backend.is_compiled()),
+            _ => None,
+        }
+    }
+
     /// Trigger a clock/event by its numeric ID.
     #[napi]
     pub fn tick(&mut self, event_id: u32) -> Result<()> {
@@ -1101,10 +1308,9 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        let event = b.id_to_event_slice()[event_id as usize];
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-        b.eval_apply_ff_at(event)
+        b.eval_apply_ff_at(event_id as usize)
             .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))
@@ -1118,11 +1324,10 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
-        let event = b.id_to_event_slice()[event_id as usize];
         for _ in 0..count {
             b.eval_comb()
                 .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-            b.eval_apply_ff_at(event)
+            b.eval_apply_ff_at(event_id as usize)
                 .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
             b.eval_comb()
                 .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
