@@ -31,7 +31,7 @@ jobs:
 
       - name: Run Rust benchmarks
         shell: bash
-        run: set -o pipefail && cargo bench --locked -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
+        run: set -o pipefail && cargo bench --locked -p celox --bench simulation --bench overhead --bench tiered -- --output-format bencher | tee rust-output.txt
 
       - uses: actions/upload-artifact@v7
         with:

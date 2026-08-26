@@ -220,7 +220,23 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
     entry_args: &[SIRValue],
     four_state: bool,
 ) -> Result<UnitExit, InterpError> {
-    let mut regs = Registers::new(&unit.register_map);
+    let mut regs = Registers::default();
+    execute_unit_with_registers(unit, machine, entry_args, four_state, &mut regs)
+}
+
+/// Execute a unit with backend-owned register storage.
+///
+/// The Tier-0 backend invokes many units per evaluation. Reusing this storage
+/// avoids allocating three register vectors for every invocation while still
+/// clearing values and rebuilding unit-specific type metadata at entry.
+pub(crate) fn execute_unit_with_registers<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+    regs: &mut Registers,
+) -> Result<UnitExit, InterpError> {
+    regs.prepare(&unit.register_map);
     let entry = unit
         .blocks
         .get(&unit.entry_block_id)
@@ -242,13 +258,13 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
             .get(&current)
             .ok_or(InterpError::UnknownBlock(current))?;
         for instruction in &block.instructions {
-            exec_instruction(instruction, &mut regs, machine, four_state)?;
+            exec_instruction(instruction, regs, machine, four_state)?;
         }
         match &block.terminator {
             SIRTerminator::Return => return Ok(UnitExit::Return),
             SIRTerminator::Error(code) => return Err(InterpError::Fatal(*code)),
             SIRTerminator::Jump(target, args) => {
-                transfer(&mut regs, unit, *target, args)?;
+                transfer(regs, unit, *target, args)?;
                 current = *target;
             }
             SIRTerminator::Branch {
@@ -265,7 +281,7 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
                 } else {
                     false_block
                 };
-                transfer(&mut regs, unit, target.0, &target.1)?;
+                transfer(regs, unit, target.0, &target.1)?;
                 current = target.0;
             }
             SIRTerminator::Switch {
@@ -282,7 +298,7 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
                     .find(|case| case.value == selector)
                     .map(|case| case.target)
                     .unwrap_or(*default);
-                transfer(&mut regs, unit, target, &[])?;
+                transfer(regs, unit, target, &[])?;
                 current = target;
             }
         }
@@ -1231,26 +1247,25 @@ impl BigUintExt for BigUint {
 
 // ── Register file ─────────────────────────────────────────────────────
 
-struct Registers {
+#[derive(Default)]
+pub(crate) struct Registers {
     values: Vec<Option<SIRValue>>,
     widths: Vec<usize>,
     signed: Vec<bool>,
 }
 
 impl Registers {
-    fn new(register_map: &HashMap<RegisterId, RegisterType>) -> Self {
+    fn prepare(&mut self, register_map: &HashMap<RegisterId, RegisterType>) {
         let size = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
-        let values = vec![None; size];
-        let mut widths = vec![0; size];
-        let mut signed = vec![false; size];
+        self.values.clear();
+        self.values.resize_with(size, || None);
+        self.widths.clear();
+        self.widths.resize(size, 0);
+        self.signed.clear();
+        self.signed.resize(size, false);
         for (id, register_type) in register_map {
-            widths[id.0] = register_type.width();
-            signed[id.0] = register_type.is_signed();
-        }
-        Self {
-            values,
-            widths,
-            signed,
+            self.widths[id.0] = register_type.width();
+            self.signed[id.0] = register_type.is_signed();
         }
     }
 
@@ -1522,6 +1537,48 @@ mod tests {
         let mut machine = FakeMachine::default();
         execute_unit(&unit, &mut machine, &[], true).unwrap();
         assert_eq!(machine.stored(7, 0, 8).payload, BigUint::from(8u8));
+    }
+
+    #[test]
+    fn reused_register_storage_clears_values_between_units() {
+        let producer = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xabu8))],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+        let consumer = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![SIRInstruction::Store(
+                    1u32,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        let mut registers = Registers::default();
+        execute_unit_with_registers(&producer, &mut machine, &[], true, &mut registers).unwrap();
+        let error = execute_unit_with_registers(&consumer, &mut machine, &[], true, &mut registers)
+            .unwrap_err();
+        assert_eq!(error, InterpError::MissingRegister(RegisterId(0)));
     }
 
     #[test]
