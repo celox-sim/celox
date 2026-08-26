@@ -35,7 +35,10 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
 };
-use crate::interpreter::{InterpError, InterpMachine, ResolvedAccess, StoreSnapshot, execute_unit};
+use crate::interpreter::{
+    InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot,
+    execute_unit_with_registers,
+};
 use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,
@@ -960,6 +963,7 @@ fn run_units(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     trigger_addrs: &[(AbsoluteAddr, u32)],
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
+    registers: &mut Registers,
     emit_triggers: bool,
 ) -> Result<(), SimulatorErrorCode> {
     // Snapshot the first word of every trigger-bearing object at group
@@ -1002,7 +1006,8 @@ fn run_units(
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
-        execute_unit(unit, &mut machine, &[], four_state).map_err(error_code)?;
+        execute_unit_with_registers(unit, &mut machine, &[], four_state, registers)
+            .map_err(error_code)?;
     }
     Ok(())
 }
@@ -1049,6 +1054,8 @@ pub struct InterpBackend {
     event_trigger_addrs: HashMap<AbsoluteAddr, Vec<(AbsoluteAddr, u32)>>,
     /// Reused group-entry trigger snapshots; sorted by address and region.
     trigger_snapshots: Vec<((AbsoluteAddr, u32), u64)>,
+    /// Register storage reused across sequential execution-unit invocations.
+    registers: Registers,
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
@@ -1230,6 +1237,7 @@ impl InterpBackend {
             comb_trigger_addrs,
             event_trigger_addrs,
             trigger_snapshots: Vec::new(),
+            registers: Registers::default(),
             emit_triggers: options.emit_triggers,
         };
         backend.install_event_buffers();
@@ -1310,6 +1318,7 @@ impl SimBackend for InterpBackend {
             &self.program_sir.eval_comb,
             &self.comb_trigger_addrs,
             &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1328,6 +1337,7 @@ impl SimBackend for InterpBackend {
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1346,6 +1356,7 @@ impl SimBackend for InterpBackend {
             units,
             &self.event_trigger_addrs[&event.addr()],
             &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1364,6 +1375,7 @@ impl SimBackend for InterpBackend {
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1382,6 +1394,7 @@ impl SimBackend for InterpBackend {
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
+            &mut self.registers,
             self.emit_triggers,
         )
     }
