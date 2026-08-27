@@ -273,6 +273,22 @@ assert_eq "$(timeout_sec_for celox-cranelift test_soc_linux_boot)" 300 \
 assert_eq "$(timeout_sec_for celox-interpreter test_soc_linux_boot)" 300 \
     "interpreter fallback timeout"
 
+HELIODOR_COMPILE_ONLY=1
+HELIODOR_RUNNERS="veryl-cc-sync celox celox-cranelift"
+validate_compile_only_runners \
+    || fail "compile-only validation rejected compiled runners"
+for unsupported_runner in celox-tiered celox-interpreter; do
+    HELIODOR_RUNNERS="celox $unsupported_runner"
+    if validate_compile_only_runners 2>"$TMP/$unsupported_runner-compile-only.stderr"; then
+        fail "compile-only validation accepted $unsupported_runner"
+    fi
+    grep -Fq "compile-only is not supported by the $unsupported_runner runner" \
+        "$TMP/$unsupported_runner-compile-only.stderr" \
+        || fail "compile-only validation omitted the rejected runner name"
+done
+HELIODOR_COMPILE_ONLY=0
+HELIODOR_RUNNERS="veryl-cc-sync celox"
+
 # Exercise run_one without Heliodor or either compiler. These overrides emit
 # fixture logs at the same boundary as the real subprocess wrapper.
 integration_results="$TMP/integration-results"

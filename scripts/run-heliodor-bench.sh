@@ -136,7 +136,7 @@ Environment:
   HELIODOR_CELOX_TARGET_DIR
                        optional explicit Cargo target directory for the Celox build
   HELIODOR_COMPILE_ONLY
-                       for Celox and veryl-cc-sync, build the simulator and exit without running the testbench
+                       for celox, celox-cranelift, and veryl-cc-sync, build the simulator and exit without running the testbench
   HELIODOR_COMPILE_TIMEOUT_SEC
                        optional safety timeout for compile-only mode
   HELIODOR_INSTALL_TOOLS
@@ -1085,6 +1085,21 @@ runner_enabled() {
     return 1
 }
 
+validate_compile_only_runners() {
+    if [[ "$HELIODOR_COMPILE_ONLY" != 1 ]]; then
+        return 0
+    fi
+    local runner
+    for runner in $HELIODOR_RUNNERS; do
+        case "$runner" in
+            celox-tiered|celox-interpreter)
+                echo "error: compile-only is not supported by the $runner runner" >&2
+                return 2
+                ;;
+        esac
+    done
+}
+
 validate_native_image_mode() {
     case "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" in
         off)
@@ -1598,6 +1613,7 @@ run_one() {
 }
 
 run_all() {
+    validate_compile_only_runners || return "$?"
     validate_native_image_mode || return "$?"
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
