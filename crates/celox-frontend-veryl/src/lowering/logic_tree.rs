@@ -4089,8 +4089,9 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_written_accesses_preserves_indeterminate_expression_branches() {
+    fn test_collect_written_accesses_reflects_constant_indeterminate_ternary_folding() {
         let code = r#"
+            #[allow(unassign_variable)]
             module Top (
                 d: input logic,
                 q: output logic,
@@ -4132,11 +4133,13 @@ mod tests {
         let mut written = HashMap::default();
         collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
 
+        for name in ["ternary_then", "z_ternary_then"] {
+            let id = var_id_of(&module, &[name]);
+            assert!(!written.contains_key(&id), "{name}");
+        }
         for name in [
-            "ternary_then",
             "ternary_else",
             "short_circuit_rhs",
-            "z_ternary_then",
             "z_ternary_else",
             "z_short_circuit_rhs",
         ] {
