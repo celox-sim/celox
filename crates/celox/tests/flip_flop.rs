@@ -4973,7 +4973,6 @@ fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
 }
 
 fn test_ff_if_reset_basic(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset, d: input logic<8>, q: output logic<8>) {
             always_ff (clk, rst) {
@@ -5040,7 +5039,6 @@ fn test_async_reset(sim) {
 }
 
 fn test_ff_swap_correctness(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
             var r1: logic<8>;
@@ -5168,7 +5166,6 @@ fn test_multiple_async_resets(sim) {
 }
 
 fn test_ff_if_reset_multi_cycle(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, rst: input reset, q: output logic<8>) {
             always_ff (clk, rst) {

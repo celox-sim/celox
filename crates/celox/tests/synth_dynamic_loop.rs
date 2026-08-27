@@ -393,7 +393,7 @@ fn test_i32_shl_step_overflow_reports_true_loop(sim) {
 }
 
 fn test_runtime_bounds_terminal_inclusive_mul_loop_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             count: input logic<32>,
@@ -588,7 +588,7 @@ fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
 }
 
 fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -964,7 +964,7 @@ fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
 }
 
 fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
