@@ -13,7 +13,7 @@ edition.workspace     = true
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-napi              = { version = "=3.12.1", features = ["napi8", "serde-json"] }
+napi              = { version = "=3.12.2", features = ["napi8", "serde-json"] }
 napi-derive       = "=3.6.3"
 celox-ts-gen      = { workspace = true }
 celox-design      = { workspace = true }
