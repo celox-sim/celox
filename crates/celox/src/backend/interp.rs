@@ -36,8 +36,7 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
 };
 use crate::interpreter::{
-    InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot,
-    execute_unit_with_registers,
+    InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot, execute_prepared_unit,
 };
 use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
@@ -1047,6 +1046,32 @@ fn collect_trigger_addrs(
     addrs
 }
 
+/// One scheduled SIR unit with register metadata prepared once at backend
+/// construction. Keeping register storage with the unit removes per-tick
+/// HashMap walks and slot clearing from the interpreter dispatch path.
+struct PreparedUnit {
+    unit: ExecutionUnit<RegionedAbsoluteAddr>,
+    registers: Registers,
+}
+
+impl PreparedUnit {
+    fn new(unit: ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Self {
+        let registers = Registers::new(&unit.register_map, four_state);
+        Self { unit, registers }
+    }
+}
+
+fn prepare_units(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    four_state: bool,
+) -> Vec<PreparedUnit> {
+    units
+        .iter()
+        .cloned()
+        .map(|unit| PreparedUnit::new(unit, four_state))
+        .collect()
+}
+
 /// Execute every unit in `units` against the split backend storage.
 #[allow(clippy::too_many_arguments)]
 fn run_units(
@@ -1054,10 +1079,9 @@ fn run_units(
     layout: &MemoryLayout,
     four_state: bool,
     comb_capture_enabled: &mut [u8],
-    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    units: &mut [PreparedUnit],
     trigger_addrs: &[(AbsoluteAddr, u32)],
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
-    registers: &mut Registers,
     emit_triggers: bool,
 ) -> Result<(), SimulatorErrorCode> {
     // Snapshot the first word of every trigger-bearing object at group
@@ -1086,7 +1110,7 @@ fn run_units(
         }
     }
 
-    for unit in units {
+    for prepared in units {
         let mut machine = Machine {
             // Reborrow through the mutable references so a fresh Machine can
             // be constructed for every execution unit in the loop.
@@ -1100,8 +1124,14 @@ fn run_units(
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
-        execute_unit_with_registers(unit, &mut machine, &[], four_state, registers)
-            .map_err(error_code)?;
+        execute_prepared_unit(
+            &prepared.unit,
+            &mut machine,
+            &[],
+            four_state,
+            &mut prepared.registers,
+        )
+        .map_err(error_code)?;
     }
     Ok(())
 }
@@ -1126,7 +1156,10 @@ unsafe fn read_word(memory: &[u64], offset: usize) -> u64 {
 /// as the state layout is finalized, which is the property the tiered
 /// startup path relies on.
 pub struct InterpBackend {
-    program_sir: crate::ir::SirProgram,
+    eval_comb_units: Vec<PreparedUnit>,
+    eval_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
+    eval_only_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
+    apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
     layout: MemoryLayout,
     four_state: bool,
     memory: Vec<u64>,
@@ -1141,15 +1174,13 @@ pub struct InterpBackend {
     /// Units for the fused comb+FF tick of each event, mirroring the
     /// compiled `comb_apply_func`: fused schedules when present, otherwise
     /// comb units followed by the clock's FF units.
-    comb_apply_units: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    comb_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
     /// Trigger-bearing addresses per schedule group, precomputed so a group
     /// invocation only performs snapshot reads.
     comb_trigger_addrs: Vec<(AbsoluteAddr, u32)>,
     event_trigger_addrs: HashMap<AbsoluteAddr, Vec<(AbsoluteAddr, u32)>>,
     /// Reused group-entry trigger snapshots; sorted by address and region.
     trigger_snapshots: Vec<((AbsoluteAddr, u32), u64)>,
-    /// Register storage reused across sequential execution-unit invocations.
-    registers: Registers,
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
@@ -1160,7 +1191,6 @@ impl InterpBackend {
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
-        let program_sir = laid_out.sir.clone();
         let layout = laid_out.layout().clone();
         let four_state = options.four_state;
 
@@ -1274,8 +1304,7 @@ impl InterpBackend {
         // program; executing independently scheduled comb and FF units can
         // observe a different pre-edge snapshot around reset and NBA regions,
         // exactly as with the compiled backends.
-        let mut comb_apply_units: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>> =
-            HashMap::default();
+        let mut comb_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>> = HashMap::default();
         for (clock, ff_units) in &laid_out.sir.eval_apply_ffs {
             let units = if let Some(fused) = laid_out.sir.eval_comb_apply_ffs.get(clock) {
                 fused.clone()
@@ -1284,8 +1313,27 @@ impl InterpBackend {
                 combined.extend(ff_units.iter().cloned());
                 combined
             };
-            comb_apply_units.insert(*clock, units);
+            comb_apply_units.insert(*clock, prepare_units(&units, four_state));
         }
+        let eval_comb_units = prepare_units(&laid_out.sir.eval_comb, four_state);
+        let eval_apply_units = laid_out
+            .sir
+            .eval_apply_ffs
+            .iter()
+            .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
+            .collect();
+        let eval_only_units = laid_out
+            .sir
+            .eval_only_ffs
+            .iter()
+            .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
+            .collect();
+        let apply_units = laid_out
+            .sir
+            .apply_ffs
+            .iter()
+            .map(|(addr, units)| (*addr, prepare_units(units, four_state)))
+            .collect();
         // Only eval/apply clocks receive combined ticks; eval-only and
         // apply-only groups fall back to the default two-phase evaluation.
         let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
@@ -1315,7 +1363,10 @@ impl InterpBackend {
         }
 
         let mut backend = Self {
-            program_sir,
+            eval_comb_units,
+            eval_apply_units,
+            eval_only_units,
+            apply_units,
             layout,
             four_state,
             memory,
@@ -1331,7 +1382,6 @@ impl InterpBackend {
             comb_trigger_addrs,
             event_trigger_addrs,
             trigger_snapshots: Vec::new(),
-            registers: Registers::default(),
             emit_triggers: options.emit_triggers,
         };
         backend.install_event_buffers();
@@ -1409,10 +1459,9 @@ impl SimBackend for InterpBackend {
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
-            &self.program_sir.eval_comb,
+            &mut self.eval_comb_units,
             &self.comb_trigger_addrs,
             &mut self.trigger_snapshots,
-            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1423,21 +1472,19 @@ impl SimBackend for InterpBackend {
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
-            self.program_sir
-                .eval_apply_ffs
-                .get(&event.addr())
+            self.eval_apply_units
+                .get_mut(&event.addr())
                 .expect("scheduled event missing from SIR program"),
             self.event_trigger_addrs
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
-            &mut self.registers,
             self.emit_triggers,
         )
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        let Some(units) = self.comb_apply_units.get(&event.addr()) else {
+        let Some(units) = self.comb_apply_units.get_mut(&event.addr()) else {
             // Events outside the eval/apply map keep the default ordering.
             self.eval_comb()?;
             return self.eval_apply_ff_at(event);
@@ -1450,7 +1497,6 @@ impl SimBackend for InterpBackend {
             units,
             &self.event_trigger_addrs[&event.addr()],
             &mut self.trigger_snapshots,
-            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1461,15 +1507,13 @@ impl SimBackend for InterpBackend {
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
-            self.program_sir
-                .eval_only_ffs
-                .get(&event.addr())
+            self.eval_only_units
+                .get_mut(&event.addr())
                 .expect("scheduled event missing from SIR program"),
             self.event_trigger_addrs
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
-            &mut self.registers,
             self.emit_triggers,
         )
     }
@@ -1480,15 +1524,13 @@ impl SimBackend for InterpBackend {
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
-            self.program_sir
-                .apply_ffs
-                .get(&event.addr())
+            self.apply_units
+                .get_mut(&event.addr())
                 .expect("scheduled event missing from SIR program"),
             self.event_trigger_addrs
                 .get(&event.addr())
                 .map_or(&[] as &[(AbsoluteAddr, u32)], Vec::as_slice),
             &mut self.trigger_snapshots,
-            &mut self.registers,
             self.emit_triggers,
         )
     }
