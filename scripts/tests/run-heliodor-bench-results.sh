@@ -258,6 +258,21 @@ if ensure_results_schema "$bad_semantics" 2>/dev/null; then
     fail "v4 compile-only row with a numeric speed elapsed was accepted"
 fi
 
+# A Veryl baseline should only cap runners intended for direct performance
+# comparison. Slower diagnostic backends retain the test fallback timeout.
+HELIODOR_COMPILE_ONLY=0
+HELIODOR_TIMEOUT_SEC=""
+HELIODOR_CELOX_TIMEOUT_MULTIPLIER=2
+BASELINE_ELAPSED_NS[test_soc_linux_boot]=1000000000
+assert_eq "$(timeout_sec_for celox test_soc_linux_boot)" 2 \
+    "native baseline-derived timeout"
+assert_eq "$(timeout_sec_for celox-tiered test_soc_linux_boot)" 2 \
+    "tiered baseline-derived timeout"
+assert_eq "$(timeout_sec_for celox-cranelift test_soc_linux_boot)" 300 \
+    "Cranelift fallback timeout"
+assert_eq "$(timeout_sec_for celox-interpreter test_soc_linux_boot)" 300 \
+    "interpreter fallback timeout"
+
 # Exercise run_one without Heliodor or either compiler. These overrides emit
 # fixture logs at the same boundary as the real subprocess wrapper.
 integration_results="$TMP/integration-results"

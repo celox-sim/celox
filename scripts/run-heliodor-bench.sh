@@ -1325,7 +1325,8 @@ timeout_sec_for() {
         printf '%s\n' "$HELIODOR_TIMEOUT_SEC"
         return
     fi
-    if [[ "$runner" == celox* && -n "${BASELINE_ELAPSED_NS[$test]:-}" ]]; then
+    if [[ ("$runner" == celox || "$runner" == celox-tiered) \
+        && -n "${BASELINE_ELAPSED_NS[$test]:-}" ]]; then
         local baseline_ns="${BASELINE_ELAPSED_NS[$test]}"
         local timeout_sec
         timeout_sec="$(((baseline_ns * HELIODOR_CELOX_TIMEOUT_MULTIPLIER + 999999999) / 1000000000))"

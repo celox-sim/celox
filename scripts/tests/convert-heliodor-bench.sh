@@ -17,6 +17,10 @@ node "$ROOT/scripts/convert-heliodor-bench.mjs" \
 node "$ROOT/scripts/convert-heliodor-bench.mjs" \
     "$TMP/results.tsv" "$TMP/jit.json" --jit-only >/dev/null
 
+grep -v '^celox-tiered' "$TMP/results.tsv" >"$TMP/default-results.tsv"
+node "$ROOT/scripts/convert-heliodor-bench.mjs" \
+    "$TMP/default-results.tsv" "$TMP/default-results.json" >/dev/null
+
 cat >"$TMP/arm64-results.tsv" <<'EOF'
 runner	test	status	elapsed_ns	log	semantic_status	exit_status	process_elapsed_ns	reported_elapsed_ns	compile_elapsed_ns	execute_elapsed_ns	jit_execute_elapsed_ns
 celox	test_soc_linux_boot	0	1150	arm64.log	pass	0	1150	1100	7000000	8000000	7500000
@@ -43,6 +47,13 @@ const fs = require("fs");
 const values = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
 if (values.length !== 1 || values[0].name !== "heliodor-celox-jit/heliodor_linux_boot_execution") process.exit(1);
 ' "$TMP/jit.json"
+
+node -e '
+const fs = require("fs");
+const values = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (values.length !== 5) process.exit(1);
+if (values.some((entry) => entry.name.includes("celox-tiered"))) process.exit(1);
+' "$TMP/default-results.json"
 
 node -e '
 const fs = require("fs");
