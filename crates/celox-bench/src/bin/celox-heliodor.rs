@@ -9,7 +9,10 @@ use std::{
 use celox::testbench::{
     compile_initial_testbench, run_compiled_testbench, run_compiled_testbench_with_tick_limit,
 };
-use celox::{OptLevel, OptimizeOptions, Simulator, SirPass, TestResult};
+use celox::{
+    OptLevel, OptimizeOptions, Simulator, SirPass, TestResult, TieredExecutionStats,
+    TieredExecutionTier, TieredPromotionStatus,
+};
 use clap::{Parser, ValueEnum};
 use veryl_metadata::Metadata;
 
@@ -104,6 +107,7 @@ enum CeloxHeliodorError {
 enum Backend {
     Native,
     Cranelift,
+    Tiered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -134,6 +138,7 @@ impl Backend {
         match self {
             Backend::Native => "native",
             Backend::Cranelift => "cranelift",
+            Backend::Tiered => "tiered",
         }
     }
 }
@@ -185,6 +190,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--native-image-output requires --compile-only",
         });
     }
+    if opts.compile_only && matches!(opts.backend, Backend::Tiered) {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--compile-only is not meaningful with --backend tiered",
+        });
+    }
     if opts.native_image_input.is_some() && opts.compile_only {
         return Err(CeloxHeliodorError::InvalidConfiguration {
             message: "--native-image-input cannot be used with --compile-only",
@@ -196,7 +206,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         });
     }
     if (opts.native_image_input.is_some() || opts.native_image_output.is_some())
-        && matches!(opts.backend, Backend::Cranelift)
+        && !matches!(opts.backend, Backend::Native)
     {
         return Err(CeloxHeliodorError::InvalidConfiguration {
             message: "native image options require --backend native",
@@ -320,7 +330,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         };
     }
     if let Some(output_dir) = opts.dump_ir_dir {
-        if matches!(opts.backend, Backend::Cranelift) {
+        if !matches!(opts.backend, Backend::Native) {
             return Err(CeloxHeliodorError::InvalidConfiguration {
                 message: "--dump-ir-dir is only supported with --backend native",
             });
@@ -567,6 +577,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
             Backend::Cranelift => {
                 let _sim = builder.build_cranelift()?;
             }
+            Backend::Tiered => unreachable!("tiered compile-only was rejected above"),
         }
         let compile_elapsed = compile_start.elapsed();
         let elapsed = total_start.elapsed();
@@ -594,6 +605,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
         execute_elapsed,
         jit_execute_elapsed,
         execute_cpu_elapsed,
+        tiered_stats,
+        tiered_promotion_error,
     ) = match opts.backend {
         #[cfg(any(
             all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -639,6 +652,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 process_cpu_time()
                     .zip(execute_cpu_start)
                     .map(|(end, start)| end.saturating_sub(start)),
+                None,
+                None,
             )
         }
         #[cfg(not(any(
@@ -669,6 +684,42 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 process_cpu_time()
                     .zip(execute_cpu_start)
                     .map(|(end, start)| end.saturating_sub(start)),
+                None,
+                None,
+            )
+        }
+        Backend::Tiered => {
+            let mut sim = builder.build_tiered()?;
+            let testbench =
+                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            // `build_tiered` returns after constructing the interpreter and
+            // starting code generation. The execution interval therefore
+            // includes the background compile and promotion, which is the
+            // end-to-end latency tiered execution is intended to improve.
+            let compile_elapsed = compile_start.elapsed();
+            let execute_cpu_start = process_cpu_time();
+            let execute_start = Instant::now();
+            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                (limited.result, limited.ticks, limited.tick_limit_reached)
+            } else {
+                (run_compiled_testbench(&mut sim, &testbench), 0, false)
+            };
+            let execute_elapsed = execute_start.elapsed();
+            let stats = sim.tiered_execution_stats();
+            let promotion_error = sim.promotion_error().map(ToString::to_string);
+            (
+                result,
+                ticks,
+                tick_limit_reached,
+                compile_elapsed,
+                execute_elapsed,
+                None,
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+                Some(stats),
+                promotion_error,
             )
         }
     };
@@ -680,6 +731,25 @@ fn run() -> Result<(), CeloxHeliodorError> {
         jit_execute_elapsed,
         execute_cpu_elapsed,
     );
+    if let Some(stats) = tiered_stats {
+        print_tiered_stats(&opts.test, stats);
+        if stats.tier != TieredExecutionTier::Compiled
+            || stats.promotion != TieredPromotionStatus::Promoted
+            || stats.compiled_evaluations == 0
+        {
+            let detail = tiered_promotion_error
+                .as_deref()
+                .unwrap_or("the compiled tier was not adopted and exercised");
+            println!(
+                "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
+                opts.test,
+                elapsed.as_nanos()
+            );
+            return Err(CeloxHeliodorError::TestFailed {
+                message: format!("tiered JIT benchmark did not exercise generated code: {detail}"),
+            });
+        }
+    }
     if opts.tick_limit.is_some() {
         println!(
             "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
@@ -713,6 +783,33 @@ fn run() -> Result<(), CeloxHeliodorError> {
             Err(CeloxHeliodorError::TestFailed { message })
         }
     }
+}
+
+fn print_tiered_stats(test: &str, stats: TieredExecutionStats) {
+    let tier = match stats.tier {
+        TieredExecutionTier::Interpreter => "interpreter",
+        TieredExecutionTier::Compiled => "compiled",
+        _ => "unknown",
+    };
+    let promotion = match stats.promotion {
+        TieredPromotionStatus::Pending => "pending",
+        TieredPromotionStatus::Failed => "failed",
+        TieredPromotionStatus::Disabled => "disabled",
+        TieredPromotionStatus::Promoted => "promoted",
+        _ => "unknown",
+    };
+    let promoted_after = stats
+        .promoted_after_interpreted_evaluations
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "NA".to_string());
+    println!(
+        "CELOX_TIERED_STATS test={test} tier={tier} promotion={promotion} interpreted_evaluations={} compiled_evaluations={} promoted_after_interpreted_evaluations={promoted_after} safe_point_polls={} split_apply_deferrals={} threshold_deferrals={}",
+        stats.interpreted_evaluations,
+        stats.compiled_evaluations,
+        stats.safe_point_polls,
+        stats.split_apply_deferrals,
+        stats.threshold_deferrals,
+    );
 }
 
 fn print_celox_timing(

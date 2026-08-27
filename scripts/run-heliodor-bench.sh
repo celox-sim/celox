@@ -101,7 +101,7 @@ Environment:
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
-                       Celox runners: celox, celox-cranelift
+                       Celox runners: celox, celox-cranelift, celox-tiered
                        Split-timing runner: veryl-cc-sync
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
@@ -153,7 +153,7 @@ Examples:
 
 `gate` is the fixed correctness and measurement run. Unlike diagnostic `run`,
 it ignores runner/test/configuration overrides, uses isolated generated trees,
-and exits successfully only when both full tests pass. Execution and code
+and exits successfully only when all three full runs pass. Execution and code
 generation times are reported but do not affect the exit status.
 USAGE
 }
@@ -509,7 +509,8 @@ classify_timed_veryl_result() {
 validate_gate_celox_config() {
     local log="$1"
     local expected_test="$2"
-    local expected="CELOX_TEST_CONFIG test=$expected_test backend=native opt_level=O2 four_state=false compile_only=false"
+    local expected_backend="${3:-native}"
+    local expected="CELOX_TEST_CONFIG test=$expected_test backend=$expected_backend opt_level=O2 four_state=false compile_only=false"
     local line config_count=0 valid_count=0
 
     if [[ ! -f "$log" ]]; then
@@ -529,6 +530,32 @@ validate_gate_celox_config() {
         echo "error: Celox gate log must contain exactly one exact config record" >&2
         echo "expected: $expected" >&2
         echo "records=$config_count exact=$valid_count" >&2
+        return 1
+    fi
+}
+
+validate_gate_tiered_stats() {
+    local log="$1"
+    local expected_test="$2"
+    local line marker_count=0 valid_count=0
+    local pattern="^CELOX_TIERED_STATS test=${expected_test} tier=compiled promotion=promoted interpreted_evaluations=([0-9]+) compiled_evaluations=([0-9]+) promoted_after_interpreted_evaluations=([0-9]+) safe_point_polls=([0-9]+) split_apply_deferrals=([0-9]+) threshold_deferrals=([0-9]+)$"
+
+    if [[ ! -f "$log" ]]; then
+        echo "error: tiered Celox gate log does not exist: $log" >&2
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" != CELOX_TIERED_STATS* ]]; then
+            continue
+        fi
+        marker_count=$((marker_count + 1))
+        if [[ "$line" =~ $pattern ]] && ((10#${BASH_REMATCH[2]} > 0)); then
+            valid_count=$((valid_count + 1))
+        fi
+    done <"$log"
+    if ((marker_count != 1 || valid_count != 1)); then
+        echo "error: tiered Celox gate must report exactly one promoted tier with generated-code evaluations" >&2
+        echo "records=$marker_count valid=$valid_count" >&2
         return 1
     fi
 }
@@ -1296,7 +1323,7 @@ timeout_sec_for() {
         printf '%s\n' "$HELIODOR_TIMEOUT_SEC"
         return
     fi
-    if [[ "$runner" == "celox" && -n "${BASELINE_ELAPSED_NS[$test]:-}" ]]; then
+    if [[ "$runner" == celox* && -n "${BASELINE_ELAPSED_NS[$test]:-}" ]]; then
         local baseline_ns="${BASELINE_ELAPSED_NS[$test]}"
         local timeout_sec
         timeout_sec="$(((baseline_ns * HELIODOR_CELOX_TIMEOUT_MULTIPLIER + 999999999) / 1000000000))"
@@ -1435,6 +1462,12 @@ run_one() {
                 "${celox_args[@]}" --backend cranelift --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
+        celox-tiered)
+            run_in_heliodor "$timeout_sec" "$log" \
+                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_args[@]}" --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}"
+            process_status="$?"
+            ;;
         veryl-cc-sync)
             run_in_heliodor "$timeout_sec" "$log" \
                 env VERYL_AOT_CACHE_DIR="$veryl_aot_cache_dir" \
@@ -1552,7 +1585,7 @@ run_all() {
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
-    if runner_enabled celox || runner_enabled celox-cranelift; then
+    if runner_enabled celox || runner_enabled celox-cranelift || runner_enabled celox-tiered; then
         build_celox_runner
     fi
     if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
@@ -1579,6 +1612,9 @@ GATE_VERYL_COMPILE_NS=""
 GATE_VERYL_EXECUTE_NS=""
 GATE_CELOX_COMPILE_NS=""
 GATE_CELOX_EXECUTE_NS=""
+GATE_TIERED_STARTUP_NS=""
+GATE_TIERED_EXECUTE_NS=""
+GATE_TIERED_TOTAL_NS=""
 
 gate_require_clean_checkout() {
     local directory="$1"
@@ -1678,7 +1714,7 @@ gate_source_manifest() {
 gate_create_worktrees() {
     local runner path
     mkdir -p "$GATE_WORKTREE_ROOT"
-    for runner in veryl-cc-sync celox; do
+    for runner in veryl-cc-sync celox celox-tiered; do
         path="$GATE_WORKTREE_ROOT/$runner"
         if ! git -C "$GATE_WORKTREE_REPO" worktree add --quiet --detach \
             "$path" "$GATE_HELIODOR_REF"; then
@@ -1693,7 +1729,7 @@ gate_cleanup_worktrees() {
     if [[ -z "$GATE_WORKTREE_REPO" || -z "$GATE_WORKTREE_ROOT" ]]; then
         return
     fi
-    for runner in veryl-cc-sync celox; do
+    for runner in veryl-cc-sync celox celox-tiered; do
         path="$GATE_WORKTREE_ROOT/$runner"
         if [[ -e "$path" ]]; then
             git -C "$GATE_WORKTREE_REPO" worktree remove --force "$path" \
@@ -1718,6 +1754,9 @@ validate_gate_results() {
     GATE_CELOX_COMPILE_NS=""
     GATE_CELOX_EXECUTE_NS=""
     GATE_CELOX_JIT_EXECUTE_NS=""
+    GATE_TIERED_STARTUP_NS=""
+    GATE_TIERED_EXECUTE_NS=""
+    GATE_TIERED_TOTAL_NS=""
     if [[ ! -f "$results_file" ]]; then
         echo "error: gate result file does not exist: $results_file" >&2
         return 1
@@ -1745,8 +1784,9 @@ validate_gate_results() {
         case "$row_count" in
             1) expected_runner=veryl-cc-sync ;;
             2) expected_runner=celox ;;
+            3) expected_runner=celox-tiered ;;
             *)
-                echo "error: gate result file contains more than two rows" >&2
+                echo "error: gate result file contains more than three rows" >&2
                 return 1
                 ;;
         esac
@@ -1840,13 +1880,41 @@ validate_gate_results() {
                 GATE_CELOX_EXECUTE_NS="$execute_elapsed"
                 GATE_CELOX_JIT_EXECUTE_NS="$jit_execute_elapsed"
                 ;;
+            celox-tiered)
+                [[ "$jit_execute_elapsed" == NA ]] || {
+                    echo "error: tiered Celox gate must not claim a generated-only wall-clock interval" >&2
+                    return 1
+                }
+                validate_gate_celox_config "$log" "$GATE_TEST" tiered || return "$?"
+                validate_gate_tiered_stats "$log" "$GATE_TEST" || return "$?"
+                validate_gate_arch_completion "$log" celox-tiered || return "$?"
+                classify_celox_result "$log" "$GATE_TEST" "$exit_status" 0 || {
+                    echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
+                    return 1
+                }
+                [[ "$CELOX_SEMANTIC_STATUS" == pass ]] || {
+                    echo "error: tiered Celox gate did not report a full pass" >&2
+                    return 1
+                }
+                [[ "$reported_elapsed" == "$CELOX_REPORTED_ELAPSED_NS" \
+                    && "$compile_elapsed" == "$CELOX_COMPILE_ELAPSED_NS" \
+                    && "$execute_elapsed" == "$CELOX_EXECUTE_ELAPSED_NS" ]] || {
+                    echo "error: tiered Celox gate row/report timing values disagree" >&2
+                    return 1
+                }
+                GATE_TIERED_STARTUP_NS="$compile_elapsed"
+                GATE_TIERED_EXECUTE_NS="$execute_elapsed"
+                GATE_TIERED_TOTAL_NS="$reported_elapsed"
+                ;;
         esac
     done < <(tail -n +2 "$results_file")
 
-    if ((row_count != 2)) \
+    if ((row_count != 3)) \
         || [[ -z "$GATE_VERYL_COMPILE_NS" || -z "$GATE_VERYL_EXECUTE_NS" \
-            || -z "$GATE_CELOX_COMPILE_NS" || -z "$GATE_CELOX_EXECUTE_NS" ]]; then
-        echo "error: gate must produce exactly the paired timed Veryl and Celox rows" >&2
+            || -z "$GATE_CELOX_COMPILE_NS" || -z "$GATE_CELOX_EXECUTE_NS" \
+            || -z "$GATE_TIERED_STARTUP_NS" || -z "$GATE_TIERED_EXECUTE_NS" \
+            || -z "$GATE_TIERED_TOTAL_NS" ]]; then
+        echo "error: gate must produce timed Veryl, native Celox, and tiered Celox rows" >&2
         return 1
     fi
     if ! is_uint "$GATE_CELOX_JIT_EXECUTE_NS" || ((GATE_CELOX_JIT_EXECUTE_NS == 0)); then
@@ -1870,7 +1938,7 @@ run_gate() {
     HELIODOR_RESULTS_DIR="$base_results_dir"
     HELIODOR_TOOLS_DIR="$CELOX_ROOT/target/heliodor/tools"
     HELIODOR_TESTS="$GATE_TEST"
-    HELIODOR_RUNNERS="veryl-cc-sync celox"
+    HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered"
     HELIODOR_TIMEOUT_SEC="$GATE_TIMEOUT_SEC"
     HELIODOR_CELOX_TIMEOUT_MULTIPLIER=1
     HELIODOR_COMPILE_ONLY=0
@@ -1927,7 +1995,7 @@ run_gate() {
         return 1
     fi
 
-    for runner in veryl-cc-sync celox; do
+    for runner in veryl-cc-sync celox celox-tiered; do
         HELIODOR_DIR="$GATE_WORKTREE_ROOT/$runner"
         gate_verify_heliodor_checkout "$HELIODOR_DIR" || overall=1
         before_manifest="$invocation_dir/${runner}.source.before"
@@ -1937,7 +2005,7 @@ run_gate() {
         fi
         case "$runner" in
             veryl-cc-sync) executable="$VERYL_TIMED_RUNNER_BIN" ;;
-            celox) executable="$CELOX_RUNNER_BIN" ;;
+            celox|celox-tiered) executable="$CELOX_RUNNER_BIN" ;;
         esac
         if ! expected_hash="$(gate_file_hash "$executable")"; then
             overall=1
@@ -1972,6 +2040,7 @@ run_gate() {
     echo "Heliodor gate: PASS"
     echo "JIT execution: Celox ${GATE_CELOX_JIT_EXECUTE_NS}ns; Veryl complete execution ${GATE_VERYL_EXECUTE_NS}ns"
     echo "Complete post-compile execution: Celox ${GATE_CELOX_EXECUTE_NS}ns"
+    echo "Tiered end-to-end: ${GATE_TIERED_TOTAL_NS}ns (startup ${GATE_TIERED_STARTUP_NS}ns; concurrent compile and execution ${GATE_TIERED_EXECUTE_NS}ns)"
     echo "Code generation: Celox ${GATE_CELOX_COMPILE_NS}ns; Veryl ${GATE_VERYL_COMPILE_NS}ns"
     echo "Artifacts: $invocation_dir"
 }

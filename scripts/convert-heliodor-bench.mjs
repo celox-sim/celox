@@ -98,9 +98,12 @@ function milliseconds(name, nanoseconds) {
 }
 
 const celox = requirePassedRunner(rows, "celox", inputPath);
+const tiered = requirePassedRunner(rows, "celox-tiered", inputPath);
 const veryl = requirePassedRunner(rows, "veryl-cc-sync", inputPath);
-if (celox.test !== veryl.test) {
-  throw new Error(`runner tests differ: Celox=${celox.test}, Veryl=${veryl.test}`);
+if (celox.test !== veryl.test || tiered.test !== celox.test) {
+  throw new Error(
+    `runner tests differ: Celox=${celox.test}, tiered=${tiered.test}, Veryl=${veryl.test}`,
+  );
 }
 
 const results = [
@@ -123,6 +126,18 @@ const results = [
   milliseconds(
     "heliodor-veryl-compile/heliodor_linux_boot_compilation",
     ns(veryl, "compile_elapsed_ns"),
+  ),
+  milliseconds(
+    "heliodor-celox-tiered/heliodor_linux_boot_end_to_end",
+    ns(tiered, "reported_elapsed_ns"),
+  ),
+  milliseconds(
+    "heliodor-celox-tiered/heliodor_linux_boot_startup",
+    ns(tiered, "compile_elapsed_ns"),
+  ),
+  milliseconds(
+    "heliodor-celox-tiered/heliodor_linux_boot_execution",
+    ns(tiered, "execute_elapsed_ns"),
   ),
 ];
 
