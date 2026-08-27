@@ -32,25 +32,22 @@ pub struct VerylEventRef(usize);
 pub struct VerylIOContext<'a> {
     sim: &'a mut VerylSim,
     names: &'a [String],
-    initial_diagnostics_pending: &'a mut bool,
+    input_written: &'a mut bool,
 }
 
 impl VerylIOContext<'_> {
-    fn prepare_input_write(&mut self) {
-        if *self.initial_diagnostics_pending {
-            assert_buffer::reset();
-            *self.initial_diagnostics_pending = false;
-        }
+    fn note_input_write(&mut self) {
+        *self.input_written = true;
     }
 
     pub fn set<T: Copy>(&mut self, signal: VerylSignalRef, val: T) {
-        self.prepare_input_write();
+        self.note_input_write();
         let name = &self.names[signal.0];
         self.sim.set(name, t_to_value(val));
     }
 
     pub fn set_wide(&mut self, signal: VerylSignalRef, val: BigUint) {
-        self.prepare_input_write();
+        self.note_input_write();
         let name = &self.names[signal.0];
         let width = val.bits() as usize;
         self.sim
@@ -58,7 +55,7 @@ impl VerylIOContext<'_> {
     }
 
     pub fn set_four_state(&mut self, signal: VerylSignalRef, val: BigUint, mask: BigUint) {
-        self.prepare_input_write();
+        self.note_input_write();
         let name = &self.names[signal.0];
         let width = self
             .sim
@@ -115,6 +112,32 @@ fn four_state_value(payload: BigUint, mask: BigUint, width: usize) -> Value {
     }
 }
 
+fn is_non_progressing_loop_diagnostic(message: &str) -> bool {
+    let Some(rest) =
+        message.strip_prefix("for-loop step does not advance the loop variable (stuck at ")
+    else {
+        return false;
+    };
+    let Some((stuck_at, location)) = rest.split_once(") at ") else {
+        return false;
+    };
+    if stuck_at.parse::<u64>().is_err() {
+        return false;
+    }
+
+    let mut location = location.rsplitn(3, ':');
+    let Some(column) = location.next() else {
+        return false;
+    };
+    let Some(line) = location.next() else {
+        return false;
+    };
+    let Some(_source) = location.next() else {
+        return false;
+    };
+    line.parse::<u32>().is_ok() && column.parse::<u32>().is_ok()
+}
+
 fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
     if !assert_buffer::has_fatal() {
         // `$assert_continue` reports are not execution errors for this adapter,
@@ -126,7 +149,7 @@ fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
     let Some(message) = assert_buffer::take_failure() else {
         return Ok(());
     };
-    if message.contains("for-loop step does not advance the loop variable") {
+    if is_non_progressing_loop_diagnostic(&message) {
         Err(RuntimeErrorCode::DetectedTrueLoop)
     } else {
         Err(RuntimeErrorCode::Runtime {
@@ -188,12 +211,25 @@ impl VerylSimAdapter {
     where
         F: FnOnce(&mut VerylIOContext<'_>),
     {
-        let mut ctx = VerylIOContext {
-            sim: &mut self.sim,
-            names: &self.names,
-            initial_diagnostics_pending: &mut self.initial_diagnostics_pending,
-        };
-        f(&mut ctx);
+        let mut input_written = false;
+        {
+            let mut ctx = VerylIOContext {
+                sim: &mut self.sim,
+                names: &self.names,
+                input_written: &mut input_written,
+            };
+            f(&mut ctx);
+        }
+        if input_written && self.initial_diagnostics_pending {
+            // The constructor settled with provisional input values. Replace
+            // those diagnostics with a forced settle after the first write;
+            // constant processes must run again even though they do not depend
+            // on the input that changed.
+            assert_buffer::reset();
+            self.initial_diagnostics_pending = false;
+            self.sim.mark_comb_dirty();
+            self.sim.ensure_comb_updated();
+        }
         self.finish_runtime_operation()
     }
 

@@ -807,6 +807,52 @@ module Top {
     );
 }
 
+fn test_veryl_adapter_modify_rechecks_constant_initial_fatal(sim) {
+    @ignore_on(native, cranelift, wasm, interp, sv);
+    @build Simulator::builder(r#"
+module Top (
+    trigger: input logic,
+) {
+    always_comb {
+        $assert(1'd0, "constant fatal after modify");
+    }
+}
+"#, "Top");
+
+    let trigger = sim.signal("trigger");
+    let err = sim.modify(|io| io.set(trigger, 1u8)).unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "constant fatal after modify".to_string(),
+            signals: Vec::new(),
+        },
+    );
+}
+
+fn test_veryl_adapter_does_not_parse_user_assertion_as_true_loop(sim) {
+    @ignore_on(native, cranelift, wasm, interp, sv);
+    @build Simulator::builder(r#"
+module Top {
+    always_comb {
+        $assert(
+            1'd0,
+            "user says for-loop step does not advance the loop variable"
+        );
+    }
+}
+"#, "Top");
+
+    let err = sim.eval_comb().unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "user says for-loop step does not advance the loop variable".to_string(),
+            signals: Vec::new(),
+        },
+    );
+}
+
 fn test_comb_sensitive_display_runs_on_initial_eval(sim) {
     @omit_veryl;
     @ignore_on(wasm, sv);
@@ -2590,6 +2636,73 @@ module Top (
 
     let side = sim.signal("side");
     assert_eq!(sim.get_as::<u8>(side), 0x22);
+}
+
+fn test_comb_function_nested_array_literals_preserve_each_dimension_order(sim) {
+    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @build Simulator::builder(r#"
+module Top (
+    q00: output logic<4>,
+    q01: output logic<4>,
+    q10: output logic<4>,
+    q11: output logic<4>,
+) {
+    function pick (
+        x: input logic<4> [2, 2],
+        row: input logic,
+        col: input logic,
+    ) -> logic<4> {
+        return x[row][col];
+    }
+
+    always_comb {
+        q00 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 0, 0);
+        q01 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 0, 1);
+        q10 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 1, 0);
+        q11 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 1, 1);
+    }
+}
+"#, "Top");
+
+    let q00 = sim.signal("q00");
+    let q01 = sim.signal("q01");
+    let q10 = sim.signal("q10");
+    let q11 = sim.signal("q11");
+    assert_eq!(sim.get_as::<u8>(q00), 1);
+    assert_eq!(sim.get_as::<u8>(q01), 2);
+    assert_eq!(sim.get_as::<u8>(q10), 3);
+    assert_eq!(sim.get_as::<u8>(q11), 4);
+}
+
+fn test_comb_function_array_literal_converts_scalar_items_per_element(sim) {
+    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @build Simulator::builder(r#"
+module Top (
+    q0: output signed logic<8>,
+    q1: output signed logic<8>,
+    q_default: output signed logic<8>,
+) {
+    function pick (
+        x: input signed logic<8> [2],
+        index: input logic,
+    ) -> signed logic<8> {
+        return x[index];
+    }
+
+    always_comb {
+        q0 = pick('{4'sh8, 4'sh1}, 0);
+        q1 = pick('{4'sh8, 4'sh1}, 1);
+        q_default = pick('{default: 4'sh8}, 1);
+    }
+}
+"#, "Top");
+
+    let q0 = sim.signal("q0");
+    let q1 = sim.signal("q1");
+    let q_default = sim.signal("q_default");
+    assert_eq!(sim.get_as::<u8>(q0), 0xf8);
+    assert_eq!(sim.get_as::<u8>(q1), 0x01);
+    assert_eq!(sim.get_as::<u8>(q_default), 0xf8);
 }
 
 fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {

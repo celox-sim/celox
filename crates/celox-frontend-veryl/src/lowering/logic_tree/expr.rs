@@ -77,7 +77,54 @@ fn eval_array_literal_item_in_store(
     let Some(context) = context else {
         return eval_expression_in_context(module, store, expr, arena, None);
     };
+
+    // A nested literal occupies the remaining unpacked dimensions. Keep
+    // carrying the formal shape down so every level gets the same index-order
+    // conversion, and the scalar leaves are sized as formal elements.
+    if let Expression::ArrayLiteral(items, _) = expr
+        && !context.array_shape.is_empty()
+    {
+        let target_width = context
+            .array_shape
+            .iter()
+            .try_fold(context.element_width, |width, dim| {
+                width.checked_mul((*dim)?)
+            })
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "array literal item",
+                    "unresolved or overflowing nested array shape",
+                    Some(&expr.token_range()),
+                )
+            })?;
+        let value = eval_array_literal_expression_with_item_context(
+            module,
+            store,
+            items,
+            Some(target_width),
+            Some(ArrayLiteralItemContext {
+                array_shape: &context.array_shape[1..],
+                element_width: context.element_width,
+            }),
+            arena,
+        )?;
+        return finish_assignment_expression(expr, arena, target_width, value);
+    }
+
     let source_type = &expr.comptime().r#type;
+
+    // A scalar leaf is assigned to one formal element, not concatenated at
+    // its natural width and widened after the aggregate has been assembled.
+    if source_type.array.is_empty() && context.array_shape.is_empty() {
+        return eval_assignment_expression_in_store(
+            module,
+            store,
+            expr,
+            arena,
+            context.element_width,
+        );
+    }
+
     if source_type.array.as_slice() != context.array_shape || source_type.array.is_empty() {
         return eval_expression_in_context(module, store, expr, arena, None);
     }
