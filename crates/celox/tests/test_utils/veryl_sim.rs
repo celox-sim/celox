@@ -32,15 +32,25 @@ pub struct VerylEventRef(usize);
 pub struct VerylIOContext<'a> {
     sim: &'a mut VerylSim,
     names: &'a [String],
+    initial_diagnostics_pending: &'a mut bool,
 }
 
 impl VerylIOContext<'_> {
+    fn prepare_input_write(&mut self) {
+        if *self.initial_diagnostics_pending {
+            assert_buffer::reset();
+            *self.initial_diagnostics_pending = false;
+        }
+    }
+
     pub fn set<T: Copy>(&mut self, signal: VerylSignalRef, val: T) {
+        self.prepare_input_write();
         let name = &self.names[signal.0];
         self.sim.set(name, t_to_value(val));
     }
 
     pub fn set_wide(&mut self, signal: VerylSignalRef, val: BigUint) {
+        self.prepare_input_write();
         let name = &self.names[signal.0];
         let width = val.bits() as usize;
         self.sim
@@ -48,6 +58,7 @@ impl VerylIOContext<'_> {
     }
 
     pub fn set_four_state(&mut self, signal: VerylSignalRef, val: BigUint, mask: BigUint) {
+        self.prepare_input_write();
         let name = &self.names[signal.0];
         let width = self
             .sim
@@ -131,6 +142,9 @@ fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
 
 pub struct VerylSimAdapter {
     sim: VerylSim,
+    /// The constructor settles once so undriven outputs are readable. Keep its
+    /// diagnostics until either the caller observes them or drives an input.
+    initial_diagnostics_pending: bool,
     /// Signal name table: VerylSignalRef(i) → names[i]
     names: Vec<String>,
     /// Event table: VerylEventRef(i) → events[i]
@@ -138,6 +152,18 @@ pub struct VerylSimAdapter {
 }
 
 impl VerylSimAdapter {
+    fn discard_initial_diagnostics(&mut self) {
+        if self.initial_diagnostics_pending {
+            assert_buffer::reset();
+            self.initial_diagnostics_pending = false;
+        }
+    }
+
+    fn finish_runtime_operation(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.initial_diagnostics_pending = false;
+        take_runtime_error()
+    }
+
     pub fn signal(&mut self, name: &str) -> VerylSignalRef {
         // Reuse existing entry if present
         if let Some(idx) = self.names.iter().position(|n| n == name) {
@@ -162,14 +188,13 @@ impl VerylSimAdapter {
     where
         F: FnOnce(&mut VerylIOContext<'_>),
     {
-        // Split borrow: names is read-only, sim is mutated through ctx
-        let names_ptr = &self.names as *const Vec<String>;
         let mut ctx = VerylIOContext {
             sim: &mut self.sim,
-            names: unsafe { &*names_ptr },
+            names: &self.names,
+            initial_diagnostics_pending: &mut self.initial_diagnostics_pending,
         };
         f(&mut ctx);
-        take_runtime_error()
+        self.finish_runtime_operation()
     }
 
     pub fn get(&mut self, signal: VerylSignalRef) -> BigUint {
@@ -212,16 +237,18 @@ impl VerylSimAdapter {
 
     pub fn tick(&mut self, event: VerylEventRef) -> Result<(), RuntimeErrorCode> {
         self.sim.step(&self.events[event.0]);
-        take_runtime_error()
+        self.finish_runtime_operation()
     }
 
     pub fn set<T: Copy>(&mut self, signal: VerylSignalRef, val: T) {
+        self.discard_initial_diagnostics();
         let name = &self.names[signal.0];
         self.sim.set(name, t_to_value(val));
         self.sim.mark_comb_dirty();
     }
 
     pub fn set_wide(&mut self, signal: VerylSignalRef, val: BigUint) {
+        self.discard_initial_diagnostics();
         let name = &self.names[signal.0];
         let width = val.bits() as usize;
         self.sim
@@ -245,7 +272,7 @@ impl VerylSimAdapter {
 
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         self.sim.ensure_comb_updated();
-        take_runtime_error()
+        self.finish_runtime_operation()
     }
 
     pub fn try_event(&mut self, port: &str) -> Result<VerylEventRef, AddrLookupError> {
@@ -308,12 +335,10 @@ pub fn build_veryl_adapter(
 
     let mut sim = VerylSim::new(sim_ir, None);
     sim.ensure_comb_updated();
-    // Inputs still contain their initial values during construction. Discard
-    // diagnostics from that provisional settle before the test drives them.
-    assert_buffer::reset();
 
     VerylSimAdapter {
         sim,
+        initial_diagnostics_pending: true,
         names: Vec::new(),
         events: Vec::new(),
     }

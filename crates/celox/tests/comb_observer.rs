@@ -787,6 +787,26 @@ module Top {
     );
 }
 
+fn test_veryl_adapter_preserves_fatal_from_initial_settle(sim) {
+    @ignore_on(native, cranelift, wasm, interp, sv);
+    @build Simulator::builder(r#"
+module Top {
+    always_comb {
+        $assert(1'd0, "initial fatal");
+    }
+}
+"#, "Top");
+
+    let err = sim.eval_comb().unwrap_err();
+    assert_eq!(
+        err,
+        celox::RuntimeErrorCode::Runtime {
+            message: "initial fatal".to_string(),
+            signals: Vec::new(),
+        },
+    );
+}
+
 fn test_comb_sensitive_display_runs_on_initial_eval(sim) {
     @omit_veryl;
     @ignore_on(wasm, sv);
