@@ -7228,7 +7228,8 @@ fn comb_process_from_always_construct(
         packed_dimensions,
         &mut guarded_assignments,
     )?;
-    let assignments = comb_assignments_from_guarded(guarded_assignments)?;
+    let assignments =
+        comb_assignments_from_guarded(guarded_assignments, &packed_dimensions.const_env)?;
     Ok((!assignments.is_empty())
         .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments)))
 }
@@ -7243,6 +7244,7 @@ fn comb_process_from_always_construct(
 /// previous value, which infers a latch, and is rejected.
 fn comb_assignments_from_guarded(
     mut guarded: Vec<ConditionalAssignment>,
+    const_env: &HashMap<String, i128>,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     let mut targets: Vec<LValue> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
@@ -7282,7 +7284,13 @@ fn comb_assignments_from_guarded(
             continue;
         }
         let initial = overlapping_whole_value_before(&guarded, indices[0], target);
-        substitute_intermediate_comb_value_reads(&mut guarded, indices, target, initial)?;
+        substitute_intermediate_comb_value_reads(
+            &mut guarded,
+            indices,
+            target,
+            initial,
+            const_env,
+        )?;
     }
 
     // Merged groups land on the slot of their last write so relative
@@ -7345,6 +7353,7 @@ fn substitute_intermediate_comb_value_reads(
     indices: &[usize],
     target: &LValue,
     initial: Option<Expr>,
+    const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
     let first = *indices.first().expect("group is non-empty");
     let last = *indices.last().expect("group is non-empty");
@@ -7355,14 +7364,13 @@ fn substitute_intermediate_comb_value_reads(
     for (index, guarded_assignment) in guarded.iter_mut().enumerate().take(last + 1).skip(first) {
         let is_target_write = indices.get(write_index) == Some(&index);
         if initialized {
-            guarded_assignment.condition = guarded_assignment
-                .condition
-                .take()
-                .map(|condition| substitute_expr_lvalue(condition, target, &established));
+            guarded_assignment.condition = guarded_assignment.condition.take().map(|condition| {
+                substitute_expr_lvalue(condition, target, &established, const_env)
+            });
             let assignment = guarded_assignment.assignment.clone();
             guarded_assignment.assignment = Assignment::new(
                 assignment.lhs_value().clone(),
-                substitute_expr_lvalue(assignment.rhs, target, &established),
+                substitute_expr_lvalue(assignment.rhs, target, &established, const_env),
             );
         } else if !is_target_write
             && (guarded_assignment
@@ -7508,9 +7516,18 @@ fn expr_contains_comb_previous_value(expr: &Expr) -> bool {
     }
 }
 
-fn substitute_expr_lvalue(expr: Expr, target: &LValue, value: &Expr) -> Expr {
+fn substitute_expr_lvalue(
+    expr: Expr,
+    target: &LValue,
+    value: &Expr,
+    const_env: &HashMap<String, i128>,
+) -> Expr {
     if expr_matches_lvalue(&expr, target) {
         return value.clone();
+    }
+    if let Some(replacement) = substitute_overlapping_selected_read(&expr, target, value, const_env)
+    {
+        return replacement;
     }
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => expr,
@@ -7520,7 +7537,7 @@ fn substitute_expr_lvalue(expr: Expr, target: &LValue, value: &Expr) -> Expr {
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(substitute_expr_lvalue(*expr, target, value)),
+            expr: Box::new(substitute_expr_lvalue(*expr, target, value, const_env)),
             msb,
             lsb,
             signed,
@@ -7528,14 +7545,14 @@ fn substitute_expr_lvalue(expr: Expr, target: &LValue, value: &Expr) -> Expr {
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| substitute_expr_lvalue(part, target, value))
+                .map(|part| substitute_expr_lvalue(part, target, value, const_env))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|part| substitute_expr_lvalue(part, target, value))
+                .map(|part| substitute_expr_lvalue(part, target, value, const_env))
                 .collect(),
         },
         Expr::Resize {
@@ -7543,35 +7560,136 @@ fn substitute_expr_lvalue(expr: Expr, target: &LValue, value: &Expr) -> Expr {
             width,
             signed,
         } => Expr::Resize {
-            expr: Box::new(substitute_expr_lvalue(*expr, target, value)),
+            expr: Box::new(substitute_expr_lvalue(*expr, target, value, const_env)),
             width,
             signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(substitute_expr_lvalue(*expr, target, value)),
+            expr: Box::new(substitute_expr_lvalue(*expr, target, value, const_env)),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(substitute_expr_lvalue(*left, target, value)),
+            left: Box::new(substitute_expr_lvalue(*left, target, value, const_env)),
             op,
-            right: Box::new(substitute_expr_lvalue(*right, target, value)),
+            right: Box::new(substitute_expr_lvalue(*right, target, value, const_env)),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(substitute_expr_lvalue(*condition, target, value)),
-            then_expr: Box::new(substitute_expr_lvalue(*then_expr, target, value)),
-            else_expr: Box::new(substitute_expr_lvalue(*else_expr, target, value)),
+            condition: Box::new(substitute_expr_lvalue(*condition, target, value, const_env)),
+            then_expr: Box::new(substitute_expr_lvalue(*then_expr, target, value, const_env)),
+            else_expr: Box::new(substitute_expr_lvalue(*else_expr, target, value, const_env)),
         },
         Expr::Call { name, args } => Expr::Call {
             name,
             args: args
                 .into_iter()
-                .map(|arg| substitute_expr_lvalue(arg, target, value))
+                .map(|arg| substitute_expr_lvalue(arg, target, value, const_env))
                 .collect(),
         },
+    }
+}
+
+fn substitute_overlapping_selected_read(
+    expr: &Expr,
+    target: &LValue,
+    value: &Expr,
+    const_env: &HashMap<String, i128>,
+) -> Option<Expr> {
+    let Expr::Select {
+        expr: read_base,
+        msb: read_msb,
+        lsb: read_lsb,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let Expr::Ident(read_name) = &**read_base else {
+        return None;
+    };
+    let LValue::Select {
+        name: target_name,
+        msb: target_msb,
+        lsb: target_lsb,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    if read_name != target_name {
+        return None;
+    }
+
+    let read_msb = eval_ast_const_expr(read_msb, const_env)?;
+    let read_lsb = eval_ast_const_expr(read_lsb, const_env)?;
+    let target_msb = eval_ast_const_expr(target_msb, const_env)?;
+    let target_lsb = eval_ast_const_expr(target_lsb, const_env)?;
+    let overlap_low = read_msb.min(read_lsb).max(target_msb.min(target_lsb));
+    let overlap_high = read_msb.max(read_lsb).min(target_msb.max(target_lsb));
+    if overlap_low > overlap_high {
+        return None;
+    }
+
+    let read_step = if read_msb >= read_lsb { -1 } else { 1 };
+    let overlap_first = if read_step < 0 {
+        overlap_high
+    } else {
+        overlap_low
+    };
+    let overlap_last = if read_step < 0 {
+        overlap_low
+    } else {
+        overlap_high
+    };
+    let mut parts = Vec::new();
+    if read_msb != overlap_first {
+        parts.push(selected_ident_read(
+            read_name,
+            read_msb,
+            overlap_first.checked_sub(read_step)?,
+        ));
+    }
+
+    let value_msb = selected_target_bit(target_msb, target_lsb, overlap_first)?;
+    let value_lsb = selected_target_bit(target_msb, target_lsb, overlap_last)?;
+    parts.push(Expr::Select {
+        expr: Box::new(value.clone()),
+        msb: const_expr_from_i128(value_msb),
+        lsb: const_expr_from_i128(value_lsb),
+        signed: false,
+    });
+
+    if overlap_last != read_lsb {
+        parts.push(selected_ident_read(
+            read_name,
+            overlap_last.checked_add(read_step)?,
+            read_lsb,
+        ));
+    }
+    if parts.len() == 1 {
+        parts.pop()
+    } else {
+        Some(Expr::Concat(parts))
+    }
+}
+
+fn selected_target_bit(target_msb: i128, target_lsb: i128, coordinate: i128) -> Option<i128> {
+    if target_msb >= target_lsb {
+        coordinate.checked_sub(target_lsb)
+    } else {
+        target_lsb.checked_sub(coordinate)
+    }
+}
+
+fn selected_ident_read(name: &str, msb: i128, lsb: i128) -> Expr {
+    Expr::Select {
+        expr: Box::new(Expr::Ident(name.to_string())),
+        msb: const_expr_from_i128(msb),
+        lsb: const_expr_from_i128(lsb),
+        signed: false,
     }
 }
 
@@ -8236,7 +8354,10 @@ fn conditional_assignments_from_conditional_statement(
             })?;
     let mut prior_false = Vec::new();
     let mut definitely_assigned_branches = Vec::new();
-    let then_condition = combine_expr_conditions(parent_condition.clone(), if_condition.clone());
+    let then_condition = combine_expr_conditions(
+        parent_condition.clone(),
+        procedural_truth_condition(if_condition.clone()),
+    );
     conditional_assignments_from_statement_or_null(
         &stmt.nodes.3,
         then_condition,
@@ -8260,7 +8381,7 @@ fn conditional_assignments_from_conditional_statement(
                     AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
                 })?;
         let mut terms = prior_false.clone();
-        terms.push(branch_condition.clone());
+        terms.push(procedural_truth_condition(branch_condition.clone()));
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
         conditional_assignments_from_statement_or_null(
             branch,

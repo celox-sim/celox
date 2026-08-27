@@ -300,6 +300,117 @@ mod tests {
     }
 
     #[test]
+    fn substitutes_subselect_reads_of_selected_comb_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic c,
+                    input logic [2:0] a, b,
+                    output logic [3:0] x,
+                    output logic y
+                );
+                    always_comb begin
+                        x[3:1] = a;
+                        y = x[2];
+                        if (c) x[3:1] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_subselect_intervening_read.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(expr_references_ident_name(y.rhs(), "a"));
+        let ir::Expr::Select { msb, lsb, .. } = y.rhs() else {
+            panic!(
+                "expected the intervening bit read to select from a: {:?}",
+                y.rhs()
+            );
+        };
+        assert_eq!(msb, &ir::ConstExpr::Literal("1".to_string()));
+        assert_eq!(lsb, &ir::ConstExpr::Literal("1".to_string()));
+        assert!(
+            !expr_references_ident_name(y.rhs(), "x"),
+            "y must observe the matching bit of the preceding selected write: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn substitutes_partially_overlapping_reads_of_selected_comb_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic c,
+                    input logic [2:0] a, b,
+                    output logic [4:0] x,
+                    output logic [2:0] y
+                );
+                    always_comb begin
+                        x[3:1] = a;
+                        y = x[4:2];
+                        if (c) x[3:1] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_partial_overlap_intervening_read.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            expr_references_ident_name(y.rhs(), "a"),
+            "the overlapping bits must come from the preceding selected write: {:?}",
+            y.rhs()
+        );
+        assert!(
+            expr_references_ident_name(y.rhs(), "x"),
+            "the non-overlapping bit must retain its original source: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn coerces_always_comb_if_predicates_to_procedural_truth() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic s, output logic y);
+                    always_comb begin
+                        if (s) y = 1'b1;
+                        else y = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("always_comb_procedural_truth.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Mux { condition, .. } = rhs else {
+            panic!("expected conditional assignment mux: {rhs:?}");
+        };
+        assert!(matches!(
+            &**condition,
+            ir::Expr::Unary {
+                op: ir::UnaryOp::RedOr,
+                expr,
+            } if matches!(
+                &**expr,
+                ir::Expr::Unary {
+                    op: ir::UnaryOp::ToTwoState,
+                    ..
+                }
+            )
+        ));
+    }
+
+    #[test]
     fn applies_cross_target_substitutions_before_merging_comb_groups() {
         let ir = analyze_source(
             r#"

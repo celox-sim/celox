@@ -2490,6 +2490,33 @@ fn treats_unknown_procedural_conditions_as_false() {
 }
 
 #[test]
+fn takes_always_comb_else_branch_for_unknown_predicates() {
+    let source = r#"
+        module Top(input logic sel, output logic y);
+            always_comb begin
+                if (sel) y = 1'b1;
+                else y = 1'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unknown_always_comb_else.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set_four_state(sel, BigUint::from(1u8), BigUint::from(1u8)))
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
 fn takes_always_ff_else_branch_for_unknown_predicates() {
     let source = r#"
         module Top(input bit clk, input logic sel, output logic q);
