@@ -434,4 +434,24 @@ run_one celox-interpreter integration_interpreter >/dev/null \
 assert_eq "$(awk -F '\t' 'NR == 10 { print $1 }' "$integration_results/results.tsv")" \
     celox-interpreter "run_one interpreter runner name"
 
+# Every target runner must be launched through the configured emulator in
+# host-qemu mode. Native host codegen is handled separately by run_one.
+HELIODOR_CELOX_NATIVE_IMAGE_MODE=host-qemu
+CELOX_EXECUTION_PREFIX=(qemu-aarch64 -L /fixture-sysroot)
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_qemu_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_qemu_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_qemu_tiered status=pass elapsed_ns=48'
+run_one celox-tiered integration_qemu_tiered >/dev/null \
+    || fail "run_one rejected a host-qemu tiered fixture"
+assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "tiered execution prefix command"
+assert_eq "${FIXTURE_RUN_ARGS[1]}" -L "tiered execution prefix option"
+assert_eq "${FIXTURE_RUN_ARGS[2]}" /fixture-sysroot "tiered execution prefix argument"
+assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "tiered target runner"
+
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_qemu_interpreter compile_ns=8 execute_ns=55 jit_execute_ns=NA\nCELOX_TEST_RESULT test=integration_qemu_interpreter status=pass elapsed_ns=65'
+run_one celox-interpreter integration_qemu_interpreter >/dev/null \
+    || fail "run_one rejected a host-qemu interpreter fixture"
+assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "interpreter execution prefix command"
+assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "interpreter target runner"
+HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
+CELOX_EXECUTION_PREFIX=()
+
 echo "run-heliodor-bench result fixture tests: PASS"

@@ -1376,7 +1376,7 @@ run_one() {
     local semantic_status reported_elapsed compile_elapsed execute_elapsed jit_execute_elapsed full_elapsed result_valid
     local native_image_path="" native_codegen_log=""
     local veryl_aot_cache_dir=""
-    local -a source_files celox_args timed_veryl_args
+    local -a source_files celox_args celox_execution_command timed_veryl_args
     collect_test_source_files "$test" source_files || return "$?"
     celox_args=()
     timed_veryl_args=()
@@ -1389,6 +1389,10 @@ run_one() {
         # disabled pass as a new command-line flag.
         celox_args+=(--sir-pass="$pass_override")
     done
+    celox_execution_command=("$CELOX_RUNNER_BIN")
+    if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+        celox_execution_command=("${CELOX_EXECUTION_PREFIX[@]}" "$CELOX_RUNNER_BIN")
+    fi
     if [[ "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
         celox_args+=(--compile-only)
         timed_veryl_args+=(--compile-only)
@@ -1444,7 +1448,7 @@ run_one() {
                         return 1
                     fi
                     run_in_heliodor "$timeout_sec" "$log" \
-                        "${CELOX_EXECUTION_PREFIX[@]}" "$CELOX_RUNNER_BIN" \
+                        "${celox_execution_command[@]}" \
                         --project "$HELIODOR_DIR" --test "$test" \
                         "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
                         --native-image-input "$native_image_path"
@@ -1454,26 +1458,30 @@ run_one() {
                 fi
             else
                 run_in_heliodor "$timeout_sec" "$log" \
-                    "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                    "${celox_execution_command[@]}" \
+                    --project "$HELIODOR_DIR" --test "$test" \
                     "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
                 process_status="$?"
             fi
             ;;
         celox-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_execution_command[@]}" \
+                --project "$HELIODOR_DIR" --test "$test" \
                 "${celox_args[@]}" --backend cranelift --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
         celox-tiered)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_execution_command[@]}" \
+                --project "$HELIODOR_DIR" --test "$test" \
                 "${celox_args[@]}" --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
         celox-interpreter)
             run_in_heliodor "$timeout_sec" "$log" \
-                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_execution_command[@]}" \
+                --project "$HELIODOR_DIR" --test "$test" \
                 "${celox_args[@]}" --backend interpreter --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
