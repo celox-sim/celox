@@ -272,6 +272,34 @@ mod tests {
     }
 
     #[test]
+    fn later_exhaustive_comb_chain_overrides_the_previous_chain() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, a, b, e, f, output logic x);
+                    always_comb begin
+                        if (c) x = a;
+                        else x = b;
+                        if (d) x = e;
+                        else x = f;
+                    end
+                endmodule
+            "#,
+            Path::new("consecutive_exhaustive_chains.sv"),
+        )
+        .expect("the later exhaustive chain should fully define x");
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        assert!(expr_references_ident_name(rhs, "d"));
+        assert!(expr_references_ident_name(rhs, "e"));
+        assert!(expr_references_ident_name(rhs, "f"));
+        assert!(
+            !expr_references_ident_name(rhs, "c")
+                && !expr_references_ident_name(rhs, "a")
+                && !expr_references_ident_name(rhs, "b"),
+            "the fully overriding second chain must discard the first chain: {rhs:?}"
+        );
+    }
+
+    #[test]
     fn substitutes_reads_of_selected_comb_targets() {
         let ir = analyze_source(
             r#"
@@ -457,6 +485,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_prior_partially_overlapping_selected_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic c, d,
+                    input logic [2:0] a, b,
+                    output logic [3:0] x
+                );
+                    always_comb begin
+                        x = '0;
+                        if (c) x[3:1] = a;
+                        if (d) x[2:0] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("overlapping_selected_fallback.sv"),
+        )
+        .expect("overlapping selected writes should preserve their procedural order");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let rhs = assignments.last().expect("final selected assignment").rhs();
+        assert!(
+            expr_references_ident_name(rhs, "a"),
+            "the later false path must retain the earlier selected value: {rhs:?}"
+        );
+    }
+
+    #[test]
     fn requires_definite_assignment_before_filling_comb_fallbacks() {
         let error = analyze_source(
             r#"
@@ -488,6 +543,24 @@ mod tests {
             Path::new("genuine_self_read.sv"),
         )
         .expect_err("a genuine self-read must not be filled as a fallback hole")
+        .to_string();
+        assert!(error.contains("latch inference inside always_comb"));
+    }
+
+    #[test]
+    fn rejects_overlapping_selected_self_reads() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic c, output logic [1:0] x);
+                    always_comb begin
+                        if (c) x[0] = x[1:0];
+                        else x[0] = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("overlapping_selected_self_read.sv"),
+        )
+        .expect_err("an overlapping selected self-read must be rejected")
         .to_string();
         assert!(error.contains("latch inference inside always_comb"));
     }

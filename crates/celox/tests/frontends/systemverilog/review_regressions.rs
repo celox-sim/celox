@@ -2268,6 +2268,71 @@ fn merges_overlapping_writes_inside_always_comb() {
 }
 
 #[test]
+fn preserves_prior_conditional_writes_across_overlapping_comb_slices() {
+    let source = r#"
+        module Top(input logic c, d, output logic [3:0] x);
+            always_comb begin
+                x = '0;
+                if (c) x[3:1] = 3'b111;
+                if (d) x[2:0] = 3'b000;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_overlapping_slice_fallback.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0b1110u8.into());
+}
+
+#[test]
+fn later_exhaustive_comb_chain_overrides_an_earlier_chain() {
+    let source = r#"
+        module Top(input logic c, d, a, b, e, f, output logic x);
+            always_comb begin
+                if (c) x = a;
+                else x = b;
+                if (d) x = e;
+                else x = f;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_consecutive_exhaustive_chains.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let e = sim.signal("e");
+    let f = sim.signal("f");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 0u8);
+        io.set(a, 1u8);
+        io.set(b, 1u8);
+        io.set(e, 1u8);
+        io.set(f, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(

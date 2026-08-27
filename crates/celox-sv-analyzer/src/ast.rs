@@ -2225,7 +2225,7 @@ impl FfEvent {
 pub struct ConditionalAssignment {
     condition: Option<Expr>,
     assignment: Assignment,
-    fills_exhaustive_fallback: bool,
+    exhaustive_fallback_start: Option<usize>,
 }
 
 impl ConditionalAssignment {
@@ -2233,7 +2233,7 @@ impl ConditionalAssignment {
         Self {
             condition,
             assignment,
-            fills_exhaustive_fallback: false,
+            exhaustive_fallback_start: None,
         }
     }
 
@@ -7260,7 +7260,7 @@ fn comb_assignments_from_guarded(
                 }
                 let previous = *groups[group].last()?;
                 let separated_by_overlap = guarded[previous + 1..index].iter().any(|assignment| {
-                    lvalues_overlap(assignment.assignment().lhs_value(), target)
+                    lvalues_overlap(assignment.assignment().lhs_value(), target, const_env)
                         && assignment.assignment().lhs_value() != target
                 });
                 (!separated_by_overlap).then_some(group)
@@ -7283,7 +7283,7 @@ fn comb_assignments_from_guarded(
         {
             continue;
         }
-        let initial = overlapping_whole_value_before(&guarded, indices[0], target);
+        let initial = overlapping_value_before(&guarded, indices[0], target, const_env);
         substitute_intermediate_comb_value_reads(
             &mut guarded,
             indices,
@@ -7313,27 +7313,28 @@ fn comb_assignments_from_guarded(
         // priority. A target-specific exhaustive fallback fills the previous
         // value in the branch chain instead of becoming globally
         // unconditional.
-        let mut current = overlapping_whole_value_before(&guarded, indices[0], &target)
+        let mut current = overlapping_value_before(&guarded, indices[0], &target, const_env)
             .unwrap_or_else(comb_previous_value_placeholder);
-        for index in &indices {
+        for (position, index) in indices.iter().enumerate() {
             let write = &guarded[*index];
             let value = write.assignment().rhs().clone();
-            current = if write.fills_exhaustive_fallback {
-                substitute_comb_previous_value(current, &value)
-            } else {
-                match write.condition() {
-                    None => value,
-                    Some(condition) => Expr::Mux {
-                        condition: Box::new(condition.clone()),
-                        then_expr: Box::new(value),
-                        else_expr: Box::new(current),
-                    },
+            current = if let Some(chain_start) = write.exhaustive_fallback_start {
+                let mut branch_value = value;
+                for prior in indices[..position]
+                    .iter()
+                    .copied()
+                    .filter(|prior| *prior >= chain_start)
+                {
+                    branch_value = fold_conditional_assignment_over(branch_value, &guarded[prior]);
                 }
+                branch_value
+            } else {
+                fold_conditional_assignment_over(current, write)
             };
         }
         let rhs = current;
         if expr_contains_comb_previous_value(&rhs)
-            || expr_references_overlapping_lvalue(&rhs, &target)
+            || expr_references_overlapping_lvalue(&rhs, &target, const_env)
         {
             return Err(AnalyzerError::Unsupported(
                 "latch inference inside always_comb".to_string(),
@@ -7342,6 +7343,18 @@ fn comb_assignments_from_guarded(
         slots[last] = Some(Assignment::new(target, rhs));
     }
     Ok(slots.into_iter().flatten().collect())
+}
+
+fn fold_conditional_assignment_over(current: Expr, write: &ConditionalAssignment) -> Expr {
+    let value = write.assignment().rhs().clone();
+    match write.condition() {
+        None => value,
+        Some(condition) => Expr::Mux {
+            condition: Box::new(condition.clone()),
+            then_expr: Box::new(value),
+            else_expr: Box::new(current),
+        },
+    }
 }
 
 /// Substitute the value established by earlier writes to `target` into reads
@@ -7360,6 +7373,7 @@ fn substitute_intermediate_comb_value_reads(
     let mut initialized = initial.is_some();
     let mut established = initial.unwrap_or_else(comb_previous_value_placeholder);
     let mut write_index = 0;
+    let mut prior_target_writes = Vec::new();
 
     for (index, guarded_assignment) in guarded.iter_mut().enumerate().take(last + 1).skip(first) {
         let is_target_write = indices.get(write_index) == Some(&index);
@@ -7389,27 +7403,26 @@ fn substitute_intermediate_comb_value_reads(
         write_index += 1;
         let write = &*guarded_assignment;
         let value = write.assignment().rhs().clone();
-        if write.fills_exhaustive_fallback {
-            established = substitute_comb_previous_value(established, &value);
+        if let Some(chain_start) = write.exhaustive_fallback_start {
+            established = value;
+            for (prior_index, prior_write) in &prior_target_writes {
+                if *prior_index >= chain_start {
+                    established = fold_conditional_assignment_over(established, prior_write);
+                }
+            }
             initialized = true;
         } else {
-            established = match write.condition() {
-                None => {
-                    initialized = true;
-                    value
-                }
-                Some(condition) => Expr::Mux {
-                    condition: Box::new(condition.clone()),
-                    then_expr: Box::new(value),
-                    else_expr: Box::new(established),
-                },
-            };
+            if write.condition().is_none() {
+                initialized = true;
+            }
+            established = fold_conditional_assignment_over(established, write);
         }
+        prior_target_writes.push((index, write.clone()));
     }
     Ok(())
 }
 
-fn lvalues_overlap(left: &LValue, right: &LValue) -> bool {
+fn lvalues_overlap(left: &LValue, right: &LValue, const_env: &HashMap<String, i128>) -> bool {
     match (left, right) {
         (LValue::Ident(left), LValue::Ident(right)) => left == right,
         (LValue::Ident(left), LValue::Select { name: right, .. })
@@ -7427,54 +7440,215 @@ fn lvalues_overlap(left: &LValue, right: &LValue) -> bool {
                 lsb: right_lsb,
                 ..
             },
-        ) => left_name == right_name && left_msb == right_msb && left_lsb == right_lsb,
+        ) => {
+            if left_name != right_name {
+                return false;
+            }
+            match (
+                eval_ast_const_expr(left_msb, const_env),
+                eval_ast_const_expr(left_lsb, const_env),
+                eval_ast_const_expr(right_msb, const_env),
+                eval_ast_const_expr(right_lsb, const_env),
+            ) {
+                (Some(left_msb), Some(left_lsb), Some(right_msb), Some(right_lsb)) => {
+                    left_msb.min(left_lsb) <= right_msb.max(right_lsb)
+                        && right_msb.min(right_lsb) <= left_msb.max(left_lsb)
+                }
+                _ => true,
+            }
+        }
     }
 }
 
-fn overlapping_whole_value_before(
+fn overlapping_value_before(
     guarded: &[ConditionalAssignment],
     before: usize,
     target: &LValue,
+    const_env: &HashMap<String, i128>,
 ) -> Option<Expr> {
+    if !matches!(target, LValue::Select { .. }) {
+        return None;
+    }
+    let mut current = comb_previous_value_placeholder();
+    let mut initialized = false;
+    let mut states_before = vec![(current.clone(), initialized)];
+    for (index, write) in guarded[..before].iter().enumerate() {
+        let Some((updated, covers_target)) = selected_value_after_write(
+            &current,
+            target,
+            write.assignment().lhs_value(),
+            write.assignment().rhs(),
+            const_env,
+        ) else {
+            states_before.push((current.clone(), initialized));
+            continue;
+        };
+        if let Some(chain_start) = write.exhaustive_fallback_start {
+            let (base, base_initialized) = states_before
+                .get(chain_start)
+                .cloned()
+                .unwrap_or_else(|| (comb_previous_value_placeholder(), false));
+            let Some((mut branch_value, fallback_covers_target)) = selected_value_after_write(
+                &base,
+                target,
+                write.assignment().lhs_value(),
+                write.assignment().rhs(),
+                const_env,
+            ) else {
+                states_before.push((current.clone(), initialized));
+                continue;
+            };
+            for prior in &guarded[chain_start..index] {
+                let Some((prior_value, _)) = selected_value_after_write(
+                    &branch_value,
+                    target,
+                    prior.assignment().lhs_value(),
+                    prior.assignment().rhs(),
+                    const_env,
+                ) else {
+                    continue;
+                };
+                branch_value = match prior.condition() {
+                    None => prior_value,
+                    Some(condition) => Expr::Mux {
+                        condition: Box::new(condition.clone()),
+                        then_expr: Box::new(prior_value),
+                        else_expr: Box::new(branch_value),
+                    },
+                };
+            }
+            current = branch_value;
+            initialized = base_initialized || fallback_covers_target;
+        } else {
+            current = match write.condition() {
+                None => {
+                    initialized |= covers_target;
+                    updated
+                }
+                Some(condition) => Expr::Mux {
+                    condition: Box::new(condition.clone()),
+                    then_expr: Box::new(updated),
+                    else_expr: Box::new(current),
+                },
+            };
+        }
+        states_before.push((current.clone(), initialized));
+    }
+    initialized.then_some(current)
+}
+
+fn selected_value_after_write(
+    current: &Expr,
+    target: &LValue,
+    write_target: &LValue,
+    write_value: &Expr,
+    const_env: &HashMap<String, i128>,
+) -> Option<(Expr, bool)> {
     let LValue::Select {
-        name,
-        msb,
-        lsb,
+        name: target_name,
+        msb: target_msb_expr,
+        lsb: target_lsb_expr,
         signed,
         ..
     } = target
     else {
         return None;
     };
-    let mut current = comb_previous_value_placeholder();
-    let mut initialized = false;
-    for write in &guarded[..before] {
-        if !matches!(write.assignment().lhs_value(), LValue::Ident(whole) if whole == name) {
-            continue;
-        }
-        let value = write.assignment().rhs().clone();
-        if write.fills_exhaustive_fallback {
-            current = substitute_comb_previous_value(current, &value);
-            initialized = true;
-        } else {
-            current = match write.condition() {
-                None => {
-                    initialized = true;
-                    value
-                }
-                Some(condition) => Expr::Mux {
-                    condition: Box::new(condition.clone()),
-                    then_expr: Box::new(value),
-                    else_expr: Box::new(current),
+    match write_target {
+        LValue::Ident(write_name) => (write_name == target_name).then(|| {
+            (
+                Expr::Select {
+                    expr: Box::new(write_value.clone()),
+                    msb: target_msb_expr.clone(),
+                    lsb: target_lsb_expr.clone(),
+                    signed: *signed,
                 },
+                true,
+            )
+        }),
+        LValue::Select {
+            name: write_name,
+            msb: write_msb_expr,
+            lsb: write_lsb_expr,
+            ..
+        } => {
+            if write_name != target_name {
+                return None;
+            }
+            let target_msb = eval_ast_const_expr(target_msb_expr, const_env)?;
+            let target_lsb = eval_ast_const_expr(target_lsb_expr, const_env)?;
+            let write_msb = eval_ast_const_expr(write_msb_expr, const_env)?;
+            let write_lsb = eval_ast_const_expr(write_lsb_expr, const_env)?;
+            let target_low = target_msb.min(target_lsb);
+            let target_high = target_msb.max(target_lsb);
+            let overlap_low = target_low.max(write_msb.min(write_lsb));
+            let overlap_high = target_high.min(write_msb.max(write_lsb));
+            if overlap_low > overlap_high {
+                return None;
+            }
+
+            let target_step = if target_msb >= target_lsb { -1 } else { 1 };
+            let overlap_first = if target_step < 0 {
+                overlap_high
+            } else {
+                overlap_low
             };
+            let overlap_last = if target_step < 0 {
+                overlap_low
+            } else {
+                overlap_high
+            };
+            let mut parts = Vec::new();
+            if target_msb != overlap_first {
+                parts.push(selected_value_read(
+                    current,
+                    target_msb,
+                    target_lsb,
+                    target_msb,
+                    overlap_first.checked_sub(target_step)?,
+                )?);
+            }
+            parts.push(selected_value_read(
+                write_value,
+                write_msb,
+                write_lsb,
+                overlap_first,
+                overlap_last,
+            )?);
+            if overlap_last != target_lsb {
+                parts.push(selected_value_read(
+                    current,
+                    target_msb,
+                    target_lsb,
+                    overlap_last.checked_add(target_step)?,
+                    target_lsb,
+                )?);
+            }
+            let value = if parts.len() == 1 {
+                parts.pop()?
+            } else {
+                Expr::Concat(parts)
+            };
+            Some((
+                value,
+                overlap_low == target_low && overlap_high == target_high,
+            ))
         }
     }
-    initialized.then_some(Expr::Select {
-        expr: Box::new(current),
-        msb: msb.clone(),
-        lsb: lsb.clone(),
-        signed: *signed,
+}
+
+fn selected_value_read(
+    value: &Expr,
+    value_msb: i128,
+    value_lsb: i128,
+    first_coordinate: i128,
+    last_coordinate: i128,
+) -> Option<Expr> {
+    Some(Expr::Select {
+        expr: Box::new(value.clone()),
+        msb: const_expr_from_i128(selected_target_bit(value_msb, value_lsb, first_coordinate)?),
+        lsb: const_expr_from_i128(selected_target_bit(value_msb, value_lsb, last_coordinate)?),
+        signed: false,
     })
 }
 
@@ -7482,12 +7656,6 @@ const COMB_PREVIOUS_VALUE: &str = "\0celox_comb_previous_value";
 
 fn comb_previous_value_placeholder() -> Expr {
     Expr::Ident(COMB_PREVIOUS_VALUE.to_string())
-}
-
-fn substitute_comb_previous_value(expr: Expr, value: &Expr) -> Expr {
-    let mut env = HashMap::default();
-    env.insert(COMB_PREVIOUS_VALUE.to_string(), value.clone());
-    substitute_expr_idents(expr, &env)
 }
 
 fn expr_contains_comb_previous_value(expr: &Expr) -> bool {
@@ -7741,7 +7909,11 @@ fn expr_references_lvalue(expr: &Expr, target: &LValue) -> bool {
     }
 }
 
-fn expr_references_overlapping_lvalue(expr: &Expr, target: &LValue) -> bool {
+fn expr_references_overlapping_lvalue(
+    expr: &Expr,
+    target: &LValue,
+    const_env: &HashMap<String, i128>,
+) -> bool {
     if expr_matches_lvalue(expr, target) {
         return true;
     }
@@ -7753,35 +7925,60 @@ fn expr_references_overlapping_lvalue(expr: &Expr, target: &LValue) -> bool {
             } => name == target_name,
         },
         Expr::Literal(_) => false,
-        Expr::Select { expr, .. } => {
-            if matches!((&**expr, target), (Expr::Ident(_), LValue::Select { .. })) {
-                false
+        Expr::Select {
+            expr: selected,
+            msb,
+            lsb,
+            ..
+        } => {
+            if let Expr::Ident(read_name) = &**selected {
+                match target {
+                    LValue::Ident(target_name) => read_name == target_name,
+                    LValue::Select {
+                        name: target_name,
+                        msb: target_msb,
+                        lsb: target_lsb,
+                        ..
+                    } if read_name == target_name => match (
+                        eval_ast_const_expr(msb, const_env),
+                        eval_ast_const_expr(lsb, const_env),
+                        eval_ast_const_expr(target_msb, const_env),
+                        eval_ast_const_expr(target_lsb, const_env),
+                    ) {
+                        (Some(msb), Some(lsb), Some(target_msb), Some(target_lsb)) => {
+                            msb.min(lsb) <= target_msb.max(target_lsb)
+                                && target_msb.min(target_lsb) <= msb.max(lsb)
+                        }
+                        _ => true,
+                    },
+                    _ => false,
+                }
             } else {
-                expr_references_overlapping_lvalue(expr, target)
+                expr_references_overlapping_lvalue(selected, target, const_env)
             }
         }
         Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
-            expr_references_overlapping_lvalue(expr, target)
+            expr_references_overlapping_lvalue(expr, target, const_env)
         }
         Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
             .iter()
-            .any(|part| expr_references_overlapping_lvalue(part, target)),
+            .any(|part| expr_references_overlapping_lvalue(part, target, const_env)),
         Expr::Binary { left, right, .. } => {
-            expr_references_overlapping_lvalue(left, target)
-                || expr_references_overlapping_lvalue(right, target)
+            expr_references_overlapping_lvalue(left, target, const_env)
+                || expr_references_overlapping_lvalue(right, target, const_env)
         }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_references_overlapping_lvalue(condition, target)
-                || expr_references_overlapping_lvalue(then_expr, target)
-                || expr_references_overlapping_lvalue(else_expr, target)
+            expr_references_overlapping_lvalue(condition, target, const_env)
+                || expr_references_overlapping_lvalue(then_expr, target, const_env)
+                || expr_references_overlapping_lvalue(else_expr, target, const_env)
         }
         Expr::Call { args, .. } => args
             .iter()
-            .any(|arg| expr_references_overlapping_lvalue(arg, target)),
+            .any(|arg| expr_references_overlapping_lvalue(arg, target, const_env)),
     }
 }
 
@@ -8347,6 +8544,7 @@ fn conditional_assignments_from_conditional_statement(
     packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
+    let chain_start = assignments.len();
     let if_condition =
         expr_from_cond_predicate(&stmt.nodes.2.nodes.1, syntax_tree, packed_dimensions)
             .ok_or_else(|| {
@@ -8424,6 +8622,7 @@ fn conditional_assignments_from_conditional_statement(
             mark_exhaustive_fallback(
                 &mut assignments[branch_start..],
                 &definitely_assigned_branches,
+                chain_start,
             );
         }
     }
@@ -8449,6 +8648,7 @@ fn conditional_assignments_from_case_statement(
     packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
+    let chain_start = assignments.len();
     let sv_parser::CaseStatement::Normal(stmt) = stmt else {
         return Err(AnalyzerError::Unsupported(
             "casez, casex, or pattern case inside always_comb".to_string(),
@@ -8551,6 +8751,7 @@ fn conditional_assignments_from_case_statement(
             mark_exhaustive_fallback(
                 &mut assignments[branch_start..],
                 &definitely_assigned_branches,
+                chain_start,
             );
         }
     }
@@ -8560,6 +8761,7 @@ fn conditional_assignments_from_case_statement(
 fn mark_exhaustive_fallback(
     fallback_assignments: &mut [ConditionalAssignment],
     branch_targets: &[Vec<LValue>],
+    chain_start: usize,
 ) {
     let mut marked_targets = Vec::new();
     for assignment in fallback_assignments {
@@ -8570,7 +8772,7 @@ fn mark_exhaustive_fallback(
             && !marked_targets.contains(target)
         {
             marked_targets.push(target.clone());
-            assignment.fills_exhaustive_fallback = true;
+            assignment.exhaustive_fallback_start = Some(chain_start);
         }
     }
 }
