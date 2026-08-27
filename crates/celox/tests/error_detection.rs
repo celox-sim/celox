@@ -1174,8 +1174,6 @@ fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_effect() {
             clk: input clock,
             out_q: output logic<8>
         ) {
-            var samples: logic<8>[2];
-
             function pick (
                 values: input logic<8>[2],
                 ignored: input logic<8>
@@ -1189,6 +1187,7 @@ fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_effect() {
             }
 
             always_ff (clk) {
+                var samples: logic<8>[2];
                 out_q = pick(samples, update(samples[0]));
             }
         }
@@ -1237,6 +1236,16 @@ fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_callee_write() 
         .build()
         .expect_err("an unpacked input must not observe a later callee write lazily");
     match err.kind() {
+        SimulatorErrorKind::Analyzer(errors) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::SideEffectFunctionCallInAlwaysFf {
+                    identifier,
+                    ..
+                } if identifier == "update"
+            )),
+            "expected analyzer side-effect error for update, got: {errors:?}"
+        ),
         SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
             assert_eq!(*issue, 43);
             assert_eq!(*feature, "unpacked function argument aliases later effect");
@@ -1253,15 +1262,17 @@ fn test_ff_function_call_rejects_selected_unpacked_input_before_callee_index_wri
             rows: input logic<8>[2, 2],
             out_q: output logic<8>
         ) {
-            var index: logic;
-
-            function pick (values: input logic<8>[2]) -> logic<8> {
+            function pick (
+                values: input logic<8>[2],
+                index: output logic
+            ) -> logic<8> {
                 index = 1'b1;
                 return values[0];
             }
 
             always_ff (clk) {
-                out_q = pick(rows[index]);
+                var index: logic;
+                out_q = pick(rows[index], index);
             }
         }
     "#;
@@ -1285,9 +1296,6 @@ fn test_ff_function_call_rejects_unpacked_literal_aliased_by_output_index_effect
             clk: input clock,
             out_q: output logic<8>
         ) {
-            var changing: logic<8>;
-            var sink: logic<8>[2];
-
             function pick (
                 values: input logic<8>[2],
                 result: output logic<8>
@@ -1302,6 +1310,8 @@ fn test_ff_function_call_rejects_unpacked_literal_aliased_by_output_index_effect
             }
 
             always_ff (clk) {
+                var changing: logic<8>;
+                var sink: logic<8>[2];
                 out_q = pick('{changing, default: 8'h00}, sink[update(changing)]);
             }
         }
