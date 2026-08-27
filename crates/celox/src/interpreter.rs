@@ -1249,45 +1249,46 @@ impl BigUintExt for BigUint {
 
 #[derive(Default)]
 pub(crate) struct Registers {
-    values: Vec<Option<SIRValue>>,
-    widths: Vec<usize>,
-    signed: Vec<bool>,
+    slots: Vec<RegisterSlot>,
+}
+
+#[derive(Default)]
+struct RegisterSlot {
+    value: Option<SIRValue>,
+    width: usize,
+    signed: bool,
 }
 
 impl Registers {
     fn prepare(&mut self, register_map: &HashMap<RegisterId, RegisterType>) {
         let size = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
-        self.values.clear();
-        self.values.resize_with(size, || None);
-        self.widths.clear();
-        self.widths.resize(size, 0);
-        self.signed.clear();
-        self.signed.resize(size, false);
+        self.slots.clear();
+        self.slots.resize_with(size, RegisterSlot::default);
         for (id, register_type) in register_map {
-            self.widths[id.0] = register_type.width();
-            self.signed[id.0] = register_type.is_signed();
+            self.slots[id.0].width = register_type.width();
+            self.slots[id.0].signed = register_type.is_signed();
         }
     }
 
     fn get(&self, id: RegisterId) -> Result<&SIRValue, InterpError> {
-        self.values
+        self.slots
             .get(id.0)
-            .and_then(|slot| slot.as_ref())
+            .and_then(|slot| slot.value.as_ref())
             .ok_or(InterpError::MissingRegister(id))
     }
 
     fn set(&mut self, id: RegisterId, value: SIRValue) {
-        if let Some(slot) = self.values.get_mut(id.0) {
-            *slot = Some(value);
+        if let Some(slot) = self.slots.get_mut(id.0) {
+            slot.value = Some(value);
         }
     }
 
     fn width(&self, id: RegisterId) -> usize {
-        self.widths.get(id.0).copied().unwrap_or(0)
+        self.slots.get(id.0).map_or(0, |slot| slot.width)
     }
 
     fn is_signed(&self, id: RegisterId) -> bool {
-        self.signed.get(id.0).copied().unwrap_or(false)
+        self.slots.get(id.0).is_some_and(|slot| slot.signed)
     }
 }
 
