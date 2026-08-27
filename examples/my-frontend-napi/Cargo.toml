@@ -10,11 +10,11 @@ crate-type = ["cdylib"]
 [dependencies]
 celox-frontend-sdk = { workspace = true }
 celox-napi = { workspace = true }
-napi = { version = "=3.12.1", features = ["napi8"] }
-napi-derive = "=3.6.3"
+napi = { workspace = true, features = ["napi8"] }
+napi-derive.workspace = true
 
 [build-dependencies]
-napi-build = "=2.4.1"
+napi-build.workspace = true
 
 [lints]
 workspace = true
