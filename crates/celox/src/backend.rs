@@ -31,7 +31,8 @@ mod host {
     pub use super::interp::InterpBackend;
     pub use super::runtime::{EventRef, JitBackend, SharedJitCode};
     pub use super::tiered::{
-        TieredBackend, TieredExecutionStats, TieredExecutionTier, TieredPromotionStatus,
+        TieredBackend, TieredExecutionStats, TieredExecutionTier, TieredExecutionTiming,
+        TieredPromotionStatus,
     };
     pub(crate) use celox_backend_cranelift::JitEngine;
     pub use celox_backend_cranelift::{

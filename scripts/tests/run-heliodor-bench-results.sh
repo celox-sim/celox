@@ -258,6 +258,37 @@ if ensure_results_schema "$bad_semantics" 2>/dev/null; then
     fail "v4 compile-only row with a numeric speed elapsed was accepted"
 fi
 
+# A Veryl baseline should only cap runners intended for direct performance
+# comparison. Slower diagnostic backends retain the test fallback timeout.
+HELIODOR_COMPILE_ONLY=0
+HELIODOR_TIMEOUT_SEC=""
+HELIODOR_CELOX_TIMEOUT_MULTIPLIER=2
+BASELINE_ELAPSED_NS[test_soc_linux_boot]=1000000000
+assert_eq "$(timeout_sec_for celox test_soc_linux_boot)" 2 \
+    "native baseline-derived timeout"
+assert_eq "$(timeout_sec_for celox-tiered test_soc_linux_boot)" 2 \
+    "tiered baseline-derived timeout"
+assert_eq "$(timeout_sec_for celox-cranelift test_soc_linux_boot)" 300 \
+    "Cranelift fallback timeout"
+assert_eq "$(timeout_sec_for celox-interpreter test_soc_linux_boot)" 300 \
+    "interpreter fallback timeout"
+
+HELIODOR_COMPILE_ONLY=1
+HELIODOR_RUNNERS="veryl-cc-sync celox celox-cranelift"
+validate_compile_only_runners \
+    || fail "compile-only validation rejected compiled runners"
+for unsupported_runner in celox-tiered celox-interpreter; do
+    HELIODOR_RUNNERS="celox $unsupported_runner"
+    if validate_compile_only_runners 2>"$TMP/$unsupported_runner-compile-only.stderr"; then
+        fail "compile-only validation accepted $unsupported_runner"
+    fi
+    grep -Fq "compile-only is not supported by the $unsupported_runner runner" \
+        "$TMP/$unsupported_runner-compile-only.stderr" \
+        || fail "compile-only validation omitted the rejected runner name"
+done
+HELIODOR_COMPILE_ONLY=0
+HELIODOR_RUNNERS="veryl-cc-sync celox"
+
 # Exercise run_one without Heliodor or either compiler. These overrides emit
 # fixture logs at the same boundary as the real subprocess wrapper.
 integration_results="$TMP/integration-results"
@@ -400,5 +431,43 @@ assert_eq "$(awk -F '\t' 'NR == 8 { print $10 }' "$integration_results/results.t
     "run_one Veryl CLI compile elapsed"
 assert_eq "$(awk -F '\t' 'NR == 8 { print $11 }' "$integration_results/results.tsv")" NA \
     "run_one Veryl CLI execute elapsed"
+
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_tiered status=pass elapsed_ns=48'
+run_one celox-tiered integration_tiered >/dev/null \
+    || fail "run_one rejected a fixture tiered pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --backend tiered "* ]] \
+    || fail "tiered runner did not select the tiered backend"
+assert_eq "$(awk -F '\t' 'NR == 9 { print $1 }' "$integration_results/results.tsv")" \
+    celox-tiered "run_one tiered runner name"
+assert_eq "$(awk -F '\t' 'NR == 9 { print $12 }' "$integration_results/results.tsv")" NA \
+    "run_one tiered generated-only elapsed"
+
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_interpreter compile_ns=8 execute_ns=55 jit_execute_ns=NA\nCELOX_TEST_RESULT test=integration_interpreter status=pass elapsed_ns=65'
+run_one celox-interpreter integration_interpreter >/dev/null \
+    || fail "run_one rejected a fixture interpreter pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --backend interpreter "* ]] \
+    || fail "interpreter runner did not select the interpreter backend"
+assert_eq "$(awk -F '\t' 'NR == 10 { print $1 }' "$integration_results/results.tsv")" \
+    celox-interpreter "run_one interpreter runner name"
+
+# Every target runner must be launched through the configured emulator in
+# host-qemu mode. Native host codegen is handled separately by run_one.
+HELIODOR_CELOX_NATIVE_IMAGE_MODE=host-qemu
+CELOX_EXECUTION_PREFIX=(qemu-aarch64 -L /fixture-sysroot)
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_qemu_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_qemu_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_qemu_tiered status=pass elapsed_ns=48'
+run_one celox-tiered integration_qemu_tiered >/dev/null \
+    || fail "run_one rejected a host-qemu tiered fixture"
+assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "tiered execution prefix command"
+assert_eq "${FIXTURE_RUN_ARGS[1]}" -L "tiered execution prefix option"
+assert_eq "${FIXTURE_RUN_ARGS[2]}" /fixture-sysroot "tiered execution prefix argument"
+assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "tiered target runner"
+
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_qemu_interpreter compile_ns=8 execute_ns=55 jit_execute_ns=NA\nCELOX_TEST_RESULT test=integration_qemu_interpreter status=pass elapsed_ns=65'
+run_one celox-interpreter integration_qemu_interpreter >/dev/null \
+    || fail "run_one rejected a host-qemu interpreter fixture"
+assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "interpreter execution prefix command"
+assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "interpreter target runner"
+HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
+CELOX_EXECUTION_PREFIX=()
 
 echo "run-heliodor-bench result fixture tests: PASS"

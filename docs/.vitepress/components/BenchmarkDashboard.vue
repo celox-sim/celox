@@ -59,6 +59,7 @@ interface Series {
     | "verilator"
     | "heliodor-native-x86_64-jit"
     | "heliodor-native-x86_64"
+    | "heliodor-tiered-x86_64"
     | "heliodor-veryl-x86_64"
     | "heliodor-native-aarch64"
     | "heliodor-veryl-aarch64"
@@ -143,6 +144,7 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
       runtimes: new Set<Series["runtime"]>([
         "heliodor-native-x86_64-jit",
         "heliodor-native-x86_64",
+        "heliodor-tiered-x86_64",
         "heliodor-veryl-x86_64",
       ]),
     },
@@ -248,6 +250,7 @@ const RUNTIME_COLORS: Record<string, string> = {
   unknown: "#9ca3af",
   "heliodor-native-x86_64-jit": "#06b6d4",
   "heliodor-native-x86_64": "#2563eb",
+  "heliodor-tiered-x86_64": "#8b5cf6",
   "heliodor-veryl-x86_64": "#f97316",
   "heliodor-native-aarch64": "#16a34a",
   "heliodor-veryl-aarch64": "#f97316",
@@ -262,6 +265,7 @@ const RUNTIME_LABELS: Record<string, string> = {
   unknown: "Unknown",
   "heliodor-native-x86_64-jit": "Native x86-64 (JIT code only)",
   "heliodor-native-x86_64": "Native x86-64",
+  "heliodor-tiered-x86_64": "Tiered JIT x86-64",
   "heliodor-veryl-x86_64": "Veryl-CC x86-64",
   "heliodor-native-aarch64": "Native AArch64",
   "heliodor-veryl-aarch64": "Veryl-CC AArch64",
@@ -278,7 +282,7 @@ const activeTab = ref("counter");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -313,6 +317,7 @@ function runtime(name: string): Series["runtime"] {
   if (name.startsWith("heliodor-celox-jit/")) return "heliodor-native-x86_64-jit";
   if (name.startsWith("heliodor-celox-total/")) return "heliodor-native-x86_64";
   if (name.startsWith("heliodor-celox-compile/")) return "heliodor-native-x86_64";
+  if (name.startsWith("heliodor-celox-tiered/")) return "heliodor-tiered-x86_64";
   if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-x86_64/")) return "heliodor-native-x86_64";
