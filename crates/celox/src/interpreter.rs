@@ -250,23 +250,32 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
     entry_args: &[SIRValue],
     four_state: bool,
 ) -> Result<UnitExit, InterpError> {
-    let mut regs = Registers::default();
-    execute_unit_with_registers(unit, machine, entry_args, four_state, &mut regs)
+    let mut regs = Registers::new(&unit.register_map, four_state);
+    execute_prepared_unit(unit, machine, entry_args, four_state, &mut regs)
 }
 
-/// Execute a unit with backend-owned register storage.
-///
-/// The Tier-0 backend invokes many units per evaluation. Reusing this storage
-/// avoids allocating three register vectors for every invocation while still
-/// clearing values and rebuilding unit-specific type metadata at entry.
-pub(crate) fn execute_unit_with_registers<A, M: InterpMachine<A>>(
+/// Execute a unit whose register types were prepared when the interpreter
+/// schedule was built. Repeated tier-zero evaluations only advance a
+/// generation counter; they do not rebuild register metadata or clear every
+/// slot before dispatching the first instruction.
+pub(crate) fn execute_prepared_unit<A, M: InterpMachine<A>>(
     unit: &ExecutionUnit<A>,
     machine: &mut M,
     entry_args: &[SIRValue],
     four_state: bool,
     regs: &mut Registers,
 ) -> Result<UnitExit, InterpError> {
-    regs.prepare(&unit.register_map, four_state);
+    regs.begin_execution();
+    execute_unit_inner(unit, machine, entry_args, four_state, regs)
+}
+
+fn execute_unit_inner<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+    regs: &mut Registers,
+) -> Result<UnitExit, InterpError> {
     let entry = unit
         .blocks
         .get(&unit.entry_block_id)
@@ -1531,6 +1540,7 @@ impl BigUintExt for BigUint {
 pub(crate) struct Registers {
     slots: Vec<RegisterSlot>,
     small_enabled: bool,
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -1538,6 +1548,7 @@ struct RegisterSlot {
     value: Option<RegisterValue>,
     width: usize,
     signed: bool,
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -1579,7 +1590,13 @@ impl RegisterValue {
 }
 
 impl Registers {
-    fn prepare(&mut self, register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) {
+    pub(crate) fn new(register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) -> Self {
+        let mut registers = Self::default();
+        registers.rebuild(register_map, four_state);
+        registers
+    }
+
+    fn rebuild(&mut self, register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) {
         self.small_enabled = !four_state;
         let size = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
         self.slots.clear();
@@ -1590,26 +1607,40 @@ impl Registers {
         }
     }
 
+    fn begin_execution(&mut self) {
+        if self.generation == u64::MAX {
+            for slot in &mut self.slots {
+                slot.generation = 0;
+            }
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
+    }
+
+    fn initialized_value(&self, id: RegisterId) -> Option<&RegisterValue> {
+        self.slots.get(id.0).and_then(|slot| {
+            (slot.generation == self.generation)
+                .then_some(slot.value.as_ref())
+                .flatten()
+        })
+    }
+
     fn get(&self, id: RegisterId) -> Result<&SIRValue, InterpError> {
-        self.slots
-            .get(id.0)
-            .and_then(|slot| slot.value.as_ref())
+        self.initialized_value(id)
             .map(RegisterValue::as_sir)
             .ok_or(InterpError::MissingRegister(id))
     }
 
     fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
-        self.slots
-            .get(id.0)
-            .and_then(|slot| slot.value.as_ref())
+        self.initialized_value(id)
             .map(RegisterValue::as_small)
             .ok_or(InterpError::MissingRegister(id))
     }
 
     fn clone_value(&self, id: RegisterId) -> Result<RegisterValue, InterpError> {
-        self.slots
-            .get(id.0)
-            .and_then(|slot| slot.value.clone())
+        self.initialized_value(id)
+            .cloned()
             .ok_or(InterpError::MissingRegister(id))
     }
 
@@ -1624,6 +1655,7 @@ impl Registers {
                 Some(value) => RegisterValue::small(value & mask_u64(slot.width)),
                 None => RegisterValue::Wide(value),
             });
+            slot.generation = self.generation;
         }
     }
 
@@ -1631,12 +1663,14 @@ impl Registers {
         if let Some(slot) = self.slots.get_mut(id.0) {
             debug_assert!(self.small_enabled && slot.width <= 64);
             slot.value = Some(RegisterValue::small(value & mask_u64(slot.width)));
+            slot.generation = self.generation;
         }
     }
 
     fn set_value(&mut self, id: RegisterId, value: RegisterValue) {
         if let Some(slot) = self.slots.get_mut(id.0) {
             slot.value = Some(value);
+            slot.generation = self.generation;
         }
     }
 
@@ -2075,10 +2109,10 @@ mod tests {
         };
 
         let mut machine = FakeMachine::default();
-        let mut registers = Registers::default();
-        execute_unit_with_registers(&producer, &mut machine, &[], true, &mut registers).unwrap();
-        let error = execute_unit_with_registers(&consumer, &mut machine, &[], true, &mut registers)
-            .unwrap_err();
+        let mut registers = Registers::new(&producer.register_map, true);
+        execute_prepared_unit(&producer, &mut machine, &[], true, &mut registers).unwrap();
+        let error =
+            execute_prepared_unit(&consumer, &mut machine, &[], true, &mut registers).unwrap_err();
         assert_eq!(error, InterpError::MissingRegister(RegisterId(0)));
     }
 
