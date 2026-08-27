@@ -256,6 +256,26 @@ fn eval_array_literal_item_in_store(
     Ok(((arena.alloc(SLTNode::Concat(parts))?, sources), bounds))
 }
 
+fn eval_array_literal_default_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    context: Option<ArrayLiteralItemContext<'_>>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    // A scalar default fills scalar leaves even when the current literal level
+    // still represents additional unpacked dimensions. Convert it once as a
+    // formal element; the caller then replicates that converted element across
+    // all remaining aggregate width.
+    if let Some(context) = context
+        && expr.comptime().r#type.array.is_empty()
+    {
+        eval_assignment_expression_in_store(module, store, expr, arena, context.element_width)
+    } else {
+        eval_array_literal_item_in_store(module, store, expr, context, arena)
+    }
+}
+
 fn eval_array_literal_expression_with_item_context(
     module: &Module,
     store: &mut ExpressionStore<'_>,
@@ -312,7 +332,7 @@ fn eval_array_literal_expression_with_item_context(
                     ));
                 }
 
-                let ((part_expr, part_sources), p_bounds) = eval_array_literal_item_in_store(
+                let ((part_expr, part_sources), p_bounds) = eval_array_literal_default_in_store(
                     module,
                     store,
                     default_expr,

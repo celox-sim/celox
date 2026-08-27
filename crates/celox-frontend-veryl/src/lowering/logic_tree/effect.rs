@@ -405,12 +405,13 @@ fn collect_function_call_effects(
 
         let formal = &module.variables[&arg_id];
         let arg_width = resolve_total_width(module, formal)?;
-        let ((arg_node, arg_sources), _) = eval_assignment_expression_effectful(
+        let ((arg_node, arg_sources), _) = expr::eval_function_input_assignment_effectful(
             module,
             &mut actual_store,
             arg_expr,
-            arena,
+            &formal.r#type,
             arg_width,
+            arena,
         )?;
         let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?

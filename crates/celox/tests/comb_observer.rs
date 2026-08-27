@@ -2705,6 +2705,42 @@ module Top (
     assert_eq!(sim.get_as::<u8>(q_default), 0xf8);
 }
 
+fn test_comb_function_nested_array_scalar_default_converts_each_element(sim) {
+    @ignore_on(veryl, sv);
+    @build Simulator::builder(r#"
+module Top (
+    q00: output signed logic<8>,
+    q01: output signed logic<8>,
+    q10: output signed logic<8>,
+    q11: output signed logic<8>,
+) {
+    function pick (
+        x: input signed logic<8> [2, 2],
+        row: input logic,
+        col: input logic,
+    ) -> signed logic<8> {
+        return x[row][col];
+    }
+
+    always_comb {
+        q00 = pick('{default: 4'sh8}, 0, 0);
+        q01 = pick('{default: 4'sh8}, 0, 1);
+        q10 = pick('{default: 4'sh8}, 1, 0);
+        q11 = pick('{default: 4'sh8}, 1, 1);
+    }
+}
+"#, "Top");
+
+    let q00 = sim.signal("q00");
+    let q01 = sim.signal("q01");
+    let q10 = sim.signal("q10");
+    let q11 = sim.signal("q11");
+    assert_eq!(sim.get_as::<u8>(q00), 0xf8);
+    assert_eq!(sim.get_as::<u8>(q01), 0xf8);
+    assert_eq!(sim.get_as::<u8>(q10), 0xf8);
+    assert_eq!(sim.get_as::<u8>(q11), 0xf8);
+}
+
 fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {
     @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
     @build Simulator::builder(r#"
@@ -2842,6 +2878,29 @@ module Top (
 
     let q = sim.signal("q");
     assert_eq!(sim.get_as::<u8>(q), 0xf8);
+}
+
+fn test_comb_function_effects_use_typed_array_arguments(sim) {
+    @omit_veryl;
+    @ignore_on(wasm, sv);
+    @build Simulator::builder(r#"
+module Top (
+    q: output signed logic<8>,
+) {
+    function check (x: input signed logic<8> [2]) -> signed logic<8> {
+        $assert_continue(x[0] == 8'shf8, "bad typed array value");
+        return x[0];
+    }
+
+    always_comb {
+        q = check('{4'sh8, 4'sh1});
+    }
+}
+"#, "Top");
+
+    let q = sim.signal("q");
+    assert_eq!(sim.get_as::<u8>(q), 0xf8);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
