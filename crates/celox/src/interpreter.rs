@@ -509,7 +509,14 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                         all_small = false;
                         break;
                     }
-                    value = (value << width) | (source_value & mask_u64(width));
+                    value = if width == 64 {
+                        // `next_width <= 64` means every preceding source was
+                        // zero-width, so the accumulated value is zero. Avoid
+                        // Rust's invalid full-width `u64 << 64` shift.
+                        source_value
+                    } else {
+                        (value << width) | (source_value & mask_u64(width))
+                    };
                     total_width = next_width;
                 }
                 if all_small {
@@ -2290,6 +2297,38 @@ mod tests {
         execute_unit(&unit, &mut machine, &[], true).unwrap();
         // 0xABCD sliced [4 +: 8] == 0xBC.
         assert_eq!(machine.stored(9, 0, 8).payload, BigUint::from(0xBCu8));
+    }
+
+    #[test]
+    fn narrow_singleton_64_bit_concat_does_not_shift_by_64() {
+        let value = 0xdead_beef_cafe_babeu64;
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(value)),
+                    SIRInstruction::Concat(RegisterId(1), vec![RegisterId(0)]),
+                    SIRInstruction::Store(
+                        9u32,
+                        SIROffset::Static(0),
+                        64,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 64), (1, 64)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], false).unwrap();
+        assert_eq!(machine.stored(9, 0, 64).payload, BigUint::from(value));
     }
 
     #[test]
