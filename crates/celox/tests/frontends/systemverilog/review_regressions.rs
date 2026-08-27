@@ -2417,6 +2417,141 @@ fn freezes_comb_branch_guards_before_predicate_writes() {
 }
 
 #[test]
+fn freezes_all_sibling_comb_guards_before_branch_writes() {
+    let source = r#"
+        module Top(input logic en, output logic s, y);
+            always_comb begin
+                s = en;
+                y = 1'b0;
+                if (s)
+                    s = 1'b0;
+                else if (!s)
+                    y = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_sibling_frozen_predicate.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let en = sim.signal("en");
+    let s = sim.signal("s");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(en, 1u8)).unwrap();
+    assert_eq!(sim.get(s), 0u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(en, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn propagates_nested_comb_writes_to_the_enclosing_path() {
+    let source = r#"
+        module Top(input logic c, d, output logic [1:0] x, y);
+            always_comb begin
+                if (c) begin
+                    x = 2'd1;
+                    if (d) x = 2'd2;
+                    y = x;
+                end else begin
+                    x = 2'd0;
+                    y = x;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_nested_path_value.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    assert_eq!(sim.get(y), 2u8.into());
+}
+
+#[test]
+fn substitutes_whole_vector_reads_after_selected_comb_writes() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic [7:0] x, y);
+            always_comb begin
+                x = '0;
+                x[0] = a;
+                y = x;
+                if (c) x[0] = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_selected_then_whole_read.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn reevaluates_constant_casts_after_parameter_overrides() {
+    let source = r#"
+        module Top #(parameter A = 3) (output logic [7:0] y);
+            typedef logic [7:0] byte_t;
+            localparam B = byte_t'(A);
+            assign y = B;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parameter_dependent_cast.sv"))],
+        "Top",
+    )
+    .param("A", 4)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 4u8.into());
+}
+
+#[test]
+fn resolves_typedefs_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            typedef logic [7:0] byte_t;
+            localparam P = $bits(byte_t)'(16'h1ff);
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typedef_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(
