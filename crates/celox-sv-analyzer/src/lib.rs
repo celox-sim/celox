@@ -219,6 +219,87 @@ mod tests {
     }
 
     #[test]
+    fn preserves_fallback_guards_for_each_comb_target() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic x, y);
+                    always_comb begin
+                        x = 1'b0;
+                        y = 1'b0;
+                        if (c) x = a;
+                        else y = b;
+                    end
+                endmodule
+            "#,
+            Path::new("target_fallback.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            matches!(y.rhs(), ir::Expr::Mux { .. }),
+            "the else write must not become globally unconditional: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn keeps_writes_after_exhaustive_comb_fallbacks() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, a, b, e, output logic x);
+                    always_comb begin
+                        if (c) x = a;
+                        else x = b;
+                        if (d) x = e;
+                    end
+                endmodule
+            "#,
+            Path::new("write_after_fallback.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Mux { condition, .. } = rhs else {
+            panic!("expected the trailing write to produce a mux: {rhs:?}");
+        };
+        assert!(
+            expr_references_ident_name(condition, "d"),
+            "the trailing d write must retain priority: {rhs:?}"
+        );
+    }
+
+    #[test]
+    fn substitutes_reads_of_selected_comb_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic [1:0] x, output logic y);
+                    always_comb begin
+                        x[0] = a;
+                        y = x[0];
+                        if (c) x[0] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_intervening_read.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(expr_references_ident_name(y.rhs(), "a"));
+        assert!(
+            !expr_references_ident_name(y.rhs(), "x"),
+            "y must observe the preceding selected write: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
     fn sign_extends_negative_literals_in_widening_constant_casts() {
         let ir = analyze_source(
             r#"
@@ -251,6 +332,39 @@ mod tests {
     }
 
     #[test]
+    fn resolves_constant_cast_targets_from_module_environments() {
+        let alias_ir = analyze_source(
+            r#"
+                module Top;
+                    typedef logic [7:0] byte_t;
+                    localparam P = byte_t'(4'd3);
+                endmodule
+            "#,
+            Path::new("constant_alias_cast_env.sv"),
+        )
+        .expect("typedef cast target should resolve");
+        assert_eq!(
+            alias_ir.modules()[0].parameters()[0].resolved_value(),
+            Some(3)
+        );
+
+        let width_ir = analyze_source(
+            r#"
+                module Top;
+                    localparam W = 8;
+                    localparam Q = W'(4'd3);
+                endmodule
+            "#,
+            Path::new("constant_width_cast_env.sv"),
+        )
+        .expect("parameter-sized cast target should resolve");
+        assert_eq!(
+            width_ir.modules()[0].parameters()[1].resolved_value(),
+            Some(3)
+        );
+    }
+
+    #[test]
     fn resolves_enum_members_referencing_earlier_members() {
         let ir = analyze_source(
             r#"
@@ -276,6 +390,48 @@ mod tests {
             expr_contains_literal(assignments[0].rhs(), "1"),
             "expected the folded member value in {:?}",
             assignments[0].rhs()
+        );
+    }
+
+    #[test]
+    fn preserves_enum_base_types_during_constant_substitution() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [31:0] y);
+                    typedef enum logic [1:0] { A = 2'd0 } E;
+                    assign y = ~A;
+                endmodule
+            "#,
+            Path::new("typed_enum_constant.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let rhs = ir.modules()[0].assignments()[0].rhs();
+        let ir::Expr::Unary { expr, .. } = rhs else {
+            panic!("expected enum complement: {rhs:?}");
+        };
+        assert_eq!(&**expr, &ir::Expr::Literal("2'd0".to_string()));
+    }
+
+    #[test]
+    fn rejects_casez_nested_under_comb_conditionals() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic en, sel, output logic y);
+                    always_comb begin
+                        y = 1'b0;
+                        if (en) casez (sel)
+                            1'b?: y = 1'b1;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("nested_casez.sv"),
+        )
+        .expect_err("nested casez must be rejected")
+        .to_string();
+        assert!(
+            error.contains("casez or casex inside always_comb"),
+            "unexpected error: {error}"
         );
     }
 

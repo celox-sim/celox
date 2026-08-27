@@ -149,7 +149,8 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
-        let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
+        let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
+        let mut parameters = parameters_from_module_node(node.clone(), syntax_tree, &type_aliases)?;
         let mut parameter_names = HashSet::default();
         if let Some(parameter) = parameters
             .iter()
@@ -164,12 +165,19 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         let mut const_env = const_env_from_parameters(&parameters);
-        let enum_constants =
-            enum_member_constants_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        let enum_constants = enum_member_constants_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        )?;
         for (name, value) in &enum_constants.numbers {
             const_env.entry(name.clone()).or_insert(*value);
+            const_env.insert(enum_marker(name), *value);
+            if let Some(r#type) = enum_constants.types.get(name) {
+                insert_parameter_type_markers(&mut const_env, name, *r#type);
+            }
         }
-        let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
         reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
         let mut port_names = HashSet::default();
@@ -615,7 +623,14 @@ fn cast_target_type(
                 return None;
             };
             let name = identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)?;
-            expr_type_from_type(type_aliases.get(&name)?, const_env)
+            if let Some(r#type) = type_aliases.get(&name) {
+                expr_type_from_type(r#type, const_env)
+            } else {
+                Some(ExprType {
+                    width: usize::try_from(*const_env.get(&name)?).ok()?.max(1),
+                    signed: false,
+                })
+            }
         }
         sv_parser::CastingType::ConstantPrimary(primary) => {
             if let Some(r#type) = size_system_function_expr_type(primary, syntax_tree, const_env) {
@@ -623,7 +638,9 @@ fn cast_target_type(
             }
             let target = const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)?;
             if let ConstExpr::Ident(name) = &target {
-                return expr_type_from_type(type_aliases.get(name)?, const_env);
+                if let Some(r#type) = type_aliases.get(name) {
+                    return expr_type_from_type(r#type, const_env);
+                }
             }
             let width = eval_ast_const_expr(&target, const_env)?;
             Some(ExprType {
@@ -742,9 +759,11 @@ fn constant_cast_const_expr(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
-    let ConstExpr::Literal(literal) = const_expr_from_ref_node(
+    let ConstExpr::Literal(literal) = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
         syntax_tree,
+        const_env,
+        type_aliases,
     )?
     else {
         return None;
@@ -2207,6 +2226,7 @@ impl FfEvent {
 pub struct ConditionalAssignment {
     condition: Option<Expr>,
     assignment: Assignment,
+    fills_exhaustive_fallback: bool,
 }
 
 impl ConditionalAssignment {
@@ -2214,6 +2234,7 @@ impl ConditionalAssignment {
         Self {
             condition,
             assignment,
+            fills_exhaustive_fallback: false,
         }
     }
 
@@ -2390,7 +2411,9 @@ fn ports_from_module_node(
 fn parameters_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
+    let base_const_env = HashMap::default();
     let mut parameters = Vec::new();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         parameters_from_ref_node(
@@ -2398,6 +2421,8 @@ fn parameters_from_module_node(
             syntax_tree,
             &mut parameters,
             false,
+            &base_const_env,
+            type_aliases,
         )?;
         let mut local_parameters = Vec::new();
         for child in parameter_port_list {
@@ -2407,6 +2432,8 @@ fn parameters_from_module_node(
                     syntax_tree,
                     &mut local_parameters,
                     true,
+                    &base_const_env,
+                    type_aliases,
                 )?;
             }
         }
@@ -2430,6 +2457,8 @@ fn parameters_from_module_node(
                     syntax_tree,
                     &mut parameters,
                     true,
+                    &base_const_env,
+                    type_aliases,
                 )?,
                 sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
                     parameters_from_ref_node(
@@ -2437,6 +2466,8 @@ fn parameters_from_module_node(
                         syntax_tree,
                         &mut parameters,
                         false,
+                        &base_const_env,
+                        type_aliases,
                     )?
                 }
                 _ => {}
@@ -2973,6 +3004,8 @@ fn parameters_from_ref_node(
     syntax_tree: &SyntaxTree,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
+    base_const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
     if node.clone().into_iter().any(|child| {
         matches!(
@@ -3008,11 +3041,11 @@ fn parameters_from_ref_node(
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
-            let mut value = param
-                .nodes
-                .2
-                .as_ref()
-                .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
+            let mut const_env = base_const_env.clone();
+            const_env.extend(const_env_from_parameters(parameters));
+            let mut value = param.nodes.2.as_ref().and_then(|(_, expr)| {
+                const_expr_from_constant_param_with_env(expr, syntax_tree, &const_env, type_aliases)
+            });
             value =
                 normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
             parameters.push(Parameter::new(
@@ -3122,6 +3155,8 @@ struct EnumMemberConstants {
     numbers: HashMap<String, i128>,
     /// Resolved literal expressions for process-expression substitution.
     exprs: HashMap<String, Expr>,
+    /// Base width and signedness retained for early constant substitution.
+    types: HashMap<String, ExprType>,
 }
 
 /// Collect enum member constants declared by module-level `typedef enum`
@@ -3132,6 +3167,7 @@ fn enum_member_constants_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     base_const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
@@ -3151,6 +3187,18 @@ fn enum_member_constants_from_module_node(
         let sv_parser::DataType::Enum(r#enum) = &type_declaration.nodes.1 else {
             continue;
         };
+        let member_type = match &r#enum.nodes.1 {
+            Some(base) => type_from_ref_node(RefNode::EnumBaseType(base), syntax_tree)
+                .or_else(|| {
+                    type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, type_aliases)
+                })
+                .and_then(|r#type| expr_type_from_type(&r#type, &eval_env)),
+            None => Some(ExprType {
+                width: 32,
+                signed: true,
+            }),
+        }
+        .ok_or_else(|| AnalyzerError::Unsupported("enum base type".to_string()))?;
         for member in r#enum.nodes.2.nodes.1.contents() {
             let name = identifier_text(RefNode::Identifier(&member.nodes.0.nodes.0), syntax_tree)
                 .ok_or_else(|| {
@@ -3161,20 +3209,27 @@ fn enum_member_constants_from_module_node(
                     "enum member `{name}` without an explicit value"
                 )));
             };
-            let value = const_expr_from_ref_node(RefNode::ConstantExpression(value), syntax_tree)
-                .ok_or_else(|| {
-                AnalyzerError::Unsupported(format!("enum member `{name}` value"))
+            let value = const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(value),
+                syntax_tree,
+                &eval_env,
+                type_aliases,
+            )
+            .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
+            let number = eval_ast_const_expr(&value, &eval_env).ok_or_else(|| {
+                AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
             })?;
-            if let Some(number) = eval_ast_const_expr(&value, &eval_env) {
-                constants.numbers.insert(name.clone(), number);
-                eval_env.insert(name.clone(), number);
-            }
-            let expr = substitute_expr_constants_with_parameter_literals(
-                const_expr_to_expr(value),
-                base_const_env,
-                &constants.exprs,
+            constants.numbers.insert(name.clone(), number);
+            eval_env.insert(name.clone(), number);
+            constants.types.insert(name.clone(), member_type);
+            constants.exprs.insert(
+                name,
+                Expr::Literal(format_typed_parameter_literal(
+                    number,
+                    member_type.width,
+                    member_type.signed,
+                )),
             );
-            constants.exprs.insert(name, expr);
         }
     }
     Ok(constants)
@@ -3756,6 +3811,10 @@ fn packed_dimensions_from_ref_node(
 
 fn parameter_marker(name: &str) -> String {
     format!("__parameter::{name}")
+}
+
+fn enum_marker(name: &str) -> String {
+    format!("__enum::{name}")
 }
 
 fn parameter_width_marker(name: &str) -> String {
@@ -6126,6 +6185,8 @@ fn generate_block_direct_local_parameter_names(
             syntax_tree,
             &mut parameters,
             true,
+            &HashMap::default(),
+            &HashMap::default(),
         )
         .is_ok()
         {
@@ -6320,6 +6381,8 @@ fn add_localparams_from_generate_item_with_literals(
         syntax_tree,
         &mut parameters,
         true,
+        const_env,
+        &HashMap::default(),
     )
     .is_err()
     {
@@ -6443,10 +6506,22 @@ fn substitute_expr_constants_with_parameter_literals(
             .get(&name)
             .cloned()
             .or_else(|| {
-                const_env
-                    .get(&name)
-                    .filter(|_| !const_env.contains_key(&parameter_marker(&name)))
-                    .map(|value| Expr::Literal(value.to_string()))
+                let value = *const_env.get(&name)?;
+                if const_env.contains_key(&enum_marker(&name)) {
+                    let width = const_env
+                        .get(&parameter_width_marker(&name))
+                        .and_then(|width| usize::try_from(*width).ok())?;
+                    let signed = const_env
+                        .get(&parameter_signed_marker(&name))
+                        .is_some_and(|signed| *signed != 0);
+                    Some(Expr::Literal(format_typed_parameter_literal(
+                        value, width, signed,
+                    )))
+                } else if !const_env.contains_key(&parameter_marker(&name)) {
+                    Some(Expr::Literal(value.to_string()))
+                } else {
+                    None
+                }
             })
             .unwrap_or(Expr::Ident(name)),
         Expr::Literal(value) => Expr::Literal(value),
@@ -7138,54 +7213,30 @@ fn comb_assignments_from_guarded(
             continue;
         }
         let last = *indices.last().expect("group is non-empty");
-        let name = write_target_base_name(&target);
-        if let LValue::Ident(name) = &target {
-            substitute_intermediate_comb_value_reads(&mut guarded, &indices, name)?;
-        }
-        let mut current: Option<Expr> = None;
-        if guarded[indices[0]].condition().is_none() {
-            // A leading unconditional write establishes the procedural
-            // default. Later guarded writes override it, just as blocking
-            // assignments do in source order.
-            for index in &indices {
-                let write = &guarded[*index];
-                let value = write.assignment().rhs().clone();
-                current = Some(match write.condition() {
+        substitute_intermediate_comb_value_reads(&mut guarded, &indices, &target)?;
+        // Fold in source order so writes after an if/else retain procedural
+        // priority. A target-specific exhaustive fallback fills the previous
+        // value in the branch chain instead of becoming globally
+        // unconditional.
+        let mut current = lvalue_self_reference(&target);
+        for index in &indices {
+            let write = &guarded[*index];
+            let value = write.assignment().rhs().clone();
+            current = if write.fills_exhaustive_fallback {
+                substitute_expr_lvalue(current, &target, &value)
+            } else {
+                match write.condition() {
                     None => value,
                     Some(condition) => Expr::Mux {
                         condition: Box::new(condition.clone()),
                         then_expr: Box::new(value),
-                        else_expr: Box::new(current.expect("leading default establishes a value")),
+                        else_expr: Box::new(current),
                     },
-                });
-            }
-        } else {
-            // Branches are emitted in priority order, with an exhaustive
-            // else/default represented as the final unconditional fallback.
-            for index in indices.iter().rev() {
-                let write = &guarded[*index];
-                let value = write.assignment().rhs().clone();
-                current = Some(match write.condition() {
-                    None => value,
-                    Some(condition) => {
-                        // A conditional write with no later unconditional
-                        // fallback would keep the previous value, which
-                        // infers a latch; represent that tentatively with a
-                        // self-reference and reject it below.
-                        let otherwise = current.unwrap_or_else(|| {
-                            lvalue_self_reference(write.assignment().lhs_value())
-                        });
-                        Expr::Mux {
-                            condition: Box::new(condition.clone()),
-                            then_expr: Box::new(value),
-                            else_expr: Box::new(otherwise),
-                        }
-                    }
-                });
-            }
+                }
+            };
         }
-        let rhs = current.expect("guarded writes exist");
-        if expr_references_signal(&rhs, name) {
+        let rhs = current;
+        if expr_references_lvalue(&rhs, &target) {
             return Err(AnalyzerError::Unsupported(
                 "latch inference inside always_comb".to_string(),
             ));
@@ -7195,39 +7246,38 @@ fn comb_assignments_from_guarded(
     Ok(slots.into_iter().flatten().collect())
 }
 
-/// Substitute the value established by earlier writes to `name` into reads
+/// Substitute the value established by earlier writes to `target` into reads
 /// that occur before the merged write is emitted. This handles procedural
 /// sequences such as `x = 0; y = x; if (c) x = 1;` without making `y` observe
 /// the value of `x` from the preceding process activation.
 fn substitute_intermediate_comb_value_reads(
     guarded: &mut [ConditionalAssignment],
     indices: &[usize],
-    name: &str,
+    target: &LValue,
 ) -> Result<(), AnalyzerError> {
     let first = *indices.first().expect("group is non-empty");
     let last = *indices.last().expect("group is non-empty");
-    let mut established: Option<Expr> = None;
+    let mut established = lvalue_self_reference(target);
+    let mut initialized = false;
     let mut write_index = 0;
 
     for (index, guarded_assignment) in guarded.iter_mut().enumerate().take(last + 1).skip(first) {
         let is_target_write = indices.get(write_index) == Some(&index);
-        let mut env = HashMap::default();
-        if let Some(value) = &established {
-            env.insert(name.to_string(), value.clone());
+        if initialized {
             guarded_assignment.condition = guarded_assignment
                 .condition
                 .take()
-                .map(|condition| substitute_expr_idents(condition, &env));
+                .map(|condition| substitute_expr_lvalue(condition, target, &established));
             let assignment = guarded_assignment.assignment.clone();
             guarded_assignment.assignment = Assignment::new(
                 assignment.lhs_value().clone(),
-                substitute_expr_idents(assignment.rhs, &env),
+                substitute_expr_lvalue(assignment.rhs, target, &established),
             );
         } else if !is_target_write
             && (guarded_assignment
                 .condition()
-                .is_some_and(|condition| expr_references_signal(condition, Some(name)))
-                || expr_references_signal(guarded_assignment.assignment().rhs(), Some(name)))
+                .is_some_and(|condition| expr_references_lvalue(condition, target))
+                || expr_references_lvalue(guarded_assignment.assignment().rhs(), target))
         {
             return Err(AnalyzerError::Unsupported(
                 "read-before-write dependency inside always_comb".to_string(),
@@ -7240,17 +7290,139 @@ fn substitute_intermediate_comb_value_reads(
         write_index += 1;
         let write = &*guarded_assignment;
         let value = write.assignment().rhs().clone();
-        established = match (write.condition(), established) {
-            (None, _) => Some(value),
-            (Some(condition), Some(previous)) => Some(Expr::Mux {
-                condition: Box::new(condition.clone()),
-                then_expr: Box::new(value),
-                else_expr: Box::new(previous),
-            }),
-            (Some(_), None) => None,
-        };
+        if write.fills_exhaustive_fallback {
+            established = substitute_expr_lvalue(established, target, &value);
+            initialized = true;
+        } else {
+            established = match write.condition() {
+                None => {
+                    initialized = true;
+                    value
+                }
+                Some(condition) => Expr::Mux {
+                    condition: Box::new(condition.clone()),
+                    then_expr: Box::new(value),
+                    else_expr: Box::new(established),
+                },
+            };
+        }
     }
     Ok(())
+}
+
+fn substitute_expr_lvalue(expr: Expr, target: &LValue, value: &Expr) -> Expr {
+    if expr_matches_lvalue(&expr, target) {
+        return value.clone();
+    }
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => expr,
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: Box::new(substitute_expr_lvalue(*expr, target, value)),
+            msb,
+            lsb,
+            signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .into_iter()
+                .map(|part| substitute_expr_lvalue(part, target, value))
+                .collect(),
+        ),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count,
+            parts: parts
+                .into_iter()
+                .map(|part| substitute_expr_lvalue(part, target, value))
+                .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(substitute_expr_lvalue(*expr, target, value)),
+            width,
+            signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(substitute_expr_lvalue(*expr, target, value)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(substitute_expr_lvalue(*left, target, value)),
+            op,
+            right: Box::new(substitute_expr_lvalue(*right, target, value)),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(substitute_expr_lvalue(*condition, target, value)),
+            then_expr: Box::new(substitute_expr_lvalue(*then_expr, target, value)),
+            else_expr: Box::new(substitute_expr_lvalue(*else_expr, target, value)),
+        },
+        Expr::Call { name, args } => Expr::Call {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| substitute_expr_lvalue(arg, target, value))
+                .collect(),
+        },
+    }
+}
+
+fn expr_matches_lvalue(expr: &Expr, target: &LValue) -> bool {
+    match (expr, target) {
+        (Expr::Ident(expr_name), LValue::Ident(target_name)) => expr_name == target_name,
+        (
+            Expr::Select { expr, msb, lsb, .. },
+            LValue::Select {
+                name,
+                msb: target_msb,
+                lsb: target_lsb,
+                ..
+            },
+        ) => {
+            matches!(&**expr, Expr::Ident(expr_name) if expr_name == name)
+                && msb == target_msb
+                && lsb == target_lsb
+        }
+        _ => false,
+    }
+}
+
+fn expr_references_lvalue(expr: &Expr, target: &LValue) -> bool {
+    if expr_matches_lvalue(expr, target) {
+        return true;
+    }
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => false,
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            expr_references_lvalue(expr, target)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
+            .iter()
+            .any(|part| expr_references_lvalue(part, target)),
+        Expr::Binary { left, right, .. } => {
+            expr_references_lvalue(left, target) || expr_references_lvalue(right, target)
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_references_lvalue(condition, target)
+                || expr_references_lvalue(then_expr, target)
+                || expr_references_lvalue(else_expr, target)
+        }
+        Expr::Call { args, .. } => args.iter().any(|arg| expr_references_lvalue(arg, target)),
+    }
 }
 
 fn lvalue_self_reference(target: &LValue) -> Expr {
@@ -7271,96 +7443,41 @@ fn lvalue_self_reference(target: &LValue) -> Expr {
     }
 }
 
-fn write_target_base_name(target: &LValue) -> Option<&str> {
-    match target {
-        LValue::Ident(name) => Some(name),
-        LValue::Select { name, .. } => Some(name),
-    }
-}
-
-fn expr_references_signal(expr: &Expr, signal: Option<&str>) -> bool {
-    let Some(signal) = signal else {
-        return false;
-    };
-    match expr {
-        Expr::Ident(name) => name == signal,
-        Expr::Literal(_) => false,
-        Expr::Select { expr, msb, lsb, .. } => {
-            expr_references_signal(expr, Some(signal))
-                || const_expr_references_signal(msb, signal)
-                || const_expr_references_signal(lsb, signal)
-        }
-        Expr::Concat(parts) => parts
-            .iter()
-            .any(|part| expr_references_signal(part, Some(signal))),
-        Expr::RepeatConcat { parts, .. } => parts
-            .iter()
-            .any(|part| expr_references_signal(part, Some(signal))),
-        Expr::Resize { expr, .. } => expr_references_signal(expr, Some(signal)),
-        Expr::Call { args, .. } => args
-            .iter()
-            .any(|arg| expr_references_signal(arg, Some(signal))),
-        Expr::Unary { expr, .. } => expr_references_signal(expr, Some(signal)),
-        Expr::Binary { left, right, .. } => {
-            expr_references_signal(left, Some(signal))
-                || expr_references_signal(right, Some(signal))
-        }
-        Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_references_signal(condition, Some(signal))
-                || expr_references_signal(then_expr, Some(signal))
-                || expr_references_signal(else_expr, Some(signal))
-        }
-    }
-}
-
-fn const_expr_references_signal(expr: &ConstExpr, signal: &str) -> bool {
-    match expr {
-        ConstExpr::Ident(name) => name == signal,
-        ConstExpr::Literal(_) => false,
-        ConstExpr::Select { expr, bit } => {
-            const_expr_references_signal(expr, signal) || const_expr_references_signal(bit, signal)
-        }
-        ConstExpr::Function { args, .. } => args
-            .iter()
-            .any(|arg| const_expr_references_signal(arg, signal)),
-        ConstExpr::Unary { expr, .. } => const_expr_references_signal(expr, signal),
-        ConstExpr::Binary { left, right, .. } => {
-            const_expr_references_signal(left, signal)
-                || const_expr_references_signal(right, signal)
-        }
-        ConstExpr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            const_expr_references_signal(condition, signal)
-                || const_expr_references_signal(then_expr, signal)
-                || const_expr_references_signal(else_expr, signal)
-        }
-    }
-}
-
 fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), AnalyzerError> {
     match &stmt.nodes.2 {
-        sv_parser::StatementItem::BlockingAssignment(_)
-        | sv_parser::StatementItem::ConditionalStatement(_) => Ok(()),
+        sv_parser::StatementItem::BlockingAssignment(_) => Ok(()),
+        sv_parser::StatementItem::ConditionalStatement(conditional) => {
+            validate_always_comb_statement_or_null(&conditional.nodes.3)?;
+            for (_, _, _, branch) in &conditional.nodes.4 {
+                validate_always_comb_statement_or_null(branch)?;
+            }
+            if let Some((_, branch)) = &conditional.nodes.5 {
+                validate_always_comb_statement_or_null(branch)?;
+            }
+            Ok(())
+        }
         sv_parser::StatementItem::CaseStatement(case) => {
             let sv_parser::CaseStatement::Normal(case) = &**case else {
                 return Err(AnalyzerError::Unsupported(
                     "casez, casex, or pattern case inside always_comb".to_string(),
                 ));
             };
-            if matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_)) {
-                Ok(())
-            } else {
-                Err(AnalyzerError::Unsupported(
+            if !matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_)) {
+                return Err(AnalyzerError::Unsupported(
                     "casez or casex inside always_comb".to_string(),
-                ))
+                ));
             }
+            for item in std::iter::once(&case.nodes.3).chain(case.nodes.4.iter()) {
+                match item {
+                    sv_parser::CaseItem::NonDefault(item) => {
+                        validate_always_comb_statement_or_null(&item.nodes.2)?;
+                    }
+                    sv_parser::CaseItem::Default(item) => {
+                        validate_always_comb_statement_or_null(&item.nodes.2)?;
+                    }
+                }
+            }
+            Ok(())
         }
         sv_parser::StatementItem::SeqBlock(block) => {
             for stmt in &block.nodes.3 {
@@ -7374,6 +7491,15 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
             "unsupported statement inside always_comb".to_string(),
         )),
     }
+}
+
+fn validate_always_comb_statement_or_null(
+    stmt: &sv_parser::StatementOrNull,
+) -> Result<(), AnalyzerError> {
+    if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
+        validate_always_comb_statement(stmt)?;
+    }
+    Ok(())
 }
 
 fn ff_processes_from_module_node(
@@ -7885,7 +8011,9 @@ fn conditional_assignments_from_conditional_statement(
                 AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
             })?;
     let mut prior_false = Vec::new();
+    let mut branch_targets = Vec::new();
     let then_condition = combine_expr_conditions(parent_condition.clone(), if_condition.clone());
+    let branch_start = assignments.len();
     conditional_assignments_from_statement_or_null(
         &stmt.nodes.3,
         then_condition,
@@ -7895,6 +8023,7 @@ fn conditional_assignments_from_conditional_statement(
         packed_dimensions,
         assignments,
     )?;
+    branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
     prior_false.push(procedural_false_condition(if_condition));
 
     for (_, _, predicate, branch) in &stmt.nodes.4 {
@@ -7906,6 +8035,7 @@ fn conditional_assignments_from_conditional_statement(
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
+        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
@@ -7915,27 +8045,29 @@ fn conditional_assignments_from_conditional_statement(
             packed_dimensions,
             assignments,
         )?;
+        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
         prior_false.push(procedural_false_condition(branch_condition));
     }
 
     if let Some((_, branch)) = &stmt.nodes.5 {
-        // Only a final else whose parent chain is already tautological is
-        // itself tautological; nested statements inside it inherit that.
+        // Keep the false-path guard while lowering. It can only be removed
+        // for targets that are written in every branch of this chain.
         let exhaustive = exhaustive_fallback && parent_condition.is_none();
-        let condition = if exhaustive {
-            None
-        } else {
-            combine_expr_condition_terms(parent_condition, prior_false)
-        };
+        let condition = combine_expr_condition_terms(parent_condition, prior_false);
+        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
-            condition,
-            exhaustive,
+            condition.clone(),
+            false,
             syntax_tree,
             const_env,
             packed_dimensions,
             assignments,
         )?;
+        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+        if exhaustive {
+            mark_exhaustive_fallback(&mut assignments[branch_start..], &branch_targets);
+        }
     }
     Ok(())
 }
@@ -7960,10 +8092,14 @@ fn conditional_assignments_from_case_statement(
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::CaseStatement::Normal(stmt) = stmt else {
-        return Ok(());
+        return Err(AnalyzerError::Unsupported(
+            "casez, casex, or pattern case inside always_comb".to_string(),
+        ));
     };
     if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
-        return Ok(());
+        return Err(AnalyzerError::Unsupported(
+            "casez or casex inside always_comb".to_string(),
+        ));
     }
     let case_expr = expr_from_expression_with_types(
         &stmt.nodes.2.nodes.1.nodes.0,
@@ -8006,12 +8142,14 @@ fn conditional_assignments_from_case_statement(
     }
 
     let mut prior_false = Vec::new();
+    let mut branch_targets = Vec::new();
     for (branch_condition, branch) in branches {
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
         // Case-item guards are never tautological, so statements nested in
         // a branch must keep the item condition.
+        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
@@ -8021,6 +8159,7 @@ fn conditional_assignments_from_case_statement(
             packed_dimensions,
             assignments,
         )?;
+        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
         prior_false.push(Expr::Unary {
             op: UnaryOp::LogicNot,
             expr: Box::new(branch_condition),
@@ -8028,25 +8167,55 @@ fn conditional_assignments_from_case_statement(
     }
 
     if let Some(branch) = default_branch {
-        // Only a default whose parent chain is already tautological is
-        // itself tautological; nested statements inside it inherit that.
+        // As with an else branch, retain the selector guard until all case
+        // arms are known to assign the same target.
         let exhaustive = exhaustive_fallback && parent_condition.is_none();
-        let condition = if exhaustive {
-            None
-        } else {
-            combine_expr_condition_terms(parent_condition, prior_false)
-        };
+        let condition = combine_expr_condition_terms(parent_condition, prior_false);
+        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
-            condition,
-            exhaustive,
+            condition.clone(),
+            false,
             syntax_tree,
             const_env,
             packed_dimensions,
             assignments,
         )?;
+        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+        if exhaustive {
+            mark_exhaustive_fallback(&mut assignments[branch_start..], &branch_targets);
+        }
     }
     Ok(())
+}
+
+fn conditional_assignment_targets(assignments: &[ConditionalAssignment]) -> Vec<LValue> {
+    let mut targets = Vec::new();
+    for assignment in assignments {
+        let target = assignment.assignment().lhs_value();
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
+    targets
+}
+
+fn mark_exhaustive_fallback(
+    fallback_assignments: &mut [ConditionalAssignment],
+    branch_targets: &[Vec<LValue>],
+) {
+    let mut marked_targets = Vec::new();
+    for assignment in fallback_assignments {
+        let target = assignment.assignment().lhs_value();
+        if branch_targets
+            .iter()
+            .all(|targets| targets.contains(target))
+            && !marked_targets.contains(target)
+        {
+            marked_targets.push(target.clone());
+            assignment.fills_exhaustive_fallback = true;
+        }
+    }
 }
 
 fn expr_from_cond_predicate(
@@ -9656,14 +9825,21 @@ fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
     }
 }
 
-fn const_expr_from_constant_param(
+fn const_expr_from_constant_param_with_env(
     expr: &sv_parser::ConstantParamExpression,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
     match expr {
         sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(expr) => match &**expr {
             sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
-                const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)
+                const_expr_from_ref_node_with_env(
+                    RefNode::ConstantExpression(expr),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
             }
             sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
         },
@@ -9973,16 +10149,32 @@ fn unpacked_ranges_from_variable_dimensions(
 }
 
 fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<ConstExpr> {
+    const_expr_from_ref_node_with_env(node, syntax_tree, &HashMap::default(), &HashMap::default())
+}
+
+fn const_expr_from_ref_node_with_env(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ConstExpr> {
     match node {
         RefNode::ConstantExpression(expr) => match expr {
             sv_parser::ConstantExpression::ConstantPrimary(primary) => {
-                const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
+                const_expr_from_ref_node_with_env(
+                    RefNode::ConstantPrimary(primary),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
             }
             sv_parser::ConstantExpression::Unary(unary) => {
                 let op = unary_op_from_symbol(&unary.nodes.0.nodes.0.nodes.0, syntax_tree)?;
-                let expr = const_expr_from_ref_node(
+                let expr = const_expr_from_ref_node_with_env(
                     RefNode::ConstantPrimary(&unary.nodes.2),
                     syntax_tree,
+                    const_env,
+                    type_aliases,
                 )?;
                 Some(ConstExpr::Unary {
                     op,
@@ -9991,14 +10183,18 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
             }
             sv_parser::ConstantExpression::Binary(binary) => {
                 let right_is_grouped = constant_expression_is_grouped(&binary.nodes.3);
-                let left = const_expr_from_ref_node(
+                let left = const_expr_from_ref_node_with_env(
                     RefNode::ConstantExpression(&binary.nodes.0),
                     syntax_tree,
+                    const_env,
+                    type_aliases,
                 )?;
                 let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
-                let right = const_expr_from_ref_node(
+                let right = const_expr_from_ref_node_with_env(
                     RefNode::ConstantExpression(&binary.nodes.3),
                     syntax_tree,
+                    const_env,
+                    type_aliases,
                 )?;
                 let expr = ConstExpr::Binary {
                     left: Box::new(left),
@@ -10012,7 +10208,12 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                 })
             }
             sv_parser::ConstantExpression::Ternary(expr) => {
-                const_expr_from_constant_expression_ternary(expr, syntax_tree)
+                const_expr_from_constant_expression_ternary_with_env(
+                    expr,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
             }
             sv_parser::ConstantExpression::Inside(_) => None,
         },
@@ -10049,15 +10250,17 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                         .map(ConstExpr::Ident)
                 })
             }
-            sv_parser::ConstantPrimary::ConstantCast(cast) => constant_cast_const_expr(
-                cast,
-                syntax_tree,
-                &HashMap::default(),
-                &HashMap::default(),
-            ),
+            sv_parser::ConstantPrimary::ConstantCast(cast) => {
+                constant_cast_const_expr(cast, syntax_tree, const_env, type_aliases)
+            }
             sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
-                    const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)
+                    const_expr_from_ref_node_with_env(
+                        RefNode::ConstantExpression(expr),
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                    )
                 }
                 sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
             },
@@ -10089,22 +10292,30 @@ fn constant_expression_is_grouped(expr: &sv_parser::ConstantExpression) -> bool 
     )
 }
 
-fn const_expr_from_constant_expression_ternary(
+fn const_expr_from_constant_expression_ternary_with_env(
     expr: &sv_parser::ConstantExpressionTernary,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
     Some(ConstExpr::Mux {
-        condition: Box::new(const_expr_from_ref_node(
+        condition: Box::new(const_expr_from_ref_node_with_env(
             RefNode::ConstantExpression(&expr.nodes.0),
             syntax_tree,
+            const_env,
+            type_aliases,
         )?),
-        then_expr: Box::new(const_expr_from_ref_node(
+        then_expr: Box::new(const_expr_from_ref_node_with_env(
             RefNode::ConstantExpression(&expr.nodes.3),
             syntax_tree,
+            const_env,
+            type_aliases,
         )?),
-        else_expr: Box::new(const_expr_from_ref_node(
+        else_expr: Box::new(const_expr_from_ref_node_with_env(
             RefNode::ConstantExpression(&expr.nodes.5),
             syntax_tree,
+            const_env,
+            type_aliases,
         )?),
     })
 }
