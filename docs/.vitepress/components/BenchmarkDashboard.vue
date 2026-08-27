@@ -584,6 +584,7 @@ const chartOptions = makeChartOptions();
 // --- URL synchronization ---
 
 const TAB_QUERY_PARAM = "tab";
+let dashboardPathname = "";
 
 function activateTabFromUrl(): boolean {
   const requestedTab = new URL(window.location.href).searchParams.get(
@@ -612,6 +613,8 @@ function selectTab(tab: string) {
 }
 
 function handlePopState() {
+  if (window.location.pathname !== dashboardPathname) return;
+
   if (!activateTabFromUrl() && availableTabs.value.length > 0) {
     activeTab.value = availableTabs.value[0].key;
     updateTabInUrl(activeTab.value, true);
@@ -621,6 +624,7 @@ function handlePopState() {
 // --- Fetch data ---
 
 onMounted(async () => {
+  dashboardPathname = window.location.pathname;
   window.addEventListener("popstate", handlePopState);
 
   try {
