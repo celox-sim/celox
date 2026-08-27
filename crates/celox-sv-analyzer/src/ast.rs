@@ -163,7 +163,12 @@ impl Module {
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
-        let const_env = const_env_from_parameters(&parameters);
+        let mut const_env = const_env_from_parameters(&parameters);
+        let enum_constants =
+            enum_member_constants_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        for (name, value) in &enum_constants.numbers {
+            const_env.entry(name.clone()).or_insert(*value);
+        }
         let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
         reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
@@ -221,8 +226,10 @@ impl Module {
         }
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let mut parameter_values = parameter_value_env(&parameters, &const_env);
-        for (name, value) in enum_member_constants_from_module_node(node.clone(), syntax_tree)? {
-            parameter_values.entry(name).or_insert(value);
+        for (name, value) in &enum_constants.exprs {
+            parameter_values
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
         }
         let mut expression_signedness = ports
             .iter()
@@ -643,7 +650,9 @@ fn size_system_function_expr_type(
         return None;
     };
     let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
-    if name != "$bits" && name != "$size" {
+    // $bits covers every packed dimension; $size covers only the first.
+    let first_dimension_only = name == "$size";
+    if name != "$bits" && !first_dimension_only {
         return None;
     }
     let data_type = unwrap_node!(
@@ -652,7 +661,17 @@ fn size_system_function_expr_type(
         DataTypeAtom
     )?;
     let r#type = type_from_ref_node(data_type.clone(), syntax_tree)?;
-    expr_type_from_type(&r#type, const_env)
+    if !first_dimension_only {
+        return expr_type_from_type(&r#type, const_env);
+    }
+    let range = r#type.packed_ranges().first()?;
+    let left = eval_ast_const_expr(range.left(), const_env)?;
+    let right = eval_ast_const_expr(range.right(), const_env)?;
+    let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
+    Some(ExprType {
+        width: width.max(1),
+        signed: r#type.is_signed(),
+    })
 }
 
 fn expr_type_from_type(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<ExprType> {
@@ -735,17 +754,35 @@ fn constant_cast_const_expr(
         return None;
     }
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
-    let value = if literal.value.bits() > target_type.width as u64 {
-        literal.value
-            & ((num_bigint::BigUint::from(1usize) << target_type.width)
-                - num_bigint::BigUint::from(1usize))
+    // A size cast keeps the source expression's signedness when the target
+    // is described by a constant primary; a type cast takes the target's.
+    let signed = if matches!(cast.nodes.0, sv_parser::CastingType::ConstantPrimary(_)) {
+        literal.signed
     } else {
-        literal.value.clone()
+        target_type.signed
     };
+    let mut value = literal.value.clone();
+    // Widen negative two's-complement sources with sign extension before
+    // applying the truncating cast.
+    if literal.signed
+        && literal.width > 0
+        && literal.width < target_type.width
+        && (literal.value >> (literal.width - 1)) & num_bigint::BigUint::from(1usize)
+            == num_bigint::BigUint::from(1usize)
+    {
+        value |= ((num_bigint::BigUint::from(1usize) << target_type.width)
+            - num_bigint::BigUint::from(1usize))
+            ^ ((num_bigint::BigUint::from(1usize) << literal.width)
+                - num_bigint::BigUint::from(1usize));
+    }
+    if value.bits() > target_type.width as u64 {
+        value &= (num_bigint::BigUint::from(1usize) << target_type.width)
+            - num_bigint::BigUint::from(1usize);
+    }
     Some(ConstExpr::Literal(format!(
         "{}'{}d{}",
         target_type.width,
-        if target_type.signed { "s" } else { "" },
+        if signed { "s" } else { "" },
         value
     )))
 }
@@ -3077,16 +3114,27 @@ fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128
         bits as i128
     }
 }
+/// Enum member constants collected from module-level `typedef enum`
+/// declarations.
+#[derive(Default)]
+struct EnumMemberConstants {
+    /// Evaluated values for the module constant environment.
+    numbers: HashMap<String, i128>,
+    /// Resolved literal expressions for process-expression substitution.
+    exprs: HashMap<String, Expr>,
+}
 
 /// Collect enum member constants declared by module-level `typedef enum`
 /// declarations. Members must carry explicit values, matching what Veryl
-/// emits; the values become literal expressions usable anywhere in the
-/// module body.
+/// emits; each initializer may reference previously declared members of the
+/// same module scope.
 fn enum_member_constants_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
-) -> Result<HashMap<String, Expr>, AnalyzerError> {
-    let mut constants = HashMap::default();
+    base_const_env: &HashMap<String, i128>,
+) -> Result<EnumMemberConstants, AnalyzerError> {
+    let mut constants = EnumMemberConstants::default();
+    let mut eval_env = base_const_env.clone();
     for item in module_non_port_items(node) {
         let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
             continue;
@@ -3114,9 +3162,19 @@ fn enum_member_constants_from_module_node(
                 )));
             };
             let value = const_expr_from_ref_node(RefNode::ConstantExpression(value), syntax_tree)
-                .map(const_expr_to_expr)
-                .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
-            constants.insert(name, value);
+                .ok_or_else(|| {
+                AnalyzerError::Unsupported(format!("enum member `{name}` value"))
+            })?;
+            if let Some(number) = eval_ast_const_expr(&value, &eval_env) {
+                constants.numbers.insert(name.clone(), number);
+                eval_env.insert(name.clone(), number);
+            }
+            let expr = substitute_expr_constants_with_parameter_literals(
+                const_expr_to_expr(value),
+                base_const_env,
+                &constants.exprs,
+            );
+            constants.exprs.insert(name, expr);
         }
     }
     Ok(constants)
@@ -7049,7 +7107,7 @@ fn comb_process_from_always_construct(
 /// conditional write with no later unconditional fallback would keep the
 /// previous value, which infers a latch, and is rejected.
 fn comb_assignments_from_guarded(
-    guarded: Vec<ConditionalAssignment>,
+    mut guarded: Vec<ConditionalAssignment>,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     let mut targets: Vec<LValue> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
@@ -7064,7 +7122,9 @@ fn comb_assignments_from_guarded(
         }
     }
     // Merged groups land on the slot of their last write so relative
-    // statement ordering across different targets is preserved.
+    // statement ordering across different targets is preserved. Substitute
+    // values established by earlier writes into intervening reads before the
+    // group is moved, preserving blocking-assignment statement semantics.
     let mut slots: Vec<Option<Assignment>> = Vec::with_capacity(guarded.len());
     slots.extend((0..guarded.len()).map(|_| None));
     for (target, indices) in targets.into_iter().zip(groups) {
@@ -7077,36 +7137,120 @@ fn comb_assignments_from_guarded(
             }
             continue;
         }
+        let last = *indices.last().expect("group is non-empty");
+        let name = write_target_base_name(&target);
+        if let LValue::Ident(name) = &target {
+            substitute_intermediate_comb_value_reads(&mut guarded, &indices, name)?;
+        }
         let mut current: Option<Expr> = None;
-        for index in indices.iter().rev() {
-            let write = &guarded[*index];
-            let value = write.assignment().rhs().clone();
-            current = Some(match write.condition() {
-                None => value,
-                Some(condition) => {
-                    // A conditional write with no later unconditional
-                    // fallback would keep the previous value, which infers
-                    // a latch; represent that tentatively with a
-                    // self-reference and reject it below.
-                    let otherwise = current
-                        .unwrap_or_else(|| lvalue_self_reference(write.assignment().lhs_value()));
-                    Expr::Mux {
+        if guarded[indices[0]].condition().is_none() {
+            // A leading unconditional write establishes the procedural
+            // default. Later guarded writes override it, just as blocking
+            // assignments do in source order.
+            for index in &indices {
+                let write = &guarded[*index];
+                let value = write.assignment().rhs().clone();
+                current = Some(match write.condition() {
+                    None => value,
+                    Some(condition) => Expr::Mux {
                         condition: Box::new(condition.clone()),
                         then_expr: Box::new(value),
-                        else_expr: Box::new(otherwise),
+                        else_expr: Box::new(current.expect("leading default establishes a value")),
+                    },
+                });
+            }
+        } else {
+            // Branches are emitted in priority order, with an exhaustive
+            // else/default represented as the final unconditional fallback.
+            for index in indices.iter().rev() {
+                let write = &guarded[*index];
+                let value = write.assignment().rhs().clone();
+                current = Some(match write.condition() {
+                    None => value,
+                    Some(condition) => {
+                        // A conditional write with no later unconditional
+                        // fallback would keep the previous value, which
+                        // infers a latch; represent that tentatively with a
+                        // self-reference and reject it below.
+                        let otherwise = current.unwrap_or_else(|| {
+                            lvalue_self_reference(write.assignment().lhs_value())
+                        });
+                        Expr::Mux {
+                            condition: Box::new(condition.clone()),
+                            then_expr: Box::new(value),
+                            else_expr: Box::new(otherwise),
+                        }
                     }
-                }
-            });
+                });
+            }
         }
         let rhs = current.expect("guarded writes exist");
-        if expr_references_signal(&rhs, write_target_base_name(&target)) {
+        if expr_references_signal(&rhs, name) {
             return Err(AnalyzerError::Unsupported(
                 "latch inference inside always_comb".to_string(),
             ));
         }
-        slots[*indices.last().expect("group is non-empty")] = Some(Assignment::new(target, rhs));
+        slots[last] = Some(Assignment::new(target, rhs));
     }
     Ok(slots.into_iter().flatten().collect())
+}
+
+/// Substitute the value established by earlier writes to `name` into reads
+/// that occur before the merged write is emitted. This handles procedural
+/// sequences such as `x = 0; y = x; if (c) x = 1;` without making `y` observe
+/// the value of `x` from the preceding process activation.
+fn substitute_intermediate_comb_value_reads(
+    guarded: &mut [ConditionalAssignment],
+    indices: &[usize],
+    name: &str,
+) -> Result<(), AnalyzerError> {
+    let first = *indices.first().expect("group is non-empty");
+    let last = *indices.last().expect("group is non-empty");
+    let mut established: Option<Expr> = None;
+    let mut write_index = 0;
+
+    for (index, guarded_assignment) in guarded.iter_mut().enumerate().take(last + 1).skip(first) {
+        let is_target_write = indices.get(write_index) == Some(&index);
+        let mut env = HashMap::default();
+        if let Some(value) = &established {
+            env.insert(name.to_string(), value.clone());
+            guarded_assignment.condition = guarded_assignment
+                .condition
+                .take()
+                .map(|condition| substitute_expr_idents(condition, &env));
+            let assignment = guarded_assignment.assignment.clone();
+            guarded_assignment.assignment = Assignment::new(
+                assignment.lhs_value().clone(),
+                substitute_expr_idents(assignment.rhs, &env),
+            );
+        } else if !is_target_write
+            && (guarded_assignment
+                .condition()
+                .is_some_and(|condition| expr_references_signal(condition, Some(name)))
+                || expr_references_signal(guarded_assignment.assignment().rhs(), Some(name)))
+        {
+            return Err(AnalyzerError::Unsupported(
+                "read-before-write dependency inside always_comb".to_string(),
+            ));
+        }
+
+        if !is_target_write {
+            continue;
+        }
+        write_index += 1;
+        let write = &*guarded_assignment;
+        let value = write.assignment().rhs().clone();
+        established = match (write.condition(), established) {
+            (None, _) => Some(value),
+            (Some(condition), Some(previous)) => Some(Expr::Mux {
+                condition: Box::new(condition.clone()),
+                then_expr: Box::new(value),
+                else_expr: Box::new(previous),
+            }),
+            (Some(_), None) => None,
+        };
+    }
+    Ok(())
 }
 
 fn lvalue_self_reference(target: &LValue) -> Expr {
@@ -7775,7 +7919,10 @@ fn conditional_assignments_from_conditional_statement(
     }
 
     if let Some((_, branch)) = &stmt.nodes.5 {
-        let condition = if exhaustive_fallback {
+        // Only a final else whose parent chain is already tautological is
+        // itself tautological; nested statements inside it inherit that.
+        let exhaustive = exhaustive_fallback && parent_condition.is_none();
+        let condition = if exhaustive {
             None
         } else {
             combine_expr_condition_terms(parent_condition, prior_false)
@@ -7783,7 +7930,7 @@ fn conditional_assignments_from_conditional_statement(
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
-            false,
+            exhaustive,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7863,10 +8010,12 @@ fn conditional_assignments_from_case_statement(
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
+        // Case-item guards are never tautological, so statements nested in
+        // a branch must keep the item condition.
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
-            exhaustive_fallback,
+            false,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -7879,7 +8028,10 @@ fn conditional_assignments_from_case_statement(
     }
 
     if let Some(branch) = default_branch {
-        let condition = if exhaustive_fallback {
+        // Only a default whose parent chain is already tautological is
+        // itself tautological; nested statements inside it inherit that.
+        let exhaustive = exhaustive_fallback && parent_condition.is_none();
+        let condition = if exhaustive {
             None
         } else {
             combine_expr_condition_terms(parent_condition, prior_false)
@@ -7887,7 +8039,7 @@ fn conditional_assignments_from_case_statement(
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
-            false,
+            exhaustive,
             syntax_tree,
             const_env,
             packed_dimensions,

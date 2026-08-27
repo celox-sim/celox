@@ -156,6 +156,215 @@ mod tests {
     }
 
     #[test]
+    fn keeps_case_item_guards_on_nested_comb_branches() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic s, t, a, b, c, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'b0: if (t) y = a; else y = b;
+                            default: y = c;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("nested_case.sv"),
+        )
+        .expect("SV analysis should succeed");
+
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        assert_eq!(assignments.len(), 1);
+        let ir::Expr::Mux { else_expr, .. } = assignments[0].rhs() else {
+            panic!("expected a multiplexer chain");
+        };
+        // The default branch value must remain the final fallback so that
+        // `s != 0` selects `c`, not the nested else value.
+        assert_eq!(expr_bottom_else(else_expr), "c");
+    }
+
+    fn expr_bottom_else(expr: &ir::Expr) -> String {
+        match expr {
+            ir::Expr::Mux { else_expr, .. } => expr_bottom_else(else_expr),
+            ir::Expr::Ident(name) => name.clone(),
+            other => panic!("unexpected expression in mux chain: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserves_reads_between_merged_conditional_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, output logic x, y);
+                    always_comb begin
+                        x = d;
+                        y = x;
+                        if (c) x = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("intervening_read.sv"),
+        )
+        .expect("intervening read should use the value at its statement position");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            expr_references_ident_name(y.rhs(), "d"),
+            "expected y to use the preceding d assignment: {:?}",
+            y.rhs()
+        );
+        assert!(!expr_references_ident_name(y.rhs(), "x"));
+    }
+
+    #[test]
+    fn sign_extends_negative_literals_in_widening_constant_casts() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter V = $bits(logic signed [7:0])'(4'shf)) ();
+                endmodule
+            "#,
+            Path::new("sign_extend_cast.sv"),
+        )
+        .expect("SV analysis should succeed");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-1));
+    }
+
+    #[test]
+    fn sizes_first_dimension_for_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = $size(logic [1:0][3:0])'(3'd7),
+                    parameter B = $bits(logic [1:0][3:0])'(4'd7)
+                ) ();
+                endmodule
+            "#,
+            Path::new("size_cast.sv"),
+        )
+        .expect("SV analysis should succeed");
+        // A 2-bit $size target truncates 7 to 3; an 8-bit $bits target
+        // keeps it.
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(7));
+    }
+
+    #[test]
+    fn resolves_enum_members_referencing_earlier_members() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic [1:0] sel, output logic y);
+                    typedef enum logic [1:0] { A = 2'd0, B = A + 2'd1 } E;
+                    always_comb y = (sel == B);
+                endmodule
+            "#,
+            Path::new("enum_member_ref.sv"),
+        )
+        .expect("SV analysis should succeed");
+
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        assert_eq!(assignments.len(), 1);
+        // `B` must resolve to its constant value even though it references
+        // the earlier member `A`.
+        assert!(
+            !expr_references_ident_name(assignments[0].rhs(), "B"),
+            "unresolved enum member in {:?}",
+            assignments[0].rhs()
+        );
+        assert!(
+            expr_contains_literal(assignments[0].rhs(), "1"),
+            "expected the folded member value in {:?}",
+            assignments[0].rhs()
+        );
+    }
+
+    fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
+        match expr {
+            ir::Expr::Ident(ident) => ident == name,
+            ir::Expr::Select { expr, .. } => expr_references_ident_name(expr, name),
+            ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => parts
+                .iter()
+                .any(|part| expr_references_ident_name(part, name)),
+            ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
+                expr_references_ident_name(expr, name)
+            }
+            ir::Expr::Call { args, .. } => {
+                args.iter().any(|arg| expr_references_ident_name(arg, name))
+            }
+            ir::Expr::Binary { left, right, .. } => {
+                expr_references_ident_name(left, name) || expr_references_ident_name(right, name)
+            }
+            ir::Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                expr_references_ident_name(condition, name)
+                    || expr_references_ident_name(then_expr, name)
+                    || expr_references_ident_name(else_expr, name)
+            }
+            ir::Expr::Literal(_) => false,
+        }
+    }
+
+    fn expr_contains_literal(expr: &ir::Expr, needle: &str) -> bool {
+        match expr {
+            ir::Expr::Literal(value) => value == needle || value.ends_with(&format!("d{needle}")),
+            ir::Expr::Select { expr, .. } => expr_contains_literal(expr, needle),
+            ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
+                parts.iter().any(|part| expr_contains_literal(part, needle))
+            }
+            ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
+                expr_contains_literal(expr, needle)
+            }
+            ir::Expr::Call { args, .. } => {
+                args.iter().any(|arg| expr_contains_literal(arg, needle))
+            }
+            ir::Expr::Binary { left, right, .. } => {
+                expr_contains_literal(left, needle) || expr_contains_literal(right, needle)
+            }
+            ir::Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                expr_contains_literal(condition, needle)
+                    || expr_contains_literal(then_expr, needle)
+                    || expr_contains_literal(else_expr, needle)
+            }
+            ir::Expr::Ident(_) => false,
+        }
+    }
+
+    #[test]
+    fn uses_enum_members_as_module_constants() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter logic [1:0] BASE = 2'd1
+                ) (input logic a, output logic y);
+                    typedef enum logic [1:0] { N = BASE + 2'd1 } E;
+                    logic [N-1:0] data;
+                    always_comb begin
+                        if (N != 0) y = a;
+                        else y = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("enum_const_env.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .map(|signal| signal.r#type().resolved_width())
+            .unwrap();
+        assert_eq!(width, Some(2));
+    }
+
+    #[test]
     fn analyzes_basic_sv_module_name() {
         let ir = analyze_source(
             r#"
