@@ -38,6 +38,7 @@
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
 
@@ -436,6 +437,29 @@ pub struct TieredExecutionStats {
     pub threshold_deferrals: u64,
 }
 
+/// Opt-in wall-clock measurement for a tiered execution interval.
+///
+/// Ordinary simulations do not read the host clock. Benchmark callers start
+/// timing immediately before executing a workload and finish it afterwards;
+/// `promotion_elapsed` is the time from that start until generated code is
+/// adopted at a scheduler safe point.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TieredExecutionTiming {
+    promotion_elapsed: Option<Duration>,
+}
+
+impl TieredExecutionTiming {
+    /// Time from the measurement start until the compiled tier was adopted.
+    pub fn promotion_elapsed(self) -> Option<Duration> {
+        self.promotion_elapsed
+    }
+}
+
+struct ActiveExecutionTiming {
+    started_at: Instant,
+    promotion_elapsed: Option<Duration>,
+}
+
 /// A [`SimBackend`] that interprets immediately and promotes to generated
 /// code as soon as background compilation completes.
 pub struct TieredBackend {
@@ -472,6 +496,9 @@ pub struct TieredBackend {
     split_apply_deferrals: u64,
     /// Safe-point polls deferred by the configured step threshold.
     threshold_deferrals: u64,
+    /// Opt-in benchmark timing. Kept out of deterministic execution stats so
+    /// normal simulations neither read the clock nor expose noisy state.
+    execution_timing: Option<ActiveExecutionTiming>,
 }
 
 impl TieredBackend {
@@ -676,6 +703,7 @@ impl TieredBackend {
             safe_point_polls: 0,
             split_apply_deferrals: 0,
             threshold_deferrals: 0,
+            execution_timing: None,
         }
     }
 
@@ -705,6 +733,23 @@ impl TieredBackend {
             split_apply_deferrals: self.split_apply_deferrals,
             threshold_deferrals: self.threshold_deferrals,
         }
+    }
+
+    /// Start measuring time to promotion for a benchmark workload.
+    pub fn start_execution_timing(&mut self) {
+        self.execution_timing = Some(ActiveExecutionTiming {
+            started_at: Instant::now(),
+            promotion_elapsed: self.is_compiled().then_some(Duration::ZERO),
+        });
+    }
+
+    /// Stop timing and return the observed promotion interval.
+    pub fn finish_execution_timing(&mut self) -> Option<TieredExecutionTiming> {
+        self.execution_timing
+            .take()
+            .map(|timing| TieredExecutionTiming {
+                promotion_elapsed: timing.promotion_elapsed,
+            })
     }
 
     /// Why promotion has not happened yet, for diagnostics.
@@ -858,6 +903,11 @@ impl TieredBackend {
             self.phase = Phase::Compiled(compiled);
             self.promotion = Promotion::Promoted;
             self.promoted_after_interpreted_steps = Some(self.interpreted_steps);
+            if let Some(timing) = &mut self.execution_timing
+                && timing.promotion_elapsed.is_none()
+            {
+                timing.promotion_elapsed = Some(timing.started_at.elapsed());
+            }
             tracing::info!("tiered backend adopted generated code");
         }
     }

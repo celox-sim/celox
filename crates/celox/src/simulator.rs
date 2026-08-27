@@ -1541,6 +1541,17 @@ mod host {
             self.backend.execution_stats()
         }
 
+        /// Start opt-in wall-clock measurement from workload execution to
+        /// promotion. Ordinary tiered simulation does not read the host clock.
+        pub fn start_tiered_execution_timing(&mut self) {
+            self.backend.start_execution_timing();
+        }
+
+        /// Stop tiered execution timing and return the promotion interval.
+        pub fn finish_tiered_execution_timing(&mut self) -> Option<crate::TieredExecutionTiming> {
+            self.backend.finish_execution_timing()
+        }
+
         /// Why promotion has not happened yet, for diagnostics.
         pub fn promotion_error(&self) -> Option<&SimulatorError> {
             self.backend.promotion_error()
