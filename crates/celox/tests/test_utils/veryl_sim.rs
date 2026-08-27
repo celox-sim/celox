@@ -12,6 +12,7 @@ use veryl_analyzer::{Analyzer, Context, attribute_table, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 use veryl_simulator::Simulator as VerylSim;
+use veryl_simulator::assert_buffer;
 use veryl_simulator::ir::{Config, Event, build_ir};
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,27 @@ fn four_state_value(payload: BigUint, mask: BigUint, width: usize) -> Value {
     }
 }
 
+fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
+    if !assert_buffer::has_fatal() {
+        // `$assert_continue` reports are not execution errors for this adapter,
+        // but must not leak into the next comparison test.
+        let _ = assert_buffer::take_failure();
+        return Ok(());
+    }
+
+    let Some(message) = assert_buffer::take_failure() else {
+        return Ok(());
+    };
+    if message.contains("for-loop step does not advance the loop variable") {
+        Err(RuntimeErrorCode::DetectedTrueLoop)
+    } else {
+        Err(RuntimeErrorCode::Runtime {
+            message,
+            signals: Vec::new(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
@@ -147,7 +169,7 @@ impl VerylSimAdapter {
             names: unsafe { &*names_ptr },
         };
         f(&mut ctx);
-        Ok(())
+        take_runtime_error()
     }
 
     pub fn get(&mut self, signal: VerylSignalRef) -> BigUint {
@@ -190,7 +212,7 @@ impl VerylSimAdapter {
 
     pub fn tick(&mut self, event: VerylEventRef) -> Result<(), RuntimeErrorCode> {
         self.sim.step(&self.events[event.0]);
-        Ok(())
+        take_runtime_error()
     }
 
     pub fn set<T: Copy>(&mut self, signal: VerylSignalRef, val: T) {
@@ -223,7 +245,7 @@ impl VerylSimAdapter {
 
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         self.sim.ensure_comb_updated();
-        Ok(())
+        take_runtime_error()
     }
 
     pub fn try_event(&mut self, port: &str) -> Result<VerylEventRef, AddrLookupError> {
@@ -252,6 +274,7 @@ pub fn build_veryl_adapter(
     // Clear global tables (same as Celox does)
     symbol_table::clear();
     attribute_table::clear();
+    assert_buffer::reset();
 
     let metadata = Metadata::create_default("prj").unwrap();
     let analyzer = Analyzer::new(&metadata);
@@ -285,6 +308,9 @@ pub fn build_veryl_adapter(
 
     let mut sim = VerylSim::new(sim_ir, None);
     sim.ensure_comb_updated();
+    // Inputs still contain their initial values during construction. Discard
+    // diagnostics from that provisional settle before the test drives them.
+    assert_buffer::reset();
 
     VerylSimAdapter {
         sim,
