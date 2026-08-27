@@ -178,6 +178,7 @@ impl Module {
                 insert_parameter_type_markers(&mut const_env, name, *r#type);
             }
         }
+        extend_const_env_with_parameters(&mut const_env, &parameters);
         reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
         let mut port_names = HashSet::default();
@@ -759,19 +760,17 @@ fn constant_cast_const_expr(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
-    let ConstExpr::Literal(literal) = const_expr_from_ref_node_with_env(
+    let operand = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
         syntax_tree,
         const_env,
         type_aliases,
-    )?
-    else {
-        return None;
-    };
-    let literal = typecheck::parse_integral_literal(&literal)?;
-    if literal.mask != 0u8.into() {
-        return None;
-    }
+    )?;
+    let operand_type = infer_const_expr_type(&operand, &parameter_types_from_const_env(const_env))?;
+    let operand_value = eval_ast_const_expr(&operand, const_env)?;
+    let operand_literal =
+        format_typed_parameter_literal(operand_value, operand_type.width, operand_type.signed);
+    let literal = typecheck::parse_integral_literal(&operand_literal)?;
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
     // A size cast keeps the source expression's signedness when the target
     // is described by a constant primary; a type cast takes the target's.
@@ -2657,16 +2656,16 @@ fn signals_from_generate_block(
 fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap<String, i128>) {
     for signal in signals {
         for range in &mut signal.r#type.packed_ranges {
-            range.left = substitute_const_expr_constants(range.left.clone(), const_env);
-            range.right = substitute_const_expr_constants(range.right.clone(), const_env);
+            range.left = substitute_dimension_constants(range.left.clone(), const_env);
+            range.right = substitute_dimension_constants(range.right.clone(), const_env);
         }
         for range in &mut signal.r#type.unpacked_ranges {
-            range.left = substitute_const_expr_constants(range.left.clone(), const_env);
-            range.right = substitute_const_expr_constants(range.right.clone(), const_env);
+            range.left = substitute_dimension_constants(range.left.clone(), const_env);
+            range.right = substitute_dimension_constants(range.right.clone(), const_env);
             range.size = range
                 .size
                 .take()
-                .map(|size| substitute_const_expr_constants(size, const_env));
+                .map(|size| substitute_dimension_constants(size, const_env));
         }
     }
 }
@@ -3117,19 +3116,26 @@ fn normalize_unbased_unsized_parameter_value(
 
 fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> {
     let mut env = HashMap::default();
-    let mut parameter_types = HashMap::default();
+    extend_const_env_with_parameters(&mut env, parameters);
+    env
+}
+
+fn extend_const_env_with_parameters(env: &mut HashMap<String, i128>, parameters: &[Parameter]) {
+    let mut parameter_types = parameter_types_from_const_env(env);
     for parameter in parameters {
-        let Some(value) = parameter.resolved_value(&env, &parameter_types) else {
+        let Some(value) = parameter.resolved_value(env, &parameter_types) else {
             continue;
         };
         if let Some(r#type) = parameter.resolved_type(&parameter_types) {
             parameter_types.insert(parameter.name().to_string(), r#type);
-            insert_parameter_type_markers(&mut env, parameter.name(), r#type);
+            insert_parameter_type_markers(env, parameter.name(), r#type);
         }
         env.insert(parameter.name().to_string(), value);
         env.insert(parameter_marker(parameter.name()), value);
+        if parameter.is_local {
+            env.insert(local_parameter_marker(parameter.name()), value);
+        }
     }
-    env
 }
 
 fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128 {
@@ -3811,6 +3817,10 @@ fn packed_dimensions_from_ref_node(
 
 fn parameter_marker(name: &str) -> String {
     format!("__parameter::{name}")
+}
+
+fn local_parameter_marker(name: &str) -> String {
+    format!("__parameter::local::{name}")
 }
 
 fn enum_marker(name: &str) -> String {
@@ -7053,41 +7063,91 @@ fn substitute_const_expr_constants(
     expr: ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
+    substitute_const_expr_constants_impl(expr, const_env, false)
+}
+
+fn substitute_dimension_constants(expr: ConstExpr, const_env: &HashMap<String, i128>) -> ConstExpr {
+    substitute_const_expr_constants_impl(expr, const_env, true)
+}
+
+fn substitute_const_expr_constants_impl(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+    include_local_parameters: bool,
+) -> ConstExpr {
     match expr {
         ConstExpr::Ident(name) => const_env
             .get(&name)
-            .filter(|_| !const_env.contains_key(&parameter_marker(&name)))
+            .filter(|_| {
+                !const_env.contains_key(&parameter_marker(&name))
+                    || include_local_parameters
+                        && const_env.contains_key(&local_parameter_marker(&name))
+            })
             .map(|value| ConstExpr::Literal(value.to_string()))
             .unwrap_or(ConstExpr::Ident(name)),
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
         ConstExpr::Select { expr, bit } => ConstExpr::Select {
-            expr: Box::new(substitute_const_expr_constants(*expr, const_env)),
-            bit: Box::new(substitute_const_expr_constants(*bit, const_env)),
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+            )),
+            bit: Box::new(substitute_const_expr_constants_impl(
+                *bit,
+                const_env,
+                include_local_parameters,
+            )),
         },
         ConstExpr::Function { name, args } => ConstExpr::Function {
             name,
             args: args
                 .into_iter()
-                .map(|arg| substitute_const_expr_constants(arg, const_env))
+                .map(|arg| {
+                    substitute_const_expr_constants_impl(arg, const_env, include_local_parameters)
+                })
                 .collect(),
         },
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
-            expr: Box::new(substitute_const_expr_constants(*expr, const_env)),
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+            )),
         },
         ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-            left: Box::new(substitute_const_expr_constants(*left, const_env)),
+            left: Box::new(substitute_const_expr_constants_impl(
+                *left,
+                const_env,
+                include_local_parameters,
+            )),
             op,
-            right: Box::new(substitute_const_expr_constants(*right, const_env)),
+            right: Box::new(substitute_const_expr_constants_impl(
+                *right,
+                const_env,
+                include_local_parameters,
+            )),
         },
         ConstExpr::Mux {
             condition,
             then_expr,
             else_expr,
         } => ConstExpr::Mux {
-            condition: Box::new(substitute_const_expr_constants(*condition, const_env)),
-            then_expr: Box::new(substitute_const_expr_constants(*then_expr, const_env)),
-            else_expr: Box::new(substitute_const_expr_constants(*else_expr, const_env)),
+            condition: Box::new(substitute_const_expr_constants_impl(
+                *condition,
+                const_env,
+                include_local_parameters,
+            )),
+            then_expr: Box::new(substitute_const_expr_constants_impl(
+                *then_expr,
+                const_env,
+                include_local_parameters,
+            )),
+            else_expr: Box::new(substitute_const_expr_constants_impl(
+                *else_expr,
+                const_env,
+                include_local_parameters,
+            )),
         },
     }
 }
@@ -7188,7 +7248,22 @@ fn comb_assignments_from_guarded(
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (index, conditional) in guarded.iter().enumerate() {
         let target = conditional.assignment().lhs_value();
-        match targets.iter().position(|existing| existing == target) {
+        let reusable_group = targets
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(group, existing)| {
+                if existing != target {
+                    return None;
+                }
+                let previous = *groups[group].last()?;
+                let separated_by_overlap = guarded[previous + 1..index].iter().any(|assignment| {
+                    lvalues_overlap(assignment.assignment().lhs_value(), target)
+                        && assignment.assignment().lhs_value() != target
+                });
+                (!separated_by_overlap).then_some(group)
+            });
+        match reusable_group {
             Some(group) => groups[group].push(index),
             None => {
                 targets.push(target.clone());
@@ -7196,10 +7271,23 @@ fn comb_assignments_from_guarded(
             }
         }
     }
+    // Apply every cross-target blocking-assignment substitution before any
+    // group is materialized. A later group may rewrite an assignment that
+    // belongs to an earlier group.
+    for (target, indices) in targets.iter().zip(&groups) {
+        if indices
+            .iter()
+            .all(|index| guarded[*index].condition().is_none())
+        {
+            continue;
+        }
+        let initial = overlapping_whole_value_before(&guarded, indices[0], target);
+        substitute_intermediate_comb_value_reads(&mut guarded, indices, target, initial)?;
+    }
+
     // Merged groups land on the slot of their last write so relative
-    // statement ordering across different targets is preserved. Substitute
-    // values established by earlier writes into intervening reads before the
-    // group is moved, preserving blocking-assignment statement semantics.
+    // statement ordering across different, non-overlapping targets is
+    // preserved.
     let mut slots: Vec<Option<Assignment>> = Vec::with_capacity(guarded.len());
     slots.extend((0..guarded.len()).map(|_| None));
     for (target, indices) in targets.into_iter().zip(groups) {
@@ -7213,17 +7301,17 @@ fn comb_assignments_from_guarded(
             continue;
         }
         let last = *indices.last().expect("group is non-empty");
-        substitute_intermediate_comb_value_reads(&mut guarded, &indices, &target)?;
         // Fold in source order so writes after an if/else retain procedural
         // priority. A target-specific exhaustive fallback fills the previous
         // value in the branch chain instead of becoming globally
         // unconditional.
-        let mut current = lvalue_self_reference(&target);
+        let mut current = overlapping_whole_value_before(&guarded, indices[0], &target)
+            .unwrap_or_else(comb_previous_value_placeholder);
         for index in &indices {
             let write = &guarded[*index];
             let value = write.assignment().rhs().clone();
             current = if write.fills_exhaustive_fallback {
-                substitute_expr_lvalue(current, &target, &value)
+                substitute_comb_previous_value(current, &value)
             } else {
                 match write.condition() {
                     None => value,
@@ -7236,7 +7324,9 @@ fn comb_assignments_from_guarded(
             };
         }
         let rhs = current;
-        if expr_references_lvalue(&rhs, &target) {
+        if expr_contains_comb_previous_value(&rhs)
+            || expr_references_overlapping_lvalue(&rhs, &target)
+        {
             return Err(AnalyzerError::Unsupported(
                 "latch inference inside always_comb".to_string(),
             ));
@@ -7254,11 +7344,12 @@ fn substitute_intermediate_comb_value_reads(
     guarded: &mut [ConditionalAssignment],
     indices: &[usize],
     target: &LValue,
+    initial: Option<Expr>,
 ) -> Result<(), AnalyzerError> {
     let first = *indices.first().expect("group is non-empty");
     let last = *indices.last().expect("group is non-empty");
-    let mut established = lvalue_self_reference(target);
-    let mut initialized = false;
+    let mut initialized = initial.is_some();
+    let mut established = initial.unwrap_or_else(comb_previous_value_placeholder);
     let mut write_index = 0;
 
     for (index, guarded_assignment) in guarded.iter_mut().enumerate().take(last + 1).skip(first) {
@@ -7291,7 +7382,7 @@ fn substitute_intermediate_comb_value_reads(
         let write = &*guarded_assignment;
         let value = write.assignment().rhs().clone();
         if write.fills_exhaustive_fallback {
-            established = substitute_expr_lvalue(established, target, &value);
+            established = substitute_comb_previous_value(established, &value);
             initialized = true;
         } else {
             established = match write.condition() {
@@ -7308,6 +7399,113 @@ fn substitute_intermediate_comb_value_reads(
         }
     }
     Ok(())
+}
+
+fn lvalues_overlap(left: &LValue, right: &LValue) -> bool {
+    match (left, right) {
+        (LValue::Ident(left), LValue::Ident(right)) => left == right,
+        (LValue::Ident(left), LValue::Select { name: right, .. })
+        | (LValue::Select { name: left, .. }, LValue::Ident(right)) => left == right,
+        (
+            LValue::Select {
+                name: left_name,
+                msb: left_msb,
+                lsb: left_lsb,
+                ..
+            },
+            LValue::Select {
+                name: right_name,
+                msb: right_msb,
+                lsb: right_lsb,
+                ..
+            },
+        ) => left_name == right_name && left_msb == right_msb && left_lsb == right_lsb,
+    }
+}
+
+fn overlapping_whole_value_before(
+    guarded: &[ConditionalAssignment],
+    before: usize,
+    target: &LValue,
+) -> Option<Expr> {
+    let LValue::Select {
+        name,
+        msb,
+        lsb,
+        signed,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    let mut current = comb_previous_value_placeholder();
+    let mut initialized = false;
+    for write in &guarded[..before] {
+        if !matches!(write.assignment().lhs_value(), LValue::Ident(whole) if whole == name) {
+            continue;
+        }
+        let value = write.assignment().rhs().clone();
+        if write.fills_exhaustive_fallback {
+            current = substitute_comb_previous_value(current, &value);
+            initialized = true;
+        } else {
+            current = match write.condition() {
+                None => {
+                    initialized = true;
+                    value
+                }
+                Some(condition) => Expr::Mux {
+                    condition: Box::new(condition.clone()),
+                    then_expr: Box::new(value),
+                    else_expr: Box::new(current),
+                },
+            };
+        }
+    }
+    initialized.then_some(Expr::Select {
+        expr: Box::new(current),
+        msb: msb.clone(),
+        lsb: lsb.clone(),
+        signed: *signed,
+    })
+}
+
+const COMB_PREVIOUS_VALUE: &str = "\0celox_comb_previous_value";
+
+fn comb_previous_value_placeholder() -> Expr {
+    Expr::Ident(COMB_PREVIOUS_VALUE.to_string())
+}
+
+fn substitute_comb_previous_value(expr: Expr, value: &Expr) -> Expr {
+    let mut env = HashMap::default();
+    env.insert(COMB_PREVIOUS_VALUE.to_string(), value.clone());
+    substitute_expr_idents(expr, &env)
+}
+
+fn expr_contains_comb_previous_value(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name) => name == COMB_PREVIOUS_VALUE,
+        Expr::Literal(_) => false,
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            expr_contains_comb_previous_value(expr)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+            parts.iter().any(expr_contains_comb_previous_value)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_contains_comb_previous_value(left) || expr_contains_comb_previous_value(right)
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_contains_comb_previous_value(condition)
+                || expr_contains_comb_previous_value(then_expr)
+                || expr_contains_comb_previous_value(else_expr)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_contains_comb_previous_value),
+    }
 }
 
 fn substitute_expr_lvalue(expr: Expr, target: &LValue, value: &Expr) -> Expr {
@@ -7425,21 +7623,47 @@ fn expr_references_lvalue(expr: &Expr, target: &LValue) -> bool {
     }
 }
 
-fn lvalue_self_reference(target: &LValue) -> Expr {
-    match target {
-        LValue::Ident(name) => Expr::Ident(name.clone()),
-        LValue::Select {
-            name,
-            msb,
-            lsb,
-            signed,
-            ..
-        } => Expr::Select {
-            expr: Box::new(Expr::Ident(name.clone())),
-            msb: msb.clone(),
-            lsb: lsb.clone(),
-            signed: *signed,
+fn expr_references_overlapping_lvalue(expr: &Expr, target: &LValue) -> bool {
+    if expr_matches_lvalue(expr, target) {
+        return true;
+    }
+    match expr {
+        Expr::Ident(name) => match target {
+            LValue::Ident(target_name)
+            | LValue::Select {
+                name: target_name, ..
+            } => name == target_name,
         },
+        Expr::Literal(_) => false,
+        Expr::Select { expr, .. } => {
+            if matches!((&**expr, target), (Expr::Ident(_), LValue::Select { .. })) {
+                false
+            } else {
+                expr_references_overlapping_lvalue(expr, target)
+            }
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            expr_references_overlapping_lvalue(expr, target)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
+            .iter()
+            .any(|part| expr_references_overlapping_lvalue(part, target)),
+        Expr::Binary { left, right, .. } => {
+            expr_references_overlapping_lvalue(left, target)
+                || expr_references_overlapping_lvalue(right, target)
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_references_overlapping_lvalue(condition, target)
+                || expr_references_overlapping_lvalue(then_expr, target)
+                || expr_references_overlapping_lvalue(else_expr, target)
+        }
+        Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_overlapping_lvalue(arg, target)),
     }
 }
 
@@ -8011,9 +8235,8 @@ fn conditional_assignments_from_conditional_statement(
                 AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
             })?;
     let mut prior_false = Vec::new();
-    let mut branch_targets = Vec::new();
+    let mut definitely_assigned_branches = Vec::new();
     let then_condition = combine_expr_conditions(parent_condition.clone(), if_condition.clone());
-    let branch_start = assignments.len();
     conditional_assignments_from_statement_or_null(
         &stmt.nodes.3,
         then_condition,
@@ -8023,7 +8246,11 @@ fn conditional_assignments_from_conditional_statement(
         packed_dimensions,
         assignments,
     )?;
-    branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+    definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
+        &stmt.nodes.3,
+        syntax_tree,
+        packed_dimensions,
+    ));
     prior_false.push(procedural_false_condition(if_condition));
 
     for (_, _, predicate, branch) in &stmt.nodes.4 {
@@ -8035,7 +8262,6 @@ fn conditional_assignments_from_conditional_statement(
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
-        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
@@ -8045,7 +8271,11 @@ fn conditional_assignments_from_conditional_statement(
             packed_dimensions,
             assignments,
         )?;
-        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+        definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
+            branch,
+            syntax_tree,
+            packed_dimensions,
+        ));
         prior_false.push(procedural_false_condition(branch_condition));
     }
 
@@ -8064,9 +8294,16 @@ fn conditional_assignments_from_conditional_statement(
             packed_dimensions,
             assignments,
         )?;
-        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+        definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
+            branch,
+            syntax_tree,
+            packed_dimensions,
+        ));
         if exhaustive {
-            mark_exhaustive_fallback(&mut assignments[branch_start..], &branch_targets);
+            mark_exhaustive_fallback(
+                &mut assignments[branch_start..],
+                &definitely_assigned_branches,
+            );
         }
     }
     Ok(())
@@ -8142,14 +8379,13 @@ fn conditional_assignments_from_case_statement(
     }
 
     let mut prior_false = Vec::new();
-    let mut branch_targets = Vec::new();
+    let mut definitely_assigned_branches = Vec::new();
     for (branch_condition, branch) in branches {
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
         // Case-item guards are never tautological, so statements nested in
         // a branch must keep the item condition.
-        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
@@ -8159,7 +8395,11 @@ fn conditional_assignments_from_case_statement(
             packed_dimensions,
             assignments,
         )?;
-        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+        definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
+            branch,
+            syntax_tree,
+            packed_dimensions,
+        ));
         prior_false.push(Expr::Unary {
             op: UnaryOp::LogicNot,
             expr: Box::new(branch_condition),
@@ -8181,23 +8421,19 @@ fn conditional_assignments_from_case_statement(
             packed_dimensions,
             assignments,
         )?;
-        branch_targets.push(conditional_assignment_targets(&assignments[branch_start..]));
+        definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
+            branch,
+            syntax_tree,
+            packed_dimensions,
+        ));
         if exhaustive {
-            mark_exhaustive_fallback(&mut assignments[branch_start..], &branch_targets);
+            mark_exhaustive_fallback(
+                &mut assignments[branch_start..],
+                &definitely_assigned_branches,
+            );
         }
     }
     Ok(())
-}
-
-fn conditional_assignment_targets(assignments: &[ConditionalAssignment]) -> Vec<LValue> {
-    let mut targets = Vec::new();
-    for assignment in assignments {
-        let target = assignment.assignment().lhs_value();
-        if !targets.contains(target) {
-            targets.push(target.clone());
-        }
-    }
-    targets
 }
 
 fn mark_exhaustive_fallback(
@@ -8218,16 +8454,150 @@ fn mark_exhaustive_fallback(
     }
 }
 
+fn definitely_assigned_comb_targets_statement_or_null(
+    stmt: &sv_parser::StatementOrNull,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Vec<LValue> {
+    match stmt {
+        sv_parser::StatementOrNull::Statement(stmt) => {
+            definitely_assigned_comb_targets(stmt, syntax_tree, packed_dimensions)
+        }
+        sv_parser::StatementOrNull::Attribute(_) => Vec::new(),
+    }
+}
+
+fn definitely_assigned_comb_targets(
+    stmt: &sv_parser::Statement,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Vec<LValue> {
+    match &stmt.nodes.2 {
+        sv_parser::StatementItem::BlockingAssignment(assignment) => {
+            let target = match &assignment.0 {
+                sv_parser::BlockingAssignment::Variable(assignment) => {
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                }
+                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                }
+                _ => None,
+            };
+            target.into_iter().collect()
+        }
+        sv_parser::StatementItem::SeqBlock(block) => {
+            let mut targets = Vec::new();
+            for stmt in &block.nodes.3 {
+                for target in definitely_assigned_comb_targets_statement_or_null(
+                    stmt,
+                    syntax_tree,
+                    packed_dimensions,
+                ) {
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+            }
+            targets
+        }
+        sv_parser::StatementItem::ConditionalStatement(conditional) => {
+            let Some((_, else_branch)) = &conditional.nodes.5 else {
+                return Vec::new();
+            };
+            let mut branches = vec![definitely_assigned_comb_targets_statement_or_null(
+                &conditional.nodes.3,
+                syntax_tree,
+                packed_dimensions,
+            )];
+            branches.extend(conditional.nodes.4.iter().map(|(_, _, _, branch)| {
+                definitely_assigned_comb_targets_statement_or_null(
+                    branch,
+                    syntax_tree,
+                    packed_dimensions,
+                )
+            }));
+            branches.push(definitely_assigned_comb_targets_statement_or_null(
+                else_branch,
+                syntax_tree,
+                packed_dimensions,
+            ));
+            intersect_lvalue_sets(branches)
+        }
+        sv_parser::StatementItem::CaseStatement(case) => {
+            let sv_parser::CaseStatement::Normal(case) = &**case else {
+                return Vec::new();
+            };
+            let mut has_default = false;
+            let branches = std::iter::once(&case.nodes.3)
+                .chain(case.nodes.4.iter())
+                .map(|item| {
+                    let branch = match item {
+                        sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
+                        sv_parser::CaseItem::Default(item) => {
+                            has_default = true;
+                            &item.nodes.2
+                        }
+                    };
+                    definitely_assigned_comb_targets_statement_or_null(
+                        branch,
+                        syntax_tree,
+                        packed_dimensions,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if has_default {
+                intersect_lvalue_sets(branches)
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn intersect_lvalue_sets(mut sets: Vec<Vec<LValue>>) -> Vec<LValue> {
+    let Some(mut intersection) = sets.pop() else {
+        return Vec::new();
+    };
+    intersection.retain(|target| sets.iter().all(|set| set.contains(target)));
+    intersection
+}
+
 fn expr_from_cond_predicate(
     predicate: &sv_parser::CondPredicate,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
-    let first = predicate.nodes.0.contents().into_iter().next()?;
-    let sv_parser::ExpressionOrCondPattern::Expression(expr) = first else {
+    if cond_predicate_has_conjunction_operator(predicate, syntax_tree) {
+        return None;
+    }
+    let entries = predicate.nodes.0.contents();
+    let [sv_parser::ExpressionOrCondPattern::Expression(expr)] = entries.as_slice() else {
         return None;
     };
     expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+}
+
+fn cond_predicate_has_conjunction_operator(
+    predicate: &sv_parser::CondPredicate,
+    syntax_tree: &SyntaxTree,
+) -> bool {
+    let mut previous = None;
+    for node in RefNode::CondPredicate(predicate) {
+        let RefNode::Symbol(symbol) = node else {
+            continue;
+        };
+        let locate = symbol.nodes.0;
+        if previous.is_some_and(|previous: sv_parser::Locate| {
+            previous.offset + previous.len == locate.offset
+                && syntax_tree.get_str(&previous) == Some("&&")
+                && syntax_tree.get_str(&locate) == Some("&")
+        }) {
+            return true;
+        }
+        previous = Some(locate);
+    }
+    false
 }
 
 fn combine_expr_conditions(parent: Option<Expr>, child: Expr) -> Option<Expr> {

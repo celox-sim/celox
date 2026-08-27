@@ -300,6 +300,88 @@ mod tests {
     }
 
     #[test]
+    fn applies_cross_target_substitutions_before_merging_comb_groups() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, output logic x, y);
+                    always_comb begin
+                        y = 1'b0;
+                        x = 1'b0;
+                        y = x;
+                        if (c) x = 1'b1;
+                        if (d) y = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("cross_target_substitution.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let y = ir.modules()[0].comb_processes()[0]
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            !expr_references_ident_name(y.rhs(), "x"),
+            "y must use x's value at the intervening statement: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn uses_whole_vector_defaults_for_conditional_selected_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, output logic [1:0] x);
+                    always_comb begin
+                        x = '0;
+                        if (c) x[0] = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("whole_then_selected.sv"),
+        )
+        .expect("whole-vector initialization should cover the selected fallback");
+        assert_eq!(ir.modules()[0].comb_processes()[0].assignments().len(), 2);
+    }
+
+    #[test]
+    fn requires_definite_assignment_before_filling_comb_fallbacks() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic c, d, a, b, output logic x);
+                    always_comb begin
+                        if (c) x = a;
+                        else if (d) x = b;
+                    end
+                endmodule
+            "#,
+            Path::new("nested_incomplete_fallback.sv"),
+        )
+        .expect_err("the incomplete nested fallback must infer a latch")
+        .to_string();
+        assert!(error.contains("latch inference inside always_comb"));
+    }
+
+    #[test]
+    fn rejects_genuine_self_reads_in_exhaustive_comb_branches() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic c, output logic [7:0] x);
+                    always_comb begin
+                        if (c) x = x + 1;
+                        else x = 0;
+                    end
+                endmodule
+            "#,
+            Path::new("genuine_self_read.sv"),
+        )
+        .expect_err("a genuine self-read must not be filled as a fallback hole")
+        .to_string();
+        assert!(error.contains("latch inference inside always_comb"));
+    }
+
+    #[test]
     fn sign_extends_negative_literals_in_widening_constant_casts() {
         let ir = analyze_source(
             r#"
@@ -362,6 +444,24 @@ mod tests {
             width_ir.modules()[0].parameters()[1].resolved_value(),
             Some(3)
         );
+    }
+
+    #[test]
+    fn evaluates_constant_cast_operand_expressions() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef logic [7:0] byte_t;
+                    localparam A = 3;
+                    localparam B = byte_t'(A);
+                    localparam C = byte_t'(1 + 2);
+                endmodule
+            "#,
+            Path::new("constant_cast_operands.sv"),
+        )
+        .expect("constant cast operands should be evaluated in the module environment");
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(3));
+        assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(3));
     }
 
     #[test]
@@ -518,6 +618,48 @@ mod tests {
             .map(|signal| signal.r#type().resolved_width())
             .unwrap();
         assert_eq!(width, Some(2));
+    }
+
+    #[test]
+    fn resolves_parameters_that_reference_enum_members() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic [1:0] { N = 2 } E;
+                    localparam W = N;
+                    logic [W-1:0] data;
+                endmodule
+            "#,
+            Path::new("enum_parameter_dependency.sv"),
+        )
+        .expect("parameters should be re-resolved after enum collection");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(2));
+    }
+
+    #[test]
+    fn rejects_conditional_predicate_conjunction_terms() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic a, b, output logic y);
+                    always_comb begin
+                        if (a &&& b) y = 1'b1;
+                        else y = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("predicate_conjunction.sv"),
+        )
+        .expect_err("unsupported predicate conjunctions must not be partially lowered")
+        .to_string();
+        assert!(
+            error.contains("predicate lowering"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
