@@ -53,7 +53,7 @@ write_valid_gate_logs() {
         "v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=tiered opt_level=O2 four_state=false compile_only=false" \
         "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$tiered_startup execute_ns=$tiered_execute jit_execute_ns=NA" \
-        "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
+        "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 promotion_elapsed_ns=12 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
         "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$tiered_reported" \
         >"$directory/celox-tiered.log"
 }
@@ -571,7 +571,7 @@ run_one() {
                 'v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=tiered opt_level=O2 four_state=false compile_only=false" \
                 "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=NA" \
-                "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
+                "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 promotion_elapsed_ns=12 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
                 "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=$reported" >"$log"
             ;;
         *) fail "unexpected mock runner: $runner" ;;

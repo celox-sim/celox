@@ -101,7 +101,7 @@ Environment:
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
-                       Celox runners: celox, celox-cranelift, celox-tiered
+                       Celox runners: celox, celox-cranelift, celox-interpreter, celox-tiered
                        Split-timing runner: veryl-cc-sync
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
@@ -538,7 +538,7 @@ validate_gate_tiered_stats() {
     local log="$1"
     local expected_test="$2"
     local line marker_count=0 valid_count=0
-    local pattern="^CELOX_TIERED_STATS test=${expected_test} tier=compiled promotion=promoted interpreted_evaluations=([0-9]+) compiled_evaluations=([0-9]+) promoted_after_interpreted_evaluations=([0-9]+) safe_point_polls=([0-9]+) split_apply_deferrals=([0-9]+) threshold_deferrals=([0-9]+)$"
+    local pattern="^CELOX_TIERED_STATS test=${expected_test} tier=compiled promotion=promoted interpreted_evaluations=([0-9]+) compiled_evaluations=([0-9]+) promoted_after_interpreted_evaluations=([0-9]+) promotion_elapsed_ns=([0-9]+) safe_point_polls=([0-9]+) split_apply_deferrals=([0-9]+) threshold_deferrals=([0-9]+)$"
 
     if [[ ! -f "$log" ]]; then
         echo "error: tiered Celox gate log does not exist: $log" >&2
@@ -549,7 +549,9 @@ validate_gate_tiered_stats() {
             continue
         fi
         marker_count=$((marker_count + 1))
-        if [[ "$line" =~ $pattern ]] && ((10#${BASH_REMATCH[2]} > 0)); then
+        if [[ "$line" =~ $pattern ]] &&
+            ((10#${BASH_REMATCH[2]} > 0)) &&
+            ((10#${BASH_REMATCH[4]} > 0)); then
             valid_count=$((valid_count + 1))
         fi
     done <"$log"
@@ -1468,6 +1470,12 @@ run_one() {
                 "${celox_args[@]}" --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
+        celox-interpreter)
+            run_in_heliodor "$timeout_sec" "$log" \
+                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                "${celox_args[@]}" --backend interpreter --opt-level "${CELOX_OPT_LEVEL,,}"
+            process_status="$?"
+            ;;
         veryl-cc-sync)
             run_in_heliodor "$timeout_sec" "$log" \
                 env VERYL_AOT_CACHE_DIR="$veryl_aot_cache_dir" \
@@ -1585,7 +1593,8 @@ run_all() {
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
-    if runner_enabled celox || runner_enabled celox-cranelift || runner_enabled celox-tiered; then
+    if runner_enabled celox || runner_enabled celox-cranelift \
+        || runner_enabled celox-interpreter || runner_enabled celox-tiered; then
         build_celox_runner
     fi
     if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then

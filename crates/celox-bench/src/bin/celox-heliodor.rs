@@ -107,6 +107,7 @@ enum CeloxHeliodorError {
 enum Backend {
     Native,
     Cranelift,
+    Interpreter,
     Tiered,
 }
 
@@ -138,6 +139,7 @@ impl Backend {
         match self {
             Backend::Native => "native",
             Backend::Cranelift => "cranelift",
+            Backend::Interpreter => "interpreter",
             Backend::Tiered => "tiered",
         }
     }
@@ -190,9 +192,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--native-image-output requires --compile-only",
         });
     }
-    if opts.compile_only && matches!(opts.backend, Backend::Tiered) {
+    if opts.compile_only && matches!(opts.backend, Backend::Interpreter | Backend::Tiered) {
         return Err(CeloxHeliodorError::InvalidConfiguration {
-            message: "--compile-only is not meaningful with --backend tiered",
+            message: "--compile-only requires a compiled backend",
         });
     }
     if opts.native_image_input.is_some() && opts.compile_only {
@@ -577,7 +579,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
             Backend::Cranelift => {
                 let _sim = builder.build_cranelift()?;
             }
-            Backend::Tiered => unreachable!("tiered compile-only was rejected above"),
+            Backend::Interpreter | Backend::Tiered => {
+                unreachable!("non-compiled backends were rejected above")
+            }
         }
         let compile_elapsed = compile_start.elapsed();
         let elapsed = total_start.elapsed();
@@ -607,6 +611,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         execute_cpu_elapsed,
         tiered_stats,
         tiered_promotion_error,
+        tiered_promotion_elapsed,
     ) = match opts.backend {
         #[cfg(any(
             all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -654,6 +659,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     .map(|(end, start)| end.saturating_sub(start)),
                 None,
                 None,
+                None,
             )
         }
         #[cfg(not(any(
@@ -686,6 +692,35 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     .map(|(end, start)| end.saturating_sub(start)),
                 None,
                 None,
+                None,
+            )
+        }
+        Backend::Interpreter => {
+            let mut sim = builder.build_interpreter()?;
+            let testbench =
+                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            let compile_elapsed = compile_start.elapsed();
+            let execute_cpu_start = process_cpu_time();
+            let execute_start = Instant::now();
+            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                (limited.result, limited.ticks, limited.tick_limit_reached)
+            } else {
+                (run_compiled_testbench(&mut sim, &testbench), 0, false)
+            };
+            (
+                result,
+                ticks,
+                tick_limit_reached,
+                compile_elapsed,
+                execute_start.elapsed(),
+                None,
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+                None,
+                None,
+                None,
             )
         }
         Backend::Tiered => {
@@ -697,6 +732,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
             // includes the background compile and promotion, which is the
             // end-to-end latency tiered execution is intended to improve.
             let compile_elapsed = compile_start.elapsed();
+            sim.start_tiered_execution_timing();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
             let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
@@ -706,6 +742,9 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             let execute_elapsed = execute_start.elapsed();
+            let promotion_elapsed = sim
+                .finish_tiered_execution_timing()
+                .and_then(|timing| timing.promotion_elapsed());
             let stats = sim.tiered_execution_stats();
             let promotion_error = sim.promotion_error().map(ToString::to_string);
             (
@@ -720,6 +759,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     .map(|(end, start)| end.saturating_sub(start)),
                 Some(stats),
                 promotion_error,
+                promotion_elapsed,
             )
         }
     };
@@ -732,10 +772,12 @@ fn run() -> Result<(), CeloxHeliodorError> {
         execute_cpu_elapsed,
     );
     if let Some(stats) = tiered_stats {
-        print_tiered_stats(&opts.test, stats);
-        if stats.tier != TieredExecutionTier::Compiled
-            || stats.promotion != TieredPromotionStatus::Promoted
-            || stats.compiled_evaluations == 0
+        print_tiered_stats(&opts.test, stats, tiered_promotion_elapsed);
+        if !tick_limit_reached
+            && (stats.tier != TieredExecutionTier::Compiled
+                || stats.promotion != TieredPromotionStatus::Promoted
+                || stats.compiled_evaluations == 0
+                || tiered_promotion_elapsed.is_none())
         {
             let detail = tiered_promotion_error
                 .as_deref()
@@ -785,7 +827,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
     }
 }
 
-fn print_tiered_stats(test: &str, stats: TieredExecutionStats) {
+fn print_tiered_stats(
+    test: &str,
+    stats: TieredExecutionStats,
+    promotion_elapsed: Option<Duration>,
+) {
     let tier = match stats.tier {
         TieredExecutionTier::Interpreter => "interpreter",
         TieredExecutionTier::Compiled => "compiled",
@@ -802,8 +848,11 @@ fn print_tiered_stats(test: &str, stats: TieredExecutionStats) {
         .promoted_after_interpreted_evaluations
         .map(|value| value.to_string())
         .unwrap_or_else(|| "NA".to_string());
+    let promotion_elapsed_ns = promotion_elapsed
+        .map(|elapsed| elapsed.as_nanos().to_string())
+        .unwrap_or_else(|| "NA".to_string());
     println!(
-        "CELOX_TIERED_STATS test={test} tier={tier} promotion={promotion} interpreted_evaluations={} compiled_evaluations={} promoted_after_interpreted_evaluations={promoted_after} safe_point_polls={} split_apply_deferrals={} threshold_deferrals={}",
+        "CELOX_TIERED_STATS test={test} tier={tier} promotion={promotion} interpreted_evaluations={} compiled_evaluations={} promoted_after_interpreted_evaluations={promoted_after} promotion_elapsed_ns={promotion_elapsed_ns} safe_point_polls={} split_apply_deferrals={} threshold_deferrals={}",
         stats.interpreted_evaluations,
         stats.compiled_evaluations,
         stats.safe_point_polls,

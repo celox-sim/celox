@@ -401,7 +401,7 @@ assert_eq "$(awk -F '\t' 'NR == 8 { print $10 }' "$integration_results/results.t
 assert_eq "$(awk -F '\t' 'NR == 8 { print $11 }' "$integration_results/results.tsv")" NA \
     "run_one Veryl CLI execute elapsed"
 
-FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_tiered status=pass elapsed_ns=48'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_tiered status=pass elapsed_ns=48'
 run_one celox-tiered integration_tiered >/dev/null \
     || fail "run_one rejected a fixture tiered pass"
 [[ " ${FIXTURE_RUN_ARGS[*]} " == *" --backend tiered "* ]] \
@@ -410,5 +410,13 @@ assert_eq "$(awk -F '\t' 'NR == 9 { print $1 }' "$integration_results/results.ts
     celox-tiered "run_one tiered runner name"
 assert_eq "$(awk -F '\t' 'NR == 9 { print $12 }' "$integration_results/results.tsv")" NA \
     "run_one tiered generated-only elapsed"
+
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_interpreter compile_ns=8 execute_ns=55 jit_execute_ns=NA\nCELOX_TEST_RESULT test=integration_interpreter status=pass elapsed_ns=65'
+run_one celox-interpreter integration_interpreter >/dev/null \
+    || fail "run_one rejected a fixture interpreter pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --backend interpreter "* ]] \
+    || fail "interpreter runner did not select the interpreter backend"
+assert_eq "$(awk -F '\t' 'NR == 10 { print $1 }' "$integration_results/results.tsv")" \
+    celox-interpreter "run_one interpreter runner name"
 
 echo "run-heliodor-bench result fixture tests: PASS"

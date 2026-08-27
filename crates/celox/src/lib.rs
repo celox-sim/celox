@@ -67,7 +67,7 @@ mod host_api {
     pub use crate::backend::{
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, EventRef, InterpBackend,
         JitBackend, RegallocAlgorithm, SharedJitCode, TieredBackend, TieredExecutionStats,
-        TieredExecutionTier, TieredPromotionStatus,
+        TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
