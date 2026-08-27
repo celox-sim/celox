@@ -13,8 +13,8 @@ edition.workspace     = true
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-napi              = { version = "=3.12.1", features = ["napi8", "serde-json"] }
-napi-derive       = "=3.6.3"
+napi              = { workspace = true, features = ["napi8", "serde-json"] }
+napi-derive       = { workspace = true }
 celox-ts-gen      = { workspace = true }
 celox-design      = { workspace = true }
 veryl-analyzer    = { workspace = true }
@@ -35,7 +35,7 @@ celox = { workspace = true, features = ["host-runtime"] }
 celox = { workspace = true }
 
 [build-dependencies]
-napi-build = "=2.4.1"
+napi-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
