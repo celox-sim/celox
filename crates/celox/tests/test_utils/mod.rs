@@ -162,7 +162,10 @@ macro_rules! all_backends {
                 #[allow(unused_mut, unused_variables)]
                 fn native() {
                     $($setup)*
-                    let mut $sim = { $builder }.build_native().unwrap();
+                    let mut $sim = { $builder }
+                        .allow_always_ff_function_effects(true)
+                        .build_native()
+                        .unwrap();
                     $($body)*
                 }
             });
@@ -173,7 +176,10 @@ macro_rules! all_backends {
                 #[allow(unused_mut, unused_variables)]
                 fn cranelift() {
                     $($setup)*
-                    let mut $sim = { $builder }.build_cranelift().unwrap();
+                    let mut $sim = { $builder }
+                        .allow_always_ff_function_effects(true)
+                        .build_cranelift()
+                        .unwrap();
                     $($body)*
                 }
             });
@@ -184,7 +190,10 @@ macro_rules! all_backends {
                 #[allow(unused_mut, unused_variables)]
                 fn wasm() {
                     $($setup)*
-                    let mut $sim = { $builder }.build_wasm().unwrap();
+                    let mut $sim = { $builder }
+                        .allow_always_ff_function_effects(true)
+                        .build_wasm()
+                        .unwrap();
                     $($body)*
                 }
             });
@@ -195,7 +204,10 @@ macro_rules! all_backends {
                 #[allow(unused_mut, unused_variables)]
                 fn interp() {
                     $($setup)*
-                    let mut $sim = { $builder }.build_interpreter().unwrap();
+                    let mut $sim = { $builder }
+                        .allow_always_ff_function_effects(true)
+                        .build_interpreter()
+                        .unwrap();
                     $($body)*
                 }
             });

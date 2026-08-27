@@ -8,6 +8,7 @@ mod test_utils;
 
 fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
     let result = SimulatorBuilder::new(code, top)
+        .allow_always_ff_function_effects(true)
         .optimize(true)
         .trace_sim_modules()
         .trace_post_optimized_sir()
@@ -7519,6 +7520,7 @@ fn test_ff_effectful_output_destination_snapshots_input_first() {
         }
     "#;
     let result = SimulatorBuilder::new(code, "Top")
+        .allow_always_ff_function_effects(true)
         .optimize(false)
         .trace_pre_optimized_sir()
         .build_with_trace();
@@ -8242,6 +8244,7 @@ fn test_ff_array_literal_argument_is_not_reevaluated_for_array_output() {
     }
 "#;
     let result = SimulatorBuilder::new(code, "Top")
+        .allow_always_ff_function_effects(true)
         .optimize(false)
         .trace_sim_modules()
         .trace_pre_optimized_sir()
@@ -8284,6 +8287,7 @@ fn test_ff_array_literal_static_then_dynamic_access_evaluates_each_item_once() {
     }
 "#;
     let result = SimulatorBuilder::new(code, "Top")
+        .allow_always_ff_function_effects(true)
         .optimize(false)
         .trace_sim_modules()
         .trace_pre_optimized_sir()
