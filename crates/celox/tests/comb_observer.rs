@@ -2543,6 +2543,90 @@ module Top (
     assert_eq!(sim.drain_runtime_events(), vec![]);
 }
 
+fn test_comb_function_packed_array_literal_preserves_source_order(sim) {
+    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @build Simulator::builder(r#"
+module Top (
+    q: output logic<2>,
+    side: output logic<8>,
+) {
+    function observe (
+        value: input logic<8>,
+        written: output logic<8>,
+    ) -> logic {
+        written = value;
+        return value[0];
+    }
+    function identity (x: input logic<2>) -> logic<2> {
+        return x;
+    }
+
+    always_comb {
+        side = 0;
+        q = identity('{default: observe(8'h11, side), observe(8'h22, side)});
+    }
+}
+"#, "Top");
+
+    let side = sim.signal("side");
+    assert_eq!(sim.get_as::<u8>(side), 0x22);
+}
+
+fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {
+    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @build Simulator::builder(r#"
+module Top (
+    q: output signed logic<8>,
+) {
+    function first (x: input signed logic<8> [2, 2]) -> signed logic<8> {
+        return x[0][0];
+    }
+    function pass (
+        row0: input signed logic<4> [2],
+        row1: input signed logic<4> [2],
+    ) -> signed logic<8> {
+        return first('{row0, row1});
+    }
+
+    always_comb {
+        q = pass('{4'h8, 4'h0}, '{4'h1, 4'h2});
+    }
+}
+"#, "Top");
+
+    let q = sim.signal("q");
+    assert_eq!(sim.get_as::<u8>(q), 0xf8);
+}
+
+fn test_comb_function_array_literal_accepts_array_returning_items(sim) {
+    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @build Simulator::builder(r#"
+module Top (
+    q: output logic<4>,
+) {
+    type row_t = logic<4> [2];
+    type matrix_t = logic<4> [2, 2];
+
+    function make_row (base: input logic<4>) -> row_t {
+        var row: row_t;
+        row[0] = base;
+        row[1] = base + 1;
+        return row;
+    }
+    function pick (x: input matrix_t) -> logic<4> {
+        return x[1][0];
+    }
+
+    always_comb {
+        q = pick('{make_row(1), make_row(3)});
+    }
+}
+"#, "Top");
+
+    let q = sim.signal("q");
+    assert_eq!(sim.get_as::<u8>(q), 3);
+}
+
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
     @ignore_on(sv);
     @build Simulator::builder(r#"
