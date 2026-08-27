@@ -61,6 +61,72 @@ fn eval_array_literal_expression_in_store(
     )
 }
 
+fn eval_function_input_assignment_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    target_type: &Type,
+    target_width: usize,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if target_type.array.is_empty() {
+        return eval_assignment_expression_in_store(module, store, expr, arena, target_width);
+    }
+
+    let element_width = target_type.total_width().ok_or_else(|| {
+        ParserError::illegal_context(
+            "function input argument",
+            format!("unresolved element width for {target_type}"),
+            Some(&expr.token_range()),
+        )
+    })?;
+    let value = if let Expression::ArrayLiteral(items, _) = expr {
+        eval_array_literal_expression_with_item_context(
+            module,
+            store,
+            items,
+            Some(target_width),
+            Some(ArrayLiteralItemContext {
+                array_shape: &target_type.array.as_slice()[1..],
+                element_width,
+            }),
+            arena,
+        )?
+    } else {
+        eval_array_literal_item_in_store(
+            module,
+            store,
+            expr,
+            Some(ArrayLiteralItemContext {
+                array_shape: target_type.array.as_slice(),
+                element_width,
+            }),
+            arena,
+        )?
+    };
+
+    finish_assignment_expression(expr, arena, target_width, value)
+}
+
+pub(crate) fn eval_function_input_assignment_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    expr: &Expression,
+    target_type: &Type,
+    target_width: usize,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut store = ExpressionStore::Effectful(store);
+    eval_function_input_assignment_in_store(
+        module,
+        &mut store,
+        expr,
+        target_type,
+        target_width,
+        arena,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct ArrayLiteralItemContext<'a> {
     array_shape: &'a [Option<usize>],
@@ -2244,27 +2310,14 @@ fn eval_function_call_expression(
             ));
         };
         let arg_width = resolve_total_width(module, arg_var)?;
-        let value = if let Expression::ArrayLiteral(items, _) = arg_expr
-            && !arg_var.r#type.array.is_empty()
-        {
-            let item_context = ArrayLiteralItemContext {
-                array_shape: &arg_var.r#type.array.as_slice()[1..],
-                element_width: arg_var.r#type.total_width().ok_or_else(|| {
-                    ParserError::unresolved_width(module, arg_var, arg_var.r#type.to_string())
-                })?,
-            };
-            let value = eval_array_literal_expression_with_item_context(
-                module,
-                store,
-                items,
-                Some(arg_width),
-                Some(item_context),
-                arena,
-            )?;
-            finish_assignment_expression(arg_expr, arena, arg_width, value)?
-        } else {
-            eval_assignment_expression_in_store(module, store, arg_expr, arena, arg_width)?
-        };
+        let value = eval_function_input_assignment_in_store(
+            module,
+            store,
+            arg_expr,
+            &arg_var.r#type,
+            arg_width,
+            arena,
+        )?;
         let ((arg_node, sources), bounds) = value;
         let arg_node = if arg_var.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?

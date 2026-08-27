@@ -2760,6 +2760,90 @@ module Top (
     assert_eq!(sim.get_as::<u8>(q), 3);
 }
 
+fn test_comb_function_direct_array_argument_converts_each_element(sim) {
+    @ignore_on(veryl, sv);
+    @build Simulator::builder(r#"
+module Top (
+    q0: output signed logic<8>,
+    q1: output signed logic<8>,
+) {
+    function pick (
+        x: input signed logic<8> [2],
+        index: input logic,
+    ) -> signed logic<8> {
+        return x[index];
+    }
+
+    var narrow: signed logic<4> [2];
+    always_comb {
+        narrow[0] = 4'sh8;
+        narrow[1] = 4'sh1;
+        q0 = pick(narrow, 0);
+        q1 = pick(narrow, 1);
+    }
+}
+"#, "Top");
+
+    let q0 = sim.signal("q0");
+    let q1 = sim.signal("q1");
+    assert_eq!(sim.get_as::<u8>(q0), 0xf8);
+    assert_eq!(sim.get_as::<u8>(q1), 0x01);
+}
+
+fn test_comb_function_direct_array_return_preserves_all_elements(sim) {
+    @ignore_on(veryl, sv);
+    @build Simulator::builder(r#"
+module Top (
+    q: output logic<4>,
+) {
+    type row_t = logic<4> [2];
+
+    function make_row () -> row_t {
+        var row: row_t;
+        row[0] = 4'd3;
+        row[1] = 4'd4;
+        return row;
+    }
+    function pick (x: input row_t) -> logic<4> {
+        return x[1];
+    }
+
+    always_comb {
+        q = pick(make_row());
+    }
+}
+"#, "Top");
+
+    let q = sim.signal("q");
+    assert_eq!(sim.get_as::<u8>(q), 4);
+}
+
+fn test_comb_statement_function_direct_array_argument_converts_each_element(sim) {
+    @ignore_on(veryl, sv);
+    @build Simulator::builder(r#"
+module Top (
+    q: output signed logic<8>,
+) {
+    function capture (
+        x: input signed logic<8> [2],
+        dst: output signed logic<8>,
+    ) {
+        dst = x[0];
+    }
+
+    var narrow: signed logic<4> [2];
+    always_comb {
+        narrow[0] = 4'sh8;
+        narrow[1] = 4'sh1;
+        capture(narrow, q);
+    }
+}
+"#, "Top");
+
+    let q = sim.signal("q");
+    assert_eq!(sim.get_as::<u8>(q), 0xf8);
+}
+
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
     @ignore_on(sv);
     @build Simulator::builder(r#"

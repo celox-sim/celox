@@ -2704,8 +2704,14 @@ fn eval_statement_form_function_call(
             )
         })?;
         let arg_width = resolve_total_width(module, formal)?;
-        let ((arg_node, arg_sources), arg_bounds) =
-            eval_assignment_expression_effectful(module, &mut store, arg_expr, arena, arg_width)?;
+        let ((arg_node, arg_sources), arg_bounds) = expr::eval_function_input_assignment_effectful(
+            module,
+            &mut store,
+            arg_expr,
+            &formal.r#type,
+            arg_width,
+            arena,
+        )?;
         let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
         } else {
