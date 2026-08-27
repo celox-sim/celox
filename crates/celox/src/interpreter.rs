@@ -17,6 +17,7 @@
 //! runtime events) are delegated to the [`InterpMachine`] trait so the
 //! interpreter stays independent of backend storage details.
 
+use std::cell::OnceCell;
 use std::fmt;
 
 use celox_sir::{
@@ -24,7 +25,7 @@ use celox_sir::{
     SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
 };
 use num_bigint::{BigInt, BigUint};
-use num_traits::{Signed, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 use crate::HashMap;
 
@@ -107,6 +108,22 @@ pub trait InterpMachine<A> {
         bits: usize,
     ) -> Result<SIRValue, InterpError>;
 
+    /// Load a fully-known value no wider than 64 bits.
+    ///
+    /// The default keeps custom interpreter machines source-compatible. The
+    /// production backend overrides this to avoid constructing a `BigUint`.
+    fn load_u64(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<u64, InterpError> {
+        self.load(addr, access, bits)?
+            .payload
+            .to_u64()
+            .ok_or_else(|| InterpError::Machine("narrow load did not fit in u64".to_string()))
+    }
+
     fn store(
         &mut self,
         addr: &A,
@@ -114,6 +131,19 @@ pub trait InterpMachine<A> {
         bits: usize,
         value: &SIRValue,
     ) -> Result<(), InterpError>;
+
+    /// Store a fully-known value no wider than 64 bits.
+    ///
+    /// Production storage overrides this with an allocation-free path.
+    fn store_u64(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        value: u64,
+    ) -> Result<(), InterpError> {
+        self.store(addr, access, bits, &SIRValue::new(value))
+    }
 
     /// `Commit`: copy `bits` at `access` from `src` to `dst`.
     fn commit(
@@ -236,7 +266,7 @@ pub(crate) fn execute_unit_with_registers<A, M: InterpMachine<A>>(
     four_state: bool,
     regs: &mut Registers,
 ) -> Result<UnitExit, InterpError> {
-    regs.prepare(&unit.register_map);
+    regs.prepare(&unit.register_map, four_state);
     let entry = unit
         .blocks
         .get(&unit.entry_block_id)
@@ -272,15 +302,14 @@ pub(crate) fn execute_unit_with_registers<A, M: InterpMachine<A>>(
                 true_block,
                 false_block,
             } => {
-                let cond = regs.get(*cond)?.clone();
                 // Mirrors the compiled `brif` on the raw payload: a
                 // normalized unknown condition (payload one) takes the true
                 // edge, keeping tier migration control-flow identical.
-                let target = if branch_condition_holds(&cond) {
-                    true_block
-                } else {
-                    false_block
+                let holds = match regs.get_small(*cond)? {
+                    Some(cond) => cond != 0,
+                    None => branch_condition_holds(regs.get(*cond)?),
                 };
+                let target = if holds { true_block } else { false_block };
                 transfer(regs, unit, target.0, &target.1)?;
                 current = target.0;
             }
@@ -325,10 +354,10 @@ fn transfer<A>(
     }
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
-        values.push(regs.get(*arg)?.clone());
+        values.push(regs.clone_value(*arg)?);
     }
     for (param, value) in params.iter().zip(values) {
-        regs.set(*param, value);
+        regs.set_value(*param, value);
     }
     Ok(())
 }
@@ -341,6 +370,12 @@ fn exec_instruction<A, M: InterpMachine<A>>(
 ) -> Result<(), InterpError> {
     match instruction {
         SIRInstruction::Imm(dst, value) => {
+            if regs.accepts_small(*dst)
+                && let Some(value) = value.payload.to_u64()
+            {
+                regs.set_small(*dst, value);
+                return Ok(());
+            }
             // Two-state translation drops unknown-bit masks entirely; keep
             // only the payload so X constants behave as their payload bits.
             let value = if four_state {
@@ -351,6 +386,22 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             regs.set(*dst, value);
         }
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
+            if regs.accepts_small(*dst)
+                && let (Some(lhs_value), Some(rhs_value)) =
+                    (regs.get_small(*lhs)?, regs.get_small(*rhs)?)
+            {
+                let out = alu_binary_u64(
+                    op,
+                    lhs_value,
+                    rhs_value,
+                    regs.width(*lhs),
+                    regs.width(*rhs),
+                    regs.width(*dst),
+                    regs.is_signed(*lhs),
+                );
+                regs.set_small(*dst, out);
+                return Ok(());
+            }
             let lhs_value = regs.get(*lhs)?.clone();
             let rhs_value = regs.get(*rhs)?.clone();
             let dst_width = regs.width(*dst);
@@ -366,6 +417,19 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             regs.set(*dst, truncate(out, dst_width));
         }
         SIRInstruction::Unary(dst, op, src) => {
+            if regs.accepts_small(*dst)
+                && let Some(src_value) = regs.get_small(*src)?
+            {
+                let out = alu_unary_u64(
+                    op,
+                    src_value,
+                    regs.width(*src),
+                    regs.is_signed(*src),
+                    regs.width(*dst),
+                );
+                regs.set_small(*dst, out);
+                return Ok(());
+            }
             let src_value = regs.get(*src)?.clone();
             let out = alu_unary(
                 op,
@@ -378,8 +442,13 @@ fn exec_instruction<A, M: InterpMachine<A>>(
         }
         SIRInstruction::Load(dst, addr, offset, bits) => {
             let access = resolve_access(offset, regs)?;
-            let value = machine.load(addr, access, *bits)?;
-            regs.set(*dst, value);
+            if regs.accepts_small(*dst) && *bits <= 64 {
+                let value = machine.load_u64(addr, access, *bits)?;
+                regs.set_small(*dst, value);
+            } else {
+                let value = machine.load(addr, access, *bits)?;
+                regs.set(*dst, value);
+            }
         }
         SIRInstruction::Store(addr, offset, bits, src, triggers, sites) => {
             if *bits == 0 {
@@ -390,7 +459,6 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 }
                 return Ok(());
             }
-            let value = regs.get(*src)?.clone();
             let access = resolve_access(offset, regs)?;
             machine.prepare_store(addr, access, *bits)?;
             let before = if sites.is_empty() {
@@ -398,7 +466,13 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             } else {
                 Some(machine.capture_store_range(addr, access, *bits)?)
             };
-            machine.store(addr, access, *bits, &value)?;
+            if let Some(value) = regs.get_small(*src)?
+                && *bits <= 64
+            {
+                machine.store_u64(addr, access, *bits, value)?;
+            } else {
+                machine.store(addr, access, *bits, regs.get(*src)?)?;
+            }
             if !triggers.is_empty() {
                 let access = resolve_access(offset, regs)?;
                 machine.notify_triggers(addr, access, *bits, triggers)?;
@@ -417,6 +491,32 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             }
         }
         SIRInstruction::Concat(dst, sources) => {
+            if regs.accepts_small(*dst) {
+                let mut value = 0u64;
+                let mut total_width = 0usize;
+                let mut all_small = true;
+                for source in sources {
+                    let width = regs.width(*source);
+                    let Some(source_value) = regs.get_small(*source)? else {
+                        all_small = false;
+                        break;
+                    };
+                    let Some(next_width) = total_width.checked_add(width) else {
+                        all_small = false;
+                        break;
+                    };
+                    if next_width > 64 {
+                        all_small = false;
+                        break;
+                    }
+                    value = (value << width) | (source_value & mask_u64(width));
+                    total_width = next_width;
+                }
+                if all_small {
+                    regs.set_small(*dst, value);
+                    return Ok(());
+                }
+            }
             let mut payload = BigUint::zero();
             let mut mask = BigUint::zero();
             for source in sources {
@@ -430,12 +530,29 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             regs.set(*dst, truncate(SIRValue { payload, mask }, regs.width(*dst)));
         }
         SIRInstruction::Slice(dst, src, offset, width) => {
+            if regs.accepts_small(*dst)
+                && let Some(value) = regs.get_small(*src)?
+            {
+                let value = if *offset >= 64 { 0 } else { value >> offset };
+                regs.set_small(*dst, value & mask_u64(*width));
+                return Ok(());
+            }
             let value = regs.get(*src)?;
             let payload = extract_bits(&value.payload, *offset, *width);
             let mask = extract_bits(&value.mask, *offset, *width);
             regs.set(*dst, SIRValue { payload, mask });
         }
         SIRInstruction::Mux(dst, cond, then_value, else_value) => {
+            if regs.accepts_small(*dst)
+                && let (Some(cond), Some(then_value), Some(else_value)) = (
+                    regs.get_small(*cond)?,
+                    regs.get_small(*then_value)?,
+                    regs.get_small(*else_value)?,
+                )
+            {
+                regs.set_small(*dst, if cond != 0 { then_value } else { else_value });
+                return Ok(());
+            }
             let cond_width = regs.width(*cond);
             let cond = regs.get(*cond)?.clone();
             let then_value = regs.get(*then_value)?.clone();
@@ -549,6 +666,162 @@ fn branch_condition_holds(cond: &SIRValue) -> bool {
 /// the then-arm, while a fully unknown condition merges the arms.
 fn mux_condition_known_one(cond: &SIRValue, width: usize) -> bool {
     !known_ones(cond, width).is_zero()
+}
+
+fn mask_u64(width: usize) -> u64 {
+    match width {
+        0 => 0,
+        64.. => u64::MAX,
+        width => (1u64 << width) - 1,
+    }
+}
+
+fn sign_extend_u64(value: u64, from_width: usize, to_width: usize) -> u64 {
+    let value = value & mask_u64(from_width);
+    if from_width != 0 && to_width > from_width && value & (1u64 << (from_width - 1)) != 0 {
+        (value | !mask_u64(from_width)) & mask_u64(to_width)
+    } else {
+        value & mask_u64(to_width)
+    }
+}
+
+fn signed_i128(value: u64, width: usize) -> i128 {
+    let value = value & mask_u64(width);
+    if width != 0 && value & (1u64 << (width - 1)) != 0 {
+        i128::from(value) - (1i128 << width)
+    } else {
+        i128::from(value)
+    }
+}
+
+fn alu_binary_u64(
+    op: &BinaryOp,
+    lhs: u64,
+    rhs: u64,
+    lhs_width: usize,
+    rhs_width: usize,
+    dst_width: usize,
+    lhs_signed: bool,
+) -> u64 {
+    let lhs = lhs & mask_u64(lhs_width);
+    let rhs = rhs & mask_u64(rhs_width);
+    let common = lhs_width.max(rhs_width).max(dst_width);
+    let promoted_lhs = if lhs_signed {
+        sign_extend_u64(lhs, lhs_width, common)
+    } else {
+        lhs & mask_u64(common)
+    };
+    let promoted_rhs = rhs & mask_u64(common);
+    let result = match op {
+        BinaryOp::Add => promoted_lhs.wrapping_add(promoted_rhs),
+        BinaryOp::Sub => promoted_lhs.wrapping_sub(promoted_rhs),
+        BinaryOp::Mul => promoted_lhs.wrapping_mul(promoted_rhs),
+        BinaryOp::DivU => lhs.checked_div(rhs).unwrap_or(0),
+        BinaryOp::RemU => lhs.checked_rem(rhs).unwrap_or(0),
+        BinaryOp::DivS | BinaryOp::RemS => {
+            let dividend = signed_i128(lhs, lhs_width);
+            let divisor = signed_i128(rhs, rhs_width);
+            if divisor == 0 {
+                0
+            } else if matches!(op, BinaryOp::DivS) {
+                (dividend / divisor) as u64
+            } else {
+                (dividend % divisor) as u64
+            }
+        }
+        BinaryOp::And => promoted_lhs & promoted_rhs,
+        BinaryOp::Or => promoted_lhs | promoted_rhs,
+        BinaryOp::Xor => promoted_lhs ^ promoted_rhs,
+        BinaryOp::Shl => {
+            if rhs < dst_width as u64 {
+                promoted_lhs << rhs
+            } else {
+                0
+            }
+        }
+        BinaryOp::Shr => {
+            let bound = lhs_width.max(dst_width).max(1);
+            if rhs < bound as u64 { lhs >> rhs } else { 0 }
+        }
+        BinaryOp::Sar => {
+            let bound = lhs_width.max(dst_width).max(1);
+            let signed = signed_i128(lhs, lhs_width);
+            if rhs < bound as u64 {
+                (signed >> rhs) as u64
+            } else if signed < 0 {
+                u64::MAX
+            } else {
+                0
+            }
+        }
+        BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard => u64::from(lhs == rhs),
+        BinaryOp::Ne | BinaryOp::NeCase | BinaryOp::NeWildcard => u64::from(lhs != rhs),
+        BinaryOp::LtU => u64::from(lhs < rhs),
+        BinaryOp::LeU => u64::from(lhs <= rhs),
+        BinaryOp::GtU => u64::from(lhs > rhs),
+        BinaryOp::GeU => u64::from(lhs >= rhs),
+        BinaryOp::LtS => u64::from(signed_i128(lhs, lhs_width) < signed_i128(rhs, rhs_width)),
+        BinaryOp::LeS => u64::from(signed_i128(lhs, lhs_width) <= signed_i128(rhs, rhs_width)),
+        BinaryOp::GtS => u64::from(signed_i128(lhs, lhs_width) > signed_i128(rhs, rhs_width)),
+        BinaryOp::GeS => u64::from(signed_i128(lhs, lhs_width) >= signed_i128(rhs, rhs_width)),
+        BinaryOp::LogicAnd => u64::from(lhs != 0 && rhs != 0),
+        BinaryOp::LogicOr => u64::from(lhs != 0 || rhs != 0),
+    };
+    result & mask_u64(dst_width)
+}
+
+fn alu_unary_u64(
+    op: &UnaryOp,
+    src: u64,
+    src_width: usize,
+    src_signed: bool,
+    dst_width: usize,
+) -> u64 {
+    let src = src & mask_u64(src_width);
+    let result = match op {
+        UnaryOp::Ident => {
+            if src_signed {
+                sign_extend_u64(src, src_width, dst_width)
+            } else {
+                src
+            }
+        }
+        UnaryOp::ToTwoState => src,
+        UnaryOp::Minus => {
+            let common = src_width.max(dst_width);
+            sign_extend_u64(src, src_width, common).wrapping_neg()
+        }
+        UnaryOp::BitNot => {
+            let common = src_width.max(dst_width);
+            let promoted = if src_signed {
+                sign_extend_u64(src, src_width, common)
+            } else {
+                src
+            };
+            !promoted
+        }
+        UnaryOp::LogicNot => u64::from(src == 0),
+        UnaryOp::And => u64::from(src == mask_u64(src_width)),
+        UnaryOp::Or => u64::from(src != 0),
+        UnaryOp::Xor => u64::from(src.count_ones() & 1 != 0),
+        UnaryOp::PopCount => u64::from(src.count_ones()),
+        UnaryOp::CountLeadingZeros => {
+            let significant = if src == 0 {
+                0
+            } else {
+                u64::BITS as usize - src.leading_zeros() as usize
+            };
+            src_width.saturating_sub(significant) as u64
+        }
+        UnaryOp::CountTrailingZeros => {
+            if src == 0 {
+                src_width as u64
+            } else {
+                u64::from(src.trailing_zeros())
+            }
+        }
+    };
+    result & mask_u64(dst_width)
 }
 
 // ── ALU ───────────────────────────────────────────────────────────────
@@ -1250,17 +1523,57 @@ impl BigUintExt for BigUint {
 #[derive(Default)]
 pub(crate) struct Registers {
     slots: Vec<RegisterSlot>,
+    small_enabled: bool,
 }
 
 #[derive(Default)]
 struct RegisterSlot {
-    value: Option<SIRValue>,
+    value: Option<RegisterValue>,
     width: usize,
     signed: bool,
 }
 
+#[derive(Clone)]
+enum RegisterValue {
+    /// Fully-known two-state value. The materialized SIR value is populated
+    /// only when a cold generic interface (dynamic access or runtime event)
+    /// needs it.
+    Small {
+        value: u64,
+        materialized: OnceCell<SIRValue>,
+    },
+    Wide(SIRValue),
+}
+
+impl RegisterValue {
+    fn small(value: u64) -> Self {
+        Self::Small {
+            value,
+            materialized: OnceCell::new(),
+        }
+    }
+
+    fn as_small(&self) -> Option<u64> {
+        match self {
+            Self::Small { value, .. } => Some(*value),
+            Self::Wide(_) => None,
+        }
+    }
+
+    fn as_sir(&self) -> &SIRValue {
+        match self {
+            Self::Small {
+                value,
+                materialized,
+            } => materialized.get_or_init(|| SIRValue::new(*value)),
+            Self::Wide(value) => value,
+        }
+    }
+}
+
 impl Registers {
-    fn prepare(&mut self, register_map: &HashMap<RegisterId, RegisterType>) {
+    fn prepare(&mut self, register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) {
+        self.small_enabled = !four_state;
         let size = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
         self.slots.clear();
         self.slots.resize_with(size, RegisterSlot::default);
@@ -1274,13 +1587,54 @@ impl Registers {
         self.slots
             .get(id.0)
             .and_then(|slot| slot.value.as_ref())
+            .map(RegisterValue::as_sir)
+            .ok_or(InterpError::MissingRegister(id))
+    }
+
+    fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
+        self.slots
+            .get(id.0)
+            .and_then(|slot| slot.value.as_ref())
+            .map(RegisterValue::as_small)
+            .ok_or(InterpError::MissingRegister(id))
+    }
+
+    fn clone_value(&self, id: RegisterId) -> Result<RegisterValue, InterpError> {
+        self.slots
+            .get(id.0)
+            .and_then(|slot| slot.value.clone())
             .ok_or(InterpError::MissingRegister(id))
     }
 
     fn set(&mut self, id: RegisterId, value: SIRValue) {
         if let Some(slot) = self.slots.get_mut(id.0) {
+            let small = if self.small_enabled && slot.width <= 64 && value.mask.is_zero() {
+                value.payload.to_u64()
+            } else {
+                None
+            };
+            slot.value = Some(match small {
+                Some(value) => RegisterValue::small(value & mask_u64(slot.width)),
+                None => RegisterValue::Wide(value),
+            });
+        }
+    }
+
+    fn set_small(&mut self, id: RegisterId, value: u64) {
+        if let Some(slot) = self.slots.get_mut(id.0) {
+            debug_assert!(self.small_enabled && slot.width <= 64);
+            slot.value = Some(RegisterValue::small(value & mask_u64(slot.width)));
+        }
+    }
+
+    fn set_value(&mut self, id: RegisterId, value: RegisterValue) {
+        if let Some(slot) = self.slots.get_mut(id.0) {
             slot.value = Some(value);
         }
+    }
+
+    fn accepts_small(&self, id: RegisterId) -> bool {
+        self.small_enabled && self.slots.get(id.0).is_some_and(|slot| slot.width <= 64)
     }
 
     fn width(&self, id: RegisterId) -> usize {
@@ -1484,6 +1838,145 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn narrow_binary_alu_matches_generic_two_state_path() {
+        const OPS: &[BinaryOp] = &[
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::DivU,
+            BinaryOp::DivS,
+            BinaryOp::RemU,
+            BinaryOp::RemS,
+            BinaryOp::And,
+            BinaryOp::Or,
+            BinaryOp::Xor,
+            BinaryOp::Shl,
+            BinaryOp::Shr,
+            BinaryOp::Sar,
+            BinaryOp::Eq,
+            BinaryOp::Ne,
+            BinaryOp::EqCase,
+            BinaryOp::NeCase,
+            BinaryOp::LtU,
+            BinaryOp::LtS,
+            BinaryOp::LeU,
+            BinaryOp::LeS,
+            BinaryOp::GtU,
+            BinaryOp::GtS,
+            BinaryOp::GeU,
+            BinaryOp::GeS,
+            BinaryOp::LogicAnd,
+            BinaryOp::LogicOr,
+            BinaryOp::EqWildcard,
+            BinaryOp::NeWildcard,
+        ];
+        const WIDTHS: &[usize] = &[1, 4, 8, 32, 63, 64];
+        const VALUES: &[u64] = &[
+            0,
+            1,
+            2,
+            3,
+            7,
+            0x80,
+            0xffff_ffff,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+        ];
+
+        for op in OPS {
+            for &lhs_width in WIDTHS {
+                for &rhs_width in WIDTHS {
+                    for &dst_width in WIDTHS {
+                        for lhs_signed in [false, true] {
+                            for &lhs in VALUES {
+                                for &rhs in VALUES {
+                                    let lhs = lhs & mask_u64(lhs_width);
+                                    let rhs = rhs & mask_u64(rhs_width);
+                                    let expected = alu_binary(
+                                        op,
+                                        &SIRValue::new(lhs),
+                                        &SIRValue::new(rhs),
+                                        lhs_width,
+                                        rhs_width,
+                                        dst_width,
+                                        lhs_signed,
+                                    )
+                                    .unwrap();
+                                    let actual = alu_binary_u64(
+                                        op, lhs, rhs, lhs_width, rhs_width, dst_width, lhs_signed,
+                                    );
+                                    assert!(expected.mask.is_zero());
+                                    assert_eq!(
+                                        BigUint::from(actual),
+                                        expected.payload,
+                                        "{op:?}: lhs={lhs:#x}/{lhs_width}, rhs={rhs:#x}/{rhs_width}, dst={dst_width}, signed={lhs_signed}",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_unary_alu_matches_generic_two_state_path() {
+        const OPS: &[UnaryOp] = &[
+            UnaryOp::Ident,
+            UnaryOp::ToTwoState,
+            UnaryOp::Minus,
+            UnaryOp::BitNot,
+            UnaryOp::LogicNot,
+            UnaryOp::And,
+            UnaryOp::Or,
+            UnaryOp::Xor,
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ];
+        const WIDTHS: &[usize] = &[1, 4, 8, 32, 63, 64];
+        const VALUES: &[u64] = &[
+            0,
+            1,
+            2,
+            3,
+            7,
+            0x80,
+            0xffff_ffff,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+        ];
+
+        for op in OPS {
+            for &src_width in WIDTHS {
+                for &dst_width in WIDTHS {
+                    for src_signed in [false, true] {
+                        for &src in VALUES {
+                            let src = src & mask_u64(src_width);
+                            let expected = alu_unary(
+                                op,
+                                &SIRValue::new(src),
+                                src_width,
+                                src_signed,
+                                dst_width,
+                            )
+                            .unwrap();
+                            let actual = alu_unary_u64(op, src, src_width, src_signed, dst_width);
+                            assert!(expected.mask.is_zero());
+                            assert_eq!(
+                                BigUint::from(actual),
+                                expected.payload,
+                                "{op:?}: src={src:#x}/{src_width}, dst={dst_width}, signed={src_signed}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn block(

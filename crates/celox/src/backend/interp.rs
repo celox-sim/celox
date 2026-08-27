@@ -98,6 +98,34 @@ fn low_mask(bits: usize) -> BigUint {
     }
 }
 
+fn narrow_mask(bits: usize) -> u64 {
+    match bits {
+        0 => 0,
+        64.. => u64::MAX,
+        bits => (1u64 << bits) - 1,
+    }
+}
+
+fn unpack_u64(bytes: &[u8], shift: usize, bits: usize) -> u64 {
+    let mut raw = 0u128;
+    for (index, byte) in bytes.iter().enumerate() {
+        raw |= u128::from(*byte) << (index * 8);
+    }
+    ((raw >> shift) as u64) & narrow_mask(bits)
+}
+
+fn pack_u64(bytes: &mut [u8], shift: usize, bits: usize, value: u64) {
+    let mut current = 0u128;
+    for (index, byte) in bytes.iter().enumerate() {
+        current |= u128::from(*byte) << (index * 8);
+    }
+    let field_mask = u128::from(narrow_mask(bits)) << shift;
+    current = (current & !field_mask) | ((u128::from(value) << shift) & field_mask);
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = (current >> (index * 8)) as u8;
+    }
+}
+
 /// Write `value` into element-strided storage: each element's low
 /// `element_width` bits land at its stride slot, masked to the element width
 /// so no padding bits leak inside or past the slot.
@@ -330,6 +358,17 @@ impl Machine<'_> {
         shifted & low_mask(bits)
     }
 
+    fn read_bits_u64(&self, byte_offset: usize, bit_offset: usize, bits: usize) -> u64 {
+        debug_assert!(bits <= 64);
+        if bits == 0 {
+            return 0;
+        }
+        let shift = bit_offset % 8;
+        let byte_len = (shift + bits).div_ceil(8);
+        let start = byte_offset + bit_offset / 8;
+        unpack_u64(self.byte_slice(start, byte_len), shift, bits)
+    }
+
     /// Read-modify-write `bits` starting at `bit_offset`, preserving every
     /// other bit in the covered bytes.
     fn write_bits(&mut self, byte_offset: usize, bit_offset: usize, bits: usize, value: &BigUint) {
@@ -353,6 +392,24 @@ impl Machine<'_> {
                 *destination.add(index) = bytes.get(index).copied().unwrap_or(0);
             }
         }
+    }
+
+    fn write_bits_u64(&mut self, byte_offset: usize, bit_offset: usize, bits: usize, value: u64) {
+        debug_assert!(bits <= 64);
+        if bits == 0 {
+            return;
+        }
+        let shift = bit_offset % 8;
+        let byte_len = (shift + bits).div_ceil(8);
+        let start = byte_offset + bit_offset / 8;
+        // Safety: the same layout-derived range is used by `write_bits`.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                (self.memory.as_mut_ptr() as *mut u8).add(start),
+                byte_len,
+            )
+        };
+        pack_u64(bytes, shift, bits, value);
     }
 
     fn mark_trigger_bit(&mut self, id: usize) {
@@ -618,6 +675,20 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         }
     }
 
+    fn load_u64(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<u64, InterpError> {
+        debug_assert!(bits <= 64);
+        let object = self.object_offset(addr)?;
+        let absolute = addr.absolute_addr();
+        debug_assert!(!self.is_4state_object(&absolute));
+        let bit_offset = self.access_bit_offset(&absolute, access.offset, &access.dynamics)?;
+        Ok(self.read_bits_u64(object, bit_offset, bits))
+    }
+
     fn prepare_store(
         &mut self,
         addr: &RegionedAbsoluteAddr,
@@ -666,6 +737,29 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         if self.is_4state_object(&absolute) {
             let mask_offset = object + self.plane_byte_size(&absolute);
             self.write_bits(mask_offset, bit_offset, bits, &value.mask);
+        }
+        Ok(())
+    }
+
+    fn store_u64(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        value: u64,
+    ) -> Result<(), InterpError> {
+        debug_assert!(bits <= 64);
+        let object = self.object_offset(addr)?;
+        let absolute = addr.absolute_addr();
+        debug_assert!(!self.is_4state_object(&absolute));
+        let bit_offset = self.access_bit_offset(&absolute, access.offset, &access.dynamics)?;
+        if let Some(array) = self.whole_strided_array(&absolute, bit_offset, bits) {
+            let value = BigUint::from(value);
+            unsafe {
+                scatter_strided(self.memory.as_mut_ptr().cast(), object, &array, &value);
+            }
+        } else {
+            self.write_bits_u64(object, bit_offset, bits, value);
         }
         Ok(())
     }
@@ -1776,5 +1870,42 @@ impl SimBackend for InterpBackend {
             }
         }
         bits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_packed_access_matches_biguint_reference() {
+        const WIDTHS: &[usize] = &[1, 7, 8, 31, 32, 63, 64];
+        const VALUES: &[u64] = &[0, 1, 0x55, 0xdead_beef, u64::MAX];
+
+        for bit_offset in 0..16 {
+            for &bits in WIDTHS {
+                let shift = bit_offset % 8;
+                let byte_len = (shift + bits).div_ceil(8);
+                let start = bit_offset / 8;
+                for &value in VALUES {
+                    let original: Vec<u8> = (0..16)
+                        .map(|index| (index as u8).wrapping_mul(37).wrapping_add(11))
+                        .collect();
+                    let mut actual = original.clone();
+                    pack_u64(&mut actual[start..start + byte_len], shift, bits, value);
+
+                    let mut expected = BigUint::from_bytes_le(&original);
+                    let field_mask = low_mask(bits) << bit_offset;
+                    expected &= low_mask(original.len() * 8) ^ &field_mask;
+                    expected |= (BigUint::from(value) & low_mask(bits)) << bit_offset;
+                    let mut expected_bytes = expected.to_bytes_le();
+                    expected_bytes.resize(original.len(), 0);
+                    assert_eq!(actual, expected_bytes);
+
+                    let loaded = unpack_u64(&actual[start..start + byte_len], shift, bits);
+                    assert_eq!(loaded, value & narrow_mask(bits));
+                }
+            }
+        }
     }
 }
