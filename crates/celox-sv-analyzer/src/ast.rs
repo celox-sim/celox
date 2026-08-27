@@ -682,7 +682,12 @@ fn size_system_function_expr_type(
     if !first_dimension_only {
         return expr_type_from_type(&r#type, const_env);
     }
-    let range = r#type.packed_ranges().first()?;
+    let Some(range) = r#type.packed_ranges().first() else {
+        return Some(ExprType {
+            width: 1,
+            signed: r#type.is_signed(),
+        });
+    };
     let left = eval_ast_const_expr(range.left(), const_env)?;
     let right = eval_ast_const_expr(range.right(), const_env)?;
     let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
@@ -2226,6 +2231,7 @@ pub struct ConditionalAssignment {
     condition: Option<Expr>,
     assignment: Assignment,
     exhaustive_fallback_start: Option<usize>,
+    condition_epoch: Option<usize>,
 }
 
 impl ConditionalAssignment {
@@ -2234,6 +2240,7 @@ impl ConditionalAssignment {
             condition,
             assignment,
             exhaustive_fallback_start: None,
+            condition_epoch: None,
         }
     }
 
@@ -7228,8 +7235,7 @@ fn comb_process_from_always_construct(
         packed_dimensions,
         &mut guarded_assignments,
     )?;
-    let assignments =
-        comb_assignments_from_guarded(guarded_assignments, &packed_dimensions.const_env)?;
+    let assignments = comb_assignments_from_guarded(guarded_assignments, packed_dimensions)?;
     Ok((!assignments.is_empty())
         .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments)))
 }
@@ -7244,8 +7250,9 @@ fn comb_process_from_always_construct(
 /// previous value, which infers a latch, and is rejected.
 fn comb_assignments_from_guarded(
     mut guarded: Vec<ConditionalAssignment>,
-    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
+    let const_env = &packed_dimensions.const_env;
     let mut targets: Vec<LValue> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (index, conditional) in guarded.iter().enumerate() {
@@ -7283,7 +7290,7 @@ fn comb_assignments_from_guarded(
         {
             continue;
         }
-        let initial = overlapping_value_before(&guarded, indices[0], target, const_env);
+        let initial = overlapping_value_before(&guarded, indices[0], target, packed_dimensions);
         substitute_intermediate_comb_value_reads(
             &mut guarded,
             indices,
@@ -7313,8 +7320,9 @@ fn comb_assignments_from_guarded(
         // priority. A target-specific exhaustive fallback fills the previous
         // value in the branch chain instead of becoming globally
         // unconditional.
-        let mut current = overlapping_value_before(&guarded, indices[0], &target, const_env)
-            .unwrap_or_else(comb_previous_value_placeholder);
+        let initial = overlapping_value_before(&guarded, indices[0], &target, packed_dimensions);
+        let has_established_initial = initial.is_some();
+        let mut current = initial.unwrap_or_else(comb_previous_value_placeholder);
         for (position, index) in indices.iter().enumerate() {
             let write = &guarded[*index];
             let value = write.assignment().rhs().clone();
@@ -7334,7 +7342,8 @@ fn comb_assignments_from_guarded(
         }
         let rhs = current;
         if expr_contains_comb_previous_value(&rhs)
-            || expr_references_overlapping_lvalue(&rhs, &target, const_env)
+            || (!has_established_initial
+                && expr_references_overlapping_lvalue(&rhs, &target, const_env))
         {
             return Err(AnalyzerError::Unsupported(
                 "latch inference inside always_comb".to_string(),
@@ -7369,22 +7378,45 @@ fn substitute_intermediate_comb_value_reads(
     const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
     let first = *indices.first().expect("group is non-empty");
-    let last = *indices.last().expect("group is non-empty");
     let mut initialized = initial.is_some();
     let mut established = initial.unwrap_or_else(comb_previous_value_placeholder);
     let mut write_index = 0;
     let mut prior_target_writes = Vec::new();
+    let mut frozen_conditions: HashMap<usize, Expr> = HashMap::default();
+    let mut path_values: HashMap<usize, Expr> = HashMap::default();
 
-    for (index, guarded_assignment) in guarded.iter_mut().enumerate().take(last + 1).skip(first) {
+    for (index, guarded_assignment) in guarded.iter_mut().enumerate().skip(first) {
         let is_target_write = indices.get(write_index) == Some(&index);
-        if initialized {
-            guarded_assignment.condition = guarded_assignment.condition.take().map(|condition| {
+        if let Some(condition) = guarded_assignment.condition.take() {
+            let condition = if let Some(epoch) = guarded_assignment.condition_epoch {
+                if let Some(frozen) = frozen_conditions.get(&epoch) {
+                    frozen.clone()
+                } else {
+                    let frozen = if initialized {
+                        substitute_expr_lvalue(condition, target, &established, const_env)
+                    } else {
+                        condition
+                    };
+                    frozen_conditions.insert(epoch, frozen.clone());
+                    frozen
+                }
+            } else if initialized {
                 substitute_expr_lvalue(condition, target, &established, const_env)
-            });
+            } else {
+                condition
+            };
+            guarded_assignment.condition = Some(condition);
+        }
+
+        let path_value = guarded_assignment
+            .condition_epoch
+            .and_then(|epoch| path_values.get(&epoch));
+        if initialized || path_value.is_some() {
+            let value = path_value.unwrap_or(&established);
             let assignment = guarded_assignment.assignment.clone();
             guarded_assignment.assignment = Assignment::new(
                 assignment.lhs_value().clone(),
-                substitute_expr_lvalue(assignment.rhs, target, &established, const_env),
+                substitute_expr_lvalue(assignment.rhs, target, value, const_env),
             );
         } else if !is_target_write
             && (guarded_assignment
@@ -7416,6 +7448,9 @@ fn substitute_intermediate_comb_value_reads(
                 initialized = true;
             }
             established = fold_conditional_assignment_over(established, write);
+        }
+        if let Some(epoch) = write.condition_epoch {
+            path_values.insert(epoch, write.assignment().rhs().clone());
         }
         prior_target_writes.push((index, write.clone()));
     }
@@ -7464,11 +7499,13 @@ fn overlapping_value_before(
     guarded: &[ConditionalAssignment],
     before: usize,
     target: &LValue,
-    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
-    if !matches!(target, LValue::Select { .. }) {
-        return None;
+    if let LValue::Ident(target_name) = target {
+        let selected_target = whole_packed_lvalue(target_name, packed_dimensions)?;
+        return overlapping_value_before(guarded, before, &selected_target, packed_dimensions);
     }
+    let const_env = &packed_dimensions.const_env;
     let mut current = comb_previous_value_placeholder();
     let mut initialized = false;
     let mut states_before = vec![(current.clone(), initialized)];
@@ -7535,6 +7572,43 @@ fn overlapping_value_before(
         states_before.push((current.clone(), initialized));
     }
     initialized.then_some(current)
+}
+
+fn whole_packed_lvalue(name: &str, packed_dimensions: &PackedDimensions) -> Option<LValue> {
+    let dimensions = packed_dimensions.get(name)?;
+    if !dimensions.unpacked.is_empty() {
+        return None;
+    }
+    let (msb, lsb) = if dimensions.packed.len() == 1 && !dimensions.packed[0].normalize_single {
+        (
+            dimensions.packed[0].left.clone(),
+            dimensions.packed[0].right.clone(),
+        )
+    } else {
+        let width = product_expr(
+            &dimensions
+                .packed
+                .iter()
+                .map(|dimension| dimension.width.clone())
+                .collect::<Vec<_>>(),
+        );
+        (
+            ConstExpr::Binary {
+                left: Box::new(width),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".to_string())),
+            },
+            ConstExpr::Literal("0".to_string()),
+        )
+    };
+    Some(LValue::Select {
+        name: name.to_string(),
+        msb,
+        lsb,
+        signed: dimensions.signed,
+        array_slice_width: None,
+        array_slice_reversed: false,
+    })
 }
 
 fn selected_value_after_write(
@@ -8556,6 +8630,7 @@ fn conditional_assignments_from_conditional_statement(
         parent_condition.clone(),
         procedural_truth_condition(if_condition.clone()),
     );
+    let then_start = assignments.len();
     conditional_assignments_from_statement_or_null(
         &stmt.nodes.3,
         then_condition,
@@ -8565,6 +8640,7 @@ fn conditional_assignments_from_conditional_statement(
         packed_dimensions,
         assignments,
     )?;
+    mark_condition_epoch(assignments, then_start);
     definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
         &stmt.nodes.3,
         syntax_tree,
@@ -8581,6 +8657,7 @@ fn conditional_assignments_from_conditional_statement(
         let mut terms = prior_false.clone();
         terms.push(procedural_truth_condition(branch_condition.clone()));
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
+        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
@@ -8590,6 +8667,7 @@ fn conditional_assignments_from_conditional_statement(
             packed_dimensions,
             assignments,
         )?;
+        mark_condition_epoch(assignments, branch_start);
         definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
             branch,
             syntax_tree,
@@ -8613,6 +8691,7 @@ fn conditional_assignments_from_conditional_statement(
             packed_dimensions,
             assignments,
         )?;
+        mark_condition_epoch(assignments, branch_start);
         definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
             branch,
             syntax_tree,
@@ -8707,6 +8786,7 @@ fn conditional_assignments_from_case_statement(
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
         // Case-item guards are never tautological, so statements nested in
         // a branch must keep the item condition.
+        let branch_start = assignments.len();
         conditional_assignments_from_statement_or_null(
             branch,
             condition,
@@ -8716,6 +8796,7 @@ fn conditional_assignments_from_case_statement(
             packed_dimensions,
             assignments,
         )?;
+        mark_condition_epoch(assignments, branch_start);
         definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
             branch,
             syntax_tree,
@@ -8742,6 +8823,7 @@ fn conditional_assignments_from_case_statement(
             packed_dimensions,
             assignments,
         )?;
+        mark_condition_epoch(assignments, branch_start);
         definitely_assigned_branches.push(definitely_assigned_comb_targets_statement_or_null(
             branch,
             syntax_tree,
@@ -8756,6 +8838,19 @@ fn conditional_assignments_from_case_statement(
         }
     }
     Ok(())
+}
+
+fn mark_condition_epoch(assignments: &mut [ConditionalAssignment], start: usize) {
+    let epoch = assignments
+        .iter()
+        .filter_map(|assignment| assignment.condition_epoch)
+        .max()
+        .map_or(0, |epoch| epoch + 1);
+    for assignment in &mut assignments[start..] {
+        if assignment.condition.is_some() && assignment.condition_epoch.is_none() {
+            assignment.condition_epoch = Some(epoch);
+        }
+    }
 }
 
 fn mark_exhaustive_fallback(

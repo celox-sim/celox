@@ -2333,6 +2333,90 @@ fn later_exhaustive_comb_chain_overrides_an_earlier_chain() {
 }
 
 #[test]
+fn preserves_selected_values_before_conditional_whole_comb_writes() {
+    let source = r#"
+        module Top(input logic c, a, output logic [7:0] x);
+            always_comb begin
+                x = '0;
+                x[0] = a;
+                if (c) x = 8'hff;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_selected_then_whole.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn reads_values_assigned_earlier_on_each_comb_branch() {
+    let source = r#"
+        module Top(input logic c, output logic x, y);
+            always_comb begin
+                if (c) begin
+                    x = 1'b1;
+                    y = x;
+                end else begin
+                    x = 1'b0;
+                    y = x;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("comb_path_local_read.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn freezes_comb_branch_guards_before_predicate_writes() {
+    let source = r#"
+        module Top(input logic en, output logic t, y);
+            always_comb begin
+                t = en;
+                y = 1'b0;
+                if (t) begin
+                    t = 1'b0;
+                    y = 1'b1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("comb_frozen_predicate.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let en = sim.signal("en");
+    let t = sim.signal("t");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(en, 1u8)).unwrap();
+    assert_eq!(sim.get(t), 0u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(

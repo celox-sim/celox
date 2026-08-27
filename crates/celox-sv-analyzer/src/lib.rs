@@ -485,6 +485,71 @@ mod tests {
     }
 
     #[test]
+    fn uses_selected_writes_before_conditional_whole_vector_writes() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, output logic [7:0] x);
+                    always_comb begin
+                        x = '0;
+                        x[0] = a;
+                        if (c) x = 8'hff;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_then_conditional_whole.sv"),
+        )
+        .expect("the preceding selected write should initialize the whole-write fallback");
+    }
+
+    #[test]
+    fn permits_reads_after_assignments_on_the_same_comb_path() {
+        analyze_source(
+            r#"
+                module Top(input logic c, output logic x, y);
+                    always_comb begin
+                        if (c) begin
+                            x = 1'b1;
+                            y = x;
+                        end else begin
+                            x = 1'b0;
+                            y = x;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("path_local_comb_read.sv"),
+        )
+        .expect("each guarded read is preceded by a write on the same path");
+    }
+
+    #[test]
+    fn freezes_comb_branch_guards_before_overwriting_the_predicate() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic en, output logic t, y);
+                    always_comb begin
+                        t = en;
+                        y = 1'b0;
+                        if (t) begin
+                            t = 1'b0;
+                            y = 1'b1;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("frozen_comb_guard.sv"),
+        )
+        .expect("the branch predicate should use t's value on entry");
+        let y = ir.modules()[0].comb_processes()[0]
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(expr_references_ident_name(y.rhs(), "en"));
+        assert!(!expr_references_ident_name(y.rhs(), "t"));
+    }
+
+    #[test]
     fn preserves_prior_partially_overlapping_selected_writes() {
         let ir = analyze_source(
             r#"
@@ -595,6 +660,19 @@ mod tests {
         // keeps it.
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
         assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(7));
+    }
+
+    #[test]
+    fn treats_scalar_size_cast_targets_as_one_bit() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter W = $size(logic)'(2'd3)) ();
+                endmodule
+            "#,
+            Path::new("scalar_size_cast.sv"),
+        )
+        .expect("a scalar $size cast target should resolve to one bit");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
     }
 
     #[test]
