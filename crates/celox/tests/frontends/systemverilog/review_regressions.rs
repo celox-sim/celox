@@ -2697,6 +2697,75 @@ fn resolves_parameter_ranges_with_enum_constants() {
 }
 
 #[test]
+fn translates_declared_packed_indices_when_composing_whole_writes() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic b,
+            input logic [3:0] descending_value,
+            input logic [3:0] ascending_value,
+            output logic [4:1] descending_x,
+            output logic [1:4] ascending_x
+        );
+            always_comb begin
+                descending_x = descending_value;
+                if (c)
+                    descending_x[2] = b;
+            end
+            always_comb begin
+                ascending_x = ascending_value;
+                if (c)
+                    ascending_x[1] = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("declared_packed_comb_coordinates.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let b = sim.signal("b");
+    let descending_value = sim.signal("descending_value");
+    let ascending_value = sim.signal("ascending_value");
+    let descending_x = sim.signal("descending_x");
+    let ascending_x = sim.signal("ascending_x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(b, 0u8);
+        io.set(descending_value, 0b0010u8);
+        io.set(ascending_value, 0b1000u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(descending_x), 0b0010u8.into());
+    assert_eq!(sim.get(ascending_x), 0b1000u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(descending_x), 0u8.into());
+    assert_eq!(sim.get(ascending_x), 0u8.into());
+}
+
+#[test]
+fn types_earlier_enum_members_in_later_initializers() {
+    let source = r#"
+        module Top(output logic y);
+            typedef enum logic signed [1:0] {
+                A = 2'b10,
+                B = (A < 0)
+            } E;
+            assign y = B;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typed_enum_member_initializer.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(

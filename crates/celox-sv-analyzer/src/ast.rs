@@ -3346,8 +3346,11 @@ fn enum_member_constants_from_module_node(
             let number = eval_ast_const_expr(&value, &eval_env).ok_or_else(|| {
                 AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
             })?;
+            let number =
+                coerce_const_parameter_value(number, member_type.width, member_type.signed);
             constants.numbers.insert(name.clone(), number);
             eval_env.insert(name.clone(), number);
+            insert_parameter_type_markers(&mut eval_env, &name, member_type);
             constants.types.insert(name.clone(), member_type);
             constants.exprs.insert(
                 name,
@@ -7521,7 +7524,7 @@ fn normalize_mixed_whole_selected_comb_writes(
             &whole_target,
             &target,
             write.assignment().rhs(),
-            &packed_dimensions.const_env,
+            packed_dimensions,
         ) else {
             continue;
         };
@@ -7658,7 +7661,7 @@ fn substitute_intermediate_comb_value_reads(
                 whole_target,
                 target,
                 &value,
-                &packed_dimensions.const_env,
+                packed_dimensions,
             )
         {
             whole_established = Some(match write.condition() {
@@ -7948,7 +7951,6 @@ fn overlapping_value_before(
         let selected_target = whole_packed_lvalue(target_name, packed_dimensions)?;
         return overlapping_value_before(guarded, before, &selected_target, packed_dimensions);
     }
-    let const_env = &packed_dimensions.const_env;
     let mut current = comb_previous_value_placeholder();
     let mut initialized = false;
     let mut states_before = vec![(current.clone(), initialized)];
@@ -7958,7 +7960,7 @@ fn overlapping_value_before(
             target,
             write.assignment().lhs_value(),
             write.assignment().rhs(),
-            const_env,
+            packed_dimensions,
         ) else {
             states_before.push((current.clone(), initialized));
             continue;
@@ -7973,7 +7975,7 @@ fn overlapping_value_before(
                 target,
                 write.assignment().lhs_value(),
                 write.assignment().rhs(),
-                const_env,
+                packed_dimensions,
             ) else {
                 states_before.push((current.clone(), initialized));
                 continue;
@@ -7984,7 +7986,7 @@ fn overlapping_value_before(
                     target,
                     prior.assignment().lhs_value(),
                     prior.assignment().rhs(),
-                    const_env,
+                    packed_dimensions,
                 ) else {
                     continue;
                 };
@@ -8059,8 +8061,9 @@ fn selected_value_after_write(
     target: &LValue,
     write_target: &LValue,
     write_value: &Expr,
-    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<(Expr, bool)> {
+    let const_env = &packed_dimensions.const_env;
     let LValue::Select {
         name: target_name,
         msb: target_msb_expr,
@@ -8073,11 +8076,17 @@ fn selected_value_after_write(
     };
     match write_target {
         LValue::Ident(write_name) => (write_name == target_name).then(|| {
+            let (msb, lsb) = whole_write_select_offsets(
+                target_name,
+                target_msb_expr,
+                target_lsb_expr,
+                packed_dimensions,
+            );
             (
                 Expr::Select {
                     expr: Box::new(write_value.clone()),
-                    msb: target_msb_expr.clone(),
-                    lsb: target_lsb_expr.clone(),
+                    msb,
+                    lsb,
                     signed: *signed,
                 },
                 true,
@@ -8152,6 +8161,28 @@ fn selected_value_after_write(
             ))
         }
     }
+}
+
+fn whole_write_select_offsets(
+    name: &str,
+    msb: &ConstExpr,
+    lsb: &ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> (ConstExpr, ConstExpr) {
+    let Some(dimensions) = packed_dimensions.get(name) else {
+        return (msb.clone(), lsb.clone());
+    };
+    if dimensions.unpacked.is_empty()
+        && dimensions.packed.len() == 1
+        && !dimensions.packed[0].normalize_single
+    {
+        let dimension = &dimensions.packed[0];
+        return (
+            packed_index_offset(dimension, msb.clone()),
+            packed_index_offset(dimension, lsb.clone()),
+        );
+    }
+    (msb.clone(), lsb.clone())
 }
 
 fn selected_value_read(
@@ -8344,7 +8375,7 @@ fn substitute_overlapping_selected_read(
             &whole,
             target,
             value,
-            const_env,
+            packed_dimensions,
         )
         .map(|(value, _)| value);
     }
