@@ -11,11 +11,9 @@ use crate::{HashMap, HashSet};
 use super::cfg::NormalizedCfg;
 use super::materialized_state_home::{MaterializedStateReload, MaterializedStateStore};
 use super::next_use::NextUseAnalysis;
-#[cfg(test)]
-use super::reload::PureStep;
 use super::reload::{
-    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, ReloadRecipeAnalysis, ResolvedBase,
-    ResolvedRecipe, materialize_pure_step,
+    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, PureStep, ReloadRecipeAnalysis,
+    ResolvedBase, ResolvedRecipe, materialize_pure_step,
 };
 use super::spill_plan::{
     LogicalValue, PlannedEdgeOp, PlannedOp, PointSide, ProgramPoint, SpillHome, SpillPlan,
@@ -1122,7 +1120,7 @@ fn prepare_home_transfer_recipe(
     func: &mut MFunction,
     logical_for_vreg: &mut Vec<LogicalValue>,
     logical: LogicalValue,
-    expected: ResolvedRecipe,
+    mut expected: ResolvedRecipe,
     cache: &mut HomeTransferRecipeCache,
 ) -> Result<(VReg, PreparedRecipe), ReconstructError> {
     if !cache.cacheable_bases.contains(&expected.base) {
@@ -1141,6 +1139,18 @@ fn prepare_home_transfer_recipe(
     for &step in &expected.steps {
         let destination = alloc_fresh(func, logical_for_vreg, logical)?;
         instructions.push(materialize_pure_step(step, destination, current));
+        current = destination;
+    }
+    if instructions.is_empty() {
+        // A cached base-only recipe still needs its own SSA definition. The
+        // copy preserves the insertion-point snapshot while giving this
+        // transfer a unique final value for reconstruction and verification.
+        let destination = alloc_fresh(func, logical_for_vreg, logical)?;
+        instructions.push(MInst::Mov {
+            dst: destination,
+            src: current,
+        });
+        expected.steps.push(PureStep::Copy64);
         current = destination;
     }
     Ok((
@@ -1174,27 +1184,32 @@ fn cacheable_home_transfer_bases(
                 return None;
             };
             (source == *destination && spill_destination == *destination).then_some((
-                index,
-                recipes.get(index)?.as_ref()?.base.clone(),
+                recipes
+                    .get(index)?
+                    .as_ref()
+                    .map(|recipe| recipe.base.clone()),
                 state_homes.get(&destination_home).copied(),
             ))
         })
         .collect::<Vec<_>>();
 
-    for (later, (later_index, base, _)) in transfers.iter().enumerate() {
+    for (later, (base, _)) in transfers.iter().enumerate() {
+        let Some(base) = base else {
+            continue;
+        };
         let ResolvedBase::State(state) = base else {
             continue;
         };
-        let previously_loaded = transfers[..later]
+        let Some(previously_loaded) = transfers[..later]
             .iter()
-            .any(|(_, previous_base, _)| previous_base == base);
-        if !previously_loaded {
+            .rposition(|(previous_base, _)| previous_base.as_ref() == Some(base))
+        else {
             continue;
-        }
-        if transfers[..later].iter().any(|(store_index, _, home)| {
-            *store_index < *later_index
-                && home.is_some_and(|home| state_load_overlaps_home(state.load, home))
-        }) {
+        };
+        if transfers[previously_loaded..later]
+            .iter()
+            .any(|(_, home)| home.is_some_and(|home| state_load_overlaps_home(state.load, home)))
+        {
             cacheable.insert(base.clone());
         }
     }
@@ -2235,6 +2250,80 @@ mod tests {
     }
 
     #[test]
+    fn cached_base_only_home_transfer_recipe_emits_a_fresh_definition() {
+        let mut vregs = VRegAllocator::new();
+        let first_logical = vregs.alloc();
+        let second_logical = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut logical_for_vreg = (0..2).map(LogicalValue).collect::<Vec<_>>();
+        let base = ResolvedBase::State(super::super::reload::StateRecipe::live_on_entry_for_test(
+            super::super::reload::StateLoad {
+                offset: 16,
+                size: OpSize::S64,
+            },
+        ));
+        let mut cache = HomeTransferRecipeCache::default();
+        cache.cacheable_bases.insert(base.clone());
+
+        let (cached_base, first) = prepare_home_transfer_recipe(
+            &mut func,
+            &mut logical_for_vreg,
+            LogicalValue(first_logical.0),
+            ResolvedRecipe {
+                base: base.clone(),
+                steps: Vec::new(),
+            },
+            &mut cache,
+        )
+        .unwrap();
+        let (second_result, second) = prepare_home_transfer_recipe(
+            &mut func,
+            &mut logical_for_vreg,
+            LogicalValue(second_logical.0),
+            ResolvedRecipe {
+                base,
+                steps: Vec::new(),
+            },
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(first.instructions.len(), 1);
+        assert_ne!(second_result, cached_base);
+        assert!(matches!(
+            second.instructions.as_slice(),
+            [MInst::Mov { dst, src }]
+                if *dst == second_result && *src == cached_base
+        ));
+        assert_eq!(second.expected.steps, vec![PureStep::Copy64]);
+
+        let mut block = MBlock::new(BlockId(0));
+        block.insts.extend(first.instructions);
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 16,
+            src: cached_base,
+            size: OpSize::S64,
+        });
+        block.insts.extend(second.instructions);
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        super::super::reload::verify_expected_materialized_reloads_after_state_spills(
+            &func,
+            &cfg,
+            &[ExpectedMaterializedReload {
+                reload: second_result,
+                expected: second.expected,
+                planned_use: None,
+            }],
+            &[(BlockId(0), 0)],
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn overlapping_home_transfer_store_protects_an_earlier_state_base() {
         let first = LogicalValue(0);
         let second = LogicalValue(1);
@@ -2289,6 +2378,77 @@ mod tests {
         assert!(cacheable.contains(&base));
 
         homes.get_mut(&first_home).unwrap().offset = 64;
+        let cacheable = cacheable_home_transfer_bases(&operations, &recipes, &homes);
+        assert!(!cacheable.contains(&base));
+    }
+
+    #[test]
+    fn recipe_less_home_transfer_store_still_protects_an_earlier_state_base() {
+        let first = LogicalValue(0);
+        let middle = LogicalValue(1);
+        let last = LogicalValue(2);
+        let first_home = SpillHome(0);
+        let middle_home = SpillHome(1);
+        let last_home = SpillHome(2);
+        let operations = [
+            PlannedEdgeOp::Reload {
+                source: first,
+                source_home: SpillHome(3),
+                destination: first,
+            },
+            PlannedEdgeOp::Spill {
+                source: first,
+                destination: first,
+                destination_home: first_home,
+            },
+            PlannedEdgeOp::Reload {
+                source: middle,
+                source_home: SpillHome(4),
+                destination: middle,
+            },
+            PlannedEdgeOp::Spill {
+                source: middle,
+                destination: middle,
+                destination_home: middle_home,
+            },
+            PlannedEdgeOp::Reload {
+                source: last,
+                source_home: SpillHome(5),
+                destination: last,
+            },
+            PlannedEdgeOp::Spill {
+                source: last,
+                destination: last,
+                destination_home: last_home,
+            },
+        ];
+        let load = super::super::reload::StateLoad {
+            offset: 16,
+            size: OpSize::S64,
+        };
+        let base = ResolvedBase::State(super::super::reload::StateRecipe::live_on_entry_for_test(
+            load,
+        ));
+        let recipe = Some(ResolvedRecipe {
+            base: base.clone(),
+            steps: vec![PureStep::ShrImm64 { immediate: 1 }],
+        });
+        let recipes = [recipe.clone(), None, None, None, recipe, None];
+        let mut homes = std::collections::BTreeMap::new();
+        homes.insert(
+            middle_home,
+            crate::native::mir::PackedStateHome {
+                id: crate::native::mir::StateHomeId(0),
+                offset: 16,
+                size: OpSize::S64,
+                live_on_entry: false,
+            },
+        );
+
+        let cacheable = cacheable_home_transfer_bases(&operations, &recipes, &homes);
+        assert!(cacheable.contains(&base));
+
+        homes.get_mut(&middle_home).unwrap().offset = 64;
         let cacheable = cacheable_home_transfer_bases(&operations, &recipes, &homes);
         assert!(!cacheable.contains(&base));
     }
