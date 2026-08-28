@@ -2930,8 +2930,15 @@ fn add_type_alias_from_data_declaration(
     else {
         return Ok(());
     };
-    let Some(r#type) = type_from_ref_node(RefNode::DataType(&declaration.nodes.1), syntax_tree)
-    else {
+    let r#type =
+        type_from_ref_node(RefNode::DataType(&declaration.nodes.1), syntax_tree).or_else(|| {
+            let sv_parser::DataType::Enum(r#enum) = &declaration.nodes.1 else {
+                return None;
+            };
+            let base = r#enum.nodes.1.as_ref()?;
+            type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases)
+        });
+    let Some(r#type) = r#type else {
         return Ok(());
     };
     let r#type = type_with_unpacked_ranges(
@@ -3782,6 +3789,7 @@ struct VariableDimensions {
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
+    is_2state: bool,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
@@ -3835,6 +3843,7 @@ fn packed_dimensions_from_ports_and_signals(
                 packed: packed_dimension_widths(port.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                 signed: port.r#type().is_signed(),
+                is_2state: port.r#type().kind() == TypeKind::Bit,
             },
         );
     }
@@ -3845,6 +3854,7 @@ fn packed_dimensions_from_ports_and_signals(
                 packed: packed_dimension_widths(signal.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                 signed: signal.r#type().is_signed(),
+                is_2state: signal.r#type().kind() == TypeKind::Bit,
             },
         );
     }
@@ -4940,6 +4950,7 @@ fn function_from_declaration(
                         packed: param.packed_dimensions.clone(),
                         unpacked: Vec::new(),
                         signed: param.signed,
+                        is_2state: param.is_2state,
                     },
                 )
             }));
@@ -4996,6 +5007,7 @@ fn function_from_declaration(
                         packed: param.packed_dimensions.clone(),
                         unpacked: Vec::new(),
                         signed: param.signed,
+                        is_2state: param.is_2state,
                     },
                 )
             }));
@@ -5085,6 +5097,7 @@ fn function_local_packed_dimensions_from_block_item_iter<'a>(
                     packed: function_packed_dimension_widths(signal.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                     signed: signal.r#type().is_signed(),
+                    is_2state: signal.r#type().kind() == TypeKind::Bit,
                 },
             )
         }));
@@ -7476,7 +7489,7 @@ fn comb_assignments_from_guarded(
                 fold_conditional_assignment_over(current, write)
             };
         }
-        let rhs = current;
+        let rhs = simplify_constant_mux_conditions(current, const_env);
         if expr_contains_comb_previous_value(&rhs)
             || (!has_established_initial
                 && expr_references_overlapping_lvalue(&rhs, &target, const_env))
@@ -7559,6 +7572,81 @@ fn fold_conditional_assignment_over(current: Expr, write: &ConditionalAssignment
             then_expr: Box::new(value),
             else_expr: Box::new(current),
         },
+    }
+}
+
+fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128>) -> Expr {
+    match expr {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+            msb,
+            lsb,
+            signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .into_iter()
+                .map(|part| simplify_constant_mux_conditions(part, const_env))
+                .collect(),
+        ),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count,
+            parts: parts
+                .into_iter()
+                .map(|part| simplify_constant_mux_conditions(part, const_env))
+                .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+            width,
+            signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(simplify_constant_mux_conditions(*left, const_env)),
+            op,
+            right: Box::new(simplify_constant_mux_conditions(*right, const_env)),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let condition = simplify_constant_mux_conditions(*condition, const_env);
+            let then_expr = simplify_constant_mux_conditions(*then_expr, const_env);
+            let else_expr = simplify_constant_mux_conditions(*else_expr, const_env);
+            match expr_to_const(condition.clone())
+                .and_then(|condition| eval_ast_const_expr(&condition, const_env))
+            {
+                Some(0) => else_expr,
+                Some(_) => then_expr,
+                None => Expr::Mux {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                },
+            }
+        }
+        Expr::Call { name, args } => Expr::Call {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| simplify_constant_mux_conditions(arg, const_env))
+                .collect(),
+        },
+        Expr::Ident(_) | Expr::Literal(_) => expr,
     }
 }
 
@@ -9165,20 +9253,35 @@ fn coerce_procedural_assignment_rhs(
     else {
         return rhs;
     };
-    if source_signed == target_type.signed
+    let assigned = if source_signed == target_type.signed
         && expr_static_width(&rhs, packed_dimensions) == Some(target_type.width)
     {
-        return rhs;
-    }
-    let assigned = Expr::Resize {
-        expr: Box::new(rhs),
-        width: target_type.width,
-        signed: source_signed,
+        rhs
+    } else {
+        let assigned = Expr::Resize {
+            expr: Box::new(rhs),
+            width: target_type.width,
+            signed: source_signed,
+        };
+        Expr::Resize {
+            expr: Box::new(assigned),
+            width: target_type.width,
+            signed: target_type.signed,
+        }
     };
-    Expr::Resize {
-        expr: Box::new(assigned),
-        width: target_type.width,
-        signed: target_type.signed,
+    let name = match lhs {
+        LValue::Ident(name) | LValue::Select { name, .. } => name,
+    };
+    if packed_dimensions
+        .get(name)
+        .is_some_and(|dimensions| dimensions.is_2state)
+    {
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(assigned),
+        }
+    } else {
+        assigned
     }
 }
 

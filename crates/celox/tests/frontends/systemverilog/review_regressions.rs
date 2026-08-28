@@ -2766,6 +2766,83 @@ fn types_earlier_enum_members_in_later_initializers() {
 }
 
 #[test]
+fn converts_two_state_blocking_writes_before_intervening_reads() {
+    let source = r#"
+        module Top(input logic c, output logic y);
+            bit x;
+            always_comb begin
+                x = 1'bx;
+                y = x;
+                if (c)
+                    x = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("two_state_intervening_comb_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn accepts_constant_true_always_comb_guards() {
+    let source = r#"
+        module Top(input logic a, output logic x);
+            always_comb
+                if (1'b1)
+                    x = a;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_true_comb_guard.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn registers_enum_types_with_aliased_bases() {
+    let source = r#"
+        module Top(output logic [1:0] y);
+            typedef logic [1:0] base_t;
+            typedef enum base_t { A = 2'd2 } E;
+            E state;
+            always_comb state = A;
+            assign y = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("aliased_enum_base_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(
