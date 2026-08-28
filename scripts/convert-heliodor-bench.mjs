@@ -81,6 +81,14 @@ function requirePassedRunner(resultRows, name, sourcePath) {
   return row;
 }
 
+function optionalPassedRunner(resultRows, name, sourcePath) {
+  const matches = resultRows.filter((row) => row.runner === name);
+  if (matches.length === 0) {
+    return undefined;
+  }
+  return requirePassedRunner(resultRows, name, sourcePath);
+}
+
 function ns(row, field) {
   const value = row[field];
   if (!/^\d+$/.test(value) || value === "0") {
@@ -98,9 +106,12 @@ function milliseconds(name, nanoseconds) {
 }
 
 const celox = requirePassedRunner(rows, "celox", inputPath);
+const tiered = optionalPassedRunner(rows, "celox-tiered", inputPath);
 const veryl = requirePassedRunner(rows, "veryl-cc-sync", inputPath);
-if (celox.test !== veryl.test) {
-  throw new Error(`runner tests differ: Celox=${celox.test}, Veryl=${veryl.test}`);
+if (celox.test !== veryl.test || (tiered && tiered.test !== celox.test)) {
+  throw new Error(
+    `runner tests differ: Celox=${celox.test}, tiered=${tiered?.test ?? "absent"}, Veryl=${veryl.test}`,
+  );
 }
 
 const results = [
@@ -125,6 +136,23 @@ const results = [
     ns(veryl, "compile_elapsed_ns"),
   ),
 ];
+
+if (tiered) {
+  results.push(
+    milliseconds(
+      "heliodor-celox-tiered/heliodor_linux_boot_end_to_end",
+      ns(tiered, "reported_elapsed_ns"),
+    ),
+    milliseconds(
+      "heliodor-celox-tiered/heliodor_linux_boot_startup",
+      ns(tiered, "compile_elapsed_ns"),
+    ),
+    milliseconds(
+      "heliodor-celox-tiered/heliodor_linux_boot_execution",
+      ns(tiered, "execute_elapsed_ns"),
+    ),
+  );
+}
 
 if (arm64ResultsPath) {
   const arm64Rows = readResults(arm64ResultsPath);

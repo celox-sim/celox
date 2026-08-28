@@ -110,6 +110,12 @@ export class Simulation<P = Record<string, unknown>> {
 	): Simulation<P> {
 		const merged = { ...module.defaultOptions, ...options };
 
+		if (merged.tier) {
+			throw new Error(
+				"tiered execution is not supported for time-based Simulation handles.",
+			);
+		}
+
 		// When the module was produced by the Vite plugin, delegate to fromProject()
 		if (module.projectPath && !merged?.__nativeCreate) {
 			return Simulation.fromProject<P>(module.projectPath, module.name, merged);
@@ -189,6 +195,11 @@ export class Simulation<P = Record<string, unknown>> {
 		top: string,
 		options?: SimulatorOptions & { nativeAddonPath?: string },
 	): Simulation<P> {
+		if (options?.tier) {
+			throw new Error(
+				"tiered execution is not supported for time-based Simulation handles.",
+			);
+		}
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
 		// WASM addon does not support time-based Simulation (no NativeSimulationHandle).
@@ -257,6 +268,11 @@ export class Simulation<P = Record<string, unknown>> {
 		artifactJson: string,
 		options?: SimulatorOptions & { nativeAddonPath?: string },
 	): Simulation<P> {
+		if (options?.tier) {
+			throw new Error(
+				"tiered execution is not supported for time-based Simulation handles.",
+			);
+		}
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const factory = addon.NativeSimulationHandle?.fromFrontendArtifact;
 		if (!factory) {
@@ -316,6 +332,11 @@ export class Simulation<P = Record<string, unknown>> {
 		top: string,
 		options?: SimulatorOptions & { nativeAddonPath?: string },
 	): Simulation<P> {
+		if (options?.tier) {
+			throw new Error(
+				"tiered execution is not supported for time-based Simulation handles.",
+			);
+		}
 		const addon = loadNativeAddon(options?.nativeAddonPath);
 		const napiOpts = buildNapiOpts(options);
 

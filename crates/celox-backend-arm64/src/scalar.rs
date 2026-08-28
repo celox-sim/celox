@@ -153,6 +153,8 @@ impl std::error::Error for PrepareError {}
 pub enum ChainedEmitError {
     Prepare(PrepareError),
     Emit(EmitError),
+    /// The compile observed its cancellation token; not a backend defect.
+    Cancelled,
 }
 
 impl fmt::Display for ChainedEmitError {
@@ -160,6 +162,7 @@ impl fmt::Display for ChainedEmitError {
         match self {
             Self::Prepare(error) => error.fmt(formatter),
             Self::Emit(error) => error.fmt(formatter),
+            Self::Cancelled => formatter.write_str("compilation was cancelled"),
         }
     }
 }
@@ -186,7 +189,21 @@ pub fn emit_prepared_eu(
     label: &str,
     native_tick_loop: bool,
     mut trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
+    // Shared borrow so the checkpoint closure and downstream callees observe
+    // the same predicate without moving it.
+    let is_cancelled = &is_cancelled;
+    // Observed between emission stages so a cancelled compile unwinds at the
+    // next boundary instead of finishing the remaining phases. Callers
+    // without cancellation pass `|| false`, which folds away after inlining.
+    let checkpoint = || -> Result<(), ChainedEmitError> {
+        if is_cancelled() {
+            Err(ChainedEmitError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
     sir_eu.verify_result().map_err(PrepareError::Sir)?;
     let tick_loop = label == "eval_comb_apply_ff" && native_tick_loop;
     let check_runtime_events = tick_loop
@@ -209,11 +226,19 @@ pub fn emit_prepared_eu(
     let mut function = crate::isel::lower_execution_unit(sir_eu, layout, four_state);
     crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);
+    checkpoint()?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_before_regalloc = format!("{function:#?}");
     }
-    let allocation = crate::regalloc::allocate_with_spills(function)
-        .map_err(|error| EmitError::Lowering(error.to_string()))?;
+    let allocation =
+        crate::regalloc::allocate_with_spills(function, is_cancelled).map_err(|error| {
+            if matches!(error, crate::regalloc::TargetRegallocError::Cancelled) {
+                ChainedEmitError::Cancelled
+            } else {
+                ChainedEmitError::Emit(EmitError::Lowering(error.to_string()))
+            }
+        })?;
+    checkpoint()?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_after_regalloc = format!("{:#?}", allocation.allocated.function);
         let mut assignments = allocation
@@ -249,7 +274,7 @@ pub fn emit_empty(state_size: usize) -> Result<EmitResult, EmitError> {
     let mut block = crate::mir::MBlock::new(BlockId(0));
     block.push(MInst::Return);
     let function = MFunction::new(vec![block], Vec::new());
-    let allocation = crate::regalloc::allocate_with_spills(function)
+    let allocation = crate::regalloc::allocate_with_spills(function, || false)
         .map_err(|error| EmitError::Lowering(error.to_string()))?;
     emit_function(
         &allocation.allocated.function,

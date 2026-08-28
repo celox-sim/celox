@@ -1,0 +1,2565 @@
+//! Tier-0 SIR interpreter for tiered execution.
+//!
+//! When [`crate::ExecutionStrategy::Tiered`] is selected the simulator starts
+//! executing execution units on this interpreter immediately after layout,
+//! hiding compilation latency behind the first simulated steps. Hot units are
+//! compiled in the background and swapped in at scheduler safe points; this
+//! interpreter remains the permanent fallback for units that are never
+//! compiled (cold paths) or whose compilation failed.
+//!
+//! Correctness contract: the interpreter and the compiled backends must agree
+//! bit-exactly, including four-state X/Z propagation, because a unit may
+//! migrate between tiers mid-simulation. Rules marked `SEMANTICS-CHECK` below
+//! follow standard HDL semantics and must be reconciled against the backend
+//! truth-table implementations.
+//!
+//! Memory accesses and simulation side effects (triggers, comb captures,
+//! runtime events) are delegated to the [`InterpMachine`] trait so the
+//! interpreter stays independent of backend storage details.
+
+use std::cell::OnceCell;
+use std::fmt;
+
+use celox_sir::{
+    BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
+    SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
+};
+use num_bigint::{BigInt, BigUint};
+use num_traits::{Signed, ToPrimitive, Zero};
+
+use crate::HashMap;
+
+/// Why an interpreted execution unit stopped abnormally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterpError {
+    /// Terminator targeted a block that does not exist in the unit.
+    UnknownBlock(BlockId),
+    /// An instruction read a register that was never written.
+    MissingRegister(RegisterId),
+    /// A jump supplied a different number of arguments than the target
+    /// block declares parameters.
+    RegisterArityMismatch { expected: usize, found: usize },
+    /// The instruction uses an operator the interpreter does not implement
+    /// yet. This fails loudly instead of producing wrong simulation results.
+    UnsupportedOperation(String),
+    /// The unit terminated with `SIRTerminator::Error`.
+    Fatal(i64),
+    /// The [`InterpMachine`] reported a failure.
+    Machine(String),
+}
+
+impl fmt::Display for InterpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InterpError::UnknownBlock(block) => {
+                write!(f, "interpreted jump to unknown block b{}", block.0)
+            }
+            InterpError::MissingRegister(register) => {
+                write!(f, "read of unwritten register r{}", register.0)
+            }
+            InterpError::RegisterArityMismatch { expected, found } => {
+                write!(
+                    f,
+                    "jump argument count mismatch: target expects {expected}, jump supplies {found}"
+                )
+            }
+            InterpError::UnsupportedOperation(description) => {
+                write!(f, "interpreter does not support operation: {description}")
+            }
+            InterpError::Fatal(code) => write!(f, "simulation fatal error ({code})"),
+            InterpError::Machine(message) => write!(f, "machine error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for InterpError {}
+
+/// One memory access with its dynamic offset components resolved.
+///
+/// The unresolved [`SIROffset`] is preserved alongside the values of its
+/// dynamic registers because element-strided layouts distinguish `Element`
+/// accesses from plain bit offsets when computing physical addresses.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedAccess<'a> {
+    pub offset: &'a SIROffset,
+    /// Values of the registers returned by [`SIROffset::dynamic_registers`],
+    /// in the same order.
+    pub dynamics: [Option<&'a SIRValue>; 2],
+}
+
+/// Pre-store snapshot of a stored range, used to detect whether a store
+/// actually changed any covered bit before enabling comb capture observers.
+#[derive(Clone, Debug, Default)]
+pub struct StoreSnapshot {
+    pub value_words: Vec<u64>,
+    pub mask_words: Vec<u64>,
+}
+
+/// Storage and side-effect interface driven by the interpreter.
+///
+/// The production implementation wraps the simulator's live memory image and
+/// event plumbing; tests use an in-memory fake. The address type `A` matches
+/// the executed SIR (for example `RegionedAbsoluteAddr`).
+pub trait InterpMachine<A> {
+    fn load(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<SIRValue, InterpError>;
+
+    /// Load a fully-known value no wider than 64 bits.
+    ///
+    /// The default keeps custom interpreter machines source-compatible. The
+    /// production backend overrides this to avoid constructing a `BigUint`.
+    fn load_u64(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<u64, InterpError> {
+        self.load(addr, access, bits)?
+            .payload
+            .to_u64()
+            .ok_or_else(|| InterpError::Machine("narrow load did not fit in u64".to_string()))
+    }
+
+    fn store(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        value: &SIRValue,
+    ) -> Result<(), InterpError>;
+
+    /// Store a fully-known value no wider than 64 bits.
+    ///
+    /// Production storage overrides this with an allocation-free path.
+    fn store_u64(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        value: u64,
+    ) -> Result<(), InterpError> {
+        self.store(addr, access, bits, &SIRValue::new(value))
+    }
+
+    /// `Commit`: copy `bits` at `access` from `src` to `dst`.
+    fn commit(
+        &mut self,
+        src: &A,
+        dst: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<(), InterpError>;
+
+    /// Edge/level triggers attached to a `Store` or `Commit`.
+    ///
+    /// The resolved access and width let the machine compare the stored
+    /// range against its group-entry snapshot for per-kind edge detection.
+    fn notify_triggers(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        triggers: &[TriggerIdWithKind],
+    ) -> Result<(), InterpError>;
+
+    /// Trigger-only aliased store (`bits == 0`): no memory write happens and
+    /// the source register is intentionally undefined; the machine detects a
+    /// change on the aliased signal and marks its triggers.
+    fn notify_trigger_only_store(
+        &mut self,
+        addr: &A,
+        triggers: &[TriggerIdWithKind],
+    ) -> Result<(), InterpError>;
+
+    /// Prepare storage for an upcoming store. Invoked before any pre-store
+    /// snapshot so the machine can make the destination readable (for
+    /// example sparse copy-on-write chunk initialization).
+    fn prepare_store(
+        &mut self,
+        _addr: &A,
+        _access: ResolvedAccess<'_>,
+        _bits: usize,
+    ) -> Result<(), InterpError> {
+        Ok(())
+    }
+
+    /// Snapshot the stored range before a `Store` with comb capture sites so
+    /// the post-store comparison can detect actual changes.
+    fn capture_store_range(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<StoreSnapshot, InterpError>;
+
+    /// Enable comb capture sites when the stored range differs from the
+    /// pre-store snapshot.
+    fn enable_comb_captures(
+        &mut self,
+        addr: &A,
+        access: ResolvedAccess<'_>,
+        bits: usize,
+        before: &StoreSnapshot,
+        sites: &[u32],
+    ) -> Result<(), InterpError>;
+
+    fn emit_runtime_event(&mut self, site_id: u32, args: &[SIRValue]) -> Result<(), InterpError>;
+
+    /// Emit a comb capture event. Returns `Err(InterpError::Fatal)` when the
+    /// event carries a fatal code and its site was enabled, mirroring the
+    /// compiled unit's early return.
+    fn emit_comb_capture_event(
+        &mut self,
+        site_id: u32,
+        args: &[SIRValue],
+        fatal_error_code: Option<i64>,
+        consume_enabled: bool,
+    ) -> Result<(), InterpError>;
+
+    fn enable_comb_capture_if_changed(
+        &mut self,
+        old: &SIRValue,
+        new: &SIRValue,
+        sites: &[u32],
+    ) -> Result<(), InterpError>;
+}
+
+/// Outcome of one interpreted unit invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitExit {
+    /// The unit reached `SIRTerminator::Return`.
+    Return,
+}
+
+/// Execute one execution unit on the interpreter.
+///
+/// `entry_args` binds the entry block's parameters (event arguments). The
+/// simulator drives repeated invocations (comb settle fixpoint, clocked
+/// events); this function performs exactly one entry-to-return traversal.
+///
+/// `four_state` selects the value model: in two-state mode immediate masks
+/// are discarded exactly like the compiled backends' translation does, so
+/// unknown-bit payloads never leak into stored values.
+pub fn execute_unit<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+) -> Result<UnitExit, InterpError> {
+    let mut regs = Registers::new(&unit.register_map, four_state);
+    execute_prepared_unit(unit, machine, entry_args, four_state, &mut regs)
+}
+
+/// Execute a unit whose register types were prepared when the interpreter
+/// schedule was built. Repeated tier-zero evaluations only advance a
+/// generation counter; they do not rebuild register metadata or clear every
+/// slot before dispatching the first instruction.
+pub(crate) fn execute_prepared_unit<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+    regs: &mut Registers,
+) -> Result<UnitExit, InterpError> {
+    regs.begin_execution();
+    execute_unit_inner(unit, machine, entry_args, four_state, regs)
+}
+
+fn execute_unit_inner<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+    regs: &mut Registers,
+) -> Result<UnitExit, InterpError> {
+    let entry = unit
+        .blocks
+        .get(&unit.entry_block_id)
+        .ok_or(InterpError::UnknownBlock(unit.entry_block_id))?;
+    if entry.params.len() != entry_args.len() {
+        return Err(InterpError::RegisterArityMismatch {
+            expected: entry.params.len(),
+            found: entry_args.len(),
+        });
+    }
+    for (param, value) in entry.params.iter().zip(entry_args) {
+        regs.set(*param, value.clone());
+    }
+
+    let mut current = unit.entry_block_id;
+    loop {
+        let block = unit
+            .blocks
+            .get(&current)
+            .ok_or(InterpError::UnknownBlock(current))?;
+        for instruction in &block.instructions {
+            exec_instruction(instruction, regs, machine, four_state)?;
+        }
+        match &block.terminator {
+            SIRTerminator::Return => return Ok(UnitExit::Return),
+            SIRTerminator::Error(code) => return Err(InterpError::Fatal(*code)),
+            SIRTerminator::Jump(target, args) => {
+                transfer(regs, unit, *target, args)?;
+                current = *target;
+            }
+            SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
+                // Mirrors the compiled `brif` on the raw payload: a
+                // normalized unknown condition (payload one) takes the true
+                // edge, keeping tier migration control-flow identical.
+                let holds = match regs.get_small(*cond)? {
+                    Some(cond) => cond != 0,
+                    None => branch_condition_holds(regs.get(*cond)?),
+                };
+                let target = if holds { true_block } else { false_block };
+                transfer(regs, unit, target.0, &target.1)?;
+                current = target.0;
+            }
+            SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                // SEMANTICS-CHECK: masked (X/Z) selector bits participate in
+                // the comparison as their payload value; unmatched selectors
+                // take the default target.
+                let selector = regs.get(*selector)?.payload.clone();
+                let target = cases
+                    .iter()
+                    .find(|case| case.value == selector)
+                    .map(|case| case.target)
+                    .unwrap_or(*default);
+                transfer(regs, unit, target, &[])?;
+                current = target;
+            }
+        }
+    }
+}
+
+/// Bind jump arguments to the target block's parameters.
+fn transfer<A>(
+    regs: &mut Registers,
+    unit: &ExecutionUnit<A>,
+    target: BlockId,
+    args: &[RegisterId],
+) -> Result<(), InterpError> {
+    let params = &unit
+        .blocks
+        .get(&target)
+        .ok_or(InterpError::UnknownBlock(target))?
+        .params;
+    if params.len() != args.len() {
+        return Err(InterpError::RegisterArityMismatch {
+            expected: params.len(),
+            found: args.len(),
+        });
+    }
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        values.push(regs.clone_value(*arg)?);
+    }
+    for (param, value) in params.iter().zip(values) {
+        regs.set_value(*param, value);
+    }
+    Ok(())
+}
+
+fn exec_instruction<A, M: InterpMachine<A>>(
+    instruction: &SIRInstruction<A>,
+    regs: &mut Registers,
+    machine: &mut M,
+    four_state: bool,
+) -> Result<(), InterpError> {
+    match instruction {
+        SIRInstruction::Imm(dst, value) => {
+            if regs.accepts_small(*dst)
+                && let Some(value) = value.payload.to_u64()
+            {
+                regs.set_small(*dst, value);
+                return Ok(());
+            }
+            // Two-state translation drops unknown-bit masks entirely; keep
+            // only the payload so X constants behave as their payload bits.
+            let value = if four_state {
+                value.clone()
+            } else {
+                SIRValue::new(value.payload.clone())
+            };
+            regs.set(*dst, value);
+        }
+        SIRInstruction::Binary(dst, lhs, op, rhs) => {
+            if regs.accepts_small(*dst)
+                && let (Some(lhs_value), Some(rhs_value)) =
+                    (regs.get_small(*lhs)?, regs.get_small(*rhs)?)
+            {
+                let out = alu_binary_u64(
+                    op,
+                    lhs_value,
+                    rhs_value,
+                    regs.width(*lhs),
+                    regs.width(*rhs),
+                    regs.width(*dst),
+                    regs.is_signed(*lhs),
+                );
+                regs.set_small(*dst, out);
+                return Ok(());
+            }
+            let lhs_value = regs.get(*lhs)?.clone();
+            let rhs_value = regs.get(*rhs)?.clone();
+            let dst_width = regs.width(*dst);
+            let out = alu_binary(
+                op,
+                &lhs_value,
+                &rhs_value,
+                regs.width(*lhs),
+                regs.width(*rhs),
+                dst_width,
+                regs.is_signed(*lhs),
+            )?;
+            regs.set(*dst, truncate(out, dst_width));
+        }
+        SIRInstruction::Unary(dst, op, src) => {
+            if regs.accepts_small(*dst)
+                && let Some(src_value) = regs.get_small(*src)?
+            {
+                let out = alu_unary_u64(
+                    op,
+                    src_value,
+                    regs.width(*src),
+                    regs.is_signed(*src),
+                    regs.width(*dst),
+                );
+                regs.set_small(*dst, out);
+                return Ok(());
+            }
+            let src_value = regs.get(*src)?.clone();
+            let out = alu_unary(
+                op,
+                &src_value,
+                regs.width(*src),
+                regs.is_signed(*src),
+                regs.width(*dst),
+            )?;
+            regs.set(*dst, truncate(out, regs.width(*dst)));
+        }
+        SIRInstruction::Load(dst, addr, offset, bits) => {
+            let access = resolve_access(offset, regs)?;
+            if regs.accepts_small(*dst) && *bits <= 64 {
+                let value = machine.load_u64(addr, access, *bits)?;
+                regs.set_small(*dst, value);
+            } else {
+                let value = machine.load(addr, access, *bits)?;
+                regs.set(*dst, value);
+            }
+        }
+        SIRInstruction::Store(addr, offset, bits, src, triggers, sites) => {
+            if *bits == 0 {
+                // Zero-width aliased store: the compiled lowering performs
+                // no memory write and never reads the source register.
+                if !triggers.is_empty() {
+                    machine.notify_trigger_only_store(addr, triggers)?;
+                }
+                return Ok(());
+            }
+            let access = resolve_access(offset, regs)?;
+            machine.prepare_store(addr, access, *bits)?;
+            let before = if sites.is_empty() {
+                None
+            } else {
+                Some(machine.capture_store_range(addr, access, *bits)?)
+            };
+            if let Some(value) = regs.get_small(*src)?
+                && *bits <= 64
+            {
+                machine.store_u64(addr, access, *bits, value)?;
+            } else {
+                machine.store(addr, access, *bits, regs.get(*src)?)?;
+            }
+            if !triggers.is_empty() {
+                let access = resolve_access(offset, regs)?;
+                machine.notify_triggers(addr, access, *bits, triggers)?;
+            }
+            if let Some(before) = before {
+                let access = resolve_access(offset, regs)?;
+                machine.enable_comb_captures(addr, access, *bits, &before, sites)?;
+            }
+        }
+        SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
+            let access = resolve_access(offset, regs)?;
+            machine.commit(src, dst, access, *bits)?;
+            if !triggers.is_empty() {
+                let access = resolve_access(offset, regs)?;
+                machine.notify_triggers(dst, access, *bits, triggers)?;
+            }
+        }
+        SIRInstruction::Concat(dst, sources) => {
+            if regs.accepts_small(*dst) {
+                let mut value = 0u64;
+                let mut total_width = 0usize;
+                let mut all_small = true;
+                for source in sources {
+                    let width = regs.width(*source);
+                    let Some(source_value) = regs.get_small(*source)? else {
+                        all_small = false;
+                        break;
+                    };
+                    let Some(next_width) = total_width.checked_add(width) else {
+                        all_small = false;
+                        break;
+                    };
+                    if next_width > 64 {
+                        all_small = false;
+                        break;
+                    }
+                    value = if width == 64 {
+                        // `next_width <= 64` means every preceding source was
+                        // zero-width, so the accumulated value is zero. Avoid
+                        // Rust's invalid full-width `u64 << 64` shift.
+                        source_value
+                    } else {
+                        (value << width) | (source_value & mask_u64(width))
+                    };
+                    total_width = next_width;
+                }
+                if all_small {
+                    regs.set_small(*dst, value);
+                    return Ok(());
+                }
+            }
+            let mut payload = BigUint::zero();
+            let mut mask = BigUint::zero();
+            for source in sources {
+                let value = regs.get(*source)?;
+                let width = regs.width(*source);
+                payload = (payload << width) | &value.payload;
+                mask = (mask << width) | &value.mask;
+            }
+            // Keep the declared-register-width invariant shared by every other
+            // operation: results never exceed the destination width.
+            regs.set(*dst, truncate(SIRValue { payload, mask }, regs.width(*dst)));
+        }
+        SIRInstruction::Slice(dst, src, offset, width) => {
+            if regs.accepts_small(*dst)
+                && let Some(value) = regs.get_small(*src)?
+            {
+                let value = if *offset >= 64 { 0 } else { value >> offset };
+                regs.set_small(*dst, value & mask_u64(*width));
+                return Ok(());
+            }
+            let value = regs.get(*src)?;
+            let payload = extract_bits(&value.payload, *offset, *width);
+            let mask = extract_bits(&value.mask, *offset, *width);
+            regs.set(*dst, SIRValue { payload, mask });
+        }
+        SIRInstruction::Mux(dst, cond, then_value, else_value) => {
+            if regs.accepts_small(*dst)
+                && let (Some(cond), Some(then_value), Some(else_value)) = (
+                    regs.get_small(*cond)?,
+                    regs.get_small(*then_value)?,
+                    regs.get_small(*else_value)?,
+                )
+            {
+                regs.set_small(*dst, if cond != 0 { then_value } else { else_value });
+                return Ok(());
+            }
+            let cond_width = regs.width(*cond);
+            let cond = regs.get(*cond)?.clone();
+            let then_value = regs.get(*then_value)?.clone();
+            let else_value = regs.get(*else_value)?.clone();
+            // Evaluate the condition in its own width; shape the selected
+            // arms to the destination width.
+            let out = eval_mux(
+                &cond,
+                &then_value,
+                &else_value,
+                cond_width,
+                regs.width(*dst),
+            );
+            regs.set(*dst, out);
+        }
+        SIRInstruction::RuntimeEvent { site_id, args } => {
+            let values = resolve_args(args, regs)?;
+            machine.emit_runtime_event(*site_id, &values)?;
+        }
+        SIRInstruction::CombCaptureEvent {
+            site_id,
+            args,
+            fatal_error_code,
+            consume_enabled,
+        } => {
+            let values = resolve_args(args, regs)?;
+            machine.emit_comb_capture_event(
+                *site_id,
+                &values,
+                *fatal_error_code,
+                *consume_enabled,
+            )?;
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
+            let old = regs.get(*old)?.clone();
+            let new = regs.get(*new)?.clone();
+            machine.enable_comb_capture_if_changed(&old, &new, sites)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_access<'a>(
+    offset: &'a SIROffset,
+    regs: &'a Registers,
+) -> Result<ResolvedAccess<'a>, InterpError> {
+    let mut dynamics = [None, None];
+    for (slot, register) in offset.dynamic_registers().into_iter().enumerate() {
+        if let Some(register) = register {
+            dynamics[slot] = Some(regs.get(register)?);
+        }
+    }
+    Ok(ResolvedAccess { offset, dynamics })
+}
+
+fn resolve_args(args: &[RegisterId], regs: &Registers) -> Result<Vec<SIRValue>, InterpError> {
+    args.iter().map(|arg| regs.get(*arg).cloned()).collect()
+}
+
+// ── Value helpers ─────────────────────────────────────────────────────
+
+fn width_mask(width: usize) -> BigUint {
+    if width == 0 {
+        BigUint::zero()
+    } else {
+        (BigUint::from(1u8) << width) - 1u8
+    }
+}
+
+fn truncate(mut value: SIRValue, width: usize) -> SIRValue {
+    let mask = width_mask(width);
+    value.payload &= &mask;
+    value.mask &= mask;
+    value
+}
+
+/// An all-unknown value following the compiled backends' normalized
+/// convention: unknown bits carry payload one.
+fn all_x(width: usize) -> SIRValue {
+    SIRValue {
+        payload: width_mask(width),
+        mask: width_mask(width),
+    }
+}
+
+fn extract_bits(value: &BigUint, offset: usize, width: usize) -> BigUint {
+    if width == 0 {
+        return BigUint::zero();
+    }
+    (value >> offset) & width_mask(width)
+}
+
+/// Bits that are unmasked and set to one.
+fn known_ones(value: &SIRValue, width: usize) -> BigUint {
+    &value.payload & (&width_mask(width) ^ &value.mask)
+}
+
+/// Bits that are unmasked and set to zero.
+fn known_zeros(value: &SIRValue, width: usize) -> BigUint {
+    (&width_mask(width) ^ &value.payload) & (&width_mask(width) ^ &value.mask)
+}
+
+/// Branch selection follows the compiled terminator lowering exactly: it
+/// branches on the raw (normalized) payload, so an unknown condition whose
+/// normalized payload is one takes the true edge.
+fn branch_condition_holds(cond: &SIRValue) -> bool {
+    !cond.payload.is_zero()
+}
+
+/// Mux selection keeps the IEEE dominant-value reading: a known one selects
+/// the then-arm, while a fully unknown condition merges the arms.
+fn mux_condition_known_one(cond: &SIRValue, width: usize) -> bool {
+    !known_ones(cond, width).is_zero()
+}
+
+fn mask_u64(width: usize) -> u64 {
+    match width {
+        0 => 0,
+        64.. => u64::MAX,
+        width => (1u64 << width) - 1,
+    }
+}
+
+fn sign_extend_u64(value: u64, from_width: usize, to_width: usize) -> u64 {
+    let value = value & mask_u64(from_width);
+    if from_width != 0 && to_width > from_width && value & (1u64 << (from_width - 1)) != 0 {
+        (value | !mask_u64(from_width)) & mask_u64(to_width)
+    } else {
+        value & mask_u64(to_width)
+    }
+}
+
+fn signed_i128(value: u64, width: usize) -> i128 {
+    let value = value & mask_u64(width);
+    if width != 0 && value & (1u64 << (width - 1)) != 0 {
+        i128::from(value) - (1i128 << width)
+    } else {
+        i128::from(value)
+    }
+}
+
+fn alu_binary_u64(
+    op: &BinaryOp,
+    lhs: u64,
+    rhs: u64,
+    lhs_width: usize,
+    rhs_width: usize,
+    dst_width: usize,
+    lhs_signed: bool,
+) -> u64 {
+    let lhs = lhs & mask_u64(lhs_width);
+    let rhs = rhs & mask_u64(rhs_width);
+    let common = lhs_width.max(rhs_width).max(dst_width);
+    let promoted_lhs = if lhs_signed {
+        sign_extend_u64(lhs, lhs_width, common)
+    } else {
+        lhs & mask_u64(common)
+    };
+    let promoted_rhs = rhs & mask_u64(common);
+    let result = match op {
+        BinaryOp::Add => promoted_lhs.wrapping_add(promoted_rhs),
+        BinaryOp::Sub => promoted_lhs.wrapping_sub(promoted_rhs),
+        BinaryOp::Mul => promoted_lhs.wrapping_mul(promoted_rhs),
+        BinaryOp::DivU => lhs.checked_div(rhs).unwrap_or(0),
+        BinaryOp::RemU => lhs.checked_rem(rhs).unwrap_or(0),
+        BinaryOp::DivS | BinaryOp::RemS => {
+            let dividend = signed_i128(lhs, lhs_width);
+            let divisor = signed_i128(rhs, rhs_width);
+            if divisor == 0 {
+                0
+            } else if matches!(op, BinaryOp::DivS) {
+                (dividend / divisor) as u64
+            } else {
+                (dividend % divisor) as u64
+            }
+        }
+        BinaryOp::And => promoted_lhs & promoted_rhs,
+        BinaryOp::Or => promoted_lhs | promoted_rhs,
+        BinaryOp::Xor => promoted_lhs ^ promoted_rhs,
+        BinaryOp::Shl => {
+            if rhs < dst_width as u64 {
+                promoted_lhs << rhs
+            } else {
+                0
+            }
+        }
+        BinaryOp::Shr => {
+            let bound = lhs_width.max(dst_width).max(1);
+            if rhs < bound as u64 { lhs >> rhs } else { 0 }
+        }
+        BinaryOp::Sar => {
+            let bound = lhs_width.max(dst_width).max(1);
+            let signed = signed_i128(lhs, lhs_width);
+            if rhs < bound as u64 {
+                (signed >> rhs) as u64
+            } else if signed < 0 {
+                u64::MAX
+            } else {
+                0
+            }
+        }
+        BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard => u64::from(lhs == rhs),
+        BinaryOp::Ne | BinaryOp::NeCase | BinaryOp::NeWildcard => u64::from(lhs != rhs),
+        BinaryOp::LtU => u64::from(lhs < rhs),
+        BinaryOp::LeU => u64::from(lhs <= rhs),
+        BinaryOp::GtU => u64::from(lhs > rhs),
+        BinaryOp::GeU => u64::from(lhs >= rhs),
+        BinaryOp::LtS => u64::from(signed_i128(lhs, lhs_width) < signed_i128(rhs, rhs_width)),
+        BinaryOp::LeS => u64::from(signed_i128(lhs, lhs_width) <= signed_i128(rhs, rhs_width)),
+        BinaryOp::GtS => u64::from(signed_i128(lhs, lhs_width) > signed_i128(rhs, rhs_width)),
+        BinaryOp::GeS => u64::from(signed_i128(lhs, lhs_width) >= signed_i128(rhs, rhs_width)),
+        BinaryOp::LogicAnd => u64::from(lhs != 0 && rhs != 0),
+        BinaryOp::LogicOr => u64::from(lhs != 0 || rhs != 0),
+    };
+    result & mask_u64(dst_width)
+}
+
+fn alu_unary_u64(
+    op: &UnaryOp,
+    src: u64,
+    src_width: usize,
+    src_signed: bool,
+    dst_width: usize,
+) -> u64 {
+    let src = src & mask_u64(src_width);
+    let result = match op {
+        UnaryOp::Ident => {
+            if src_signed {
+                sign_extend_u64(src, src_width, dst_width)
+            } else {
+                src
+            }
+        }
+        UnaryOp::ToTwoState => src,
+        UnaryOp::Minus => {
+            let common = src_width.max(dst_width);
+            sign_extend_u64(src, src_width, common).wrapping_neg()
+        }
+        UnaryOp::BitNot => {
+            let common = src_width.max(dst_width);
+            let promoted = if src_signed {
+                sign_extend_u64(src, src_width, common)
+            } else {
+                src
+            };
+            !promoted
+        }
+        UnaryOp::LogicNot => u64::from(src == 0),
+        UnaryOp::And => u64::from(src == mask_u64(src_width)),
+        UnaryOp::Or => u64::from(src != 0),
+        UnaryOp::Xor => u64::from(src.count_ones() & 1 != 0),
+        UnaryOp::PopCount => u64::from(src.count_ones()),
+        UnaryOp::CountLeadingZeros => {
+            let significant = if src == 0 {
+                0
+            } else {
+                u64::BITS as usize - src.leading_zeros() as usize
+            };
+            src_width.saturating_sub(significant) as u64
+        }
+        UnaryOp::CountTrailingZeros => {
+            if src == 0 {
+                src_width as u64
+            } else {
+                u64::from(src.trailing_zeros())
+            }
+        }
+    };
+    result & mask_u64(dst_width)
+}
+
+// ── ALU ───────────────────────────────────────────────────────────────
+
+/// Normalize a value into the compiled backends' register convention:
+/// unknown bits carry payload one (`payload |= mask`), so a value migrated
+/// between the interpreter and generated code is bit-identical in memory.
+fn normalize(value: SIRValue) -> SIRValue {
+    SIRValue {
+        payload: &value.payload | &value.mask,
+        mask: value.mask,
+    }
+}
+
+fn alu_binary(
+    op: &BinaryOp,
+    lhs: &SIRValue,
+    rhs: &SIRValue,
+    lhs_width: usize,
+    rhs_width: usize,
+    dst_width: usize,
+    lhs_signed: bool,
+) -> Result<SIRValue, InterpError> {
+    let out = match op {
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
+            // Operands are promoted to the common width with the compiled
+            // extension rule before the wrap-around arithmetic, so a narrow
+            // signed operand keeps its value (4-bit -1 + 8-bit 1 == 0).
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                // The compiled narrowing (<= 64-bit) lowering zero-extends
+                // the right operand regardless of its declaration and
+                // sign-promotes the left by its declaration; the wide path
+                // passes raw zero-filled chunks for both sides.
+                let common = lhs_width.max(rhs_width).max(dst_width);
+                let l = if common <= 64 {
+                    promote_operand(lhs, lhs_signed, lhs_width, common).payload
+                } else {
+                    zero_extend(lhs, common).payload
+                };
+                let r = zero_extend(rhs, common).payload;
+                let raw = match op {
+                    BinaryOp::Add => l + r,
+                    BinaryOp::Sub => l + (&width_mask(common) ^ &r) + 1u8,
+                    _ => l * r,
+                };
+                SIRValue::new(raw & width_mask(dst_width))
+            }
+        }
+        BinaryOp::DivU | BinaryOp::RemU => {
+            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
+            // Division by zero yields zero, matching the compiled contract.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else if rhs.payload.is_zero() {
+                SIRValue::new(BigUint::zero())
+            } else if *op == BinaryOp::DivU {
+                SIRValue::new(&lhs.payload / &rhs.payload)
+            } else {
+                SIRValue::new(&lhs.payload % &rhs.payload)
+            }
+        }
+        BinaryOp::DivS | BinaryOp::RemS => {
+            // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
+            // Signed division truncates toward zero; division by zero yields
+            // zero, and MIN / -1 wraps to MIN (rem: 0), matching the compiled
+            // overflow guards.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let dividend = to_signed(&lhs.payload, lhs_width);
+                let divisor = to_signed(&rhs.payload, rhs_width);
+                if divisor.is_zero() {
+                    SIRValue::new(BigUint::zero())
+                } else {
+                    let raw = if *op == BinaryOp::DivS {
+                        &dividend / &divisor
+                    } else {
+                        &dividend % &divisor
+                    };
+                    SIRValue::new(wrap_signed(&raw, dst_width))
+                }
+            }
+        }
+        BinaryOp::And => {
+            // Per-bit truth tables evaluated at the common width with the
+            // compiled promotion, so padding above a narrower operand follows
+            // its sign instead of reading as known zero.
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let l = if common <= 64 {
+                promote_operand(lhs, lhs_signed, lhs_width, common)
+            } else {
+                zero_extend(lhs, common)
+            };
+            let r = zero_extend(rhs, common);
+            let ones = known_ones(&l, common) & known_ones(&r, common);
+            let zeros = known_zeros(&l, common) | known_zeros(&r, common);
+            let mask = &width_mask(common) ^ (&ones | &zeros);
+            SIRValue {
+                payload: ones,
+                mask,
+            }
+        }
+        BinaryOp::Or => {
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let l = if common <= 64 {
+                promote_operand(lhs, lhs_signed, lhs_width, common)
+            } else {
+                zero_extend(lhs, common)
+            };
+            let r = zero_extend(rhs, common);
+            let ones = known_ones(&l, common) | known_ones(&r, common);
+            let zeros = known_zeros(&l, common) & known_zeros(&r, common);
+            let mask = &width_mask(common) ^ (&ones | &zeros);
+            SIRValue {
+                payload: ones,
+                mask,
+            }
+        }
+        BinaryOp::Xor => {
+            // SEMANTICS-CHECK: XOR is per-bit independent — an unknown input
+            // bit only makes the corresponding output bit unknown (mask union),
+            // unlike arithmetic ops where any X poisons the whole result.
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let l = if common <= 64 {
+                promote_operand(lhs, lhs_signed, lhs_width, common)
+            } else {
+                zero_extend(lhs, common)
+            };
+            let r = zero_extend(rhs, common);
+            SIRValue {
+                payload: &l.payload ^ &r.payload,
+                mask: &l.mask | &r.mask,
+            }
+        }
+        BinaryOp::Shl => {
+            // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
+            // The compiled lowering promotes the left operand to the common
+            // width by its declaration (a signed source sign-fills), shifts,
+            // and keeps the low destination bits; a narrow signed value
+            // shifted into a wider destination keeps its sign region.
+            // Counts at or beyond the destination width produce zero without
+            // materializing a huge BigUint shift.
+            if !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                match shift_amount(&rhs.payload) {
+                    Some(amount) if amount < dst_width => {
+                        let common = lhs_width.max(dst_width);
+                        let promoted = promote_operand(lhs, lhs_signed, lhs_width, common);
+                        SIRValue {
+                            payload: (&promoted.payload << amount) & width_mask(dst_width),
+                            mask: (&promoted.mask << amount) & width_mask(dst_width),
+                        }
+                    }
+                    _ => SIRValue::new(BigUint::zero()),
+                }
+            }
+        }
+        BinaryOp::Shr => {
+            // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
+            // Logical shift: vacated bits are zero regardless of width.
+            // Overshift counts return zero directly to bound the work.
+            if !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let bound = lhs_width.max(dst_width).max(1);
+                match shift_amount(&rhs.payload) {
+                    Some(amount) if amount < bound => SIRValue {
+                        payload: &lhs.payload >> amount,
+                        mask: &lhs.mask >> amount,
+                    },
+                    _ => SIRValue::new(BigUint::zero()),
+                }
+            }
+        }
+        BinaryOp::Sar => {
+            // SEMANTICS-CHECK: an X/Z shift amount makes the whole result X.
+            // The narrow (<= 64-bit) compiled lowering sign-promotes the
+            // source and shifts arithmetically. The multi-word lowering
+            // instead sign-fills whole words above the source's own chunks —
+            // based on the declared width's top bit — and shifts logically,
+            // for the value and the mask alike.
+            if !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let common = lhs_width.max(rhs_width).max(dst_width);
+                let signed_value = to_signed(&lhs.payload, lhs_width);
+                let signed_mask = to_signed(&lhs.mask, lhs_width);
+                // The narrow lowering converges once the count reaches the
+                // operand width; the word-based wide lowering keeps reading
+                // sign-filled words until every output word sits past the
+                // source's own chunks.
+                let bound = if common <= 64 {
+                    lhs_width.max(dst_width).max(1)
+                } else {
+                    lhs_width.div_ceil(64) * 64
+                };
+                match shift_amount(&rhs.payload) {
+                    Some(amount) if amount < bound => {
+                        if common <= 64 {
+                            SIRValue {
+                                payload: wrap_signed(&(signed_value >> amount), dst_width),
+                                mask: wrap_signed(&(signed_mask >> amount), dst_width),
+                            }
+                        } else {
+                            let payload =
+                                (sar_wide_extend(&lhs.payload, lhs_width, common, amount)
+                                    >> amount)
+                                    & width_mask(dst_width);
+                            let mask = (sar_wide_extend(&lhs.mask, lhs_width, common, amount)
+                                >> amount)
+                                & width_mask(dst_width);
+                            SIRValue { payload, mask }
+                        }
+                    }
+                    _ => {
+                        // Overshift or unrepresentable distances converge the
+                        // value and the mask toward their own sign fills
+                        // independently, exactly like the normal branches.
+                        let payload = if signed_value.is_negative() {
+                            width_mask(dst_width)
+                        } else {
+                            BigUint::zero()
+                        };
+                        let mask = if signed_mask.is_negative() {
+                            width_mask(dst_width)
+                        } else {
+                            BigUint::zero()
+                        };
+                        SIRValue { payload, mask }
+                    }
+                }
+            }
+        }
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::LtU
+        | BinaryOp::LtS
+        | BinaryOp::LeU
+        | BinaryOp::LeS
+        | BinaryOp::GtU
+        | BinaryOp::GtS
+        | BinaryOp::GeU
+        | BinaryOp::GeS => {
+            // SEMANTICS-CHECK: comparisons yield X when either operand holds
+            // an unknown bit; otherwise the comparison runs on the operands'
+            // declared values (signed ops interpret two's complement). `Eq`
+            // and `Ne` sign-extend a signed left-hand operand and zero-extend
+            // the right-hand one, mirroring the compiled promotion rules.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let holds = compare_holds(op, lhs, rhs, lhs_width, rhs_width);
+                SIRValue::new(u8::from(holds))
+            }
+        }
+        BinaryOp::LogicAnd => {
+            // IEEE 1800: 0 dominates `&&` — a definitely-false operand forces
+            // a definite zero; any remaining X yields X.
+            if logic_operand_definitely_false(lhs, lhs_width)
+                || logic_operand_definitely_false(rhs, rhs_width)
+            {
+                SIRValue::new(BigUint::zero())
+            } else if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let truth = logic_truth(lhs, lhs_width) && logic_truth(rhs, rhs_width);
+                SIRValue::new(u8::from(truth))
+            }
+        }
+        BinaryOp::LogicOr => {
+            // IEEE 1800: 1 dominates `||` — a definitely-true operand forces
+            // a definite one; any remaining X yields X.
+            if logic_operand_definitely_true(lhs, lhs_width)
+                || logic_operand_definitely_true(rhs, rhs_width)
+            {
+                SIRValue::new(1u8)
+            } else if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                let truth = logic_truth(lhs, lhs_width) || logic_truth(rhs, rhs_width);
+                SIRValue::new(u8::from(truth))
+            }
+        }
+        BinaryOp::EqCase | BinaryOp::NeCase => {
+            // Case equality treats X/Z as ordinary values: payload and mask
+            // must agree at every compared bit for a match. The result is
+            // always definite.
+            let common = lhs_width.max(rhs_width).max(dst_width);
+            let lhs_ext = zero_extend(lhs, common);
+            let rhs_ext = zero_extend(rhs, common);
+            let diff = (&lhs_ext.payload ^ &rhs_ext.payload) | (&lhs_ext.mask ^ &rhs_ext.mask);
+            let matched = diff.is_zero();
+            let holds = if *op == BinaryOp::EqCase {
+                matched
+            } else {
+                !matched
+            };
+            SIRValue::new(u8::from(holds))
+        }
+        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            // IEEE 1800 ==?/!=?: X/Z bits on the right-hand side are
+            // wildcards. A definite mismatch yields a definite result, an
+            // unknown left-hand bit at a compared position yields X, and
+            // otherwise the payloads compare at definitely-known positions.
+            let common = lhs_width.max(rhs_width);
+            let compare_mask = &width_mask(common) ^ &rhs.mask;
+            let definite_compare = &compare_mask & (&width_mask(common) ^ &lhs.mask);
+            let mismatch_bits = (&lhs.payload ^ &rhs.payload) & &definite_compare;
+            let x_at_compared = &lhs.mask & &compare_mask;
+            let mask = if !mismatch_bits.is_zero() {
+                BigUint::zero()
+            } else if !x_at_compared.is_zero() {
+                BigUint::from(1u8)
+            } else {
+                BigUint::zero()
+            };
+            let lhs_eff = &lhs.payload & &definite_compare;
+            let rhs_eff = &rhs.payload & &definite_compare;
+            let equal = lhs_eff == rhs_eff;
+            let holds = if *op == BinaryOp::EqWildcard {
+                equal
+            } else {
+                !equal
+            };
+            SIRValue {
+                payload: BigUint::from(u8::from(holds)),
+                mask,
+            }
+        }
+    };
+    Ok(normalize(truncate(out, dst_width)))
+}
+
+/// Interpret a shift amount register value as `usize`.
+///
+/// The compiled wide lowerings consume only the low 64-bit chunk of the
+/// count register, so upper chunks are ignored here as well. Returns `None`
+/// when even the low chunk is unrepresentable (overshift).
+fn shift_amount(value: &BigUint) -> Option<usize> {
+    let low = value.to_u64_digits().first().copied().unwrap_or(0);
+    usize::try_from(low).ok()
+}
+
+/// Extend a value across the common width the way the compiled multi-word
+/// Sar lowering does: whole 64-bit words above the source's own chunks are
+/// filled with the declared width's top bit, then the caller shifts
+/// logically. Bits inside the source's partial top word are left untouched.
+fn sar_wide_extend(value: &BigUint, lhs_width: usize, common: usize, amount: usize) -> BigUint {
+    let src_words = lhs_width.div_ceil(64);
+    if lhs_width == 0 || !value.bit((lhs_width - 1) as u64) {
+        return value.clone();
+    }
+    // Extend far enough that output words reading past the common width
+    // after the shift still observe sign fill instead of zeroes.
+    let fill_until = common.div_ceil(64) + amount.div_ceil(64) + 1;
+    let mut extended = value.clone();
+    for word in src_words..fill_until {
+        extended |= BigUint::from(u64::MAX) << (word * 64);
+    }
+    extended
+}
+
+/// Two's complement interpretation of `width`-truncated `value`.
+fn to_signed(value: &BigUint, width: usize) -> BigInt {
+    if width == 0 {
+        return BigInt::from(0);
+    }
+    let masked = value & width_mask(width);
+    if masked.bit((width - 1) as u64) {
+        BigInt::from(masked) - (BigInt::from(1) << width)
+    } else {
+        BigInt::from(masked)
+    }
+}
+
+/// Reduce a signed integer modulo `2^width` into its two's complement bits.
+fn wrap_signed(value: &BigInt, width: usize) -> BigUint {
+    if width == 0 {
+        return BigUint::zero();
+    }
+    let modulus = BigInt::from(1) << width;
+    ((value % &modulus + &modulus) % modulus)
+        .to_biguint()
+        .expect("non-negative remainder")
+}
+
+/// Evaluate an ordering/equality operator on fully-known operands.
+fn compare_holds(
+    op: &BinaryOp,
+    lhs: &SIRValue,
+    rhs: &SIRValue,
+    lhs_width: usize,
+    rhs_width: usize,
+) -> bool {
+    let ordering = match op {
+        BinaryOp::Eq | BinaryOp::Ne => {
+            // Equality compares zero-extended payloads on both sides, like
+            // every compiled lowering; declaration signedness is ignored.
+            let common = lhs_width.max(rhs_width);
+            let lhs_ext = zero_extend(lhs, common).payload;
+            let rhs_ext = zero_extend(rhs, common).payload;
+            lhs_ext.cmp(&rhs_ext)
+        }
+        BinaryOp::LtU | BinaryOp::LeU | BinaryOp::GtU | BinaryOp::GeU => {
+            lhs.payload.cmp(&rhs.payload)
+        }
+        _ => {
+            // Signed orderings interpret two's complement at the operation
+            // width. The compiled wide comparison path zero-fills a narrow
+            // operand's missing chunks before interpreting signedness at the
+            // common width, so crossing 64 bits must zero-pad first.
+            let common = lhs_width.max(rhs_width);
+            if common <= 64 {
+                to_signed(&lhs.payload, lhs_width).cmp(&to_signed(&rhs.payload, rhs_width))
+            } else {
+                let l = zero_extend(lhs, common).payload;
+                let r = zero_extend(rhs, common).payload;
+                to_signed(&l, common).cmp(&to_signed(&r, common))
+            }
+        }
+    };
+    use std::cmp::Ordering;
+    match op {
+        BinaryOp::Eq | BinaryOp::EqCase => ordering == Ordering::Equal,
+        BinaryOp::Ne | BinaryOp::NeCase => ordering != Ordering::Equal,
+        BinaryOp::LtU | BinaryOp::LtS => ordering == Ordering::Less,
+        BinaryOp::LeU | BinaryOp::LeS => ordering != Ordering::Greater,
+        BinaryOp::GtU | BinaryOp::GtS => ordering == Ordering::Greater,
+        BinaryOp::GeU | BinaryOp::GeS => ordering != Ordering::Less,
+        _ => false,
+    }
+}
+
+/// Zero-extend a value's payload/mask view up to `width` (padding reads as
+/// known zero).
+fn zero_extend(value: &SIRValue, width: usize) -> SIRValue {
+    SIRValue {
+        payload: &value.payload & width_mask(width),
+        mask: &value.mask & width_mask(width),
+    }
+}
+
+/// Promote a payload/mask pair up to `width` using the compiled extension
+/// rule: a signed declaration sign-extends both words, an unsigned one
+/// zero-extends.
+fn promote_operand(value: &SIRValue, signed: bool, from_width: usize, width: usize) -> SIRValue {
+    if !signed || width <= from_width {
+        return zero_extend(value, width);
+    }
+    SIRValue {
+        payload: sign_extend(&value.payload, from_width, width),
+        mask: sign_extend(&value.mask, from_width, width),
+    }
+}
+
+/// Sign-extend the top bit of a `from_width`-wide payload up to `to_width`.
+fn sign_extend(payload: &BigUint, from_width: usize, to_width: usize) -> BigUint {
+    if from_width == 0 || to_width <= from_width {
+        return payload & width_mask(to_width);
+    }
+    if payload.bit((from_width - 1) as u64) {
+        payload | (&width_mask(to_width) ^ &width_mask(from_width))
+    } else {
+        payload.clone()
+    }
+}
+
+/// An operand of a logical operator is definitely false when every bit,
+/// including unknown ones, is zero.
+fn logic_operand_definitely_false(value: &SIRValue, width: usize) -> bool {
+    (&value.payload | &value.mask) & width_mask(width) == BigUint::zero()
+}
+
+/// An operand of a logical operator is definitely true when some bit is a
+/// known one.
+fn logic_operand_definitely_true(value: &SIRValue, width: usize) -> bool {
+    !known_ones(value, width).is_zero()
+}
+
+/// Boolean truth of a fully-known operand.
+fn logic_truth(value: &SIRValue, width: usize) -> bool {
+    !known_ones(value, width).is_zero()
+}
+
+fn alu_unary(
+    op: &UnaryOp,
+    src: &SIRValue,
+    src_width: usize,
+    src_signed: bool,
+    dst_width: usize,
+) -> Result<SIRValue, InterpError> {
+    let out = match op {
+        UnaryOp::Ident => {
+            // Identity casts widen with the operand's declared signedness,
+            // matching the compiled narrow promotion: widening a signed
+            // negative value must sign-fill, not zero-fill. The compiled
+            // multi-word path instead copies chunks and zero-fills, so casts
+            // into registers wider than 64 bits keep zero padding.
+            if src_signed && dst_width > src_width && dst_width <= 64 {
+                SIRValue {
+                    payload: sign_extend(&src.payload, src_width, dst_width),
+                    mask: sign_extend(&src.mask, src_width, dst_width),
+                }
+            } else {
+                src.clone()
+            }
+        }
+        UnaryOp::ToTwoState => SIRValue {
+            payload: &src.payload & (&width_mask(src_width) ^ &src.mask),
+            mask: BigUint::zero(),
+        },
+        UnaryOp::Minus => {
+            // SEMANTICS-CHECK: negating a value containing X/Z yields all-X.
+            // Minus forces signed promotion in the compiled narrow lowering,
+            // so the operand is sign-extended to the common width before the
+            // two's-complement negation (negating 4-bit 1 into an 8-bit
+            // destination yields 0xff). The compiled multi-word lowering
+            // instead zero-fills missing chunks, so destinations wider than
+            // 64 bits keep zero padding.
+            if src.mask.is_zero() {
+                let common = src_width.max(dst_width);
+                let promoted = promote_operand(src, common <= 64, src_width, common).payload;
+                let inverted = &width_mask(common) ^ &promoted;
+                SIRValue::new((&inverted + 1u8) & width_mask(dst_width))
+            } else {
+                all_x(dst_width)
+            }
+        }
+        UnaryOp::BitNot => {
+            // Complement at the common width so widened results fill their
+            // new high bits, mirroring the compiled narrow promotion. The
+            // compiled multi-word lowering zero-fills absent chunks before
+            // complementing, so destinations wider than 64 bits keep zero
+            // padding.
+            let common = src_width.max(dst_width);
+            let promoted = promote_operand(src, src_signed && common <= 64, src_width, common);
+            SIRValue {
+                payload: &width_mask(common) ^ &promoted.payload,
+                mask: promoted.mask,
+            }
+        }
+        UnaryOp::LogicNot => {
+            if !known_ones(src, src_width).is_zero() {
+                SIRValue::new(BigUint::zero())
+            } else if !src.mask.is_zero() {
+                all_x(1)
+            } else {
+                SIRValue::new(1u8)
+            }
+        }
+        UnaryOp::Or => {
+            // Reduction-or over known bits.
+            if !known_ones(src, src_width).is_zero() {
+                SIRValue::new(1u8)
+            } else if !src.mask.is_zero() {
+                all_x(1)
+            } else {
+                SIRValue::new(BigUint::zero())
+            }
+        }
+        UnaryOp::Xor => {
+            // Reduction-xor; any X/Z input bit yields X.
+            // SEMANTICS-CHECK: masked bits are treated as X inputs.
+            if !src.mask.is_zero() {
+                all_x(1)
+            } else {
+                SIRValue::new(u8::from(parity(&src.payload)))
+            }
+        }
+        UnaryOp::And => {
+            // Reduction-and over the payload bits; a definite zero bit makes
+            // the result a definite zero, otherwise any X/Z input bit yields
+            // X (IEEE 1800 dominant-value rule).
+            let width = width_mask(src_width);
+            let has_definite_zero = !(&width ^ &src.payload ^ &src.mask).is_zero()
+                && !known_zeros(src, src_width).is_zero();
+            let mask = if has_definite_zero {
+                BigUint::zero()
+            } else if !src.mask.is_zero() {
+                BigUint::from(1u8)
+            } else {
+                BigUint::zero()
+            };
+            let all_ones = src.payload == width;
+            SIRValue {
+                payload: BigUint::from(u8::from(all_ones)),
+                mask,
+            }
+        }
+        UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
+            // SEMANTICS-CHECK: any X/Z input bit makes the whole result X,
+            // matching the compiled bit-count lowering; otherwise the count
+            // runs on the payload bits.
+            if !src.mask.is_zero() {
+                all_x(dst_width)
+            } else {
+                match op {
+                    UnaryOp::PopCount => SIRValue::new(src.payload.popcount()),
+                    UnaryOp::CountLeadingZeros => {
+                        let significant = src.payload.bits() as usize;
+                        SIRValue::new(src_width.saturating_sub(significant) as u64)
+                    }
+                    _ => SIRValue::new(trailing_zeros(&src.payload, src_width) as u64),
+                }
+            }
+        }
+    };
+    let truncated = truncate(out, dst_width);
+    // Identity and two-state casts preserve the incoming bit pattern; every
+    // other unary operation adopts the normalized unknown-bit convention.
+    if matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState) {
+        Ok(truncated)
+    } else {
+        Ok(normalize(truncated))
+    }
+}
+
+/// `Mux` following the SIR contract: a known one in the condition selects
+/// `then` exactly (preserving its mask); a fully known zero selects `else`;
+/// an unknown condition preserves bits where both arms agree and turns
+/// differing bits into X.
+///
+/// The condition is evaluated in `cond_width` (its own register width) while
+/// the agreement merge is shaped to `out_width` (the destination width).
+fn eval_mux(
+    cond: &SIRValue,
+    then_value: &SIRValue,
+    else_value: &SIRValue,
+    cond_width: usize,
+    out_width: usize,
+) -> SIRValue {
+    // Every outcome is shaped to the destination width like the compiled
+    // selection, so an arm wider than the destination cannot leak excess
+    // bits into later operations.
+    let mask = width_mask(out_width);
+    if mux_condition_known_one(cond, cond_width) {
+        return SIRValue {
+            payload: &then_value.payload & &mask,
+            mask: &then_value.mask & &mask,
+        };
+    }
+    if cond.mask.is_zero() {
+        return SIRValue {
+            payload: &else_value.payload & &mask,
+            mask: &else_value.mask & &mask,
+        };
+    }
+    let tv = &then_value.payload & &mask;
+    let ev = &else_value.payload & &mask;
+    let tm = &then_value.mask & &mask;
+    let em = &else_value.mask & &mask;
+    let difference = (&tv ^ &ev) | (&tm ^ &em);
+    // Differing bits become X; agreeing bits keep the then-arm bits. The
+    // payload absorbs the difference so unknown bits stay normalized.
+    SIRValue {
+        payload: tv | &difference,
+        mask: tm | &difference,
+    }
+}
+
+fn parity(value: &BigUint) -> bool {
+    value
+        .to_bytes_le()
+        .iter()
+        .fold(0u8, |acc, byte| acc ^ byte)
+        .count_ones()
+        % 2
+        == 1
+}
+
+fn trailing_zeros(value: &BigUint, width: usize) -> usize {
+    if value.is_zero() {
+        return width;
+    }
+    // Lowest set bit position: isolate it with v & (v-1) complement trick.
+    let isolated = value ^ (value - 1u8);
+    isolated.bits() as usize - 1
+}
+
+trait BigUintExt {
+    fn popcount(&self) -> u64;
+}
+
+impl BigUintExt for BigUint {
+    fn popcount(&self) -> u64 {
+        self.to_bytes_le()
+            .iter()
+            .map(|byte| u64::from(byte.count_ones()))
+            .sum()
+    }
+}
+
+// ── Register file ─────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub(crate) struct Registers {
+    slots: Vec<RegisterSlot>,
+    small_enabled: bool,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct RegisterSlot {
+    value: Option<RegisterValue>,
+    width: usize,
+    signed: bool,
+    generation: u64,
+}
+
+#[derive(Clone)]
+enum RegisterValue {
+    /// Fully-known two-state value. The materialized SIR value is populated
+    /// only when a cold generic interface (dynamic access or runtime event)
+    /// needs it.
+    Small {
+        value: u64,
+        materialized: OnceCell<SIRValue>,
+    },
+    Wide(SIRValue),
+}
+
+impl RegisterValue {
+    fn small(value: u64) -> Self {
+        Self::Small {
+            value,
+            materialized: OnceCell::new(),
+        }
+    }
+
+    fn as_small(&self) -> Option<u64> {
+        match self {
+            Self::Small { value, .. } => Some(*value),
+            Self::Wide(_) => None,
+        }
+    }
+
+    fn as_sir(&self) -> &SIRValue {
+        match self {
+            Self::Small {
+                value,
+                materialized,
+            } => materialized.get_or_init(|| SIRValue::new(*value)),
+            Self::Wide(value) => value,
+        }
+    }
+}
+
+impl Registers {
+    pub(crate) fn new(register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) -> Self {
+        let mut registers = Self::default();
+        registers.rebuild(register_map, four_state);
+        registers
+    }
+
+    fn rebuild(&mut self, register_map: &HashMap<RegisterId, RegisterType>, four_state: bool) {
+        self.small_enabled = !four_state;
+        let size = register_map.keys().map(|id| id.0 + 1).max().unwrap_or(0);
+        self.slots.clear();
+        self.slots.resize_with(size, RegisterSlot::default);
+        for (id, register_type) in register_map {
+            self.slots[id.0].width = register_type.width();
+            self.slots[id.0].signed = register_type.is_signed();
+        }
+    }
+
+    fn begin_execution(&mut self) {
+        if self.generation == u64::MAX {
+            for slot in &mut self.slots {
+                slot.generation = 0;
+            }
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
+    }
+
+    fn initialized_value(&self, id: RegisterId) -> Option<&RegisterValue> {
+        self.slots.get(id.0).and_then(|slot| {
+            (slot.generation == self.generation)
+                .then_some(slot.value.as_ref())
+                .flatten()
+        })
+    }
+
+    fn get(&self, id: RegisterId) -> Result<&SIRValue, InterpError> {
+        self.initialized_value(id)
+            .map(RegisterValue::as_sir)
+            .ok_or(InterpError::MissingRegister(id))
+    }
+
+    fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
+        self.initialized_value(id)
+            .map(RegisterValue::as_small)
+            .ok_or(InterpError::MissingRegister(id))
+    }
+
+    fn clone_value(&self, id: RegisterId) -> Result<RegisterValue, InterpError> {
+        self.initialized_value(id)
+            .cloned()
+            .ok_or(InterpError::MissingRegister(id))
+    }
+
+    fn set(&mut self, id: RegisterId, value: SIRValue) {
+        if let Some(slot) = self.slots.get_mut(id.0) {
+            let small = if self.small_enabled && slot.width <= 64 && value.mask.is_zero() {
+                value.payload.to_u64()
+            } else {
+                None
+            };
+            slot.value = Some(match small {
+                Some(value) => RegisterValue::small(value & mask_u64(slot.width)),
+                None => RegisterValue::Wide(value),
+            });
+            slot.generation = self.generation;
+        }
+    }
+
+    fn set_small(&mut self, id: RegisterId, value: u64) {
+        if let Some(slot) = self.slots.get_mut(id.0) {
+            debug_assert!(self.small_enabled && slot.width <= 64);
+            slot.value = Some(RegisterValue::small(value & mask_u64(slot.width)));
+            slot.generation = self.generation;
+        }
+    }
+
+    fn set_value(&mut self, id: RegisterId, value: RegisterValue) {
+        if let Some(slot) = self.slots.get_mut(id.0) {
+            slot.value = Some(value);
+            slot.generation = self.generation;
+        }
+    }
+
+    fn accepts_small(&self, id: RegisterId) -> bool {
+        self.small_enabled && self.slots.get(id.0).is_some_and(|slot| slot.width <= 64)
+    }
+
+    fn width(&self, id: RegisterId) -> usize {
+        self.slots.get(id.0).map_or(0, |slot| slot.width)
+    }
+
+    fn is_signed(&self, id: RegisterId) -> bool {
+        self.slots.get(id.0).is_some_and(|slot| slot.signed)
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celox_sir::{BasicBlock, SIRSwitchCase};
+
+    #[derive(Default)]
+    struct FakeMachine {
+        cells: HashMap<(u32, usize, usize), SIRValue>,
+        runtime_events: Vec<(u32, Vec<SIRValue>)>,
+        comb_captures: Vec<usize>,
+        trigger_notifications: Vec<usize>,
+    }
+
+    impl FakeMachine {
+        fn stored(&self, addr: u32, offset: usize, bits: usize) -> &SIRValue {
+            self.cells.get(&(addr, offset, bits)).unwrap()
+        }
+    }
+
+    impl InterpMachine<u32> for FakeMachine {
+        fn load(
+            &mut self,
+            addr: &u32,
+            access: ResolvedAccess<'_>,
+            bits: usize,
+        ) -> Result<SIRValue, InterpError> {
+            let offset = match access.offset {
+                SIROffset::Static(offset) => *offset,
+                other => {
+                    return Err(InterpError::Machine(format!(
+                        "fake machine cannot resolve {other}"
+                    )));
+                }
+            };
+            Ok(self
+                .cells
+                .get(&(*addr, offset, bits))
+                .cloned()
+                .unwrap_or_else(|| SIRValue::new(BigUint::zero())))
+        }
+
+        fn store(
+            &mut self,
+            addr: &u32,
+            access: ResolvedAccess<'_>,
+            bits: usize,
+            value: &SIRValue,
+        ) -> Result<(), InterpError> {
+            let offset = match access.offset {
+                SIROffset::Static(offset) => *offset,
+                other => {
+                    return Err(InterpError::Machine(format!(
+                        "fake machine cannot resolve {other}"
+                    )));
+                }
+            };
+            self.cells.insert((*addr, offset, bits), value.clone());
+            Ok(())
+        }
+
+        fn commit(
+            &mut self,
+            src: &u32,
+            dst: &u32,
+            access: ResolvedAccess<'_>,
+            bits: usize,
+        ) -> Result<(), InterpError> {
+            let offset = match access.offset {
+                SIROffset::Static(offset) => *offset,
+                other => {
+                    return Err(InterpError::Machine(format!(
+                        "fake machine cannot resolve {other}"
+                    )));
+                }
+            };
+            let value = self.cells.get(&(*src, offset, bits)).cloned();
+            if let Some(value) = value {
+                self.cells.insert((*dst, offset, bits), value);
+            }
+            Ok(())
+        }
+
+        fn notify_triggers(
+            &mut self,
+            _addr: &u32,
+            _access: ResolvedAccess<'_>,
+            _bits: usize,
+            triggers: &[TriggerIdWithKind],
+        ) -> Result<(), InterpError> {
+            self.trigger_notifications.push(triggers.len());
+            Ok(())
+        }
+
+        fn notify_trigger_only_store(
+            &mut self,
+            _addr: &u32,
+            triggers: &[TriggerIdWithKind],
+        ) -> Result<(), InterpError> {
+            self.trigger_notifications.push(triggers.len());
+            Ok(())
+        }
+
+        fn capture_store_range(
+            &mut self,
+            addr: &u32,
+            access: ResolvedAccess<'_>,
+            bits: usize,
+        ) -> Result<StoreSnapshot, InterpError> {
+            let offset = match access.offset {
+                SIROffset::Static(offset) => *offset,
+                other => {
+                    return Err(InterpError::Machine(format!(
+                        "fake machine cannot resolve {other}"
+                    )));
+                }
+            };
+            Ok(StoreSnapshot {
+                value_words: self
+                    .cells
+                    .get(&(*addr, offset, bits))
+                    .map(|value| Self::words(&value.payload))
+                    .unwrap_or_default(),
+                mask_words: Vec::new(),
+            })
+        }
+
+        fn enable_comb_captures(
+            &mut self,
+            _addr: &u32,
+            _access: ResolvedAccess<'_>,
+            _bits: usize,
+            _before: &StoreSnapshot,
+            sites: &[u32],
+        ) -> Result<(), InterpError> {
+            self.comb_captures.push(sites.len());
+            Ok(())
+        }
+
+        fn emit_runtime_event(
+            &mut self,
+            site_id: u32,
+            args: &[SIRValue],
+        ) -> Result<(), InterpError> {
+            self.runtime_events.push((site_id, args.to_vec()));
+            Ok(())
+        }
+
+        fn emit_comb_capture_event(
+            &mut self,
+            _site_id: u32,
+            _args: &[SIRValue],
+            _fatal_error_code: Option<i64>,
+            _consume_enabled: bool,
+        ) -> Result<(), InterpError> {
+            Ok(())
+        }
+
+        fn enable_comb_capture_if_changed(
+            &mut self,
+            _old: &SIRValue,
+            _new: &SIRValue,
+            _sites: &[u32],
+        ) -> Result<(), InterpError> {
+            Ok(())
+        }
+    }
+
+    impl FakeMachine {
+        fn words(_value: &BigUint) -> Vec<u64> {
+            Vec::new()
+        }
+    }
+
+    fn _addr_owned(addr: &u32) -> u32 {
+        *addr
+    }
+
+    fn bit_regs(specs: &[(usize, usize)]) -> HashMap<RegisterId, RegisterType> {
+        specs
+            .iter()
+            .map(|&(id, width)| {
+                (
+                    RegisterId(id),
+                    RegisterType::Bit {
+                        width,
+                        signed: false,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn narrow_binary_alu_matches_generic_two_state_path() {
+        const OPS: &[BinaryOp] = &[
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::DivU,
+            BinaryOp::DivS,
+            BinaryOp::RemU,
+            BinaryOp::RemS,
+            BinaryOp::And,
+            BinaryOp::Or,
+            BinaryOp::Xor,
+            BinaryOp::Shl,
+            BinaryOp::Shr,
+            BinaryOp::Sar,
+            BinaryOp::Eq,
+            BinaryOp::Ne,
+            BinaryOp::EqCase,
+            BinaryOp::NeCase,
+            BinaryOp::LtU,
+            BinaryOp::LtS,
+            BinaryOp::LeU,
+            BinaryOp::LeS,
+            BinaryOp::GtU,
+            BinaryOp::GtS,
+            BinaryOp::GeU,
+            BinaryOp::GeS,
+            BinaryOp::LogicAnd,
+            BinaryOp::LogicOr,
+            BinaryOp::EqWildcard,
+            BinaryOp::NeWildcard,
+        ];
+        const WIDTHS: &[usize] = &[1, 4, 8, 32, 63, 64];
+        const VALUES: &[u64] = &[
+            0,
+            1,
+            2,
+            3,
+            7,
+            0x80,
+            0xffff_ffff,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+        ];
+
+        for op in OPS {
+            for &lhs_width in WIDTHS {
+                for &rhs_width in WIDTHS {
+                    for &dst_width in WIDTHS {
+                        for lhs_signed in [false, true] {
+                            for &lhs in VALUES {
+                                for &rhs in VALUES {
+                                    let lhs = lhs & mask_u64(lhs_width);
+                                    let rhs = rhs & mask_u64(rhs_width);
+                                    let expected = alu_binary(
+                                        op,
+                                        &SIRValue::new(lhs),
+                                        &SIRValue::new(rhs),
+                                        lhs_width,
+                                        rhs_width,
+                                        dst_width,
+                                        lhs_signed,
+                                    )
+                                    .unwrap();
+                                    let actual = alu_binary_u64(
+                                        op, lhs, rhs, lhs_width, rhs_width, dst_width, lhs_signed,
+                                    );
+                                    assert!(expected.mask.is_zero());
+                                    assert_eq!(
+                                        BigUint::from(actual),
+                                        expected.payload,
+                                        "{op:?}: lhs={lhs:#x}/{lhs_width}, rhs={rhs:#x}/{rhs_width}, dst={dst_width}, signed={lhs_signed}",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_unary_alu_matches_generic_two_state_path() {
+        const OPS: &[UnaryOp] = &[
+            UnaryOp::Ident,
+            UnaryOp::ToTwoState,
+            UnaryOp::Minus,
+            UnaryOp::BitNot,
+            UnaryOp::LogicNot,
+            UnaryOp::And,
+            UnaryOp::Or,
+            UnaryOp::Xor,
+            UnaryOp::PopCount,
+            UnaryOp::CountLeadingZeros,
+            UnaryOp::CountTrailingZeros,
+        ];
+        const WIDTHS: &[usize] = &[1, 4, 8, 32, 63, 64];
+        const VALUES: &[u64] = &[
+            0,
+            1,
+            2,
+            3,
+            7,
+            0x80,
+            0xffff_ffff,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+        ];
+
+        for op in OPS {
+            for &src_width in WIDTHS {
+                for &dst_width in WIDTHS {
+                    for src_signed in [false, true] {
+                        for &src in VALUES {
+                            let src = src & mask_u64(src_width);
+                            let expected = alu_unary(
+                                op,
+                                &SIRValue::new(src),
+                                src_width,
+                                src_signed,
+                                dst_width,
+                            )
+                            .unwrap();
+                            let actual = alu_unary_u64(op, src, src_width, src_signed, dst_width);
+                            assert!(expected.mask.is_zero());
+                            assert_eq!(
+                                BigUint::from(actual),
+                                expected.payload,
+                                "{op:?}: src={src:#x}/{src_width}, dst={dst_width}, signed={src_signed}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn block(
+        id: usize,
+        params: Vec<usize>,
+        instructions: Vec<SIRInstruction<u32>>,
+        terminator: SIRTerminator,
+    ) -> (BlockId, BasicBlock<u32>) {
+        (
+            BlockId(id),
+            BasicBlock {
+                id: BlockId(id),
+                params: params.into_iter().map(RegisterId).collect(),
+                instructions,
+                terminator,
+            },
+        )
+    }
+
+    #[test]
+    fn executes_straight_line_arithmetic_and_store() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(5u8)),
+                    SIRInstruction::Imm(RegisterId(1), SIRValue::new(3u8)),
+                    SIRInstruction::Binary(
+                        RegisterId(2),
+                        RegisterId(0),
+                        BinaryOp::Add,
+                        RegisterId(1),
+                    ),
+                    SIRInstruction::Store(
+                        7u32,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8), (1, 8), (2, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
+        assert_eq!(machine.stored(7, 0, 8).payload, BigUint::from(8u8));
+    }
+
+    #[test]
+    fn reused_register_storage_clears_values_between_units() {
+        let producer = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xabu8))],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+        let consumer = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![SIRInstruction::Store(
+                    1u32,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        let mut registers = Registers::new(&producer.register_map, true);
+        execute_prepared_unit(&producer, &mut machine, &[], true, &mut registers).unwrap();
+        let error =
+            execute_prepared_unit(&consumer, &mut machine, &[], true, &mut registers).unwrap_err();
+        assert_eq!(error, InterpError::MissingRegister(RegisterId(0)));
+    }
+
+    #[test]
+    fn branch_selects_target_by_known_condition_bits() {
+        for (cond, expected) in [(1u8, 10u8), (0, 20)] {
+            let unit = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [
+                    block(
+                        0,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(cond))],
+                        SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    ),
+                    block(
+                        1,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(1), SIRValue::new(10u8))],
+                        SIRTerminator::Jump(BlockId(3), vec![]),
+                    ),
+                    block(
+                        2,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(1), SIRValue::new(20u8))],
+                        SIRTerminator::Jump(BlockId(3), vec![]),
+                    ),
+                    block(
+                        3,
+                        vec![],
+                        vec![SIRInstruction::Store(
+                            1u32,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(1),
+                            Vec::new(),
+                            Vec::new(),
+                        )],
+                        SIRTerminator::Return,
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                register_map: bit_regs(&[(0, 1), (1, 8)]),
+            };
+
+            let mut machine = FakeMachine::default();
+            execute_unit(&unit, &mut machine, &[], true).unwrap();
+            assert_eq!(machine.stored(1, 0, 8).payload, BigUint::from(expected));
+        }
+    }
+
+    #[test]
+    fn switch_matches_cases_and_falls_back_to_default() {
+        for (selector, expected) in [(2u8, 2u8), (9, 99)] {
+            let unit = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [
+                    block(
+                        0,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(selector))],
+                        SIRTerminator::Switch {
+                            selector: RegisterId(0),
+                            cases: vec![
+                                SIRSwitchCase {
+                                    value: BigUint::from(1u8),
+                                    target: BlockId(1),
+                                },
+                                SIRSwitchCase {
+                                    value: BigUint::from(2u8),
+                                    target: BlockId(2),
+                                },
+                            ],
+                            default: BlockId(3),
+                        },
+                    ),
+                    block(
+                        1,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(1), SIRValue::new(1u8))],
+                        SIRTerminator::Jump(BlockId(4), vec![]),
+                    ),
+                    block(
+                        2,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(1), SIRValue::new(2u8))],
+                        SIRTerminator::Jump(BlockId(4), vec![]),
+                    ),
+                    block(
+                        3,
+                        vec![],
+                        vec![SIRInstruction::Imm(RegisterId(1), SIRValue::new(99u8))],
+                        SIRTerminator::Jump(BlockId(4), vec![]),
+                    ),
+                    block(
+                        4,
+                        vec![],
+                        vec![SIRInstruction::Store(
+                            1u32,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(1),
+                            Vec::new(),
+                            Vec::new(),
+                        )],
+                        SIRTerminator::Return,
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                register_map: bit_regs(&[(0, 4), (1, 8)]),
+            };
+
+            let mut machine = FakeMachine::default();
+            execute_unit(&unit, &mut machine, &[], true).unwrap();
+            assert_eq!(machine.stored(1, 0, 8).payload, BigUint::from(expected));
+        }
+    }
+
+    #[test]
+    fn jump_binds_target_block_parameters() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                block(
+                    0,
+                    vec![],
+                    vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(7u8))],
+                    SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+                ),
+                block(
+                    1,
+                    vec![1],
+                    vec![SIRInstruction::Store(
+                        3u32,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    SIRTerminator::Return,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8), (1, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
+        assert_eq!(machine.stored(3, 0, 8).payload, BigUint::from(7u8));
+    }
+
+    #[test]
+    fn entry_parameters_bind_caller_supplied_arguments() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![0],
+                vec![SIRInstruction::Store(
+                    5u32,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[SIRValue::new(0xDEu16)], true).unwrap();
+        assert_eq!(machine.stored(5, 0, 8).payload, BigUint::from(0xDEu16));
+    }
+
+    #[test]
+    fn concat_and_slice_roundtrip_msbf_order() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xABu8)),
+                    SIRInstruction::Imm(RegisterId(1), SIRValue::new(0xCDu8)),
+                    SIRInstruction::Concat(RegisterId(2), vec![RegisterId(0), RegisterId(1)]),
+                    SIRInstruction::Slice(RegisterId(3), RegisterId(2), 4, 8),
+                    SIRInstruction::Store(
+                        9u32,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(3),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8), (1, 8), (2, 16), (3, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
+        // 0xABCD sliced [4 +: 8] == 0xBC.
+        assert_eq!(machine.stored(9, 0, 8).payload, BigUint::from(0xBCu8));
+    }
+
+    #[test]
+    fn narrow_singleton_64_bit_concat_does_not_shift_by_64() {
+        let value = 0xdead_beef_cafe_babeu64;
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(value)),
+                    SIRInstruction::Concat(RegisterId(1), vec![RegisterId(0)]),
+                    SIRInstruction::Store(
+                        9u32,
+                        SIROffset::Static(0),
+                        64,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 64), (1, 64)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], false).unwrap();
+        assert_eq!(machine.stored(9, 0, 64).payload, BigUint::from(value));
+    }
+
+    #[test]
+    fn concat_truncates_to_destination_width() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xFFu8)),
+                    SIRInstruction::Imm(RegisterId(1), SIRValue::new(0xFFu8)),
+                    SIRInstruction::Concat(RegisterId(2), vec![RegisterId(0), RegisterId(1)]),
+                    SIRInstruction::Store(
+                        9u32,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            // Destination is narrower than the concatenated sources: the
+            // declared-register-width invariant keeps the low 8 bits.
+            register_map: bit_regs(&[(0, 8), (1, 8), (2, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
+        assert_eq!(machine.stored(9, 0, 8).payload, BigUint::from(0xFFu8));
+    }
+
+    #[test]
+    fn mux_follows_four_state_selection_contract() {
+        let known_one = SIRValue::new(1u8);
+        let known_zero = SIRValue::new(0u8);
+        let unknown = SIRValue::new_four_state(0u8, 1u8);
+
+        // Known-one condition selects the then-arm exactly, mask included.
+        let mixed_arm = SIRValue::new_four_state(0b01u8, 0b10u8);
+        assert_eq!(
+            eval_mux(&known_one, &mixed_arm, &SIRValue::new(0u8), 1, 2),
+            mixed_arm
+        );
+        // Known-zero condition selects the else-arm.
+        assert_eq!(
+            eval_mux(&known_zero, &mixed_arm, &SIRValue::new(0b11u8), 1, 2),
+            SIRValue::new(0b11u8)
+        );
+        // Unknown condition: agreeing bits preserved, differing bits become X
+        // with a normalized (all-ones) payload.
+        let out = eval_mux(
+            &unknown,
+            &SIRValue::new_four_state(0b1010u8, 0b0000u8),
+            &SIRValue::new_four_state(0b0011u8, 0b0100u8),
+            1,
+            4,
+        );
+        // difference = 1101 → mask keeps those bits unknown, payload absorbs
+        // them so X bits read as one.
+        assert_eq!(out.payload, BigUint::from(0b1111u8));
+        assert_eq!(out.mask, BigUint::from(0b1101u8));
+    }
+
+    #[test]
+    fn mux_condition_is_evaluated_in_its_own_width() {
+        // An 8-bit condition with a known one above the 4-bit destination
+        // width must still select the then-arm.
+        let wide_cond = SIRValue::new(0b1_0000u8);
+        let out = eval_mux(
+            &wide_cond,
+            &SIRValue::new(0xAu8),
+            &SIRValue::new(0x5u8),
+            8,
+            4,
+        );
+        assert_eq!(out.payload, BigUint::from(0xAu8));
+    }
+
+    #[test]
+    fn error_terminator_surfaces_fatal_code() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(0, vec![], vec![], SIRTerminator::Error(42))]
+                .into_iter()
+                .collect(),
+            register_map: HashMap::default(),
+        };
+
+        let mut machine = FakeMachine::default();
+        assert_eq!(
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
+            InterpError::Fatal(42)
+        );
+    }
+
+    #[test]
+    fn jump_to_missing_block_reports_unknown_block() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![],
+                SIRTerminator::Jump(BlockId(99), vec![]),
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+
+        let mut machine = FakeMachine::default();
+        assert_eq!(
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
+            InterpError::UnknownBlock(BlockId(99))
+        );
+    }
+
+    #[test]
+    fn arity_mismatch_between_jump_and_target_params_is_rejected() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                block(0, vec![], vec![], SIRTerminator::Jump(BlockId(1), vec![])),
+                block(1, vec![0], vec![], SIRTerminator::Return),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        assert_eq!(
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
+            InterpError::RegisterArityMismatch {
+                expected: 1,
+                found: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn reading_unwritten_register_is_rejected() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![SIRInstruction::Store(
+                    1u32,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(4),
+                    Vec::new(),
+                    Vec::new(),
+                )],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(4, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        assert_eq!(
+            execute_unit(&unit, &mut machine, &[], true).unwrap_err(),
+            InterpError::MissingRegister(RegisterId(4))
+        );
+    }
+
+    #[test]
+    fn runtime_events_receive_resolved_argument_values() {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(11u8)),
+                    SIRInstruction::RuntimeEvent {
+                        site_id: 3,
+                        args: vec![RegisterId(0)],
+                    },
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[(0, 8)]),
+        };
+
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], true).unwrap();
+        assert_eq!(machine.runtime_events, vec![(3, vec![SIRValue::new(11u8)])]);
+    }
+}

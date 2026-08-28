@@ -33,7 +33,7 @@ resolver = "2"
 [workspace.package]
 # Keep the publishable Rust crates in lockstep with VERSION and the npm packages.
 # Release Please updates this annotated line as part of the shared release PR.
-version     = "0.4.0" # x-release-please-version
+version     = "0.4.2" # x-release-please-version
 authors     = ["tignear"]
 repository  = "https://github.com/celox-sim/celox"
 keywords    = ["hdl", "simulator", "veryl"]
@@ -42,31 +42,31 @@ license     = "MIT OR Apache-2.0"
 readme      = "README.md"
 edition     = "2024"
 description = "Celox HDL Simulator"
-rust-version = "1.97.1"
+rust-version = "1.98.0"
 
 [workspace.dependencies]
-celox                   = { version = "=0.4.0", path = "crates/celox", default-features = false } # x-release-please-version
-celox-analysis          = { version = "=0.4.0", path = "crates/celox-analysis" } # x-release-please-version
-celox-backend-arm64     = { version = "=0.4.0", path = "crates/celox-backend-arm64" } # x-release-please-version
-celox-backend-common    = { version = "=0.4.0", path = "crates/celox-backend-common" } # x-release-please-version
-celox-backend-cranelift = { version = "=0.4.0", path = "crates/celox-backend-cranelift" } # x-release-please-version
-celox-backend-wasm      = { version = "=0.4.0", path = "crates/celox-backend-wasm" } # x-release-please-version
-celox-backend-x86       = { version = "=0.4.0", path = "crates/celox-backend-x86" } # x-release-please-version
-celox-design            = { version = "=0.4.0", path = "crates/celox-design" } # x-release-please-version
-celox-frontend-core     = { version = "=0.4.0", path = "crates/celox-frontend-core" } # x-release-please-version
-celox-frontend-sdk      = { version = "=0.4.0", path = "crates/celox-frontend-sdk" } # x-release-please-version
-celox-frontend-sv       = { version = "=0.4.0", path = "crates/celox-frontend-sv" } # x-release-please-version
-celox-frontend-veryl    = { version = "=0.4.0", path = "crates/celox-frontend-veryl" } # x-release-please-version
-celox-macros            = { version = "=0.4.0", path = "crates/celox-macros" } # x-release-please-version
-celox-napi              = { version = "=0.4.0", path = "crates/celox-napi" } # x-release-please-version
-celox-runtime           = { version = "=0.4.0", path = "crates/celox-runtime" } # x-release-please-version
-celox-sir               = { version = "=0.4.0", path = "crates/celox-sir" } # x-release-please-version
-celox-sir-opt           = { version = "=0.4.0", path = "crates/celox-sir-opt", default-features = false } # x-release-please-version
-celox-slt               = { version = "=0.4.0", path = "crates/celox-slt" } # x-release-please-version
-celox-state-layout      = { version = "=0.4.0", path = "crates/celox-state-layout" } # x-release-please-version
-celox-sv-analyzer       = { version = "=0.4.0", path = "crates/celox-sv-analyzer" } # x-release-please-version
-celox-testbench         = { version = "=0.4.0", path = "crates/celox-testbench" } # x-release-please-version
-celox-ts-gen            = { version = "=0.4.0", path = "crates/celox-ts-gen" } # x-release-please-version
+celox                   = { version = "=0.4.2", path = "crates/celox", default-features = false } # x-release-please-version
+celox-analysis          = { version = "=0.4.2", path = "crates/celox-analysis" } # x-release-please-version
+celox-backend-arm64     = { version = "=0.4.2", path = "crates/celox-backend-arm64" } # x-release-please-version
+celox-backend-common    = { version = "=0.4.2", path = "crates/celox-backend-common" } # x-release-please-version
+celox-backend-cranelift = { version = "=0.4.2", path = "crates/celox-backend-cranelift" } # x-release-please-version
+celox-backend-wasm      = { version = "=0.4.2", path = "crates/celox-backend-wasm" } # x-release-please-version
+celox-backend-x86       = { version = "=0.4.2", path = "crates/celox-backend-x86" } # x-release-please-version
+celox-design            = { version = "=0.4.2", path = "crates/celox-design" } # x-release-please-version
+celox-frontend-core     = { version = "=0.4.2", path = "crates/celox-frontend-core" } # x-release-please-version
+celox-frontend-sdk      = { version = "=0.4.2", path = "crates/celox-frontend-sdk" } # x-release-please-version
+celox-frontend-sv       = { version = "=0.4.2", path = "crates/celox-frontend-sv" } # x-release-please-version
+celox-frontend-veryl    = { version = "=0.4.2", path = "crates/celox-frontend-veryl" } # x-release-please-version
+celox-macros            = { version = "=0.4.2", path = "crates/celox-macros" } # x-release-please-version
+celox-napi              = { version = "=0.4.2", path = "crates/celox-napi" } # x-release-please-version
+celox-runtime           = { version = "=0.4.2", path = "crates/celox-runtime" } # x-release-please-version
+celox-sir               = { version = "=0.4.2", path = "crates/celox-sir" } # x-release-please-version
+celox-sir-opt           = { version = "=0.4.2", path = "crates/celox-sir-opt", default-features = false } # x-release-please-version
+celox-slt               = { version = "=0.4.2", path = "crates/celox-slt" } # x-release-please-version
+celox-state-layout      = { version = "=0.4.2", path = "crates/celox-state-layout" } # x-release-please-version
+celox-sv-analyzer       = { version = "=0.4.2", path = "crates/celox-sv-analyzer" } # x-release-please-version
+celox-testbench         = { version = "=0.4.2", path = "crates/celox-testbench" } # x-release-please-version
+celox-ts-gen            = { version = "=0.4.2", path = "crates/celox-ts-gen" } # x-release-please-version
 
 veryl-analyzer = "0.20.3"
 veryl-emitter  = "0.20.3"
@@ -83,6 +83,9 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
+napi            = "=3.12.2"
+napi-build      = "=2.4.1"
+napi-derive     = "=3.6.3"
 num-bigint      = { version = "0.5", features = ["serde"] }
 num-traits      = "0.2.19"
 rand            = { version = "0.10", default-features = false }

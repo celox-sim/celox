@@ -16,11 +16,11 @@ celox-sir = { workspace = true }
 celox-state-layout = { workspace = true }
 fxhash = { workspace = true }
 thiserror = { workspace = true }
-cranelift = "0.134.0"
-cranelift-module = "0.134.0"
-cranelift-jit = "0.134.0"
-cranelift-frontend = "0.134.0"
-cranelift-native = "0.134.0"
+cranelift = "0.135.0"
+cranelift-module = "0.135.0"
+cranelift-jit = "0.135.0"
+cranelift-frontend = "0.135.0"
+cranelift-native = "0.135.0"
 
 [lints]
 workspace = true

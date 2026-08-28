@@ -1187,6 +1187,8 @@ pub enum ChainedEmitError {
     Input(EmitInputError),
     SsaDestruction(SsaDestructionError),
     Assembly(IcedError),
+    /// The compile observed its cancellation token; not a backend defect.
+    Cancelled,
 }
 
 impl fmt::Display for ChainedEmitError {
@@ -1199,6 +1201,7 @@ impl fmt::Display for ChainedEmitError {
             Self::Input(error) => error.fmt(f),
             Self::SsaDestruction(error) => error.fmt(f),
             Self::Assembly(error) => error.fmt(f),
+            Self::Cancelled => f.write_str("compilation was cancelled"),
         }
     }
 }
@@ -1213,6 +1216,7 @@ impl std::error::Error for ChainedEmitError {
             Self::Input(error) => Some(error),
             Self::SsaDestruction(error) => Some(error),
             Self::Assembly(error) => Some(error),
+            Self::Cancelled => None,
         }
     }
 }
@@ -5250,14 +5254,28 @@ pub fn emit_prepared_eu(
     label: &str,
     options: &crate::X86BackendOptions,
     mut trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
+    // Shared borrow so the checkpoint closure and downstream callees observe
+    // the same predicate without moving it.
+    let is_cancelled = &is_cancelled;
     let diagnostics = &options.diagnostics;
     let timing = diagnostics.phase_timing;
     let mir_stats = diagnostics.mir_stats;
     let copy_stats =
         timing || mir_stats || diagnostics.regalloc_timing || diagnostics.regalloc_stats;
     let total_start = timing.then(crate::timing::now);
+    // Observed between emission stages so a cancelled compile unwinds at the
+    // next boundary instead of finishing the remaining phases. Callers
+    // without cancellation pass `|| false`, which folds away after inlining.
+    let checkpoint = || -> Result<(), ChainedEmitError> {
+        if is_cancelled() {
+            Err(ChainedEmitError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
 
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         sir_eu
@@ -5301,6 +5319,7 @@ pub fn emit_prepared_eu(
         tracing::debug!("[native-timing] emit_chained verify after_isel label={label}");
     }
     verify_mir(&mfunc, "after native instruction selection")?;
+    checkpoint()?;
     let legalize_start = timing.then(crate::timing::now);
     super::mir_legalize::legalize(&mut mfunc);
     if let Some(start) = legalize_start {
@@ -5317,6 +5336,7 @@ pub fn emit_prepared_eu(
         tracing::debug!("[native-timing] emit_chained verify after_legalize label={label}");
     }
     verify_mir(&mfunc, "after MIR legalization")?;
+    checkpoint()?;
     let opt_start = timing.then(crate::timing::now);
     super::mir_opt::optimize_with_diagnostics(&mut mfunc, diagnostics);
     if let Some(start) = opt_start {
@@ -5329,6 +5349,7 @@ pub fn emit_prepared_eu(
         );
     }
     verify_mir(&mfunc, "after MIR optimization before x86 SLP")?;
+    checkpoint()?;
     let slp_stats = if options.slp {
         super::x86_slp::select(&mut mfunc)
     } else {
@@ -5368,6 +5389,7 @@ pub fn emit_prepared_eu(
         tracing::debug!("[native-timing] emit_chained verify after_mir_opt label={label}");
     }
     verify_mir(&mfunc, "after MIR optimization")?;
+    checkpoint()?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_before_regalloc = mfunc.to_string();
     }
@@ -5379,7 +5401,15 @@ pub fn emit_prepared_eu(
         regalloc_trace.as_mut(),
         diagnostics,
         options.native_tick_loop,
-    )?;
+        is_cancelled,
+    )
+    .map_err(|error| {
+        if regalloc::is_cancellation(&error) {
+            ChainedEmitError::Cancelled
+        } else {
+            ChainedEmitError::Regalloc(error)
+        }
+    })?;
     if let (Some(trace), Some(regalloc_trace)) = (trace.as_deref_mut(), regalloc_trace.as_mut()) {
         trace.mir_after_late_memory_folds =
             std::mem::take(&mut regalloc_trace.mir_after_late_memory_folds);
@@ -5396,7 +5426,7 @@ pub fn emit_prepared_eu(
         );
     }
     let post_regalloc_start = timing.then(crate::timing::now);
-    super::mir_opt::post_regalloc_peephole(&mut mfunc);
+    super::mir_opt::post_regalloc_peephole(&mut mfunc, &ra.assignment);
     super::mir_opt::post_regalloc_cleanup(&mut mfunc);
     super::mir_opt::post_regalloc_direct_load_cse(&mut mfunc, &ra.assignment);
     if cfg!(debug_assertions) || diagnostics.verify_regalloc {
@@ -5412,6 +5442,7 @@ pub fn emit_prepared_eu(
         );
     }
     verify_mir(&mfunc, "after post-allocation MIR peepholes")?;
+    checkpoint()?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_after_regalloc = mfunc.to_string();
         trace.register_assignment.clear();
@@ -5454,6 +5485,7 @@ pub fn emit_prepared_eu(
             stats.max_effective_copies_per_edge,
         );
     }
+    checkpoint()?;
     let emit_start = timing.then(crate::timing::now);
     let state_size = layout
         .merged_total_size

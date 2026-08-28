@@ -81,6 +81,7 @@ celox-backend-arm64   = { workspace = true }
 
 [dev-dependencies]
 insta      = "1.46"
+libc.workspace = true
 criterion  = "0.8"
 codspeed-criterion-compat = "5.0.1"
 proptest   = "1.10"
@@ -107,6 +108,10 @@ required-features = ["systemverilog"]
 name = "compilation"
 harness = false
 bench = false
+
+[[bench]]
+name = "tiered"
+harness = false
 
 [[example]]
 name = "frontend_binary"

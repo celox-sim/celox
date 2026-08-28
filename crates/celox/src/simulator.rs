@@ -11,7 +11,7 @@ mod error;
 ))]
 pub use builder::NativeCompilation;
 #[cfg(feature = "host-runtime")]
-pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
+pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions, TierPromotion};
 pub use builder::{compile_frontend_to_sir, compile_to_sir};
 #[cfg(feature = "systemverilog")]
 pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
@@ -1238,6 +1238,15 @@ mod host {
             self.backend.layout()
         }
 
+        /// Take ownership of the VCD writer, if one was configured at build time.
+        ///
+        /// Builders create the writer themselves so that layout selection can
+        /// account for VCD recording; callers building handles around a backend
+        /// use this to keep tracing alive without rebuilding descriptors.
+        pub fn take_vcd_writer(&mut self) -> Option<crate::VcdWriter> {
+            self.vcd_writer.take()
+        }
+
         /// Build VCD signal descriptors for all instances.
         ///
         /// The returned descriptors are self-contained (no IR references) and can
@@ -1511,6 +1520,54 @@ mod host {
     impl Simulator<crate::backend::wasm_runtime::WasmBackend> {
         /// Consume the simulator and return the inner Wasmtime backend.
         pub fn into_backend(self) -> crate::backend::wasm_runtime::WasmBackend {
+            self.backend
+        }
+    }
+
+    impl Simulator<crate::backend::TieredBackend> {
+        /// Whether this tiered simulation has adopted its compiled tier.
+        ///
+        /// False while background compilation is still running or after it
+        /// failed (the interpreter then remains the permanent tier).
+        pub fn is_compiled(&self) -> bool {
+            self.backend.is_compiled()
+        }
+
+        /// Return deterministic tier lifecycle and evaluation measurements.
+        ///
+        /// The snapshot contains counts rather than ad-hoc wall-clock samples;
+        /// use a statistical benchmark harness to measure elapsed time.
+        pub fn tiered_execution_stats(&self) -> crate::TieredExecutionStats {
+            self.backend.execution_stats()
+        }
+
+        /// Start opt-in wall-clock measurement from workload execution to
+        /// promotion. Ordinary tiered simulation does not read the host clock.
+        pub fn start_tiered_execution_timing(&mut self) {
+            self.backend.start_execution_timing();
+        }
+
+        /// Stop tiered execution timing and return the promotion interval.
+        pub fn finish_tiered_execution_timing(&mut self) -> Option<crate::TieredExecutionTiming> {
+            self.backend.finish_execution_timing()
+        }
+
+        /// Why promotion has not happened yet, for diagnostics.
+        pub fn promotion_error(&self) -> Option<&SimulatorError> {
+            self.backend.promotion_error()
+        }
+
+        /// Request cancellation of background compilation.
+        ///
+        /// The simulation stays on the interpreter permanently and
+        /// [`Simulator::promotion_error`] reports the cancellation. Returns
+        /// whether a background compilation was still pending.
+        pub fn cancel_background_compilation(&mut self) -> bool {
+            self.backend.cancel_background_compilation()
+        }
+
+        /// Consume the simulator and return the inner tiered backend.
+        pub fn into_backend(self) -> crate::backend::TieredBackend {
             self.backend
         }
     }

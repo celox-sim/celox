@@ -1043,6 +1043,23 @@ mod host {
         PreserveAllPorts,
     }
 
+    /// Controls when the tiered backend adopts background-compiled code.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TierPromotion {
+        /// Adopt compiled code at the first scheduler safe point after
+        /// background compilation completes. Default.
+        Always,
+        /// Adopt compiled code only once the interpreter has executed at
+        /// least this many evaluation steps. Background compilation still
+        /// starts immediately; short simulations that finish before the
+        /// threshold simply never pay the adoption cost. `AfterSteps(0)`
+        /// behaves like [`TierPromotion::Always`].
+        AfterSteps(u64),
+        /// Stay interpreted permanently and skip background compilation
+        /// entirely — no worker thread is spawned.
+        Never,
+    }
+
     #[derive(Debug, Clone)]
     pub struct SimulatorOptions {
         pub four_state: bool,
@@ -1066,6 +1083,8 @@ mod host {
         pub native_force_support: bool,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
+        /// When the tiered backend adopts background-compiled code.
+        pub tier_promotion: TierPromotion,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1237,6 +1256,7 @@ mod host {
                 emit_triggers: false,
                 native_force_support: false,
                 dead_store_policy: DeadStorePolicy::Off,
+                tier_promotion: TierPromotion::Always,
             }
         }
     }
@@ -1470,6 +1490,12 @@ mod host {
         /// Set the dead store elimination policy.
         pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
             self.options.dead_store_policy = policy;
+            self
+        }
+
+        /// Set when the tiered backend adopts background-compiled code.
+        pub fn tier_promotion(mut self, policy: TierPromotion) -> Self {
+            self.options.tier_promotion = policy;
             self
         }
 
@@ -1933,6 +1959,148 @@ mod host {
             if let Some(s) = jit_start {
                 tracing::debug!("[phase-timing] jit_backend: {:?}", s.elapsed());
             }
+
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            sim.apply_initial_values();
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            Ok(sim)
+        }
+
+        /// Compiles SIR, finalizes the state layout, and returns a simulator
+        /// whose execution units run on the Tier-0 SIR interpreter instead of
+        /// generated machine code.
+        ///
+        /// This is the target of the `all_backends!` `interp` test arm. No
+        /// code generation happens on this path: the simulator is ready as
+        /// soon as the state layout is finalized, and every execution unit is
+        /// driven by [`crate::interpreter::execute_unit`] against the same
+        /// memory image ABI the compiled backends use.
+        pub fn build_interpreter(
+            self,
+        ) -> Result<Simulator<crate::backend::InterpBackend>, SimulatorError> {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let phase_start = phase_timing.then(crate::timing::now);
+
+            let (laid_out, warnings, options, vcd_path, injected_components) = self
+                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+
+            if let Some(s) = phase_start {
+                tracing::debug!(
+                    "[phase-timing] compile_and_layout (total): {:?}",
+                    s.elapsed()
+                );
+            }
+
+            let backend = crate::backend::InterpBackend::new(&laid_out, &options)?;
+
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            sim.apply_initial_values();
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            Ok(sim)
+        }
+
+        /// Compiles SIR, finalizes the state layout, and returns a simulator
+        /// that starts executing on the Tier-0 interpreter immediately while
+        /// the host's default compiled tier (native where available,
+        /// Cranelift otherwise) is compiled in the background.
+        ///
+        /// The first scheduler safe point after background compilation
+        /// completes adopts the compiled code and moves the live memory image
+        /// across without translation. If background compilation fails the
+        /// simulator keeps running on the interpreter.
+        pub fn build_tiered(
+            self,
+        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError> {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let phase_start = phase_timing.then(crate::timing::now);
+
+            let (laid_out, warnings, options, vcd_path, injected_components) = {
+                let vcd_recording = self.vcd_path.is_some();
+                self.into_laid_out_program(crate::backend::tiered::tiered_layout_mode(
+                    vcd_recording,
+                ))?
+            };
+
+            if let Some(s) = phase_start {
+                tracing::debug!(
+                    "[phase-timing] compile_and_layout (total): {:?}",
+                    s.elapsed()
+                );
+            }
+
+            let backend = crate::backend::TieredBackend::new(&laid_out, &options);
+
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            sim.apply_initial_values();
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            Ok(sim)
+        }
+
+        /// Build a tiered simulator with a caller-provided compilation step.
+        ///
+        /// Used by tests to make promotion timing deterministic; `compile`
+        /// runs on the background worker thread.
+        #[cfg(test)]
+        pub(crate) fn build_tiered_with_compiler<F>(
+            self,
+            compile: F,
+        ) -> Result<Simulator<crate::backend::TieredBackend>, SimulatorError>
+        where
+            F: FnOnce(
+                    &crate::ir::LaidOutProgram,
+                    &SimulatorOptions,
+                    &crate::backend::compile_cancel::CompileCancel,
+                )
+                    -> Result<crate::backend::tiered::CompiledCode, SimulatorError>
+                + Send
+                + 'static,
+        {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let phase_start = phase_timing.then(crate::timing::now);
+
+            let (laid_out, warnings, options, vcd_path, injected_components) = {
+                let vcd_recording = self.vcd_path.is_some();
+                self.into_laid_out_program(crate::backend::tiered::tiered_layout_mode(
+                    vcd_recording,
+                ))?
+            };
+
+            if let Some(s) = phase_start {
+                tracing::debug!(
+                    "[phase-timing] compile_and_layout (total): {:?}",
+                    s.elapsed()
+                );
+            }
+
+            let backend =
+                crate::backend::TieredBackend::with_compiler(&laid_out, &options, compile);
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);

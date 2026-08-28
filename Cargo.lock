@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "celox"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
@@ -445,6 +445,7 @@ dependencies = [
  "fxhash",
  "insta",
  "itertools 0.15.0",
+ "libc",
  "libloading",
  "miette",
  "num-bigint",
@@ -473,14 +474,14 @@ dependencies = [
 
 [[package]]
 name = "celox-analysis"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-arm64"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -497,23 +498,23 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-common"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-cranelift"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-design",
  "celox-sir",
  "celox-state-layout",
- "cranelift",
- "cranelift-frontend 0.134.2",
+ "cranelift 0.135.0",
+ "cranelift-frontend 0.135.0",
  "cranelift-jit",
- "cranelift-module",
- "cranelift-native 0.134.2",
+ "cranelift-module 0.135.0",
+ "cranelift-native 0.135.0",
  "fxhash",
  "num-bigint",
  "thiserror 2.0.20",
@@ -522,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-wasm"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-backend-cranelift",
  "celox-design",
@@ -530,13 +531,13 @@ dependencies = [
  "celox-state-layout",
  "fxhash",
  "num-bigint",
- "wasm-encoder 0.257.1",
+ "wasm-encoder 0.258.0",
  "wasmtime 48.0.0",
 ]
 
 [[package]]
 name = "celox-backend-x86"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -554,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox",
  "clap",
@@ -568,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench-sv"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "veryl-analyzer",
  "veryl-emitter",
@@ -579,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "celox-design"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -588,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "celox-example-my-frontend-napi"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-frontend-sdk",
  "celox-napi",
@@ -599,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-core"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-design",
  "celox-frontend-sdk",
@@ -615,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sdk"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -626,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sv"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-design",
  "celox-frontend-core",
@@ -640,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-veryl"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -662,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "celox-macros"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
  "insta",
@@ -670,7 +671,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
@@ -678,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "celox-napi"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox",
  "celox-design",
@@ -701,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "celox-runtime"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -716,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -728,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir-opt"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
@@ -745,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "celox-slt"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -761,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "celox-state-layout"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox-design",
  "fxhash",
@@ -770,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sv-analyzer"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
  "miette",
@@ -781,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "celox-testbench"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -790,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "celox-ts-gen"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "fxhash",
  "insta",
@@ -803,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "celox-vpi"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox",
  "clap",
@@ -815,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "celox-wasm"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "celox",
  "console_error_panic_hook",
@@ -918,7 +919,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1103,7 +1104,18 @@ checksum = "acb6f5299ee35492ba1a70a3c80e8b76291bac7503ebff4a8815958060d3b2af"
 dependencies = [
  "cranelift-codegen 0.134.2",
  "cranelift-frontend 0.134.2",
- "cranelift-module",
+ "cranelift-module 0.134.2",
+]
+
+[[package]]
+name = "cranelift"
+version = "0.135.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dbbec87b21cfd7e099e074433ebdb4a354770b5b125399034b9d85c6ebbe6ca"
+dependencies = [
+ "cranelift-codegen 0.135.0",
+ "cranelift-frontend 0.135.0",
+ "cranelift-module 0.135.0",
 ]
 
 [[package]]
@@ -1366,22 +1378,22 @@ checksum = "f00258ff3d37f52ed731df679205e66175c728846dbde186ee20e93973d12ee7"
 
 [[package]]
 name = "cranelift-jit"
-version = "0.134.2"
+version = "0.135.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc96ccb592b046be204bf2fbeb397761384e5da10cbf0c2095078af3eaaebe55"
+checksum = "fa063cc98af51fb9090cd40b674503e21bdfa705d2bff75ebf98b79ffc0f598d"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.134.2",
- "cranelift-control 0.134.2",
- "cranelift-entity 0.134.2",
- "cranelift-module",
- "cranelift-native 0.134.2",
+ "cranelift-codegen 0.135.0",
+ "cranelift-control 0.135.0",
+ "cranelift-entity 0.135.0",
+ "cranelift-module 0.135.0",
+ "cranelift-native 0.135.0",
  "libc",
  "log",
  "memmap2",
  "region",
  "target-lexicon",
- "wasmtime-internal-jit-icache-coherence 47.0.2",
+ "wasmtime-internal-jit-icache-coherence 48.0.0",
  "windows-sys 0.61.2",
 ]
 
@@ -1394,6 +1406,17 @@ dependencies = [
  "anyhow",
  "cranelift-codegen 0.134.2",
  "cranelift-control 0.134.2",
+]
+
+[[package]]
+name = "cranelift-module"
+version = "0.135.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bff0025f1ff6a0470cbd2a61b125f8501311ea9e6c46ed5bb2110ee6710c6a76"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen 0.135.0",
+ "cranelift-control 0.135.0",
 ]
 
 [[package]]
@@ -2795,9 +2818,9 @@ dependencies = [
 
 [[package]]
 name = "napi"
-version = "3.12.1"
+version = "3.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "459197f1592f4c3dbbf9c1b13f5a4599a343e4ef66b96bc340e2a518b36a6662"
+checksum = "58c5f4d5375213fdb7be2655e152386e82f026f9a5ba36a75556e11359aafe09"
 dependencies = [
  "bitflags 2.13.0",
  "ctor",
@@ -3303,7 +3326,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
 dependencies = [
  "proc-macro2",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -3334,7 +3357,7 @@ dependencies = [
  "proc-macro-error-attr3",
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -3806,7 +3829,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -4112,9 +4135,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4280,7 +4303,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -4681,7 +4704,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16ee8fb0bcf504abbc9112ed617e8f1abe96b89e1015d3c9180666bb763833f5"
 dependencies = [
  "clap",
- "cranelift",
+ "cranelift 0.134.2",
  "daggy",
  "fst-writer",
  "fxhash",
@@ -4868,6 +4891,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-encoder"
+version = "0.258.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e974fe6821a8cf64575d51ea2194e2c8f77e7b66e9afe7419ce8a97f9ee0d251"
+dependencies = [
+ "leb128fmt",
+ "wasmparser 0.258.0",
+]
+
+[[package]]
 name = "wasm-metadata"
 version = "0.254.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4910,6 +4943,17 @@ name = "wasmparser"
 version = "0.257.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92fc335fb6d48f46bda1d8b26b69e28320c15ac3272208333833d6e217e2b4a"
+dependencies = [
+ "bitflags 2.13.0",
+ "indexmap",
+ "semver",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.258.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9a61719f93a87b16d325921e251800c4833f8fab50fa21c7de73aed50086313"
 dependencies = [
  "bitflags 2.13.0",
  "indexmap",

@@ -14,11 +14,23 @@ pub fn optimize_merged_chain(
     four_state: bool,
     recover_merged_effect_regions: bool,
     diagnostics: &crate::SirDiagnostics,
+    is_cancelled: impl Fn() -> bool,
 ) -> Result<(), crate::OptimizationError> {
     let verify = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage| {
         if cfg!(debug_assertions) || diagnostics.verify_boundaries {
             eu.verify_result()
                 .map_err(|error| crate::OptimizationError::verification(stage, error))
+        } else {
+            Ok(())
+        }
+    };
+    // Observed between pass groups so a cancelled pipeline unwinds at the
+    // next boundary instead of running the remaining fused-optimization
+    // stages. Callers without cancellation pass `|| false`, which folds to
+    // nothing after inlining.
+    let checkpoint = |stage: &'static str| -> Result<(), crate::OptimizationError> {
+        if is_cancelled() {
+            Err(crate::OptimizationError::cancelled(stage))
         } else {
             Ok(())
         }
@@ -50,6 +62,7 @@ pub fn optimize_merged_chain(
         },
     );
     verify(eu, "after native merged-chain CFG simplification")?;
+    checkpoint("during native merged-chain optimization")?;
     if recover_merged_effect_regions && !four_state {
         pass_guarded_region_sinking::recover_merged_effect_regions(eu, four_state);
         pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
@@ -64,6 +77,7 @@ pub fn optimize_merged_chain(
         verify(eu, "after native merged effect-region recovery")?;
         changed = true;
     }
+    checkpoint("during native merged-chain optimization")?;
     if !four_state {
         let collapsed = pass_vectorize_concat::collapse_packed_conditional_store_chains_with(
             eu,
@@ -86,6 +100,7 @@ pub fn optimize_merged_chain(
         GvnPass.run(eu, &PassOptions::default());
         verify(eu, "after native packed bit-store vectorization")?;
     }
+    checkpoint("during native merged-chain optimization")?;
     let recovered_bit_maps = if four_state {
         0
     } else {
@@ -103,6 +118,7 @@ pub fn optimize_merged_chain(
         GvnPass.run(eu, &PassOptions::default());
         verify(eu, "after native fixed bit-map recovery")?;
     }
+    checkpoint("during native merged-chain optimization")?;
     if !four_state
         && diagnostics.effect_case_dispatch
         && let Some(result) = pass_effect_case_dispatch::run(eu)
@@ -142,6 +158,7 @@ pub fn optimize_merged_chain(
         GvnPass.run(eu, &PassOptions::default());
         verify(eu, "after native packed phi forwarding")?;
     }
+    checkpoint("during native merged-chain optimization")?;
     if !four_state {
         // Fusion and the native-only packed/control rewrites above can create
         // new branch-local pure suffixes after the ordinary per-EU placement

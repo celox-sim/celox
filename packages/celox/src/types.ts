@@ -137,6 +137,12 @@ export interface NativeSimulatorHandle {
 	evalComb(): void;
 	dump(timestamp: number): void;
 	dispose(): void;
+	/**
+	 * Whether the tiered backend has adopted its compiled tier.
+	 * Present only on handles created through `newTiered()`; reads live so
+	 * repeated calls track promotion progress.
+	 */
+	tierCompiled?(): boolean | null;
 }
 
 /**
@@ -280,6 +286,17 @@ export interface SimulatorOptions {
 	 * When `optLevel` is "O2", defaults to "preserveTopPorts" unless explicitly set.
 	 */
 	deadStorePolicy?: "off" | "preserveTopPorts" | "preserveAllPorts";
+	/**
+	 * Run tiered: execution starts on the interpreter immediately while the
+	 * host's compiled tier is prepared on a background thread, and the
+	 * simulation adopts it at the next safe point after compilation.
+	 * Default: false (compile up front before the first tick).
+	 *
+	 * Honored by `Simulator.create`, `fromSource`, and `fromProject`;
+	 * rejected by `fromFrontendArtifact`, the time-based `Simulation`
+	 * factories, and addons without tiered support (e.g. WASM).
+	 */
+	tier?: boolean;
 }
 
 /** A parameter override for a top-level module parameter. */
