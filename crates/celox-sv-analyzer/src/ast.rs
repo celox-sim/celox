@@ -294,6 +294,8 @@ impl Module {
             syntax_tree,
             &const_env,
             &packed_dimensions,
+            &functions,
+            &expression_signedness,
         )?
         .into_iter()
         .map(|process| expand_process_calls(process, &functions, &expression_signedness))
@@ -5931,6 +5933,8 @@ fn comb_processes_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
@@ -5940,6 +5944,8 @@ fn comb_processes_from_module_node(
             syntax_tree,
             const_env,
             packed_dimensions,
+            functions,
+            expression_signedness,
             &mut processes,
         )?;
     }
@@ -5952,6 +5958,8 @@ fn comb_processes_from_non_port_module_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -5963,6 +5971,8 @@ fn comb_processes_from_non_port_module_item(
                     syntax_tree,
                     const_env,
                     packed_dimensions,
+                    functions,
+                    expression_signedness,
                     processes,
                 )?;
             }
@@ -5974,6 +5984,8 @@ fn comb_processes_from_non_port_module_item(
                 syntax_tree,
                 const_env,
                 packed_dimensions,
+                functions,
+                expression_signedness,
                 processes,
             )?;
         }
@@ -5988,6 +6000,8 @@ fn comb_processes_from_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
@@ -5997,6 +6011,8 @@ fn comb_processes_from_generate_item(
             syntax_tree,
             const_env,
             packed_dimensions,
+            functions,
+            expression_signedness,
             processes,
         )?;
     }
@@ -6009,6 +6025,8 @@ fn comb_processes_from_module_or_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
@@ -6018,6 +6036,8 @@ fn comb_processes_from_module_or_generate_item(
             syntax_tree,
             const_env,
             packed_dimensions,
+            functions,
+            expression_signedness,
             processes,
         )?;
     }
@@ -6030,6 +6050,8 @@ fn comb_processes_from_module_common_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -6055,6 +6077,8 @@ fn comb_processes_from_module_common_item(
                 condition,
                 syntax_tree,
                 packed_dimensions,
+                functions,
+                expression_signedness,
             )? {
                 processes.push(substitute_process_constants(process, const_env));
             }
@@ -6066,6 +6090,8 @@ fn comb_processes_from_module_common_item(
                 syntax_tree,
                 const_env,
                 packed_dimensions,
+                functions,
+                expression_signedness,
                 processes,
             )?;
         }
@@ -6076,6 +6102,8 @@ fn comb_processes_from_module_common_item(
                 syntax_tree,
                 const_env,
                 packed_dimensions,
+                functions,
+                expression_signedness,
                 processes,
             )?;
         }
@@ -6095,6 +6123,8 @@ fn comb_processes_from_conditional_generate(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
@@ -6121,6 +6151,8 @@ fn comb_processes_from_conditional_generate(
                 syntax_tree,
                 const_env,
                 packed_dimensions,
+                functions,
+                expression_signedness,
                 processes,
             )?;
         }
@@ -6141,6 +6173,8 @@ fn comb_processes_from_conditional_generate(
         syntax_tree,
         const_env,
         packed_dimensions,
+        functions,
+        expression_signedness,
         processes,
     )?;
     if let Some((_, block)) = &generate.nodes.3 {
@@ -6157,6 +6191,8 @@ fn comb_processes_from_conditional_generate(
             syntax_tree,
             const_env,
             packed_dimensions,
+            functions,
+            expression_signedness,
             processes,
         )?;
     }
@@ -6169,6 +6205,8 @@ fn comb_processes_from_loop_generate(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if generate_block_has_data_declaration(&generate.nodes.2) {
@@ -6208,6 +6246,8 @@ fn comb_processes_from_loop_generate(
             syntax_tree,
             &loop_env,
             packed_dimensions,
+            functions,
+            expression_signedness,
             processes,
         )?;
         iterations += 1;
@@ -6507,6 +6547,8 @@ fn comb_processes_from_generate_block(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match block {
@@ -6517,6 +6559,8 @@ fn comb_processes_from_generate_block(
                 syntax_tree,
                 const_env,
                 packed_dimensions,
+                functions,
+                expression_signedness,
                 processes,
             )?;
         }
@@ -6532,6 +6576,8 @@ fn comb_processes_from_generate_block(
                     syntax_tree,
                     &block_env,
                     packed_dimensions,
+                    functions,
+                    expression_signedness,
                     processes,
                 )?;
             }
@@ -7403,6 +7449,8 @@ fn comb_process_from_always_construct(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
         return Ok(None);
@@ -7418,6 +7466,17 @@ fn comb_process_from_always_construct(
         packed_dimensions,
         &mut guarded_assignments,
     )?;
+    for guarded in &mut guarded_assignments {
+        guarded.condition = guarded.condition.take().map(|condition| {
+            expand_expr_calls(condition, functions, expression_signedness, 0, true)
+        });
+        guarded.assignment = expand_assignment_calls(
+            guarded.assignment.clone(),
+            functions,
+            expression_signedness,
+            true,
+        );
+    }
     let assignments = comb_assignments_from_guarded(guarded_assignments, packed_dimensions)?;
     Ok((!assignments.is_empty())
         .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments)))
@@ -8408,8 +8467,8 @@ fn substitute_expr_lvalue(
                 value,
                 packed_dimensions,
             )),
-            msb,
-            lsb,
+            msb: substitute_const_expr_lvalue(msb, target, value, packed_dimensions),
+            lsb: substitute_const_expr_lvalue(lsb, target, value, packed_dimensions),
             signed,
         },
         Expr::Concat(parts) => Expr::Concat(
@@ -8495,6 +8554,22 @@ fn substitute_expr_lvalue(
                 .collect(),
         },
     }
+}
+
+fn substitute_const_expr_lvalue(
+    expr: ConstExpr,
+    target: &LValue,
+    value: &Expr,
+    packed_dimensions: &PackedDimensions,
+) -> ConstExpr {
+    let original = expr.clone();
+    expr_to_const(substitute_expr_lvalue(
+        const_expr_to_expr(expr),
+        target,
+        value,
+        packed_dimensions,
+    ))
+    .unwrap_or(original)
 }
 
 fn substitute_overlapping_selected_read(
@@ -8639,7 +8714,12 @@ fn expr_references_lvalue(expr: &Expr, target: &LValue) -> bool {
     }
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => false,
-        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+        Expr::Select { expr, msb, lsb, .. } => {
+            expr_references_lvalue(expr, target)
+                || expr_references_lvalue(&const_expr_to_expr(msb.clone()), target)
+                || expr_references_lvalue(&const_expr_to_expr(lsb.clone()), target)
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
             expr_references_lvalue(expr, target)
         }
         Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
@@ -8683,7 +8763,7 @@ fn expr_references_overlapping_lvalue(
             lsb,
             ..
         } => {
-            if let Expr::Ident(read_name) = &**selected {
+            let selected_reference = if let Expr::Ident(read_name) = &**selected {
                 match target {
                     LValue::Ident(target_name) => read_name == target_name,
                     LValue::Select {
@@ -8707,7 +8787,18 @@ fn expr_references_overlapping_lvalue(
                 }
             } else {
                 expr_references_overlapping_lvalue(selected, target, const_env)
-            }
+            };
+            selected_reference
+                || expr_references_overlapping_lvalue(
+                    &const_expr_to_expr(msb.clone()),
+                    target,
+                    const_env,
+                )
+                || expr_references_overlapping_lvalue(
+                    &const_expr_to_expr(lsb.clone()),
+                    target,
+                    const_env,
+                )
         }
         Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
             expr_references_overlapping_lvalue(expr, target, const_env)
@@ -9692,10 +9783,18 @@ fn two_state_case_items_cover_selector(
     else {
         return false;
     };
-    let Some(total) = i128::try_from(value_count).ok() else {
+    if i128::try_from(value_count).is_err() {
+        return false;
+    }
+    let identifiers = packed_dimensions
+        .iter()
+        .map(|(name, dimensions)| (name.clone(), dimensions.signed))
+        .collect::<HashMap<_, _>>();
+    let Some(selector_signed) = expr_signedness(&selector, &identifiers, &HashMap::default())
+    else {
         return false;
     };
-    let mut covered = HashSet::default();
+    let mut labels = Vec::new();
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
         let sv_parser::CaseItem::NonDefault(item) = item else {
             continue;
@@ -9706,24 +9805,31 @@ fn two_state_case_items_cover_selector(
             else {
                 return false;
             };
-            let Some(value) = expr_to_const(label.clone())
-                .and_then(|label| eval_ast_const_expr(&label, const_env))
-            else {
-                return false;
-            };
-            let value = if value >= 0 && value < total {
-                value
-            } else if expr_static_width(&label, packed_dimensions)
-                .is_some_and(|label_width| label_width <= width)
-            {
-                coerce_const_parameter_value(value, width, false)
-            } else {
-                return false;
-            };
-            covered.insert(value);
+            if let Some(label) = expr_to_const(label) {
+                labels.push(label);
+            }
         }
     }
-    covered.len() == value_count
+    if labels.len() < value_count {
+        return false;
+    }
+    (0..value_count).all(|value| {
+        let selector = ConstExpr::Literal(format_typed_parameter_literal(
+            value as i128,
+            width,
+            selector_signed,
+        ));
+        labels.iter().any(|label| {
+            eval_ast_const_expr(
+                &ConstExpr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: BinaryOp::EqCase,
+                    right: Box::new(label.clone()),
+                },
+                const_env,
+            ) == Some(1)
+        })
+    })
 }
 
 fn mark_condition_context(
@@ -11569,12 +11675,26 @@ fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             op,
             right: Box::new(expr_to_const(*right)?),
         }),
-        Expr::Select { .. }
-        | Expr::Concat(_)
-        | Expr::RepeatConcat { .. }
-        | Expr::Resize { .. }
-        | Expr::Mux { .. }
-        | Expr::Call { .. } => None,
+        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
+            expr: Box::new(expr_to_const(*expr)?),
+            bit: Box::new(msb),
+        }),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(ConstExpr::Mux {
+            condition: Box::new(expr_to_const(*condition)?),
+            then_expr: Box::new(expr_to_const(*then_expr)?),
+            else_expr: Box::new(expr_to_const(*else_expr)?),
+        }),
+        Expr::Call { name, args } => Some(ConstExpr::Function {
+            name,
+            args: args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
+        }),
+        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
+            None
+        }
     }
 }
 

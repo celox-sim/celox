@@ -56,6 +56,106 @@ fn rejects_same_vector_slice_read_before_write_in_always_comb() {
 }
 
 #[test]
+fn rejects_self_reads_hidden_in_comb_function_calls() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic c, output logic x);
+            function automatic logic read_x();
+                return x;
+            endfunction
+            always_comb begin
+                if (c)
+                    x = read_x();
+                else
+                    x = 1'b0;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn substitutes_prior_comb_values_into_function_bodies() {
+    let source = r#"
+        module Top(input logic c, output logic x, y);
+            function automatic logic read_x();
+                return x;
+            endfunction
+            always_comb begin
+                x = 1'b0;
+                y = read_x();
+                if (c)
+                    x = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("blocking_read_inside_function.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn substitutes_blocking_values_inside_dynamic_select_indices() {
+    let source = r#"
+        module Top(
+            input logic c, a, b,
+            input logic [7:0] lut[2],
+            output logic x,
+            output logic [7:0] y
+        );
+            always_comb begin
+                x = a;
+                y = lut[x];
+                if (c)
+                    x = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("blocking_dynamic_select_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let lut = sim.signal("lut");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+        io.set(lut, 0xaa55u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0xaau8.into());
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 0u8);
+        io.set(b, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0x55u8.into());
+}
+
+#[test]
 fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
@@ -3003,6 +3103,54 @@ fn recognizes_complete_cases_over_two_state_expressions() {
     assert_eq!(sim.get(y), 1u8.into());
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn respects_signed_case_item_sizing_when_checking_coverage() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit signed [1:0] s, output logic y);
+            always_comb begin
+                case (s)
+                    0: y = 1'b0;
+                    1: y = 1'b1;
+                    2: y = 1'b0;
+                    3: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn recognizes_complete_signed_cases_with_sized_labels() {
+    let source = r#"
+        module Top(input bit signed [1:0] s, output logic y);
+            always_comb begin
+                case (s)
+                    2'sb00: y = 1'b0;
+                    2'sb01: y = 1'b1;
+                    2'sb10: y = 1'b0;
+                    2'sb11: y = 1'b1;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("complete_signed_case.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let s = sim.signal("s");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(s, 2u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(s, 3u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
 }
 
 #[test]
