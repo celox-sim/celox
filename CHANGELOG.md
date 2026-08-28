@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.2 (2026-08-27)
+
+## What's Changed
+* chore(deps): update compatible Python and cocotb versions by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/675
+* feat(backend): tiered execution — interpret first, promote to JIT by @tignear in https://github.com/celox-sim/celox/pull/668
+* chore(deps): update dependency @biomejs/biome to v2.5.9 by @renovate[bot] in https://github.com/celox-sim/celox/pull/681
+* chore(deps): update vitest monorepo to v4.1.11 by @renovate[bot] in https://github.com/celox-sim/celox/pull/682
+* feat(backend): tier promotion policy and Node tiered bindings by @tignear in https://github.com/celox-sim/celox/pull/680
+* perf(tiered): add deterministic execution measurements by @tignear in https://github.com/celox-sim/celox/pull/686
+* perf(interpreter): reuse tier-zero register storage by @tignear in https://github.com/celox-sim/celox/pull/687
+* chore(deps): update rust crate syn to v3.0.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/690
+* chore(deps): update dependency vite to v8.2.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/692
+* perf(interpreter): pack reusable register slots by @tignear in https://github.com/celox-sim/celox/pull/689
+* fix(deps): centralize napi workspace versions by @tignear in https://github.com/celox-sim/celox/pull/695
+* perf(interpreter): add u64 two-state fast path by @tignear in https://github.com/celox-sim/celox/pull/699
+* fix(interpreter): handle 64-bit concat operands by @tignear in https://github.com/celox-sim/celox/pull/700
+* perf(bench): benchmark Heliodor with tiered JIT by @tignear in https://github.com/celox-sim/celox/pull/697
+* fix(docs): sync benchmark tabs with URL by @tignear in https://github.com/celox-sim/celox/pull/702
+* perf(interpreter): reuse prepared register storage by @tignear in https://github.com/celox-sim/celox/pull/705
+* fix(deps): update rust crate wasm-encoder to 0.258 by @renovate[bot] in https://github.com/celox-sim/celox/pull/708
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.1...v0.4.2
+
 ## 0.4.1 (2026-08-24)
 
 ## What's Changed
