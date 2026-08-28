@@ -966,6 +966,25 @@ mod tests {
     }
 
     #[test]
+    fn preserves_operand_signedness_for_named_numeric_size_casts() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    localparam W = 8;
+                    localparam P = W'(4'shf);
+                    localparam Q = 16'(P);
+                endmodule
+            "#,
+            Path::new("named_numeric_size_cast.sv"),
+        )
+        .expect("named numeric size casts should preserve operand signedness");
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_value(), Some(-1));
+        assert_eq!(parameters[1].resolved_signed(), Some(true));
+        assert_eq!(parameters[2].resolved_value(), Some(-1));
+    }
+
+    #[test]
     fn resolves_typedef_declared_parameter_types() {
         let ir = analyze_source(
             r#"

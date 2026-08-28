@@ -831,11 +831,12 @@ fn cast_zero_type(
         return None;
     }
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
-    let signed = if matches!(cast.nodes.0, sv_parser::CastingType::ConstantPrimary(_)) {
-        literal.signed
-    } else {
-        target_type.signed
-    };
+    let signed =
+        if casting_type_is_numeric_size(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
+            literal.signed
+        } else {
+            target_type.signed
+        };
     Some(ExprType {
         signed,
         ..target_type
@@ -864,13 +865,14 @@ fn constant_cast_const_expr(
         typecheck::parse_integral_literal(&operand_literal)?
     };
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
-    // A size cast keeps the source expression's signedness when the target
-    // is described by a constant primary; a type cast takes the target's.
-    let signed = if matches!(cast.nodes.0, sv_parser::CastingType::ConstantPrimary(_)) {
-        literal.signed
-    } else {
-        target_type.signed
-    };
+    // A numeric size cast keeps the source expression's signedness; a type
+    // cast takes the target type's signedness.
+    let signed =
+        if casting_type_is_numeric_size(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
+            literal.signed
+        } else {
+            target_type.signed
+        };
     let resized = match &operand {
         ConstExpr::Literal(value) => {
             resize_unbased_fill_literal_for_cast(value, target_type.width, signed).unwrap_or_else(
@@ -880,6 +882,29 @@ fn constant_cast_const_expr(
         _ => resize_integral_literal_for_cast(literal, target_type.width, signed),
     };
     Some(ConstExpr::Literal(resized))
+}
+
+fn casting_type_is_numeric_size(
+    casting_type: &sv_parser::CastingType,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> bool {
+    match casting_type {
+        sv_parser::CastingType::ConstantPrimary(_) => true,
+        sv_parser::CastingType::SimpleType(simple_type) => {
+            let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
+                return false;
+            };
+            let Some(name) =
+                identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)
+            else {
+                return false;
+            };
+            !type_aliases.contains_key(&name) && const_env.contains_key(&name)
+        }
+        _ => false,
+    }
 }
 
 fn resize_unbased_fill_literal_for_cast(value: &str, width: usize, signed: bool) -> Option<String> {
@@ -7839,7 +7864,8 @@ fn normalize_mixed_whole_selected_comb_writes(
     packed_dimensions: &PackedDimensions,
 ) {
     let mut whole_names = HashSet::default();
-    let mut selected_names = HashSet::default();
+    let mut selected_targets: HashMap<String, Vec<LValue>> = HashMap::default();
+    let mut conditional_selected_names = HashSet::default();
     let mut earlier_selected_names = HashSet::default();
     for write in guarded.iter() {
         match write.assignment().lhs_value() {
@@ -7849,13 +7875,30 @@ fn normalize_mixed_whole_selected_comb_writes(
                 whole_names.insert(name.clone());
             }
             LValue::Ident(_) => {}
-            LValue::Select { name, .. } => {
-                selected_names.insert(name.clone());
+            target @ LValue::Select { name, .. } => {
+                selected_targets
+                    .entry(name.clone())
+                    .or_default()
+                    .push(target.clone());
+                if write.condition().is_some() {
+                    conditional_selected_names.insert(name.clone());
+                }
                 earlier_selected_names.insert(name.clone());
             }
         }
     }
-    whole_names.retain(|name| selected_names.contains(name));
+    whole_names.retain(|name| selected_targets.contains_key(name));
+    for name in conditional_selected_names {
+        let Some(whole_target) = whole_packed_lvalue(&name, packed_dimensions) else {
+            continue;
+        };
+        if selected_targets
+            .get(&name)
+            .is_some_and(|targets| lvalue_is_covered_by(&whole_target, targets, packed_dimensions))
+        {
+            whole_names.insert(name);
+        }
+    }
     for write in guarded.iter_mut() {
         let target = write.assignment().lhs_value().clone();
         let LValue::Select { name, .. } = &target else {
@@ -9982,11 +10025,9 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
             *op == UnaryOp::ToTwoState || expr_is_two_state(expr, packed_dimensions)
         }
         Expr::Binary { left, op, right } => {
-            matches!(
-                op,
-                BinaryOp::EqCase | BinaryOp::NeCase | BinaryOp::EqWildcard | BinaryOp::NeWildcard
-            ) || (expr_is_two_state(left, packed_dimensions)
-                && expr_is_two_state(right, packed_dimensions))
+            matches!(op, BinaryOp::EqCase | BinaryOp::NeCase)
+                || (expr_is_two_state(left, packed_dimensions)
+                    && expr_is_two_state(right, packed_dimensions))
         }
         Expr::Mux {
             condition,
@@ -10099,16 +10140,33 @@ fn mark_exhaustive_fallback(
     chain_start: usize,
     packed_dimensions: &PackedDimensions,
 ) {
-    let mut marked_targets = Vec::new();
-    for assignment in fallback_assignments {
-        let target = assignment.assignment().lhs_value();
+    let mut definite_targets = Vec::new();
+    for assignment in fallback_assignments.iter() {
+        let target = assignment.assignment().lhs_value().clone();
         if branch_targets
             .iter()
-            .all(|targets| lvalue_is_covered_by(target, targets, packed_dimensions))
-            && !marked_targets.contains(target)
+            .all(|targets| lvalue_is_covered_by(&target, targets, packed_dimensions))
+            && !definite_targets.contains(&target)
         {
-            marked_targets.push(target.clone());
-            assignment.exhaustive_fallback_start = Some(chain_start);
+            definite_targets.push(target);
+        }
+    }
+    for target in definite_targets {
+        let candidates = fallback_assignments
+            .iter()
+            .enumerate()
+            .filter(|(_, assignment)| assignment.assignment().lhs_value() == &target)
+            .collect::<Vec<_>>();
+        let marked = candidates
+            .iter()
+            .find(|(_, assignment)| assignment.exhaustive_fallback_start.is_some())
+            .map(|(index, _)| *index);
+        let shallowest = candidates
+            .iter()
+            .min_by_key(|(index, assignment)| (assignment.path_epochs.len(), *index))
+            .map(|(index, _)| *index);
+        if let Some(index) = marked.or(shallowest) {
+            fallback_assignments[index].exhaustive_fallback_start = Some(chain_start);
         }
     }
 }

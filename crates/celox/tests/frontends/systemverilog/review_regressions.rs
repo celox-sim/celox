@@ -3351,6 +3351,100 @@ fn normalizes_element_writes_before_conditional_whole_array_writes() {
 }
 
 #[test]
+fn merges_exhaustive_writes_across_different_slice_partitions() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [1:0] a,
+            input logic b, d,
+            output logic [1:0] x
+        );
+            always_comb begin
+                if (c)
+                    x[1:0] = a;
+                else begin
+                    x[1] = b;
+                    x[0] = d;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("exhaustive_slice_partitions.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 0u8);
+        io.set(b, 1u8);
+        io.set(d, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn does_not_treat_wildcard_equality_as_inherently_two_state() {
+    let error = four_state_cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y);
+            always_comb begin
+                case (a ==? 1'b0)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_reads_before_a_later_definite_fallback_write() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic c, d, a, b, e,
+            output logic x, y
+        );
+            always_comb begin
+                y = 1'b0;
+                if (c)
+                    x = a;
+                else begin
+                    if (d)
+                        x = b;
+                    y = x;
+                    x = e;
+                end
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(
