@@ -251,6 +251,13 @@ if validate_gate_results "$bad_celox_cycle/results.tsv" "$bad_celox_cycle" 2>/de
     fail "gate accepted the wrong Celox architectural completion cycle"
 fi
 
+bad_tiered_cycle="$TMP/bad-tiered-cycle"
+write_gate_results "$bad_tiered_cycle" 200 100
+sed -i 's/cy=d83790/cy=d83791/' "$bad_tiered_cycle/celox-tiered.log"
+if validate_gate_results "$bad_tiered_cycle/results.tsv" "$bad_tiered_cycle" 2>/dev/null; then
+    fail "gate accepted the wrong tiered Celox architectural completion cycle"
+fi
+
 duplicate_celox_cycle="$TMP/duplicate-celox-cycle"
 write_gate_results "$duplicate_celox_cycle" 200 100
 sed -n '1p' "$duplicate_celox_cycle/celox.log" >>"$duplicate_celox_cycle/celox.log"

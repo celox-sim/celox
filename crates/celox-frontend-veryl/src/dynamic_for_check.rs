@@ -1729,7 +1729,7 @@ fn dynamic_bounds(range: &ForRange) -> impl Iterator<Item = &Expression> {
 mod tests {
     use super::*;
     use veryl_analyzer::ir::{
-        Comptime, FfTable, Shape, Type, TypeKind, VarKind, VarPath, Variable,
+        Comptime, FfTable, Shape, Signature, Type, TypeKind, VarKind, VarPath, Variable,
     };
     use veryl_parser::token_range::TokenRange;
 
@@ -1756,11 +1756,13 @@ mod tests {
         }));
         let module = Module {
             name: StrId::default(),
+            signature: Signature::new(Default::default()),
             token,
             ports: HashMap::default(),
             port_types: HashMap::default(),
             variables: HashMap::default(),
             functions: HashMap::default(),
+            interface_members: HashMap::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,
             per_decl_refs: HashMap::default(),
@@ -1818,11 +1820,13 @@ mod tests {
         };
         let module = Module {
             name: StrId::default(),
+            signature: Signature::new(Default::default()),
             token,
             ports: HashMap::default(),
             port_types: HashMap::default(),
             variables: [(bound_id, variable)].into_iter().collect(),
             functions: HashMap::default(),
+            interface_members: HashMap::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,
             per_decl_refs: HashMap::default(),
@@ -1867,11 +1871,13 @@ mod tests {
         }));
         let module = Module {
             name: StrId::default(),
+            signature: Signature::new(Default::default()),
             token,
             ports: HashMap::default(),
             port_types: HashMap::default(),
             variables: HashMap::default(),
             functions: HashMap::default(),
+            interface_members: HashMap::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,
             per_decl_refs: HashMap::default(),
@@ -1943,11 +1949,13 @@ mod tests {
         };
         let module = Module {
             name: StrId::default(),
+            signature: Signature::new(Default::default()),
             token,
             ports: HashMap::default(),
             port_types: HashMap::default(),
             variables: [(bound_id, variable)].into_iter().collect(),
             functions: HashMap::default(),
+            interface_members: HashMap::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: true,
             per_decl_refs: HashMap::default(),
