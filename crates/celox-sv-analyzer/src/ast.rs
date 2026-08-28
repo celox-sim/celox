@@ -8668,8 +8668,21 @@ fn selected_value_after_write(
             }
             let target_msb = eval_ast_const_expr(target_msb_expr, const_env)?;
             let target_lsb = eval_ast_const_expr(target_lsb_expr, const_env)?;
-            let write_msb = eval_ast_const_expr(write_msb_expr, const_env)?;
-            let write_lsb = eval_ast_const_expr(write_lsb_expr, const_env)?;
+            let (write_msb, write_lsb) = match (
+                eval_ast_const_expr(write_msb_expr, const_env),
+                eval_ast_const_expr(write_lsb_expr, const_env),
+            ) {
+                (Some(msb), Some(lsb)) => (msb, lsb),
+                _ => {
+                    return dynamic_selected_value_after_write(
+                        current,
+                        target,
+                        write_target,
+                        write_value,
+                        packed_dimensions,
+                    );
+                }
+            };
             let target_low = target_msb.min(target_lsb);
             let target_high = target_msb.max(target_lsb);
             let overlap_low = target_low.max(write_msb.min(write_lsb));
@@ -8726,6 +8739,93 @@ fn selected_value_after_write(
             ))
         }
     }
+}
+
+fn dynamic_selected_value_after_write(
+    current: &Expr,
+    target: &LValue,
+    write_target: &LValue,
+    write_value: &Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(Expr, bool)> {
+    let LValue::Select {
+        name,
+        msb: write_msb,
+        lsb: write_lsb,
+        signed,
+        ..
+    } = write_target
+    else {
+        return None;
+    };
+
+    // Runtime indices still describe a fixed-width selection. Evaluate one
+    // representative position to recover its direction and width, then use
+    // case-equality guards so unknown and out-of-range positions are no-ops.
+    let mut sample_env = packed_dimensions.const_env.clone();
+    for variable in packed_dimensions.keys() {
+        sample_env.entry(variable.clone()).or_insert(0);
+    }
+    let sample_msb = eval_ast_const_expr(write_msb, &sample_env)?;
+    let sample_lsb = eval_ast_const_expr(write_lsb, &sample_env)?;
+    let delta = sample_msb.checked_sub(sample_lsb)?;
+    let whole = whole_packed_lvalue(name, packed_dimensions)?;
+    let LValue::Select {
+        msb: whole_msb,
+        lsb: whole_lsb,
+        ..
+    } = whole
+    else {
+        unreachable!("whole packed lvalue is always a selection");
+    };
+    let whole_msb = eval_ast_const_expr(&whole_msb, &packed_dimensions.const_env)?;
+    let whole_lsb = eval_ast_const_expr(&whole_lsb, &packed_dimensions.const_env)?;
+    let whole_low = whole_msb.min(whole_lsb);
+    let whole_high = whole_msb.max(whole_lsb);
+    let mut result = current.clone();
+    let mut matched = false;
+    for candidate_lsb in whole_low..=whole_high {
+        let Some(candidate_msb) = candidate_lsb.checked_add(delta) else {
+            continue;
+        };
+        if candidate_msb < whole_low || candidate_msb > whole_high {
+            continue;
+        }
+        let candidate = LValue::Select {
+            name: name.clone(),
+            msb: const_expr_from_i128(candidate_msb),
+            lsb: const_expr_from_i128(candidate_lsb),
+            signed: *signed,
+            array_slice_width: None,
+            array_slice_reversed: false,
+        };
+        let Some((updated, _)) =
+            selected_value_after_write(current, target, &candidate, write_value, packed_dimensions)
+        else {
+            continue;
+        };
+        let matches_msb = Expr::Binary {
+            left: Box::new(const_expr_to_expr(write_msb.clone())),
+            op: BinaryOp::EqCase,
+            right: Box::new(const_expr_to_expr(const_expr_from_i128(candidate_msb))),
+        };
+        let matches_lsb = Expr::Binary {
+            left: Box::new(const_expr_to_expr(write_lsb.clone())),
+            op: BinaryOp::EqCase,
+            right: Box::new(const_expr_to_expr(const_expr_from_i128(candidate_lsb))),
+        };
+        result = Expr::Mux {
+            condition: Box::new(Expr::Binary {
+                left: Box::new(matches_msb),
+                op: BinaryOp::LogicAnd,
+                right: Box::new(matches_lsb),
+            }),
+            then_expr: Box::new(updated),
+            else_expr: Box::new(result),
+        };
+        matched = true;
+    }
+    matched.then_some((result, false))
 }
 
 fn whole_write_select_offsets(

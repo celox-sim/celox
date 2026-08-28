@@ -1505,6 +1505,114 @@ fn composes_dynamic_array_writes_after_whole_array_assignments() {
 }
 
 #[test]
+fn preserves_dynamic_selected_writes_before_conditional_whole_writes() {
+    let source = r#"
+        module Top(
+            input logic [1:0] index,
+            input logic data,
+            input logic replace,
+            output logic [3:0] value
+        );
+            always_comb begin
+                value = '0;
+                value[index] = data;
+                if (replace) value = '1;
+            end
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("dynamic_select_before_conditional_whole_write.sv"),
+        )],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let index = sim.signal("index");
+    let data = sim.signal("data");
+    let replace = sim.signal("replace");
+    let value = sim.signal("value");
+
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(data, true);
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0b0100u8.into());
+
+    sim.modify(|io| io.set(replace, true)).unwrap();
+    assert_eq!(sim.get(value), 0b1111u8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(index, BigUint::default(), BigUint::from(0b11u8));
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::default(), BigUint::default())
+    );
+}
+
+#[test]
+fn preserves_dynamic_array_writes_before_conditional_whole_writes() {
+    let source = r#"
+        module Top(
+            input logic [1:0] index,
+            input logic [7:0] data,
+            input logic replace,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values = '0;
+                values[index] = data;
+                if (replace) values = '1;
+            end
+            assign value = values[2];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("dynamic_array_before_conditional_whole_write.sv"),
+        )],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let index = sim.signal("index");
+    let data = sim.signal("data");
+    let replace = sim.signal("replace");
+    let value = sim.signal("value");
+
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(data, 0xa5u8);
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0xa5u8.into());
+
+    sim.modify(|io| io.set(replace, true)).unwrap();
+    assert_eq!(sim.get(value), 0xffu8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(index, BigUint::default(), BigUint::from(0b11u8));
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::default(), BigUint::default())
+    );
+}
+
+#[test]
 fn ignores_unknown_dynamic_array_write_indices() {
     let source = r#"
         module Top(
