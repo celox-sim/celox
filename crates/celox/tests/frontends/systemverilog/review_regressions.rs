@@ -2971,6 +2971,41 @@ fn recognizes_complete_cases_over_two_state_selectors() {
 }
 
 #[test]
+fn recognizes_complete_cases_over_two_state_expressions() {
+    let source = r#"
+        module Top(input bit a, b, output logic y);
+            always_comb begin
+                case ({a, b})
+                    2'b00: y = 1'b0;
+                    2'b01: y = 1'b1;
+                    2'b10: y = 1'b1;
+                    2'b11: y = 1'b0;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_two_state_expression_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(a, 0u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(b, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
 fn recognizes_nested_complete_cases_as_definite_assignments() {
     let source = r#"
         module Top(input logic c, input bit s, output logic x);

@@ -9627,20 +9627,44 @@ fn two_state_case_selector_width(
     selector: &Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Option<usize> {
-    let name = match selector {
-        Expr::Ident(name) => name,
-        Expr::Select { expr, .. } => {
-            let Expr::Ident(name) = &**expr else {
-                return None;
-            };
-            name
-        }
-        _ => return None,
-    };
-    packed_dimensions
-        .get(name)
-        .is_some_and(|dimensions| dimensions.is_2state)
+    expr_is_two_state(selector, packed_dimensions)
         .then(|| expr_static_width(selector, packed_dimensions))?
+}
+
+fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool {
+    match expr {
+        Expr::Ident(name) => packed_dimensions
+            .get(name)
+            .is_some_and(|dimensions| dimensions.is_2state),
+        Expr::Literal(value) => typecheck::parse_integral_literal(value)
+            .is_some_and(|literal| literal.mask == num_bigint::BigUint::default()),
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => {
+            expr_is_two_state(expr, packed_dimensions)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
+            .iter()
+            .all(|part| expr_is_two_state(part, packed_dimensions)),
+        Expr::Unary { op, expr } => {
+            *op == UnaryOp::ToTwoState || expr_is_two_state(expr, packed_dimensions)
+        }
+        Expr::Binary { left, op, right } => {
+            matches!(
+                op,
+                BinaryOp::EqCase | BinaryOp::NeCase | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+            ) || (expr_is_two_state(left, packed_dimensions)
+                && expr_is_two_state(right, packed_dimensions))
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_is_two_state(condition, packed_dimensions)
+                && expr_is_two_state(then_expr, packed_dimensions)
+                && expr_is_two_state(else_expr, packed_dimensions)
+        }
+        Expr::Call { .. } => false,
+    }
 }
 
 fn two_state_case_items_cover_selector(
