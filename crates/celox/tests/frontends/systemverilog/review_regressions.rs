@@ -2552,6 +2552,84 @@ fn resolves_typedefs_in_size_function_cast_targets() {
 }
 
 #[test]
+fn recognizes_exhaustive_comb_coverage_across_selected_writes() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic [1:0] x);
+            always_comb begin
+                if (c)
+                    x = 2'b00;
+                else begin
+                    x[1] = a;
+                    x[0] = b;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_overlapping_branch_coverage.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn reevaluates_constant_casts_with_enum_operands() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            typedef logic [7:0] byte_t;
+            typedef enum logic [1:0] { N = 2 } E;
+            localparam B = byte_t'(N);
+            assign y = B;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("enum_dependent_cast.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn coerces_each_guarded_rhs_before_building_a_mux() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] x);
+            always_comb begin
+                if (c)
+                    x = 1'sb1;
+                else
+                    x = 8'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_guarded_assignment_coercion.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0xffu8.into());
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(

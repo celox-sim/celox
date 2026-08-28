@@ -160,6 +160,7 @@ impl Module {
             node.clone(),
             syntax_tree,
             &type_aliases,
+            &HashMap::default(),
             applicable_parameter_overrides,
         )?;
         let mut parameter_names = HashSet::default();
@@ -188,6 +189,20 @@ impl Module {
             if let Some(r#type) = enum_constants.types.get(name) {
                 insert_parameter_type_markers(&mut const_env, name, *r#type);
             }
+        }
+        // Constant casts are evaluated while parameter syntax is lowered.
+        // Repeat that lowering after enum constants become available so a
+        // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
+        // discarded during the initial pass.
+        parameters = parameters_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &type_aliases,
+            &const_env,
+            applicable_parameter_overrides,
+        )?;
+        if name == override_module_name {
+            apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         extend_const_env_with_parameters(&mut const_env, &parameters);
         reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
@@ -2457,9 +2472,9 @@ fn parameters_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
+    base_const_env: &HashMap<String, i128>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
-    let base_const_env = HashMap::default();
     let mut parameters = Vec::new();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         parameters_from_ref_node(
@@ -2467,7 +2482,7 @@ fn parameters_from_module_node(
             syntax_tree,
             &mut parameters,
             false,
-            &base_const_env,
+            base_const_env,
             type_aliases,
             parameter_overrides,
         )?;
@@ -2479,7 +2494,7 @@ fn parameters_from_module_node(
                     syntax_tree,
                     &mut local_parameters,
                     true,
-                    &base_const_env,
+                    base_const_env,
                     type_aliases,
                     parameter_overrides,
                 )?;
@@ -2505,7 +2520,7 @@ fn parameters_from_module_node(
                     syntax_tree,
                     &mut parameters,
                     true,
-                    &base_const_env,
+                    base_const_env,
                     type_aliases,
                     parameter_overrides,
                 )?,
@@ -2515,7 +2530,7 @@ fn parameters_from_module_node(
                         syntax_tree,
                         &mut parameters,
                         false,
-                        &base_const_env,
+                        base_const_env,
                         type_aliases,
                         parameter_overrides,
                     )?
@@ -7306,6 +7321,7 @@ fn comb_assignments_from_guarded(
     mut guarded: Vec<ConditionalAssignment>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
+    normalize_mixed_whole_selected_comb_writes(&mut guarded, packed_dimensions);
     let const_env = &packed_dimensions.const_env;
     let mut targets: Vec<LValue> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
@@ -7382,11 +7398,9 @@ fn comb_assignments_from_guarded(
             let value = write.assignment().rhs().clone();
             current = if let Some(chain_start) = write.exhaustive_fallback_start {
                 let mut branch_value = value;
-                for prior in indices[..position]
-                    .iter()
-                    .copied()
-                    .filter(|prior| *prior >= chain_start)
-                {
+                for prior in indices[..position].iter().copied().filter(|prior| {
+                    *prior >= chain_start && guarded[*prior].path_epochs != write.path_epochs
+                }) {
                     branch_value = fold_conditional_assignment_over(branch_value, &guarded[prior]);
                 }
                 branch_value
@@ -7406,6 +7420,66 @@ fn comb_assignments_from_guarded(
         slots[last] = Some(Assignment::new(target, rhs));
     }
     Ok(slots.into_iter().flatten().collect())
+}
+
+fn normalize_mixed_whole_selected_comb_writes(
+    guarded: &mut [ConditionalAssignment],
+    packed_dimensions: &PackedDimensions,
+) {
+    let mut whole_names = HashSet::default();
+    let mut selected_names = HashSet::default();
+    for write in guarded.iter() {
+        match write.assignment().lhs_value() {
+            LValue::Ident(name) if write.condition().is_some() => {
+                whole_names.insert(name.clone());
+            }
+            LValue::Ident(_) => {}
+            LValue::Select { name, .. } => {
+                selected_names.insert(name.clone());
+            }
+        }
+    }
+    whole_names.retain(|name| selected_names.contains(name));
+    for write in guarded.iter_mut() {
+        let target = write.assignment().lhs_value().clone();
+        let LValue::Select { name, .. } = &target else {
+            continue;
+        };
+        if !whole_names.contains(name) {
+            continue;
+        }
+        let Some(whole_target) = whole_packed_lvalue(name, packed_dimensions) else {
+            continue;
+        };
+        let Some((rhs, _)) = selected_value_after_write(
+            &Expr::Ident(name.clone()),
+            &whole_target,
+            &target,
+            write.assignment().rhs(),
+            &packed_dimensions.const_env,
+        ) else {
+            continue;
+        };
+        write.assignment = Assignment::new(LValue::Ident(name.clone()), rhs);
+    }
+
+    // Several selected writes in one fallback branch become writes to the
+    // same normalized whole value. Only the final write completes that
+    // fallback; earlier writes must remain ordinary guarded updates.
+    let mut last_fallback = HashMap::default();
+    for (index, write) in guarded.iter().enumerate() {
+        if let Some(chain_start) = write.exhaustive_fallback_start {
+            last_fallback.insert((chain_start, write.assignment().lhs().to_string()), index);
+        }
+    }
+    for (index, write) in guarded.iter_mut().enumerate() {
+        if let Some(chain_start) = write.exhaustive_fallback_start
+            && last_fallback.get(&(chain_start, write.assignment().lhs().to_string()))
+                != Some(&index)
+        {
+            write.exhaustive_fallback_start = None;
+        }
+    }
 }
 
 fn fold_conditional_assignment_over(current: Expr, write: &ConditionalAssignment) -> Expr {
@@ -7435,7 +7509,7 @@ fn substitute_intermediate_comb_value_reads(
     let mut initialized = initial.is_some();
     let mut established = initial.unwrap_or_else(comb_previous_value_placeholder);
     let mut write_index = 0;
-    let mut prior_target_writes = Vec::new();
+    let mut prior_target_writes: Vec<(usize, ConditionalAssignment)> = Vec::new();
     let mut guard_values: HashMap<usize, Expr> = HashMap::default();
     let mut path_values: HashMap<usize, Expr> = HashMap::default();
     let whole_target = match target {
@@ -7534,7 +7608,7 @@ fn substitute_intermediate_comb_value_reads(
         if let Some(chain_start) = write.exhaustive_fallback_start {
             established = value;
             for (prior_index, prior_write) in &prior_target_writes {
-                if *prior_index >= chain_start {
+                if *prior_index >= chain_start && prior_write.path_epochs != write.path_epochs {
                     established = fold_conditional_assignment_over(established, prior_write);
                 }
             }
@@ -7568,12 +7642,196 @@ fn substitute_comb_value_reads(
     whole_value: Option<&Expr>,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
-    if let (LValue::Select { name, .. }, Some(whole_value)) = (target, whole_value) {
-        let mut env = HashMap::default();
-        env.insert(name.clone(), whole_value.clone());
-        substitute_expr_idents(expr, &env)
-    } else {
-        substitute_expr_lvalue(expr, target, value, packed_dimensions)
+    let substituted =
+        if let (LValue::Select { name, .. }, Some(whole_value)) = (target, whole_value) {
+            let mut env = HashMap::default();
+            env.insert(name.clone(), whole_value.clone());
+            substitute_expr_idents(expr, &env)
+        } else {
+            substitute_expr_lvalue(expr, target, value, packed_dimensions)
+        };
+    simplify_single_bit_concat_selects(substituted, packed_dimensions)
+}
+
+fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDimensions) -> Expr {
+    match expr {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
+            let expr = simplify_single_bit_concat_selects(*expr, packed_dimensions);
+            let bit = match (
+                eval_ast_const_expr(&msb, &packed_dimensions.const_env),
+                eval_ast_const_expr(&lsb, &packed_dimensions.const_env),
+            ) {
+                (Some(msb), Some(lsb)) if msb == lsb => Some(msb),
+                _ => None,
+            };
+            if let (Some(bit), Expr::Concat(parts)) = (bit, &expr)
+                && let Ok(bit) = usize::try_from(bit)
+            {
+                let mut offset = 0usize;
+                for part in parts.iter().rev() {
+                    let Some(width) = expr_static_width(part, packed_dimensions) else {
+                        break;
+                    };
+                    if bit < offset.saturating_add(width) {
+                        let selected = bit - offset;
+                        return if width == 1 {
+                            part.clone()
+                        } else {
+                            Expr::Select {
+                                expr: Box::new(part.clone()),
+                                msb: ConstExpr::Literal(selected.to_string()),
+                                lsb: ConstExpr::Literal(selected.to_string()),
+                                signed: false,
+                            }
+                        };
+                    }
+                    offset = offset.saturating_add(width);
+                }
+            }
+            Expr::Select {
+                expr: Box::new(expr),
+                msb,
+                lsb,
+                signed,
+            }
+        }
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .into_iter()
+                .map(|part| simplify_single_bit_concat_selects(part, packed_dimensions))
+                .collect(),
+        ),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count,
+            parts: parts
+                .into_iter()
+                .map(|part| simplify_single_bit_concat_selects(part, packed_dimensions))
+                .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(simplify_single_bit_concat_selects(*expr, packed_dimensions)),
+            width,
+            signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(simplify_single_bit_concat_selects(*expr, packed_dimensions)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(simplify_single_bit_concat_selects(*left, packed_dimensions)),
+            op,
+            right: Box::new(simplify_single_bit_concat_selects(
+                *right,
+                packed_dimensions,
+            )),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(simplify_single_bit_concat_selects(
+                *condition,
+                packed_dimensions,
+            )),
+            then_expr: Box::new(simplify_single_bit_concat_selects(
+                *then_expr,
+                packed_dimensions,
+            )),
+            else_expr: Box::new(simplify_single_bit_concat_selects(
+                *else_expr,
+                packed_dimensions,
+            )),
+        },
+        Expr::Call { name, args } => Expr::Call {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| simplify_single_bit_concat_selects(arg, packed_dimensions))
+                .collect(),
+        },
+        Expr::Ident(_) | Expr::Literal(_) => expr,
+    }
+}
+
+fn expr_static_width(expr: &Expr, packed_dimensions: &PackedDimensions) -> Option<usize> {
+    match expr {
+        Expr::Ident(name) => lvalue_expr_type(&LValue::Ident(name.clone()), packed_dimensions)
+            .map(|r#type| r#type.width),
+        Expr::Literal(literal) => {
+            typecheck::parse_integral_literal(literal).map(|literal| literal.width)
+        }
+        Expr::Select { msb, lsb, .. } => {
+            let msb = eval_ast_const_expr(msb, &packed_dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(lsb, &packed_dimensions.const_env)?;
+            usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
+        }
+        Expr::Concat(parts) => parts.iter().try_fold(0usize, |width, part| {
+            width.checked_add(expr_static_width(part, packed_dimensions)?)
+        }),
+        Expr::RepeatConcat { count, parts } => {
+            let count = eval_ast_const_expr(count, &packed_dimensions.const_env)?;
+            let count = usize::try_from(count).ok()?;
+            let width = parts.iter().try_fold(0usize, |width, part| {
+                width.checked_add(expr_static_width(part, packed_dimensions)?)
+            })?;
+            width.checked_mul(count)
+        }
+        Expr::Resize { width, .. } => Some(*width),
+        Expr::Unary { op, expr } => {
+            if matches!(
+                op,
+                UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor
+            ) {
+                Some(1)
+            } else {
+                expr_static_width(expr, packed_dimensions)
+            }
+        }
+        Expr::Binary { left, op, right } => {
+            if matches!(
+                op,
+                BinaryOp::LogicAnd
+                    | BinaryOp::LogicOr
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
+                    | BinaryOp::EqWildcard
+                    | BinaryOp::NeWildcard
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+            ) {
+                Some(1)
+            } else if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+                expr_static_width(left, packed_dimensions)
+            } else {
+                Some(
+                    expr_static_width(left, packed_dimensions)?
+                        .max(expr_static_width(right, packed_dimensions)?),
+                )
+            }
+        }
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => Some(
+            expr_static_width(then_expr, packed_dimensions)?
+                .max(expr_static_width(else_expr, packed_dimensions)?),
+        ),
+        Expr::Call { .. } => None,
     }
 }
 
@@ -8671,6 +8929,11 @@ fn conditional_assignments_from_statement(
                     "always_comb assignment expression".to_string(),
                 ));
             };
+            let rhs = if condition.is_some() {
+                coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+            } else {
+                rhs
+            };
             assignments.push(ConditionalAssignment::new(
                 condition,
                 Assignment::new(lhs, rhs),
@@ -8690,6 +8953,11 @@ fn conditional_assignments_from_statement(
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
             })?;
+            let rhs = if condition.is_some() {
+                coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+            } else {
+                rhs
+            };
             assignments.push(ConditionalAssignment::new(
                 condition,
                 Assignment::new(lhs, rhs),
@@ -8785,6 +9053,69 @@ fn conditional_assignments_from_statement(
     Ok(())
 }
 
+fn coerce_procedural_assignment_rhs(
+    rhs: Expr,
+    lhs: &LValue,
+    packed_dimensions: &PackedDimensions,
+) -> Expr {
+    let Some(target_type) = lvalue_expr_type(lhs, packed_dimensions) else {
+        return rhs;
+    };
+    let identifier_signedness = packed_dimensions
+        .iter()
+        .map(|(name, dimensions)| (name.clone(), dimensions.signed))
+        .collect();
+    let Some(source_signed) = expr_signedness(&rhs, &identifier_signedness, &HashMap::default())
+    else {
+        return rhs;
+    };
+    if source_signed == target_type.signed
+        && expr_static_width(&rhs, packed_dimensions) == Some(target_type.width)
+    {
+        return rhs;
+    }
+    let assigned = Expr::Resize {
+        expr: Box::new(rhs),
+        width: target_type.width,
+        signed: source_signed,
+    };
+    Expr::Resize {
+        expr: Box::new(assigned),
+        width: target_type.width,
+        signed: target_type.signed,
+    }
+}
+
+fn lvalue_expr_type(value: &LValue, packed_dimensions: &PackedDimensions) -> Option<ExprType> {
+    match value {
+        LValue::Ident(name) => {
+            let dimensions = packed_dimensions.get(name)?;
+            let width = dimensions
+                .packed
+                .iter()
+                .try_fold(1usize, |width, dimension| {
+                    let dimension_width =
+                        eval_ast_const_expr(&dimension.width, &packed_dimensions.const_env)?;
+                    width.checked_mul(usize::try_from(dimension_width).ok()?)
+                })?;
+            Some(ExprType {
+                width: width.max(1),
+                signed: dimensions.signed,
+            })
+        }
+        LValue::Select {
+            msb, lsb, signed, ..
+        } => {
+            let msb = eval_ast_const_expr(msb, &packed_dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(lsb, &packed_dimensions.const_env)?;
+            Some(ExprType {
+                width: usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?,
+                signed: *signed,
+            })
+        }
+    }
+}
+
 fn conditional_assignments_from_conditional_statement(
     stmt: &sv_parser::ConditionalStatement,
     parent_condition: Option<Expr>,
@@ -8878,6 +9209,7 @@ fn conditional_assignments_from_conditional_statement(
                 &mut assignments[branch_start..],
                 &definitely_assigned_branches,
                 chain_start,
+                packed_dimensions,
             );
         }
     }
@@ -9010,6 +9342,7 @@ fn conditional_assignments_from_case_statement(
                 &mut assignments[branch_start..],
                 &definitely_assigned_branches,
                 chain_start,
+                packed_dimensions,
             );
         }
     }
@@ -9038,13 +9371,14 @@ fn mark_exhaustive_fallback(
     fallback_assignments: &mut [ConditionalAssignment],
     branch_targets: &[Vec<LValue>],
     chain_start: usize,
+    packed_dimensions: &PackedDimensions,
 ) {
     let mut marked_targets = Vec::new();
     for assignment in fallback_assignments {
         let target = assignment.assignment().lhs_value();
         if branch_targets
             .iter()
-            .all(|targets| targets.contains(target))
+            .all(|targets| lvalue_is_covered_by(target, targets, packed_dimensions))
             && !marked_targets.contains(target)
         {
             marked_targets.push(target.clone());
@@ -9120,7 +9454,7 @@ fn definitely_assigned_comb_targets(
                 syntax_tree,
                 packed_dimensions,
             ));
-            intersect_lvalue_sets(branches)
+            intersect_lvalue_sets(branches, packed_dimensions)
         }
         sv_parser::StatementItem::CaseStatement(case) => {
             let sv_parser::CaseStatement::Normal(case) = &**case else {
@@ -9145,7 +9479,7 @@ fn definitely_assigned_comb_targets(
                 })
                 .collect::<Vec<_>>();
             if has_default {
-                intersect_lvalue_sets(branches)
+                intersect_lvalue_sets(branches, packed_dimensions)
             } else {
                 Vec::new()
             }
@@ -9154,12 +9488,78 @@ fn definitely_assigned_comb_targets(
     }
 }
 
-fn intersect_lvalue_sets(mut sets: Vec<Vec<LValue>>) -> Vec<LValue> {
-    let Some(mut intersection) = sets.pop() else {
+fn intersect_lvalue_sets(
+    sets: Vec<Vec<LValue>>,
+    packed_dimensions: &PackedDimensions,
+) -> Vec<LValue> {
+    if sets.is_empty() {
         return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for target in sets.iter().flatten() {
+        if !candidates.contains(target) {
+            candidates.push(target.clone());
+        }
+    }
+    candidates.retain(|target| {
+        sets.iter()
+            .all(|set| lvalue_is_covered_by(target, set, packed_dimensions))
+    });
+    candidates
+}
+
+fn lvalue_is_covered_by(
+    target: &LValue,
+    writes: &[LValue],
+    packed_dimensions: &PackedDimensions,
+) -> bool {
+    if writes.contains(target) {
+        return true;
+    }
+    let Some((target_name, target_low, target_high)) = lvalue_bit_range(target, packed_dimensions)
+    else {
+        return false;
     };
-    intersection.retain(|target| sets.iter().all(|set| set.contains(target)));
-    intersection
+    let mut ranges = writes
+        .iter()
+        .filter_map(|write| lvalue_bit_range(write, packed_dimensions))
+        .filter_map(|(name, low, high)| (name == target_name).then_some((low, high)))
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(low, _)| *low);
+    let mut covered_through = target_low.checked_sub(1);
+    for (low, high) in ranges {
+        let next = covered_through.and_then(|covered| covered.checked_add(1));
+        if next.is_some_and(|next| low > next) {
+            continue;
+        }
+        if low <= target_low || next.is_some_and(|next| low <= next) {
+            covered_through = Some(covered_through.map_or(high, |covered| covered.max(high)));
+        }
+        if covered_through.is_some_and(|covered| covered >= target_high) {
+            return true;
+        }
+    }
+    false
+}
+
+fn lvalue_bit_range(
+    value: &LValue,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(String, i128, i128)> {
+    let selected;
+    let value = match value {
+        LValue::Ident(name) => {
+            selected = whole_packed_lvalue(name, packed_dimensions)?;
+            &selected
+        }
+        value => value,
+    };
+    let LValue::Select { name, msb, lsb, .. } = value else {
+        unreachable!();
+    };
+    let msb = eval_ast_const_expr(msb, &packed_dimensions.const_env)?;
+    let lsb = eval_ast_const_expr(lsb, &packed_dimensions.const_env)?;
+    Some((name.clone(), msb.min(lsb), msb.max(lsb)))
 }
 
 fn expr_from_cond_predicate(
