@@ -2892,6 +2892,29 @@ fn preserves_four_state_masks_through_constant_casts() {
 }
 
 #[test]
+fn expands_unbased_fill_literals_to_constant_cast_widths() {
+    let source = r#"
+        module Top(output logic y);
+            typedef logic [63:0] wide_t;
+            localparam logic [63:0] P1 = wide_t'('1);
+            localparam logic [63:0] PX = wide_t'('x);
+            localparam logic [63:0] PZ = wide_t'('z);
+            assign y = (P1 === 64'hffffffffffffffff)
+                    && (PX === 64'hxxxxxxxxxxxxxxxx)
+                    && (PZ === 64'hzzzzzzzzzzzzzzzz);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unbased_fill_constant_cast.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn accepts_selected_writes_killed_by_later_whole_writes() {
     let source = r#"
         module Top(input logic c, a, output logic [1:0] x);
@@ -2945,6 +2968,40 @@ fn recognizes_complete_cases_over_two_state_selectors() {
     assert_eq!(sim.get(y), 0u8.into());
     sim.modify(|io| io.set(s, 1u8)).unwrap();
     assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn recognizes_nested_complete_cases_as_definite_assignments() {
+    let source = r#"
+        module Top(input logic c, input bit s, output logic x);
+            always_comb begin
+                if (c)
+                    case (s)
+                        1'b0: x = 1'b0;
+                        1'b1: x = 1'b1;
+                    endcase
+                else
+                    x = 1'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nested_complete_two_state_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let s = sim.signal("s");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(s, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
 }
 
 #[test]

@@ -868,11 +868,28 @@ fn constant_cast_const_expr(
     } else {
         target_type.signed
     };
-    Some(ConstExpr::Literal(resize_integral_literal_for_cast(
-        literal,
-        target_type.width,
-        signed,
-    )))
+    let resized = match &operand {
+        ConstExpr::Literal(value) => {
+            resize_unbased_fill_literal_for_cast(value, target_type.width, signed).unwrap_or_else(
+                || resize_integral_literal_for_cast(literal, target_type.width, signed),
+            )
+        }
+        _ => resize_integral_literal_for_cast(literal, target_type.width, signed),
+    };
+    Some(ConstExpr::Literal(resized))
+}
+
+fn resize_unbased_fill_literal_for_cast(value: &str, width: usize, signed: bool) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let mut chars = normalized.chars();
+    (chars.next()? == '\'' && chars.clone().count() == 1).then_some(())?;
+    let fill = chars.next()?;
+    matches!(fill, '0' | '1' | 'x' | 'z' | '?').then_some(())?;
+    let signing = if signed { "s" } else { "" };
+    Some(format!(
+        "{width}'{signing}b{}",
+        fill.to_string().repeat(width)
+    ))
 }
 
 fn resize_integral_literal_for_cast(
@@ -9494,9 +9511,8 @@ fn conditional_assignments_from_case_statement(
         packed_dimensions,
     )
     .ok_or_else(|| AnalyzerError::Unsupported("always_ff case selector lowering".to_string()))?;
-    let two_state_selector_width = two_state_case_selector_width(&case_expr, packed_dimensions);
-    let mut covered_selector_values = HashSet::default();
-    let mut labels_are_constant = true;
+    let complete_two_state_case =
+        two_state_case_items_cover_selector(stmt, syntax_tree, const_env, packed_dimensions);
 
     let mut branches = Vec::new();
     let mut default_branch = None;
@@ -9515,25 +9531,6 @@ fn conditional_assignments_from_case_statement(
                             "always_ff case item expression lowering".to_string(),
                         )
                     })?;
-                    if let Some(width) = two_state_selector_width {
-                        let value = expr_to_const(expr.clone())
-                            .and_then(|expr| eval_ast_const_expr(&expr, const_env));
-                        if let Some(value) = value {
-                            let total = 1i128.checked_shl(u32::try_from(width).unwrap_or(u32::MAX));
-                            if value >= 0 && total.is_some_and(|total| value < total) {
-                                covered_selector_values.insert(value);
-                            } else if expr_static_width(&expr, packed_dimensions)
-                                .is_some_and(|label_width| label_width <= width)
-                            {
-                                covered_selector_values
-                                    .insert(coerce_const_parameter_value(value, width, false));
-                            } else {
-                                labels_are_constant = false;
-                            }
-                        } else {
-                            labels_are_constant = false;
-                        }
-                    }
                     conditions.push(case_item_condition(case_expr.clone(), expr));
                 }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
@@ -9549,12 +9546,6 @@ fn conditional_assignments_from_case_statement(
             }
         }
     }
-
-    let complete_two_state_case = two_state_selector_width
-        .and_then(|width| 1usize.checked_shl(u32::try_from(width).ok()?))
-        .is_some_and(|value_count| {
-            labels_are_constant && covered_selector_values.len() == value_count
-        });
 
     let mut prior_false = Vec::new();
     let mut definitely_assigned_branches = Vec::new();
@@ -9650,6 +9641,65 @@ fn two_state_case_selector_width(
         .get(name)
         .is_some_and(|dimensions| dimensions.is_2state)
         .then(|| expr_static_width(selector, packed_dimensions))?
+}
+
+fn two_state_case_items_cover_selector(
+    stmt: &sv_parser::CaseStatementNormal,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
+) -> bool {
+    if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
+        return false;
+    }
+    let Some(selector) = expr_from_expression_with_types(
+        &stmt.nodes.2.nodes.1.nodes.0,
+        syntax_tree,
+        packed_dimensions,
+    ) else {
+        return false;
+    };
+    let Some(width) = two_state_case_selector_width(&selector, packed_dimensions) else {
+        return false;
+    };
+    let Some(value_count) = u32::try_from(width)
+        .ok()
+        .and_then(|width| 1usize.checked_shl(width))
+    else {
+        return false;
+    };
+    let Some(total) = i128::try_from(value_count).ok() else {
+        return false;
+    };
+    let mut covered = HashSet::default();
+    for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
+        let sv_parser::CaseItem::NonDefault(item) = item else {
+            continue;
+        };
+        for label in item.nodes.0.contents() {
+            let Some(label) =
+                expr_from_expression_with_types(&label.nodes.0, syntax_tree, packed_dimensions)
+            else {
+                return false;
+            };
+            let Some(value) = expr_to_const(label.clone())
+                .and_then(|label| eval_ast_const_expr(&label, const_env))
+            else {
+                return false;
+            };
+            let value = if value >= 0 && value < total {
+                value
+            } else if expr_static_width(&label, packed_dimensions)
+                .is_some_and(|label_width| label_width <= width)
+            {
+                coerce_const_parameter_value(value, width, false)
+            } else {
+                return false;
+            };
+            covered.insert(value);
+        }
+    }
+    covered.len() == value_count
 }
 
 fn mark_condition_context(
@@ -9781,7 +9831,14 @@ fn definitely_assigned_comb_targets(
                     )
                 })
                 .collect::<Vec<_>>();
-            if has_default {
+            if has_default
+                || two_state_case_items_cover_selector(
+                    case,
+                    syntax_tree,
+                    &packed_dimensions.const_env,
+                    packed_dimensions,
+                )
+            {
                 intersect_lvalue_sets(branches, packed_dimensions)
             } else {
                 Vec::new()
