@@ -724,22 +724,52 @@ fn size_system_function_expr_type(
         }
         sv_parser::SystemTfCall::ArgOptionl(_) => return None,
     };
-    // $bits covers every packed dimension; $size covers only the first.
+    // $bits covers every unpacked and packed dimension; $size covers only
+    // the outermost dimension, which is unpacked when one is present.
     let first_dimension_only = name == "$size";
     if name != "$bits" && !first_dimension_only {
         return None;
     }
     if !first_dimension_only {
-        return expr_type_from_type(&r#type, const_env);
+        let unpacked_width = r#type
+            .unpacked_ranges()
+            .iter()
+            .try_fold(1usize, |width, range| {
+                let left = eval_ast_const_expr(range.left(), const_env)?;
+                let right = eval_ast_const_expr(range.right(), const_env)?;
+                width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+            })?;
+        let packed_width = r#type
+            .packed_ranges()
+            .iter()
+            .try_fold(1usize, |width, range| {
+                let left = eval_ast_const_expr(range.left(), const_env)?;
+                let right = eval_ast_const_expr(range.right(), const_env)?;
+                width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+            })?;
+        return Some(ExprType {
+            width: unpacked_width.checked_mul(packed_width)?.max(1),
+            signed: r#type.is_signed(),
+        });
     }
-    let Some(range) = r#type.packed_ranges().first() else {
+    let range = r#type
+        .unpacked_ranges()
+        .first()
+        .map(|range| (range.left(), range.right()))
+        .or_else(|| {
+            r#type
+                .packed_ranges()
+                .first()
+                .map(|range| (range.left(), range.right()))
+        });
+    let Some((left, right)) = range else {
         return Some(ExprType {
             width: 1,
             signed: r#type.is_signed(),
         });
     };
-    let left = eval_ast_const_expr(range.left(), const_env)?;
-    let right = eval_ast_const_expr(range.right(), const_env)?;
+    let left = eval_ast_const_expr(left, const_env)?;
+    let right = eval_ast_const_expr(right, const_env)?;
     let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
     Some(ExprType {
         width: width.max(1),
@@ -3090,7 +3120,8 @@ fn parameters_from_ref_node(
             "unsupported parameter data type".to_string(),
         ));
     }
-    let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
+    let parameter_width =
+        parameter_declared_width(node.clone(), syntax_tree, base_const_env, parameters);
     let has_declared_type = node.clone().into_iter().any(|child| {
         matches!(
             child,
@@ -3138,6 +3169,7 @@ fn parameters_from_ref_node(
 fn parameter_declared_width(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    base_const_env: &HashMap<String, i128>,
     parameters: &[Parameter],
 ) -> Option<usize> {
     let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
@@ -3147,7 +3179,22 @@ fn parameter_declared_width(
         }
         return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
     }
-    let env = const_env_from_parameters(parameters);
+    let mut env = base_const_env.clone();
+    // A second lowering pass receives values from the first pass in the base
+    // environment. Do not let stale values for parameters declared by this
+    // same syntax node resolve its declaration ranges; only constants from
+    // outside the declaration (such as enum members) belong here.
+    for child in node.clone() {
+        if let RefNode::ParamAssignment(parameter) = child
+            && let Ok(name) = parameter_name(
+                RefNode::ParameterIdentifier(&parameter.nodes.0),
+                syntax_tree,
+            )
+        {
+            env.remove(&name);
+        }
+    }
+    env.extend(const_env_from_parameters(parameters));
     ranges.iter().try_fold(1usize, |acc, range| {
         let left = eval_ast_const_expr(range.left(), &env)?;
         let right = eval_ast_const_expr(range.right(), &env)?;
@@ -7348,6 +7395,24 @@ fn comb_assignments_from_guarded(
                 targets.push(target.clone());
                 groups.push(vec![index]);
             }
+        }
+    }
+    // Every arm that will participate in a mux must first undergo its own
+    // procedural assignment conversion. This includes an unconditional
+    // initializer that becomes the fallback of a later guarded write.
+    for indices in &groups {
+        let has_conditional = indices
+            .iter()
+            .any(|index| guarded[*index].condition().is_some());
+        if !has_conditional {
+            continue;
+        }
+        for index in indices {
+            let assignment = guarded[*index].assignment().clone();
+            let lhs = assignment.lhs_value().clone();
+            let rhs =
+                coerce_procedural_assignment_rhs(assignment.rhs().clone(), &lhs, packed_dimensions);
+            guarded[*index].assignment = Assignment::new(lhs, rhs);
         }
     }
     // Apply every cross-target blocking-assignment substitution before any

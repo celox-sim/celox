@@ -2630,6 +2630,73 @@ fn coerces_each_guarded_rhs_before_building_a_mux() {
 }
 
 #[test]
+fn coerces_unconditional_fallbacks_before_building_a_mux() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] x);
+            always_comb begin
+                x = 1'sb1;
+                if (c)
+                    x = 8'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("comb_unconditional_assignment_coercion.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0xffu8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn sizes_unpacked_array_type_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [31:0] bits_y, output logic [7:0] size_y);
+            typedef logic [7:0] bytes_t [0:3];
+            localparam B = $bits(bytes_t)'(40'h1fffffffff);
+            localparam S = $size(bytes_t)'(8'h1f);
+            assign bits_y = B;
+            assign size_y = S;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unpacked_typedef_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("bits_y")), 0xffff_ffffu32.into());
+    assert_eq!(sim.get(sim.signal("size_y")), 0x0fu8.into());
+}
+
+#[test]
+fn resolves_parameter_ranges_with_enum_constants() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            typedef enum logic [1:0] { W = 2 } E;
+            localparam logic signed [W-1:0] P = 2'b11;
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("enum_dependent_parameter_range.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(
