@@ -62,8 +62,8 @@ readonly GATE_HELIODOR_REF=a78d04730cf2b37c616e039b4a5bd437c1cfd355
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=420
 # The Heliodor testbench observes `pass` after 10,000-cycle chunks. At this
-# revision the transition lands on a chunk boundary, and the two runners expose
-# the settled value on adjacent boundaries while reaching the same x3 state.
+# revision the transition lands on a chunk boundary, and the runners expose the
+# settled value on nearby boundaries while reaching the same x3 state.
 readonly GATE_EXPECTED_VERYL_CYCLE=87cda0
 readonly GATE_EXPECTED_CELOX_CYCLE=87a690
 readonly GATE_EXPECTED_X3=aa
@@ -1928,7 +1928,8 @@ validate_gate_results() {
                 }
                 validate_gate_celox_config "$log" "$GATE_TEST" tiered || return "$?"
                 validate_gate_tiered_stats "$log" "$GATE_TEST" || return "$?"
-                validate_gate_arch_completion "$log" celox-tiered || return "$?"
+                validate_gate_arch_completion \
+                    "$log" celox-tiered "$GATE_EXPECTED_CELOX_CYCLE" || return "$?"
                 classify_celox_result "$log" "$GATE_TEST" "$exit_status" 0 || {
                     echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
                     return 1
