@@ -149,7 +149,7 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
-        let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
+        let mut type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
         let empty_parameter_overrides = HashMap::default();
         let applicable_parameter_overrides = if name == override_module_name {
             parameter_overrides
@@ -205,6 +205,8 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         extend_const_env_with_parameters(&mut const_env, &parameters);
+        type_aliases =
+            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
         reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let mut port_names = HashSet::default();
@@ -220,7 +222,8 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
-        let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        let signals =
+            signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         for r#type in ports
             .iter()
             .map(Port::r#type)
@@ -881,7 +884,59 @@ fn constant_cast_const_expr(
         }
         _ => resize_integral_literal_for_cast(literal, target_type.width, signed),
     };
+    let resized = if cast_target_is_two_state(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
+        two_state_integral_literal(&resized, target_type.width, signed)?
+    } else {
+        resized
+    };
     Some(ConstExpr::Literal(resized))
+}
+
+fn cast_target_is_two_state(
+    casting_type: &sv_parser::CastingType,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> bool {
+    if type_from_ref_node_with_env(
+        RefNode::CastingType(casting_type),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .is_some_and(|r#type| r#type.kind() == TypeKind::Bit)
+    {
+        return true;
+    }
+    match casting_type {
+        sv_parser::CastingType::SimpleType(simple_type) => {
+            let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
+                return false;
+            };
+            identifier_text(RefNode::TypeIdentifier(&identifier.nodes.1), syntax_tree)
+                .and_then(|name| type_aliases.get(&name))
+                .is_some_and(|r#type| r#type.kind() == TypeKind::Bit)
+        }
+        sv_parser::CastingType::ConstantPrimary(primary) => {
+            let Some(ConstExpr::Ident(name)) =
+                const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
+            else {
+                return false;
+            };
+            type_aliases
+                .get(&name)
+                .is_some_and(|r#type| r#type.kind() == TypeKind::Bit)
+        }
+        _ => false,
+    }
+}
+
+fn two_state_integral_literal(value: &str, width: usize, signed: bool) -> Option<String> {
+    let mut literal = typecheck::parse_integral_literal(value)?;
+    let keep = (num_bigint::BigUint::from(1usize) << width) - num_bigint::BigUint::from(1usize);
+    literal.value &= &keep ^ &literal.mask;
+    literal.mask = num_bigint::BigUint::default();
+    Some(resize_integral_literal_for_cast(literal, width, signed))
 }
 
 fn casting_type_is_numeric_size(
@@ -2672,14 +2727,14 @@ fn signals_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     for item in module_non_port_items(node) {
         signals_from_non_port_module_item(
             item,
             syntax_tree,
-            &type_aliases,
+            type_aliases,
             const_env,
             &mut signals,
         )?;
@@ -2985,6 +3040,14 @@ fn type_aliases_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<HashMap<String, Type>, AnalyzerError> {
+    type_aliases_from_module_node_with_env(node, syntax_tree, &HashMap::default())
+}
+
+fn type_aliases_from_module_node_with_env(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Result<HashMap<String, Type>, AnalyzerError> {
     let mut aliases = HashMap::default();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         if let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list {
@@ -3012,7 +3075,12 @@ fn type_aliases_from_module_node(
         };
         match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(declaration) => {
-                add_type_alias_from_data_declaration(declaration, syntax_tree, &mut aliases)?;
+                add_type_alias_from_data_declaration(
+                    declaration,
+                    syntax_tree,
+                    const_env,
+                    &mut aliases,
+                )?;
             }
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
                 add_type_aliases_from_localparam(&localparam.0, syntax_tree, &mut aliases);
@@ -3035,6 +3103,7 @@ fn type_aliases_from_module_node(
 fn add_type_alias_from_data_declaration(
     declaration: &sv_parser::DataDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::DataDeclaration::TypeDeclaration(declaration) = declaration else {
@@ -3047,29 +3116,39 @@ fn add_type_alias_from_data_declaration(
     else {
         return Ok(());
     };
-    let r#type =
-        type_from_ref_node(RefNode::DataType(&declaration.nodes.1), syntax_tree).or_else(|| {
-            let sv_parser::DataType::Enum(r#enum) = &declaration.nodes.1 else {
-                return None;
-            };
-            if let Some(base) = &r#enum.nodes.1 {
-                type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases)
-            } else {
-                let mut r#type = Type::new(TypeKind::Bit);
-                r#type.is_signed = true;
-                r#type.packed_ranges.push(PackedRange::new(
-                    ConstExpr::Literal("31".to_string()),
-                    ConstExpr::Literal("0".to_string()),
-                ));
-                Some(r#type)
-            }
-        });
+    let r#type = type_from_ref_node_with_env(
+        RefNode::DataType(&declaration.nodes.1),
+        syntax_tree,
+        const_env,
+        aliases,
+    )
+    .or_else(|| {
+        let sv_parser::DataType::Enum(r#enum) = &declaration.nodes.1 else {
+            return None;
+        };
+        if let Some(base) = &r#enum.nodes.1 {
+            type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases)
+        } else {
+            let mut r#type = Type::new(TypeKind::Bit);
+            r#type.is_signed = true;
+            r#type.packed_ranges.push(PackedRange::new(
+                ConstExpr::Literal("31".to_string()),
+                ConstExpr::Literal("0".to_string()),
+            ));
+            Some(r#type)
+        }
+    });
     let Some(r#type) = r#type else {
         return Ok(());
     };
     let r#type = type_with_unpacked_ranges(
         r#type,
-        unpacked_ranges_from_variable_dimensions(&declaration.nodes.3, syntax_tree)?,
+        unpacked_ranges_from_variable_dimensions_with_env(
+            &declaration.nodes.3,
+            syntax_tree,
+            const_env,
+            aliases,
+        )?,
     );
     aliases.insert(name, r#type);
     Ok(())
@@ -12334,18 +12413,6 @@ fn validate_unpacked_dimension_sizes(
     Ok(())
 }
 
-fn unpacked_ranges_from_variable_dimensions(
-    dimensions: &[sv_parser::VariableDimension],
-    syntax_tree: &SyntaxTree,
-) -> Result<Vec<UnpackedRange>, AnalyzerError> {
-    unpacked_ranges_from_variable_dimensions_with_env(
-        dimensions,
-        syntax_tree,
-        &HashMap::default(),
-        &HashMap::default(),
-    )
-}
-
 fn unpacked_ranges_from_variable_dimensions_with_env(
     dimensions: &[sv_parser::VariableDimension],
     syntax_tree: &SyntaxTree,
@@ -12465,7 +12532,14 @@ fn const_expr_from_ref_node_with_env(
                 let base = identifier_locate(identifier)
                     .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
                     .map(ConstExpr::Ident)?;
-                const_select_expr(base.clone(), &parameter.nodes.1, syntax_tree).or(Some(base))
+                const_select_expr(
+                    base.clone(),
+                    &parameter.nodes.1,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .or(Some(base))
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
                 let lowered = const_expr_from_function_subroutine_call(&call.nodes.0, syntax_tree);
@@ -12568,14 +12642,18 @@ fn const_select_expr(
     base: ConstExpr,
     select: &sv_parser::ConstantSelect,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     if bit_selects.len() != 1 || select.nodes.2.is_some() {
         return None;
     }
-    let bit = const_expr_from_ref_node(
+    let bit = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&bit_selects[0].nodes.1),
         syntax_tree,
+        const_env,
+        type_aliases,
     )?;
     Some(ConstExpr::Select {
         expr: Box::new(base),

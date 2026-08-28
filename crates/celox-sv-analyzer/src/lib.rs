@@ -985,6 +985,55 @@ mod tests {
     }
 
     #[test]
+    fn preserves_casted_ranges_while_collecting_typedefs() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter W = 8);
+                    typedef logic [W'(15):0] T;
+                    T x;
+                endmodule
+            "#,
+            Path::new("casted_typedef_range.sv"),
+        )
+        .expect("typedef ranges should use the populated module environment");
+        assert_eq!(
+            ir.modules()[0].signals()[0].r#type().resolved_width(),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn preserves_named_casts_in_constant_select_indices() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    localparam W = 1;
+                    localparam logic [1:0] A = 2'b10;
+                    localparam B = A[W'(0)];
+                endmodule
+            "#,
+            Path::new("casted_constant_select.sv"),
+        )
+        .expect("constant select indices should use the populated module environment");
+        assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(0));
+    }
+
+    #[test]
+    fn converts_unknowns_when_constant_casting_to_two_state_types() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef bit [1:0] two_t;
+                    localparam logic [1:0] P = two_t'(2'bx1);
+                endmodule
+            "#,
+            Path::new("two_state_constant_cast.sv"),
+        )
+        .expect("two-state constant casts should convert unknown bits to zero");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    }
+
+    #[test]
     fn resolves_typedef_declared_parameter_types() {
         let ir = analyze_source(
             r#"
