@@ -296,6 +296,7 @@ impl Module {
             &packed_dimensions,
             &functions,
             &expression_signedness,
+            &parameter_values,
         )?
         .into_iter()
         .map(|process| expand_process_calls(process, &functions, &expression_signedness))
@@ -1134,9 +1135,15 @@ fn reject_silently_ignored_constructs(
                     .into_iter()
                     .any(|node| matches!(node, RefNode::DataDeclaration(_)))
                 {
-                    return Err(AnalyzerError::Unsupported(
-                        "procedural local data declaration".to_string(),
-                    ));
+                    let detail = if matches!(
+                        always.nodes.0,
+                        sv_parser::AlwaysKeyword::AlwaysComb(_)
+                    ) {
+                        "block-local declaration inside always_comb"
+                    } else {
+                        "procedural local data declaration"
+                    };
+                    return Err(AnalyzerError::Unsupported(detail.to_string()));
                 }
             }
             RefNode::NetDeclAssignment(assignment) if assignment.nodes.2.is_some() => {
@@ -3391,6 +3398,11 @@ fn enum_member_constants_from_module_node(
                 .ok_or_else(|| {
                 AnalyzerError::Unsupported("enum member identifier".to_string())
             })?;
+            if member.nodes.1.is_some() {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "ranged enum member `{name}`"
+                )));
+            }
             let Some((_, value)) = &member.nodes.2 else {
                 return Err(AnalyzerError::Unsupported(format!(
                     "enum member `{name}` without an explicit value"
@@ -3471,10 +3483,28 @@ fn parameter_value_env(
                 &values,
             );
             if let Some(width) = width {
-                Expr::Resize {
-                    expr: Box::new(value),
-                    width,
-                    signed,
+                match value {
+                    Expr::Literal(literal) => {
+                        let resized = resize_unbased_fill_literal_for_cast(&literal, width, signed)
+                            .or_else(|| {
+                                typecheck::parse_integral_literal(&literal).map(|literal| {
+                                    resize_integral_literal_for_cast(literal, width, signed)
+                                })
+                            });
+                        resized.map_or_else(
+                            || Expr::Resize {
+                                expr: Box::new(Expr::Literal(literal)),
+                                width,
+                                signed,
+                            },
+                            Expr::Literal,
+                        )
+                    }
+                    value => Expr::Resize {
+                        expr: Box::new(value),
+                        width,
+                        signed,
+                    },
                 }
             } else {
                 value
@@ -5935,6 +5965,7 @@ fn comb_processes_from_module_node(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
@@ -5946,6 +5977,7 @@ fn comb_processes_from_module_node(
             packed_dimensions,
             functions,
             expression_signedness,
+            parameter_literals,
             &mut processes,
         )?;
     }
@@ -5960,6 +5992,7 @@ fn comb_processes_from_non_port_module_item(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -5973,6 +6006,7 @@ fn comb_processes_from_non_port_module_item(
                     packed_dimensions,
                     functions,
                     expression_signedness,
+                    parameter_literals,
                     processes,
                 )?;
             }
@@ -5986,6 +6020,7 @@ fn comb_processes_from_non_port_module_item(
                 packed_dimensions,
                 functions,
                 expression_signedness,
+                parameter_literals,
                 processes,
             )?;
         }
@@ -6002,6 +6037,7 @@ fn comb_processes_from_generate_item(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
@@ -6013,6 +6049,7 @@ fn comb_processes_from_generate_item(
             packed_dimensions,
             functions,
             expression_signedness,
+            parameter_literals,
             processes,
         )?;
     }
@@ -6027,6 +6064,7 @@ fn comb_processes_from_module_or_generate_item(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
@@ -6038,6 +6076,7 @@ fn comb_processes_from_module_or_generate_item(
             packed_dimensions,
             functions,
             expression_signedness,
+            parameter_literals,
             processes,
         )?;
     }
@@ -6052,6 +6091,7 @@ fn comb_processes_from_module_common_item(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -6079,6 +6119,7 @@ fn comb_processes_from_module_common_item(
                 packed_dimensions,
                 functions,
                 expression_signedness,
+                parameter_literals,
             )? {
                 processes.push(substitute_process_constants(process, const_env));
             }
@@ -6092,6 +6133,7 @@ fn comb_processes_from_module_common_item(
                 packed_dimensions,
                 functions,
                 expression_signedness,
+                parameter_literals,
                 processes,
             )?;
         }
@@ -6104,6 +6146,7 @@ fn comb_processes_from_module_common_item(
                 packed_dimensions,
                 functions,
                 expression_signedness,
+                parameter_literals,
                 processes,
             )?;
         }
@@ -6125,6 +6168,7 @@ fn comb_processes_from_conditional_generate(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
@@ -6153,6 +6197,7 @@ fn comb_processes_from_conditional_generate(
                 packed_dimensions,
                 functions,
                 expression_signedness,
+                parameter_literals,
                 processes,
             )?;
         }
@@ -6175,6 +6220,7 @@ fn comb_processes_from_conditional_generate(
         packed_dimensions,
         functions,
         expression_signedness,
+        parameter_literals,
         processes,
     )?;
     if let Some((_, block)) = &generate.nodes.3 {
@@ -6193,6 +6239,7 @@ fn comb_processes_from_conditional_generate(
             packed_dimensions,
             functions,
             expression_signedness,
+            parameter_literals,
             processes,
         )?;
     }
@@ -6207,6 +6254,7 @@ fn comb_processes_from_loop_generate(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if generate_block_has_data_declaration(&generate.nodes.2) {
@@ -6248,6 +6296,7 @@ fn comb_processes_from_loop_generate(
             packed_dimensions,
             functions,
             expression_signedness,
+            parameter_literals,
             processes,
         )?;
         iterations += 1;
@@ -6549,6 +6598,7 @@ fn comb_processes_from_generate_block(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match block {
@@ -6561,6 +6611,7 @@ fn comb_processes_from_generate_block(
                 packed_dimensions,
                 functions,
                 expression_signedness,
+                parameter_literals,
                 processes,
             )?;
         }
@@ -6578,6 +6629,7 @@ fn comb_processes_from_generate_block(
                     packed_dimensions,
                     functions,
                     expression_signedness,
+                    parameter_literals,
                     processes,
                 )?;
             }
@@ -7451,6 +7503,7 @@ fn comb_process_from_always_construct(
     packed_dimensions: &PackedDimensions,
     functions: &HashMap<String, Function>,
     expression_signedness: &HashMap<String, bool>,
+    parameter_literals: &HashMap<String, Expr>,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
         return Ok(None);
@@ -7468,13 +7521,21 @@ fn comb_process_from_always_construct(
     )?;
     for guarded in &mut guarded_assignments {
         guarded.condition = guarded.condition.take().map(|condition| {
-            expand_expr_calls(condition, functions, expression_signedness, 0, true)
+            substitute_expr_constants_with_parameter_literals(
+                expand_expr_calls(condition, functions, expression_signedness, 0, true),
+                &HashMap::default(),
+                parameter_literals,
+            )
         });
-        guarded.assignment = expand_assignment_calls(
-            guarded.assignment.clone(),
-            functions,
-            expression_signedness,
-            true,
+        guarded.assignment = substitute_assignment_constants_with_parameter_literals(
+            expand_assignment_calls(
+                guarded.assignment.clone(),
+                functions,
+                expression_signedness,
+                true,
+            ),
+            &HashMap::default(),
+            parameter_literals,
         );
     }
     let assignments = comb_assignments_from_guarded(guarded_assignments, packed_dimensions)?;
@@ -8862,6 +8923,11 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
             Ok(())
         }
         sv_parser::StatementItem::SeqBlock(block) => {
+            if !block.nodes.2.is_empty() {
+                return Err(AnalyzerError::Unsupported(
+                    "block-local declaration inside always_comb".to_string(),
+                ));
+            }
             for stmt in &block.nodes.3 {
                 if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
                     validate_always_comb_statement(stmt)?;
@@ -9443,9 +9509,11 @@ fn lvalue_expr_type(value: &LValue, packed_dimensions: &PackedDimensions) -> Opt
             let width = dimensions
                 .packed
                 .iter()
+                .map(|dimension| &dimension.width)
+                .chain(dimensions.unpacked.iter().map(|dimension| &dimension.width))
                 .try_fold(1usize, |width, dimension| {
                     let dimension_width =
-                        eval_ast_const_expr(&dimension.width, &packed_dimensions.const_env)?;
+                        eval_ast_const_expr(dimension, &packed_dimensions.const_env)?;
                     width.checked_mul(usize::try_from(dimension_width).ok()?)
                 })?;
             Some(ExprType {

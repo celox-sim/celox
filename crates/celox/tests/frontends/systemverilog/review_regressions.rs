@@ -79,6 +79,30 @@ fn rejects_self_reads_hidden_in_comb_function_calls() {
 }
 
 #[test]
+fn rejects_block_local_declarations_inside_always_comb() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic c, a, b, output logic t, y);
+            always_comb begin
+                t = 1'b0;
+                if (c) begin
+                    logic t;
+                    t = a;
+                    y = t;
+                end else begin
+                    y = b;
+                end
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("block-local declaration inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn substitutes_prior_comb_values_into_function_bodies() {
     let source = r#"
         module Top(input logic c, output logic x, y);
@@ -3207,6 +3231,86 @@ fn registers_enum_types_with_default_bases() {
 }
 
 #[test]
+fn rejects_ranged_enum_members_instead_of_registering_the_base_name() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [31:0] y);
+            typedef enum int { S[2] = 4 } E;
+            assign y = S0;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("ranged enum member"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_masked_parameter_guards_before_latch_detection() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            localparam logic [1:0] S = 2'bx1;
+            always_comb begin
+                case (S)
+                    2'bx1: y = a;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("masked_parameter_case_guard.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn coerces_whole_unpacked_array_writes_to_the_flattened_width() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic signed [7:0] a[2], b[2],
+            output logic [7:0] x[2]
+        );
+            always_comb begin
+                if (c)
+                    x = a;
+                else
+                    x = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("whole_unpacked_array_comb_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 0x2211u16);
+        io.set(b, 0x4433u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0x4433u16.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0x2211u16.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(
@@ -4405,7 +4509,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural local data declaration",
+            "block-local declaration inside always_comb",
             r#"
             module Top(input logic a, output logic y);
                 always_comb begin logic tmp; tmp = a; y = tmp; end
