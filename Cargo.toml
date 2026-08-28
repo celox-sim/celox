@@ -68,14 +68,14 @@ celox-sv-analyzer       = { version = "=0.4.1", path = "crates/celox-sv-analyzer
 celox-testbench         = { version = "=0.4.1", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.4.1", path = "crates/celox-ts-gen" } # x-release-please-version
 
-veryl-analyzer = "0.20.3"
-veryl-emitter  = "0.20.3"
-veryl-metadata = "0.20.3"
-veryl-parser   = { version = "0.20.3", default-features = false }
-veryl-path      = "0.20.3"
-veryl-simulator = "0.20.3"
-veryl-std       = "0.20.3"
-sv-parser       = "0.13.5"
+veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658" }
+veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658" }
+veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658" }
+veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658", default-features = false }
+veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658" }
+veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658" }
+veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "248d548c60abfcf9ce7c330fe5cd83ff5d2d0658" }
+sv-parser = "0.13.5"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }

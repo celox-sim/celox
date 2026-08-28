@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HELIODOR_REPO="${HELIODOR_REPO:-https://github.com/dalance/heliodor.git}"
-HELIODOR_REF="${HELIODOR_REF:-94e9c5821c24a8941c3ddc3b76daddc7124a855a}"
+HELIODOR_REF="${HELIODOR_REF:-a78d04730cf2b37c616e039b4a5bd437c1cfd355}"
 HELIODOR_DIR="${HELIODOR_DIR:-$CELOX_ROOT/target/heliodor/source}"
 HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/results}"
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
@@ -58,10 +58,14 @@ if [[ -n "$HELIODOR_CELOX_EXECUTION_PREFIX" ]]; then
     read -r -a CELOX_EXECUTION_PREFIX <<<"$HELIODOR_CELOX_EXECUTION_PREFIX"
 fi
 
-readonly GATE_HELIODOR_REF=94e9c5821c24a8941c3ddc3b76daddc7124a855a
+readonly GATE_HELIODOR_REF=a78d04730cf2b37c616e039b4a5bd437c1cfd355
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=420
-readonly GATE_EXPECTED_CYCLE=d83790
+# The Heliodor testbench observes `pass` after 10,000-cycle chunks. At this
+# revision the transition lands on a chunk boundary, and the two runners expose
+# the settled value on adjacent boundaries while reaching the same x3 state.
+readonly GATE_EXPECTED_VERYL_CYCLE=87cda0
+readonly GATE_EXPECTED_CELOX_CYCLE=87a690
 readonly GATE_EXPECTED_X3=aa
 
 # Populated only while `gate` owns detached Heliodor worktrees. Keeping these
@@ -625,6 +629,7 @@ validate_veryl_completion() {
 validate_gate_arch_completion() {
     local log="$1"
     local runner="$2"
+    local expected_cycle="$3"
     local line cycle x3 pass marker_count=0 exact_count=0
     local pattern='^v4 SoC linux boot smoke: cy=([0-9A-Fa-f]+) x3=([0-9A-Fa-f]+) pass=([01])$'
 
@@ -643,14 +648,14 @@ validate_gate_arch_completion() {
             cycle="${BASH_REMATCH[1],,}"
             x3="${BASH_REMATCH[2],,}"
             pass="${BASH_REMATCH[3]}"
-            if [[ "$cycle" =~ ^0*${GATE_EXPECTED_CYCLE}$ \
+            if [[ "$cycle" =~ ^0*${expected_cycle}$ \
                 && "$x3" =~ ^0*${GATE_EXPECTED_X3}$ && "$pass" == 1 ]]; then
                 exact_count=$((exact_count + 1))
             fi
         fi
     done <"$log"
     if ((marker_count != 1 || exact_count != 1)); then
-        echo "error: $runner gate log must contain exactly cy=$GATE_EXPECTED_CYCLE x3=$GATE_EXPECTED_X3 pass=1" >&2
+        echo "error: $runner gate log must contain exactly cy=$expected_cycle x3=$GATE_EXPECTED_X3 pass=1" >&2
         echo "records=$marker_count exact=$exact_count" >&2
         return 1
     fi
@@ -1871,7 +1876,8 @@ validate_gate_results() {
                     return 1
                 }
                 validate_gate_timed_veryl_config "$log" "$GATE_TEST" || return "$?"
-                validate_gate_arch_completion "$log" veryl-cc-sync || return "$?"
+                validate_gate_arch_completion \
+                    "$log" veryl-cc-sync "$GATE_EXPECTED_VERYL_CYCLE" || return "$?"
                 classify_timed_veryl_result "$log" "$GATE_TEST" "$exit_status" || {
                     echo "error: $VERYL_TIMED_RESULT_DIAGNOSTIC" >&2
                     return 1
@@ -1891,7 +1897,8 @@ validate_gate_results() {
                 ;;
             celox)
                 validate_gate_celox_config "$log" "$GATE_TEST" || return "$?"
-                validate_gate_arch_completion "$log" celox || return "$?"
+                validate_gate_arch_completion \
+                    "$log" celox "$GATE_EXPECTED_CELOX_CYCLE" || return "$?"
                 classify_celox_result "$log" "$GATE_TEST" "$exit_status" 0 || {
                     echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
                     return 1

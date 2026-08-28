@@ -203,6 +203,7 @@ fn analyze(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> (
     Result<OptimizedSir, ParserError>,
     Vec<AnalyzerError>,
@@ -293,6 +294,20 @@ fn analyze(
     // still reject every cycle that is not covered by the supplied paths.
     if !ignored_loops.is_empty() || !true_loops.is_empty() {
         errors.retain(|error| !matches!(error, AnalyzerError::CombinationalLoop { .. }));
+    }
+
+    // Celox's FF lowerer can model function copy-out and non-local writes that
+    // Veryl rejects for SystemVerilog always_ff compatibility. Keep the
+    // language diagnostics by default, but let semantic regression tests opt
+    // into lowering the analyzer IR for those constructs.
+    if allow_always_ff_function_effects {
+        errors.retain(|error| {
+            !matches!(
+                error,
+                AnalyzerError::SideEffectFunctionCallInAlwaysFf { .. }
+                    | AnalyzerError::FunctionOutputInAlwaysFf { .. }
+            )
+        });
     }
 
     let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
@@ -449,6 +464,7 @@ pub fn compile_to_sir(
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
+        false,
     )
 }
 
@@ -561,6 +577,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
     let (sir, errors, frontend_diagnostics) = analyze(
@@ -582,6 +599,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
+        allow_always_ff_function_effects,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -638,6 +656,7 @@ fn compile_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -658,6 +677,7 @@ fn compile_to_sir_with_layout_mode(
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
+        allow_always_ff_function_effects,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -829,6 +849,7 @@ pub fn compile_mixed_to_sir(
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
+        false,
     )
 }
 
@@ -859,6 +880,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -879,6 +901,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
+        allow_always_ff_function_effects,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -938,6 +961,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     #[cfg(not(feature = "systemverilog"))]
     {
@@ -959,6 +983,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
+            allow_always_ff_function_effects,
         )
     }
     #[cfg(feature = "systemverilog")]
@@ -980,6 +1005,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
+            allow_always_ff_function_effects,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
             sv_sources,
@@ -1015,6 +1041,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
+            allow_always_ff_function_effects,
         ),
     }
 }
@@ -1085,6 +1112,9 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
         pub tier_promotion: TierPromotion,
+        /// Allow Celox to lower function side effects that Veryl rejects in
+        /// `always_ff` for SystemVerilog compatibility.
+        pub allow_always_ff_function_effects: bool,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1257,6 +1287,7 @@ mod host {
                 native_force_support: false,
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
+                allow_always_ff_function_effects: false,
             }
         }
     }
@@ -1367,6 +1398,16 @@ mod host {
         /// Enable 4-state (0, 1, X, Z) simulation mode.
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
+            self
+        }
+
+        /// Allow function output and non-local write effects in `always_ff`.
+        ///
+        /// This opts into Celox-specific lowering for constructs rejected by
+        /// Veryl's SystemVerilog compatibility checks. It is primarily useful
+        /// for testing Celox's FF lowering semantics.
+        pub fn allow_always_ff_function_effects(mut self, enable: bool) -> Self {
+            self.options.allow_always_ff_function_effects = enable;
             self
         }
 
@@ -1853,6 +1894,7 @@ mod host {
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
+                        self.options.allow_always_ff_function_effects,
                     )?
                 }
             } else {
@@ -1874,6 +1916,7 @@ mod host {
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
+                    self.options.allow_always_ff_function_effects,
                 )?
             };
             if let Some(start) = compile_start {
@@ -2392,6 +2435,7 @@ mod host {
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
+                        self.options.allow_always_ff_function_effects,
                     )
                 }
             } else {
@@ -2413,6 +2457,7 @@ mod host {
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
+                    self.options.allow_always_ff_function_effects,
                 )
             };
 
@@ -2596,6 +2641,7 @@ mod host {
                     &self.injected_components.manifests(),
                     layout_mode,
                     !self.options.native_force_support,
+                    self.options.allow_always_ff_function_effects,
                 )?
             };
             let mut laid_out =

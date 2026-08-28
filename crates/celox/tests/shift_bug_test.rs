@@ -21,7 +21,6 @@ mod test_utils;
 all_backends! {
 
     fn test_shift_in_if_reset(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -94,7 +93,7 @@ o = a << 4;
     }
 
     fn test_shift_ifreset_for(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -192,7 +191,6 @@ assign o_shl = r_shl;
     }
 
     fn test_dynamic_shift_in_if_reset(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,

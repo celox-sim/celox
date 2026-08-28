@@ -8,7 +8,6 @@ all_backends! {
 
     // Test `reset_async_high`: the FF resets when the reset signal is HIGH.
     fn test_reset_async_high(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -61,7 +60,6 @@ assign q = r;
 
     // Test `reset_sync_high`: synchronous reset, active HIGH.
     fn test_reset_sync_high(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -104,7 +102,6 @@ assign q = r;
 
     // Test `reset_sync_low`: synchronous reset, active LOW.
     fn test_reset_sync_low(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -147,7 +144,6 @@ assign q = r;
 
     // Test multiple FF blocks sharing the same reset signal.
     fn test_shared_reset(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -207,7 +203,6 @@ assign q2 = r2;
     // Reset value that is non-zero: verifies the reset assignment uses
     // the specified value, not just zero.
     fn test_nonzero_reset_value(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
