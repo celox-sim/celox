@@ -177,6 +177,8 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         let mut const_env = const_env_from_parameters(&parameters);
+        type_aliases =
+            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
         let enum_constants = enum_member_constants_from_module_node(
             node.clone(),
             syntax_tree,
@@ -10194,9 +10196,11 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
             .is_some_and(|dimensions| dimensions.is_2state),
         Expr::Literal(value) => typecheck::parse_integral_literal(value)
             .is_some_and(|literal| literal.mask == num_bigint::BigUint::default()),
-        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => {
+        Expr::Select { expr, msb, lsb, .. } => {
             expr_is_two_state(expr, packed_dimensions)
+                && select_bounds_are_statically_valid(expr, msb, lsb, packed_dimensions)
         }
+        Expr::Resize { expr, .. } => expr_is_two_state(expr, packed_dimensions),
         Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
             .iter()
             .all(|part| expr_is_two_state(part, packed_dimensions)),
@@ -10219,6 +10223,42 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
         }
         Expr::Call { .. } => false,
     }
+}
+
+fn select_bounds_are_statically_valid(
+    expr: &Expr,
+    msb: &ConstExpr,
+    lsb: &ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> bool {
+    let (Some(msb), Some(lsb)) = (
+        eval_ast_const_expr(msb, &packed_dimensions.const_env),
+        eval_ast_const_expr(lsb, &packed_dimensions.const_env),
+    ) else {
+        return false;
+    };
+    let (valid_low, valid_high) = if let Expr::Ident(name) = expr {
+        let Some(LValue::Select { msb, lsb, .. }) = whole_packed_lvalue(name, packed_dimensions)
+        else {
+            return false;
+        };
+        let (Some(msb), Some(lsb)) = (
+            eval_ast_const_expr(&msb, &packed_dimensions.const_env),
+            eval_ast_const_expr(&lsb, &packed_dimensions.const_env),
+        ) else {
+            return false;
+        };
+        (msb.min(lsb), msb.max(lsb))
+    } else {
+        let Some(width) = expr_static_width(expr, packed_dimensions)
+            .and_then(|width| width.checked_sub(1))
+            .and_then(|high| i128::try_from(high).ok())
+        else {
+            return false;
+        };
+        (0, width)
+    };
+    msb.min(lsb) >= valid_low && msb.max(lsb) <= valid_high
 }
 
 fn two_state_case_items_cover_selector(
@@ -10397,26 +10437,45 @@ fn definitely_assigned_comb_targets(
             targets
         }
         sv_parser::StatementItem::ConditionalStatement(conditional) => {
-            let Some((_, else_branch)) = &conditional.nodes.5 else {
-                return Vec::new();
-            };
-            let mut branches = vec![definitely_assigned_comb_targets_statement_or_null(
-                &conditional.nodes.3,
-                syntax_tree,
-                packed_dimensions,
-            )];
-            branches.extend(conditional.nodes.4.iter().map(|(_, _, _, branch)| {
-                definitely_assigned_comb_targets_statement_or_null(
+            let mut branches = Vec::new();
+            let mut terminal = false;
+            for (predicate, branch) in
+                std::iter::once((&conditional.nodes.2.nodes.1, &conditional.nodes.3)).chain(
+                    conditional
+                        .nodes
+                        .4
+                        .iter()
+                        .map(|(_, _, predicate, branch)| (&predicate.nodes.1, branch)),
+                )
+            {
+                let condition = expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions)
+                    .and_then(expr_to_const)
+                    .and_then(|condition| {
+                        eval_ast_const_expr(&condition, &packed_dimensions.const_env)
+                    });
+                if condition == Some(0) {
+                    continue;
+                }
+                branches.push(definitely_assigned_comb_targets_statement_or_null(
                     branch,
                     syntax_tree,
                     packed_dimensions,
-                )
-            }));
-            branches.push(definitely_assigned_comb_targets_statement_or_null(
-                else_branch,
-                syntax_tree,
-                packed_dimensions,
-            ));
+                ));
+                if condition.is_some() {
+                    terminal = true;
+                    break;
+                }
+            }
+            if !terminal {
+                let Some((_, else_branch)) = &conditional.nodes.5 else {
+                    return Vec::new();
+                };
+                branches.push(definitely_assigned_comb_targets_statement_or_null(
+                    else_branch,
+                    syntax_tree,
+                    packed_dimensions,
+                ));
+            }
             intersect_lvalue_sets(branches, packed_dimensions)
         }
         sv_parser::StatementItem::CaseStatement(case) => {

@@ -3055,6 +3055,45 @@ fn accepts_constant_true_always_comb_guards() {
 }
 
 #[test]
+fn recognizes_constant_true_nested_comb_guards_as_definite() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic y);
+            always_comb begin
+                if (c) begin
+                    if (1'b1)
+                        y = a;
+                end else begin
+                    y = b;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_true_nested_comb_guard.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, false);
+        io.set(b, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
 fn registers_enum_types_with_aliased_bases() {
     let source = r#"
         module Top(output logic [1:0] y);
@@ -3067,6 +3106,24 @@ fn registers_enum_types_with_aliased_bases() {
     "#;
     let mut sim = Simulator::from_sv_sources(
         vec![(source, Path::new("aliased_enum_base_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn collects_enum_constants_from_parameterized_aliased_bases() {
+    let source = r#"
+        module Top #(parameter W = 2) (output logic [1:0] y);
+            typedef logic [W'(1):0] B;
+            typedef enum B { A = 2'b10 } E;
+            assign y = A;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parameterized_aliased_enum_base.sv"))],
         "Top",
     )
     .build_cranelift()
@@ -3200,6 +3257,26 @@ fn recognizes_complete_cases_over_two_state_selectors() {
     assert_eq!(sim.get(y), 0u8.into());
     sim.modify(|io| io.set(s, 1u8)).unwrap();
     assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit [1:0] a, input bit [2:0] i, output logic y);
+            always_comb begin
+                case (a[i])
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
