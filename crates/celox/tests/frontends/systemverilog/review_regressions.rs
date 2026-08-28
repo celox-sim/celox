@@ -2843,6 +2843,130 @@ fn registers_enum_types_with_aliased_bases() {
 }
 
 #[test]
+fn coerces_selected_writes_before_whole_vector_normalization() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] x);
+            always_comb begin
+                x = '0;
+                x[3:1] = 1'sb1;
+                if (c)
+                    x = 8'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("selected_write_before_whole_normalization.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0x0eu8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn preserves_four_state_masks_through_constant_casts() {
+    let source = r#"
+        module Top(output logic y);
+            typedef logic [1:0] two_t;
+            localparam logic [1:0] PX = two_t'(1'bx);
+            localparam logic [1:0] PZ = two_t'(1'bz);
+            assign y = (PX === 2'b0x) && (PZ === 2'b0z);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("four_state_constant_cast.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn accepts_selected_writes_killed_by_later_whole_writes() {
+    let source = r#"
+        module Top(input logic c, a, output logic [1:0] x);
+            always_comb begin
+                if (c)
+                    x[0] = a;
+                x = '0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("killed_selected_comb_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn recognizes_complete_cases_over_two_state_selectors() {
+    let source = r#"
+        module Top(input bit s, output logic y);
+            always_comb begin
+                case (s)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_two_state_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let s = sim.signal("s");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(s, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(s, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn registers_enum_types_with_default_bases() {
+    let source = r#"
+        module Top(output logic [31:0] y);
+            typedef enum { Idle = 0, Run = 1 } State;
+            State state;
+            always_comb state = Run;
+            assign y = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("default_enum_base_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(

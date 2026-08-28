@@ -852,10 +852,14 @@ fn constant_cast_const_expr(
         type_aliases,
     )?;
     let operand_type = infer_const_expr_type(&operand, &parameter_types_from_const_env(const_env))?;
-    let operand_value = eval_ast_const_expr(&operand, const_env)?;
-    let operand_literal =
-        format_typed_parameter_literal(operand_value, operand_type.width, operand_type.signed);
-    let literal = typecheck::parse_integral_literal(&operand_literal)?;
+    let literal = if let ConstExpr::Literal(literal) = &operand {
+        typecheck::parse_integral_literal(literal)?
+    } else {
+        let operand_value = eval_ast_const_expr(&operand, const_env)?;
+        let operand_literal =
+            format_typed_parameter_literal(operand_value, operand_type.width, operand_type.signed);
+        typecheck::parse_integral_literal(&operand_literal)?
+    };
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
     // A size cast keeps the source expression's signedness when the target
     // is described by a constant primary; a type cast takes the target's.
@@ -864,30 +868,51 @@ fn constant_cast_const_expr(
     } else {
         target_type.signed
     };
-    let mut value = literal.value.clone();
-    // Widen negative two's-complement sources with sign extension before
-    // applying the truncating cast.
-    if literal.signed
-        && literal.width > 0
-        && literal.width < target_type.width
-        && (literal.value >> (literal.width - 1)) & num_bigint::BigUint::from(1usize)
-            == num_bigint::BigUint::from(1usize)
-    {
-        value |= ((num_bigint::BigUint::from(1usize) << target_type.width)
-            - num_bigint::BigUint::from(1usize))
-            ^ ((num_bigint::BigUint::from(1usize) << literal.width)
-                - num_bigint::BigUint::from(1usize));
-    }
-    if value.bits() > target_type.width as u64 {
-        value &= (num_bigint::BigUint::from(1usize) << target_type.width)
-            - num_bigint::BigUint::from(1usize);
-    }
-    Some(ConstExpr::Literal(format!(
-        "{}'{}d{}",
+    Some(ConstExpr::Literal(resize_integral_literal_for_cast(
+        literal,
         target_type.width,
-        if signed { "s" } else { "" },
-        value
+        signed,
     )))
+}
+
+fn resize_integral_literal_for_cast(
+    literal: typecheck::IntegralLiteral,
+    width: usize,
+    signed: bool,
+) -> String {
+    let mut value = literal.value;
+    let mut mask = literal.mask;
+    if literal.signed && literal.width > 0 && literal.width < width {
+        let extension = ((num_bigint::BigUint::from(1usize) << (width - literal.width))
+            - num_bigint::BigUint::from(1usize))
+            << literal.width;
+        if value.bit((literal.width - 1) as u64) {
+            value |= &extension;
+        }
+        if mask.bit((literal.width - 1) as u64) {
+            mask |= extension;
+        }
+    }
+    let keep = (num_bigint::BigUint::from(1usize) << width) - num_bigint::BigUint::from(1usize);
+    value &= &keep;
+    mask &= keep;
+    let signing = if signed { "s" } else { "" };
+    if mask == num_bigint::BigUint::default() {
+        return format!("{width}'{signing}d{value}");
+    }
+    let bits = (0..width)
+        .rev()
+        .map(|bit| {
+            if mask.bit(bit as u64) {
+                if value.bit(bit as u64) { 'x' } else { 'z' }
+            } else if value.bit(bit as u64) {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect::<String>();
+    format!("{width}'{signing}b{bits}")
 }
 
 fn for_loop_variable_lvalue_name(
@@ -2935,8 +2960,17 @@ fn add_type_alias_from_data_declaration(
             let sv_parser::DataType::Enum(r#enum) = &declaration.nodes.1 else {
                 return None;
             };
-            let base = r#enum.nodes.1.as_ref()?;
-            type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases)
+            if let Some(base) = &r#enum.nodes.1 {
+                type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases)
+            } else {
+                let mut r#type = Type::new(TypeKind::Bit);
+                r#type.is_signed = true;
+                r#type.packed_ranges.push(PackedRange::new(
+                    ConstExpr::Literal("31".to_string()),
+                    ConstExpr::Literal("0".to_string()),
+                ));
+                Some(r#type)
+            }
         });
     let Some(r#type) = r#type else {
         return Ok(());
@@ -7509,14 +7543,18 @@ fn normalize_mixed_whole_selected_comb_writes(
 ) {
     let mut whole_names = HashSet::default();
     let mut selected_names = HashSet::default();
+    let mut earlier_selected_names = HashSet::default();
     for write in guarded.iter() {
         match write.assignment().lhs_value() {
-            LValue::Ident(name) if write.condition().is_some() => {
+            LValue::Ident(name)
+                if write.condition().is_some() || earlier_selected_names.contains(name) =>
+            {
                 whole_names.insert(name.clone());
             }
             LValue::Ident(_) => {}
             LValue::Select { name, .. } => {
                 selected_names.insert(name.clone());
+                earlier_selected_names.insert(name.clone());
             }
         }
     }
@@ -7532,11 +7570,16 @@ fn normalize_mixed_whole_selected_comb_writes(
         let Some(whole_target) = whole_packed_lvalue(name, packed_dimensions) else {
             continue;
         };
+        let write_value = coerce_procedural_assignment_rhs(
+            write.assignment().rhs().clone(),
+            &target,
+            packed_dimensions,
+        );
         let Some((rhs, _)) = selected_value_after_write(
             &Expr::Ident(name.clone()),
             &whole_target,
             &target,
-            write.assignment().rhs(),
+            &write_value,
             packed_dimensions,
         ) else {
             continue;
@@ -9451,6 +9494,9 @@ fn conditional_assignments_from_case_statement(
         packed_dimensions,
     )
     .ok_or_else(|| AnalyzerError::Unsupported("always_ff case selector lowering".to_string()))?;
+    let two_state_selector_width = two_state_case_selector_width(&case_expr, packed_dimensions);
+    let mut covered_selector_values = HashSet::default();
+    let mut labels_are_constant = true;
 
     let mut branches = Vec::new();
     let mut default_branch = None;
@@ -9469,6 +9515,25 @@ fn conditional_assignments_from_case_statement(
                             "always_ff case item expression lowering".to_string(),
                         )
                     })?;
+                    if let Some(width) = two_state_selector_width {
+                        let value = expr_to_const(expr.clone())
+                            .and_then(|expr| eval_ast_const_expr(&expr, const_env));
+                        if let Some(value) = value {
+                            let total = 1i128.checked_shl(u32::try_from(width).unwrap_or(u32::MAX));
+                            if value >= 0 && total.is_some_and(|total| value < total) {
+                                covered_selector_values.insert(value);
+                            } else if expr_static_width(&expr, packed_dimensions)
+                                .is_some_and(|label_width| label_width <= width)
+                            {
+                                covered_selector_values
+                                    .insert(coerce_const_parameter_value(value, width, false));
+                            } else {
+                                labels_are_constant = false;
+                            }
+                        } else {
+                            labels_are_constant = false;
+                        }
+                    }
                     conditions.push(case_item_condition(case_expr.clone(), expr));
                 }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
@@ -9485,9 +9550,16 @@ fn conditional_assignments_from_case_statement(
         }
     }
 
+    let complete_two_state_case = two_state_selector_width
+        .and_then(|width| 1usize.checked_shl(u32::try_from(width).ok()?))
+        .is_some_and(|value_count| {
+            labels_are_constant && covered_selector_values.len() == value_count
+        });
+
     let mut prior_false = Vec::new();
     let mut definitely_assigned_branches = Vec::new();
-    for (branch_condition, branch) in branches {
+    let branch_count = branches.len();
+    for (branch_index, (branch_condition, branch)) in branches.into_iter().enumerate() {
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
@@ -9509,6 +9581,18 @@ fn conditional_assignments_from_case_statement(
             syntax_tree,
             packed_dimensions,
         ));
+        if complete_two_state_case
+            && exhaustive_fallback
+            && parent_condition.is_none()
+            && branch_index + 1 == branch_count
+        {
+            mark_exhaustive_fallback(
+                &mut assignments[branch_start..],
+                &definitely_assigned_branches,
+                chain_start,
+                packed_dimensions,
+            );
+        }
         prior_false.push(Expr::Unary {
             op: UnaryOp::LogicNot,
             expr: Box::new(branch_condition),
@@ -9546,6 +9630,26 @@ fn conditional_assignments_from_case_statement(
         }
     }
     Ok(())
+}
+
+fn two_state_case_selector_width(
+    selector: &Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<usize> {
+    let name = match selector {
+        Expr::Ident(name) => name,
+        Expr::Select { expr, .. } => {
+            let Expr::Ident(name) = &**expr else {
+                return None;
+            };
+            name
+        }
+        _ => return None,
+    };
+    packed_dimensions
+        .get(name)
+        .is_some_and(|dimensions| dimensions.is_2state)
+        .then(|| expr_static_width(selector, packed_dimensions))?
 }
 
 fn mark_condition_context(
