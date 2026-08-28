@@ -3311,6 +3311,46 @@ fn coerces_whole_unpacked_array_writes_to_the_flattened_width() {
 }
 
 #[test]
+fn normalizes_element_writes_before_conditional_whole_array_writes() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [7:0] a, b,
+            input logic [7:0] d[2],
+            output logic [7:0] x[2]
+        );
+            always_comb begin
+                x[0] = a;
+                x[1] = b;
+                if (c)
+                    x = d;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("mixed_unpacked_array_comb_writes.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 0x11u8);
+        io.set(b, 0x22u8);
+        io.set(d, 0x4433u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0x2211u16.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0x4433u16.into());
+}
+
+#[test]
 fn interprets_signed_literals_before_constant_unary_operations() {
     let source = r#"
         module Top #(

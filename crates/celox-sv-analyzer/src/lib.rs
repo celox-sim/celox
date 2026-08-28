@@ -946,6 +946,45 @@ mod tests {
     }
 
     #[test]
+    fn preserves_named_constant_casts_in_unpacked_ranges() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 2
+                ) (
+                    output logic y [W'(1):0]
+                );
+                endmodule
+            "#,
+            Path::new("named_cast_unpacked_range.sv"),
+        )
+        .expect("named constant casts in unpacked dimensions should use the module environment");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn resolves_typedef_declared_parameter_types() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic signed [1:0] { Z = 0 } E;
+                    localparam E P = '0;
+                    localparam B = $bits(P);
+                endmodule
+            "#,
+            Path::new("typedef_declared_parameter.sv"),
+        )
+        .expect("typedef-declared parameters should retain their declared type");
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[0].declared_width(), Some(2));
+        assert_eq!(parameters[0].declared_signed(), Some(true));
+        assert_eq!(parameters[1].resolved_value(), Some(2));
+    }
+
+    #[test]
     fn preserves_enum_types_in_instance_parameter_overrides() {
         let ir = analyze_source(
             r#"
