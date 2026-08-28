@@ -11,9 +11,11 @@ use crate::native::mir::{
 use super::cfg::NormalizedCfg;
 use super::materialized_state_home::{MaterializedStateReload, MaterializedStateStore};
 use super::next_use::NextUseAnalysis;
+#[cfg(test)]
+use super::reload::PureStep;
 use super::reload::{
-    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, PureStep, ReloadRecipeAnalysis,
-    ResolvedBase, ResolvedRecipe, materialize_pure_step,
+    ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, ReloadRecipeAnalysis, ResolvedBase,
+    ResolvedRecipe, materialize_pure_step,
 };
 use super::spill_plan::{
     LogicalValue, PlannedEdgeOp, PlannedOp, PointSide, ProgramPoint, SpillHome, SpillPlan,
@@ -94,18 +96,6 @@ enum MaterializedOp {
 struct PreparedRecipe {
     expected: ResolvedRecipe,
     instructions: Vec<MInst>,
-}
-
-/// Exact recipe prefixes already emitted at one concrete insertion point.
-///
-/// VRegs are sufficient node identities because every cached prefix has one
-/// unique SSA definition.  Keeping one flat edge table avoids a separately
-/// allocated hash table for every trie node.  Final recipe results are never
-/// cached: each logical reload must retain its own SSA representative.
-#[derive(Default)]
-struct PreparedRecipeCache {
-    bases: HashMap<ResolvedBase, VReg>,
-    steps: HashMap<(VReg, PureStep), VReg>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -222,13 +212,7 @@ pub(super) fn reconstruct(
             .phis
             .retain(|phi| !spilled_phis.contains(&plan.logical.of(phi.dst)));
     }
-    let mut cached_point = None;
-    let mut point_recipe_cache = PreparedRecipeCache::default();
     for &(point, operation) in &plan.point_ops {
-        if cached_point != Some(point) {
-            point_recipe_cache = PreparedRecipeCache::default();
-            cached_point = Some(point);
-        }
         if !matches!(operation, PlannedOp::Reload { .. }) {
             continue;
         }
@@ -252,7 +236,6 @@ pub(super) fn reconstruct(
             &mut insertions,
             &mut reload_blocks,
             recipe,
-            &mut point_recipe_cache,
         )?;
     }
     for (&(predecessor, successor), operations) in &plan.edge_ops {
@@ -285,18 +268,8 @@ pub(super) fn reconstruct(
             instruction_count: 0,
         };
         let mut reloads_only = true;
-        let mut recipe_cache = PreparedRecipeCache::default();
-        let cache_scope_end = edge_home_transfer_end(operations);
         let mut operation_index = 0usize;
         while operation_index < operations.len() {
-            if cache_scope_end == Some(operation_index) {
-                // W/S deliberately completes every reload/store home transfer
-                // before it restores successor residents. A recipe prefix
-                // retained across that boundary is an unplanned live value
-                // during the resident phase, so the two phases have distinct
-                // reconstruction caches.
-                recipe_cache = PreparedRecipeCache::default();
-            }
             let operation = operations[operation_index];
             if let PlannedEdgeOp::Reload {
                 source,
@@ -332,7 +305,6 @@ pub(super) fn reconstruct(
                     &mut logical_for_vreg,
                     &mut insertions,
                     recipe,
-                    &mut recipe_cache,
                 )?;
                 operation_index += 2;
                 continue;
@@ -363,7 +335,6 @@ pub(super) fn reconstruct(
                 &mut insertions,
                 &mut reload_blocks,
                 recipe,
-                &mut recipe_cache,
             )?;
             if !is_reload {
                 debug_assert!(materialized.is_none());
@@ -544,29 +515,6 @@ pub(super) fn reconstruct(
         state_reloads,
         shared_reload_blocks,
     })
-}
-
-fn edge_home_transfer_end(operations: &[PlannedEdgeOp]) -> Option<usize> {
-    let mut index = 0usize;
-    while matches!(operations.get(index), Some(PlannedEdgeOp::Spill { .. })) {
-        index += 1;
-    }
-    let transfer_start = index;
-    while let (
-        Some(PlannedEdgeOp::Reload { destination, .. }),
-        Some(PlannedEdgeOp::Spill {
-            source,
-            destination: spill_destination,
-            ..
-        }),
-    ) = (operations.get(index), operations.get(index + 1))
-    {
-        if source != destination || spill_destination != destination {
-            break;
-        }
-        index += 2;
-    }
-    (index > transfer_start).then_some(index)
 }
 
 fn available_recipe_at_point(
@@ -955,7 +903,6 @@ fn materialize_operation(
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
     recipe: Option<ResolvedRecipe>,
-    recipe_cache: &mut PreparedRecipeCache,
 ) -> Result<Option<MaterializedReload>, ReconstructError> {
     let (operation, reload) = match operation {
         PlannedOp::Spill { value, home } | PlannedOp::SpillPhi { value, home } => {
@@ -972,8 +919,7 @@ fn materialize_operation(
                 |recipe| ReloadMaterialization::Recipe(recipe.clone()),
             );
             let (fresh, recipe, definitions, instruction_count) = if let Some(recipe) = recipe {
-                let (fresh, prepared) =
-                    prepare_recipe(func, logical_for_vreg, value, recipe, recipe_cache)?;
+                let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, value, recipe)?;
                 let definitions = prepared
                     .instructions
                     .iter()
@@ -1026,7 +972,6 @@ fn materialize_edge_operation(
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     reload_blocks: &mut HashMap<LogicalValue, BTreeSet<usize>>,
     recipe: Option<ResolvedRecipe>,
-    recipe_cache: &mut PreparedRecipeCache,
 ) -> Result<Option<MaterializedReload>, ReconstructError> {
     if matches!(operation, PlannedEdgeOp::Spill { .. }) {
         // All standalone point and edge spills come from the one
@@ -1052,8 +997,7 @@ fn materialize_edge_operation(
                 |recipe| ReloadMaterialization::Recipe(recipe.clone()),
             );
             let (fresh, prepared, definitions, instruction_count) = if let Some(recipe) = recipe {
-                let (fresh, prepared) =
-                    prepare_recipe(func, logical_for_vreg, source, recipe, recipe_cache)?;
+                let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, source, recipe)?;
                 let definitions = prepared
                     .instructions
                     .iter()
@@ -1107,11 +1051,9 @@ fn materialize_edge_home_transfer(
     logical_for_vreg: &mut Vec<LogicalValue>,
     insertions: &mut HashMap<(usize, usize), Vec<MaterializedOp>>,
     recipe: Option<ResolvedRecipe>,
-    recipe_cache: &mut PreparedRecipeCache,
 ) -> Result<(), ReconstructError> {
     let (fresh, recipe) = if let Some(recipe) = recipe {
-        let (fresh, prepared) =
-            prepare_recipe(func, logical_for_vreg, destination, recipe, recipe_cache)?;
+        let (fresh, prepared) = prepare_recipe(func, logical_for_vreg, destination, recipe)?;
         (fresh, Some(prepared))
     } else {
         (alloc_fresh(func, logical_for_vreg, destination)?, None)
@@ -1135,40 +1077,17 @@ fn prepare_recipe(
     logical_for_vreg: &mut Vec<LogicalValue>,
     logical: LogicalValue,
     expected: ResolvedRecipe,
-    cache: &mut PreparedRecipeCache,
 ) -> Result<(VReg, PreparedRecipe), ReconstructError> {
     let mut instructions = Vec::with_capacity(expected.steps.len() + 1);
-    if expected.steps.is_empty() {
-        let result = alloc_fresh(func, logical_for_vreg, logical)?;
-        instructions.push(materialize_recipe_base(&expected.base, result));
-        return Ok((
-            result,
-            PreparedRecipe {
-                expected,
-                instructions,
-            },
-        ));
-    }
-
-    let mut current = if let Some(&cached) = cache.bases.get(&expected.base) {
-        cached
-    } else {
-        let base = alloc_fresh(func, logical_for_vreg, logical)?;
-        instructions.push(materialize_recipe_base(&expected.base, base));
-        cache.bases.insert(expected.base.clone(), base);
-        base
-    };
-    for (index, &step) in expected.steps.iter().enumerate() {
-        let is_final = index + 1 == expected.steps.len();
-        if !is_final && let Some(&cached) = cache.steps.get(&(current, step)) {
-            current = cached;
-            continue;
-        }
+    // W/S reserves one register for each reload result, but not an additional
+    // register for a recipe prefix retained across reloads. Materialize every
+    // recipe as its own linear chain so each intermediate dies when the next
+    // one is defined and can reuse the same physical register.
+    let mut current = alloc_fresh(func, logical_for_vreg, logical)?;
+    instructions.push(materialize_recipe_base(&expected.base, current));
+    for &step in &expected.steps {
         let destination = alloc_fresh(func, logical_for_vreg, logical)?;
         instructions.push(materialize_pure_step(step, destination, current));
-        if !is_final {
-            cache.steps.insert((current, step), destination);
-        }
         current = destination;
     }
     Ok((
@@ -2085,270 +2004,68 @@ mod tests {
     }
 
     #[test]
-    fn recipe_materialization_shares_exact_intermediate_prefixes() {
+    fn recipe_materialization_preserves_the_planned_pressure_bound() {
         let mut vregs = VRegAllocator::new();
+        let residents = (0..13).map(|_| vregs.alloc()).collect::<Vec<_>>();
         let first_logical = vregs.alloc();
         let second_logical = vregs.alloc();
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
-        let mut logical_for_vreg = vec![
-            LogicalValue(first_logical.0),
-            LogicalValue(second_logical.0),
-        ];
-        let mut cache = PreparedRecipeCache::default();
-        let common_mask = PureStep::AndImm32 {
-            immediate: 0x07ff_ffff,
-        };
-
-        let (first_result, first) = prepare_recipe(
-            &mut func,
-            &mut logical_for_vreg,
-            LogicalValue(first_logical.0),
-            ResolvedRecipe {
-                base: ResolvedBase::Constant(0x1234_5678),
-                steps: vec![common_mask, PureStep::ShrImm64 { immediate: 18 }],
-            },
-            &mut cache,
-        )
-        .unwrap();
-        let (second_result, second) = prepare_recipe(
-            &mut func,
-            &mut logical_for_vreg,
-            LogicalValue(second_logical.0),
-            ResolvedRecipe {
-                base: ResolvedBase::Constant(0x1234_5678),
-                steps: vec![common_mask, PureStep::ShrImm64 { immediate: 9 }],
-            },
-            &mut cache,
-        )
-        .unwrap();
-
-        assert_eq!(first.instructions.len(), 3);
-        assert_eq!(second.instructions.len(), 1);
-        let common = match first.instructions[1] {
-            MInst::AndImm32 {
-                dst,
-                imm: 0x07ff_ffff,
-                ..
-            } => dst,
-            ref instruction => panic!("expected cached mask, got {instruction:?}"),
-        };
-        assert!(matches!(
-            second.instructions[0],
-            MInst::ShrImm {
-                dst,
-                src,
-                imm: 9,
-            } if dst == second_result && src == common
-        ));
-        assert_ne!(first_result, second_result);
-    }
-
-    #[test]
-    fn recipe_materialization_never_shares_final_results() {
-        let mut vregs = VRegAllocator::new();
-        let first_logical = vregs.alloc();
-        let second_logical = vregs.alloc();
-        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
-        let mut logical_for_vreg = vec![
-            LogicalValue(first_logical.0),
-            LogicalValue(second_logical.0),
-        ];
-        let mut cache = PreparedRecipeCache::default();
-        let recipe = ResolvedRecipe {
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 15]);
+        let mut logical_for_vreg = (0..15).map(LogicalValue).collect::<Vec<_>>();
+        let recipe = |immediate| ResolvedRecipe {
             base: ResolvedBase::Constant(0x1234_5678),
-            steps: vec![
-                PureStep::AndImm32 {
-                    immediate: 0x07ff_ffff,
-                },
-                PureStep::ShrImm64 { immediate: 18 },
-            ],
+            steps: vec![PureStep::CmpImm64 {
+                immediate,
+                kind: crate::native::mir::CmpKind::Eq,
+            }],
         };
 
         let (first_result, first) = prepare_recipe(
             &mut func,
             &mut logical_for_vreg,
             LogicalValue(first_logical.0),
-            recipe.clone(),
-            &mut cache,
+            recipe(1),
         )
         .unwrap();
         let (second_result, second) = prepare_recipe(
             &mut func,
             &mut logical_for_vreg,
             LogicalValue(second_logical.0),
-            recipe,
-            &mut cache,
+            recipe(2),
         )
         .unwrap();
 
-        assert_eq!(first.instructions.len(), 3);
-        assert_eq!(second.instructions.len(), 1);
-        assert_ne!(first_result, second_result);
-        assert_eq!(second.instructions[0].def(), Some(second_result));
-    }
-
-    #[test]
-    fn edge_recipe_cache_does_not_cross_the_home_transfer_phase() {
-        fn fixture(reset_cache: bool) -> MFunction {
-            let mut vregs = VRegAllocator::new();
-            let residents = (0..13).map(|_| vregs.alloc()).collect::<Vec<_>>();
-            let transfer_a = vregs.alloc();
-            let transfer_b = vregs.alloc();
-            let resident_a = vregs.alloc();
-            let resident_b = vregs.alloc();
-            let transient = vregs.alloc();
-            let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 18]);
-            let mut logical_for_vreg = (0..18).map(LogicalValue).collect::<Vec<_>>();
-            let mut cache = PreparedRecipeCache::default();
-            let recipe = |base, immediate| ResolvedRecipe {
-                base: ResolvedBase::Constant(base),
-                steps: vec![PureStep::CmpImm64 {
-                    immediate,
-                    kind: crate::native::mir::CmpKind::Eq,
-                }],
-            };
-            let (transfer_a_result, transfer_a_recipe) = prepare_recipe(
-                &mut func,
-                &mut logical_for_vreg,
-                LogicalValue(transfer_a.0),
-                recipe(7, 1),
-                &mut cache,
-            )
-            .unwrap();
-            let (transfer_b_result, transfer_b_recipe) = prepare_recipe(
-                &mut func,
-                &mut logical_for_vreg,
-                LogicalValue(transfer_b.0),
-                recipe(8, 1),
-                &mut cache,
-            )
-            .unwrap();
-            if reset_cache {
-                cache = PreparedRecipeCache::default();
-            }
-            let (resident_a_result, resident_a_recipe) = prepare_recipe(
-                &mut func,
-                &mut logical_for_vreg,
-                LogicalValue(resident_a.0),
-                recipe(7, 2),
-                &mut cache,
-            )
-            .unwrap();
-            let (resident_b_result, resident_b_recipe) = prepare_recipe(
-                &mut func,
-                &mut logical_for_vreg,
-                LogicalValue(resident_b.0),
-                recipe(8, 2),
-                &mut cache,
-            )
-            .unwrap();
-
-            let mut block = MBlock::new(BlockId(0));
-            for (index, resident) in residents.iter().copied().enumerate() {
-                block.push(MInst::LoadImm {
-                    dst: resident,
-                    value: index as u64,
-                });
-            }
-            block.insts.extend(transfer_a_recipe.instructions);
-            block.push(MInst::Store {
-                base: BaseReg::StackFrame,
-                offset: 0,
-                src: transfer_a_result,
-                size: OpSize::S64,
+        assert_eq!(first.instructions.len(), 2);
+        assert_eq!(second.instructions.len(), 2);
+        let mut block = MBlock::new(BlockId(0));
+        for (value, destination) in residents.iter().copied().enumerate() {
+            block.push(MInst::LoadImm {
+                dst: destination,
+                value: value as u64,
             });
-            block.insts.extend(transfer_b_recipe.instructions);
-            block.push(MInst::Store {
-                base: BaseReg::StackFrame,
-                offset: 8,
-                src: transfer_b_result,
-                size: OpSize::S64,
-            });
-            block.push(MInst::Load {
-                dst: transient,
-                base: BaseReg::StackFrame,
-                offset: 16,
-                size: OpSize::S64,
-            });
-            block.push(MInst::Store {
-                base: BaseReg::StackFrame,
-                offset: 24,
-                src: transient,
-                size: OpSize::S64,
-            });
-            block.insts.extend(resident_a_recipe.instructions);
-            block.insts.extend(resident_b_recipe.instructions);
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: 0,
-                src: resident_a_result,
-                size: OpSize::S64,
-            });
-            block.push(MInst::Store {
-                base: BaseReg::SimState,
-                offset: 8,
-                src: resident_b_result,
-                size: OpSize::S64,
-            });
-            for (index, resident) in residents.into_iter().enumerate() {
-                block.push(MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 16 + index as i32 * 8,
-                    src: resident,
-                    size: OpSize::S64,
-                });
-            }
-            block.push(MInst::Return);
-            func.push_block(block);
-            func.verify();
-            func
         }
+        block.insts.extend(first.instructions);
+        block.insts.extend(second.instructions);
+        for (offset, result) in [first_result, second_result].into_iter().enumerate() {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: offset as i32 * 8,
+                src: result,
+                size: OpSize::S64,
+            });
+        }
+        for (offset, resident) in residents.into_iter().enumerate() {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16 + offset as i32 * 8,
+                src: resident,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Return);
+        func.push_block(block);
 
-        let overflowing = fixture(false);
-        let analysis = super::super::analysis::analyze(&overflowing);
-        assert!(super::super::pressure::verify(&overflowing, &analysis, 15).is_err());
-
-        let bounded = fixture(true);
-        let analysis = super::super::analysis::analyze(&bounded);
-        super::super::pressure::verify(&bounded, &analysis, 15).unwrap();
-    }
-
-    #[test]
-    fn edge_home_transfer_cache_scope_ends_before_resident_reloads() {
-        let transfer = |source, destination| {
-            [
-                PlannedEdgeOp::Reload {
-                    source,
-                    source_home: SpillHome(source.0),
-                    destination,
-                },
-                PlannedEdgeOp::Spill {
-                    source: destination,
-                    destination,
-                    destination_home: SpillHome(destination.0),
-                },
-            ]
-        };
-        let first = transfer(LogicalValue(1), LogicalValue(2));
-        let second = transfer(LogicalValue(3), LogicalValue(4));
-        let operations = [
-            PlannedEdgeOp::Spill {
-                source: LogicalValue(0),
-                destination: LogicalValue(0),
-                destination_home: SpillHome(0),
-            },
-            first[0],
-            first[1],
-            second[0],
-            second[1],
-            PlannedEdgeOp::Reload {
-                source: LogicalValue(0),
-                source_home: SpillHome(0),
-                destination: LogicalValue(0),
-            },
-        ];
-
-        assert_eq!(edge_home_transfer_end(&operations), Some(5));
+        let analysis = super::super::analysis::analyze(&func);
+        super::super::pressure::verify(&func, &analysis, 15).unwrap();
     }
 
     #[test]
