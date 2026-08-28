@@ -904,6 +904,74 @@ mod tests {
     }
 
     #[test]
+    fn re_resolves_parameters_between_enum_declarations() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic [1:0] { A = 2 } E0;
+                    localparam W = A + 1;
+                    typedef enum logic [3:0] { B = W } E1;
+                    logic [B-1:0] data;
+                endmodule
+            "#,
+            Path::new("enum_parameter_enum_dependency.sv"),
+        )
+        .expect("parameters between enum declarations should be available to later enums");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(3));
+    }
+
+    #[test]
+    fn preserves_named_constant_casts_in_packed_ranges() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 8
+                ) (
+                    output logic [W'(15):0] y
+                );
+                endmodule
+            "#,
+            Path::new("named_cast_packed_range.sv"),
+        )
+        .expect("named constant casts should lower with the module environment");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn preserves_enum_types_in_instance_parameter_overrides() {
+        let ir = analyze_source(
+            r#"
+                module Child #(parameter P = 0) ();
+                endmodule
+
+                module Top;
+                    typedef enum logic signed [1:0] { A = 2'b10 } E;
+                    Child #(.P(A)) child();
+                endmodule
+            "#,
+            Path::new("typed_enum_parameter_override.sv"),
+        )
+        .expect("enum parameter overrides should retain their declared type");
+        let top = ir
+            .modules()
+            .iter()
+            .find(|module| module.name() == "Top")
+            .expect("Top module should exist");
+        assert_eq!(
+            top.instances()[0].parameter_overrides()[0].value(),
+            Some(&ir::ConstExpr::Literal("2'sd2".to_string()))
+        );
+    }
+
+    #[test]
     fn rejects_conditional_predicate_conjunction_terms() {
         let error = analyze_source(
             r#"
