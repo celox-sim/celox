@@ -4,6 +4,7 @@
 //! Supports 2-state and 4-state (IEEE 1800) with full mask propagation.
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
+mod dynamic_load_cache;
 mod packed_bit_store;
 mod sparse;
 
@@ -26,6 +27,7 @@ use celox_sir::analysis::{
     instruction_definition as sir_def_reg, reverse_postorder as ordered_sir_blocks,
     visit_instruction_uses as collect_sir_inst_uses,
 };
+use dynamic_load_cache::{block_dynamic_load_cache_plans, native_plane_access_size};
 use packed_bit_store::{PackedBitStorePlan, PackedBitStorePlans, find_packed_bit_store_plans};
 use sparse::{find_sparse_worklist_run, sparse_descriptor_table};
 
@@ -107,88 +109,10 @@ struct PackedByteAffineComparePlans {
     skip_indices: HashSet<usize>,
 }
 
-#[derive(Debug, Default)]
-struct BlockDynamicLoadCachePlans {
-    addresses: HashSet<RegionedAbsoluteAddr>,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct BlockDynamicLoadCacheEntry {
     value: VReg,
     mask: Option<VReg>,
-}
-
-fn native_plane_access_size(byte_size: usize) -> Option<OpSize> {
-    match byte_size {
-        1 => Some(OpSize::S8),
-        2 => Some(OpSize::S16),
-        4 => Some(OpSize::S32),
-        8 => Some(OpSize::S64),
-        _ => None,
-    }
-}
-
-fn block_dynamic_load_cache_plans(
-    block: &BasicBlock<RegionedAbsoluteAddr>,
-    layout: &MemoryLayout,
-) -> BlockDynamicLoadCachePlans {
-    const MIN_LOADS: usize = 4;
-
-    let mut counts = HashMap::<RegionedAbsoluteAddr, usize>::default();
-    let mut written_ranges = Vec::<(i32, usize)>::new();
-    let physical_range = |address: &RegionedAbsoluteAddr| {
-        let base = layout.regioned_static_byte_and_intra(address, 0)?.0;
-        Some((base, layout.plane_size(&address.absolute_addr())))
-    };
-
-    for instruction in &block.instructions {
-        match instruction {
-            SIRInstruction::Load(_, address, offset, width)
-                if *width <= 64
-                    && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. }) =>
-            {
-                *counts.entry(*address).or_default() += 1;
-            }
-            SIRInstruction::Store(address, ..) => {
-                if let Some(range) = physical_range(address) {
-                    written_ranges.push(range);
-                }
-            }
-            SIRInstruction::Commit(_, destination, ..) => {
-                if let Some(range) = physical_range(destination) {
-                    written_ranges.push(range);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let addresses = counts
-        .into_iter()
-        .filter_map(|(address, count)| {
-            if count < MIN_LOADS {
-                return None;
-            }
-            let absolute = address.absolute_addr();
-            let byte_size = layout.plane_size(&absolute);
-            native_plane_access_size(byte_size)?;
-            if layout.widths.get(&absolute).copied().unwrap_or(usize::MAX) > 64 {
-                return None;
-            }
-            if layout.unpacked_arrays.contains_key(&absolute) {
-                return None;
-            }
-            let (base, size) = physical_range(&address)?;
-            let end = i64::from(base).checked_add(i64::try_from(size).ok()?)?;
-            let overlaps_write = written_ranges.iter().any(|&(write_base, write_size)| {
-                let write_end =
-                    i64::from(write_base) + i64::try_from(write_size).unwrap_or(i64::MAX);
-                i64::from(base) < write_end && i64::from(write_base) < end
-            });
-            (!overlaps_write).then_some(address)
-        })
-        .collect();
-    BlockDynamicLoadCachePlans { addresses }
 }
 
 #[derive(Clone, Copy)]
