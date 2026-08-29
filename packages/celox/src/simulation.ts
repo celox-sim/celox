@@ -580,28 +580,48 @@ export class Simulation<P = Record<string, unknown>> {
 			typeKind === "reset_async_low" || typeKind === "reset_sync_low";
 		const activeValue = isActiveLow ? 0n : 1n;
 		const inactiveValue = isActiveLow ? 1n : 0n;
+		const associatedClock = sig.associatedClock;
+		const duration = opts?.duration;
+
+		// Validate the execution strategy before changing DUT state. A rejected
+		// reset call must not leave the signal asserted.
+		let execution:
+			| { kind: "duration"; duration: number }
+			| { kind: "cycles"; clock: string; cycles: number };
+		if (duration != null) {
+			execution = { kind: "duration", duration };
+		} else {
+			if (!associatedClock) {
+				throw new Error(
+					`Reset '${signal}' has no associated clock. Specify opts.duration.`,
+				);
+			}
+			if (!this._clocks.has(associatedClock)) {
+				throw new Error(
+					`No clock registered for '${associatedClock}'. Call addClock() first.`,
+				);
+			}
+			execution = {
+				kind: "cycles",
+				clock: associatedClock,
+				cycles: opts?.activeCycles ?? 2,
+			};
+		}
 
 		const dut = this._dut as Record<string, unknown>;
 		dut[signal] = activeValue;
-
-		const associatedClock = sig.associatedClock;
-
-		if (opts?.duration != null) {
-			// Explicit duration (works for both sync and async resets)
-			this._handle.runUntil(this._handle.time() + opts.duration);
-		} else if (associatedClock) {
-			// Clock-associated reset → advance by activeCycles
-			const cycles = opts?.activeCycles ?? 2;
-			this.waitForCycles(associatedClock, cycles);
-		} else {
-			// No associated clock and no explicit duration → error
-			throw new Error(
-				`Reset '${signal}' has no associated clock. Specify opts.duration.`,
-			);
+		try {
+			if (execution.kind === "duration") {
+				// Explicit duration (works for both sync and async resets)
+				this.runUntil(this.time() + execution.duration);
+			} else {
+				this.waitForCycles(execution.clock, execution.cycles);
+			}
+		} finally {
+			// Releasing reset changes an input after the final timed step. Keep the
+			// DUT dirty so the next output read observes the released state.
+			dut[signal] = inactiveValue;
 		}
-
-		dut[signal] = inactiveValue;
-		this._state.dirty = false;
 	}
 
 	/**

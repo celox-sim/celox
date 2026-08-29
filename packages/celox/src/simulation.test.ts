@@ -421,6 +421,24 @@ describe("Simulation", () => {
 		expect(mock.handle.step).toHaveBeenCalledTimes(3);
 	});
 
+	test("reset: releasing reset leaves outputs ready for lazy re-evaluation", () => {
+		const mock = createMockNative({ associatedClock: "clk" });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		const view = new DataView(mock.buffer);
+		vi.mocked(mock.handle.evalComb).mockImplementation(() => {
+			view.setUint8(4, view.getUint8(0));
+		});
+
+		sim.dut.d = 42n;
+		sim.addClock("clk", { period: 10 });
+		sim.reset("rst");
+
+		expect(sim.dut.q).toBe(0n);
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+	});
+
 	test("reset: throws when no associatedClock and no duration", () => {
 		// No associatedClock in layout
 		const mock = createMockNative();
@@ -429,6 +447,7 @@ describe("Simulation", () => {
 		});
 
 		expect(() => sim.reset("rst")).toThrow("has no associated clock");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
 	});
 
 	test("reset: no associatedClock but duration specified works", () => {
@@ -449,6 +468,37 @@ describe("Simulation", () => {
 		});
 		// addClock not called
 		expect(() => sim.reset("rst")).toThrow("No clock registered for 'clk'");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
+	});
+
+	test("reset: releases the signal when advancing the simulation fails", () => {
+		const mock = createMockNative({ associatedClock: "clk" });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.addClock("clk", { period: 10 });
+		vi.mocked(mock.handle.step).mockImplementationOnce(() => {
+			throw new Error("step failed");
+		});
+
+		expect(() => sim.reset("rst")).toThrow("step failed");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+		void sim.dut.q;
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+	});
+
+	test("reset: releases the signal when duration-based advancement fails", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		vi.mocked(mock.handle.runUntil).mockImplementationOnce(() => {
+			throw new Error("runUntil failed");
+		});
+
+		expect(() => sim.reset("rst", { duration: 10 })).toThrow("runUntil failed");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
 	});
 
 	test("reset: throws on non-reset port", () => {
