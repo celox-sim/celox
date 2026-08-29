@@ -195,7 +195,9 @@ impl Module {
         // Constant casts are evaluated while parameter syntax is lowered.
         // Repeat that lowering after enum constants become available so a
         // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
-        // discarded during the initial pass.
+        // discarded during the initial pass. Materialize only enum-member
+        // references so exported parameter expressions retain dependencies
+        // on other parameters for later specialization.
         parameters = parameters_from_module_node(
             node.clone(),
             syntax_tree,
@@ -203,6 +205,15 @@ impl Module {
             &const_env,
             applicable_parameter_overrides,
         )?;
+        for parameter in &mut parameters {
+            parameter.value = parameter.value.take().map(|value| {
+                substitute_typed_parameter_literals(
+                    value,
+                    &enum_constants.numbers,
+                    &enum_constants.types,
+                )
+            });
+        }
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
@@ -10210,7 +10221,13 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
         Expr::Binary { left, op, right } => {
             matches!(op, BinaryOp::EqCase | BinaryOp::NeCase)
                 || (expr_is_two_state(left, packed_dimensions)
-                    && expr_is_two_state(right, packed_dimensions))
+                    && expr_is_two_state(right, packed_dimensions)
+                    && (!matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                        || expr_to_const((**right).clone())
+                            .and_then(|right| {
+                                eval_ast_const_expr(&right, &packed_dimensions.const_env)
+                            })
+                            .is_some_and(|right| right != 0)))
         }
         Expr::Mux {
             condition,
@@ -11218,7 +11235,10 @@ fn guard_zero_divisions(expr: Expr) -> Expr {
                 op,
                 right: right.clone(),
             };
-            if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+            let divisor_is_nonzero = expr_to_const((*right).clone())
+                .and_then(|right| eval_ast_const_expr(&right, &HashMap::default()))
+                .is_some_and(|right| right != 0);
+            if matches!(op, BinaryOp::Div | BinaryOp::Mod) && !divisor_is_nonzero {
                 Expr::Mux {
                     condition: Box::new(Expr::Binary {
                         left: right,

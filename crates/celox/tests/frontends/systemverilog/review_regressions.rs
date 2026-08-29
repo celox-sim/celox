@@ -2351,6 +2351,52 @@ fn produces_unknown_for_four_state_division_by_zero() {
 }
 
 #[test]
+fn rejects_incomplete_cases_for_potential_two_state_division_by_zero() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit a, b, output logic y);
+            always_comb begin
+                case (a / b)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn recognizes_complete_cases_for_nonzero_two_state_divisors() {
+    let source = r#"
+        module Top(input bit a, output logic y);
+            always_comb begin
+                case (a / 1'b1)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nonzero_two_state_case_divisor.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, false)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+    sim.modify(|io| io.set(a, true)).unwrap();
+    assert_eq!(sim.get(y), true.into());
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -2926,6 +2972,27 @@ fn resolves_parameter_ranges_with_enum_constants() {
     .build_cranelift()
     .unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
+fn preserves_enum_dependent_parameters_in_instance_overrides() {
+    let source = r#"
+        module Child #(parameter Q = 0) (output logic [1:0] y);
+            assign y = Q;
+        endmodule
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 2 } E;
+            localparam P = A;
+            Child #(.Q(P)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("enum_dependent_instance_parameter.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
 }
 
 #[test]
