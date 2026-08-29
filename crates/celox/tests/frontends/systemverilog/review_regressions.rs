@@ -5748,14 +5748,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "dependent repeated assignment inside always_comb",
-            r#"
-            module Top(input logic b, d, output logic a, c);
-                always_comb begin a = b; c = a; a = d; end
-            endmodule
-        "#,
-        ),
-        (
             "reduction operator in parameter expression",
             r#"
             module Top #(parameter logic [3:0] P = 4'hf, parameter FLAG = &P)
@@ -7602,6 +7594,122 @@ fn rejects_function_writes_outside_the_inlined_scope() {
         error.contains("function assignment target outside local scope `side`"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn handles_wide_two_state_cases_without_enumerating_the_selector_domain() {
+    let source = r#"
+        module Top(input bit [31:0] s, input logic a, b, output logic y);
+            always_comb begin
+                case (s)
+                    32'd0: y = a;
+                    default: y = b;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("wide_two_state_case.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(s, 0u32);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, 1u32)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn treats_nonempty_static_for_loops_as_definite_assignments() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic y);
+            always_comb begin
+                if (c)
+                    y = a;
+                else
+                    for (int i = 0; i < 1; i++)
+                        y = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("definite_static_for_loop.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(c, false)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn rejects_unmatched_constant_cases_that_would_infer_latches() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y);
+            always_comb begin
+                case (1'b0)
+                    1'b1: y = a;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn sign_extends_function_calls_in_conditional_assignments() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] y);
+            function automatic logic signed [3:0] f();
+                return -1;
+            endfunction
+            always_comb begin
+                if (c)
+                    y = f();
+                else
+                    y = 8'h00;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("signed_function_conditional_assignment.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, true)).unwrap();
+    assert_eq!(sim.get(y), 0xffu8.into());
+    sim.modify(|io| io.set(c, false)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

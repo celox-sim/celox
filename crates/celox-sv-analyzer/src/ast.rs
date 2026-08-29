@@ -1335,6 +1335,19 @@ fn reject_silently_ignored_constructs(
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
                     validate_static_for_loops_in_statement(&always.nodes.1, syntax_tree, const_env)?;
                 }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
+                    validate_static_for_loops_in_statement(&always.nodes.1, syntax_tree, const_env)
+                        .map_err(|error| match error {
+                            AnalyzerError::Unsupported(construct)
+                                if construct == "procedural loop inside always_ff" =>
+                            {
+                                AnalyzerError::Unsupported(
+                                    "procedural loop inside always_comb".to_string(),
+                                )
+                            }
+                            error => error,
+                        })?;
+                }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
                     && body.clone().into_iter().any(|node| {
                         matches!(
@@ -1350,16 +1363,6 @@ fn reject_silently_ignored_constructs(
                 {
                     return Err(AnalyzerError::Unsupported(
                         "casez, casex, or pattern case inside always_ff".to_string(),
-                    ));
-                }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
-                    && body
-                        .clone()
-                        .into_iter()
-                        .any(|node| matches!(node, RefNode::LoopStatement(_)))
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "procedural loop inside always_comb".to_string(),
                     ));
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
@@ -7566,6 +7569,15 @@ fn expr_signedness(
     identifiers: &HashMap<String, bool>,
     functions: &HashMap<String, Function>,
 ) -> Option<bool> {
+    expr_signedness_with_return_types(expr, identifiers, functions, &HashMap::default())
+}
+
+fn expr_signedness_with_return_types(
+    expr: &Expr,
+    identifiers: &HashMap<String, bool>,
+    functions: &HashMap<String, Function>,
+    function_return_types: &HashMap<String, (Option<usize>, bool, bool)>,
+) -> Option<bool> {
     match expr {
         Expr::Ident(name) => identifiers.get(name).copied(),
         Expr::Literal(literal) => {
@@ -7581,7 +7593,12 @@ fn expr_signedness(
             ) {
                 Some(false)
             } else {
-                expr_signedness(expr, identifiers, functions)
+                expr_signedness_with_return_types(
+                    expr,
+                    identifiers,
+                    functions,
+                    function_return_types,
+                )
             }
         }
         Expr::Binary { left, op, right } => {
@@ -7602,11 +7619,25 @@ fn expr_signedness(
             ) {
                 Some(false)
             } else if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
-                expr_signedness(left, identifiers, functions)
+                expr_signedness_with_return_types(
+                    left,
+                    identifiers,
+                    functions,
+                    function_return_types,
+                )
             } else {
                 Some(
-                    expr_signedness(left, identifiers, functions)?
-                        && expr_signedness(right, identifiers, functions)?,
+                    expr_signedness_with_return_types(
+                        left,
+                        identifiers,
+                        functions,
+                        function_return_types,
+                    )? && expr_signedness_with_return_types(
+                        right,
+                        identifiers,
+                        functions,
+                        function_return_types,
+                    )?,
                 )
             }
         }
@@ -7615,10 +7646,26 @@ fn expr_signedness(
             else_expr,
             ..
         } => Some(
-            expr_signedness(then_expr, identifiers, functions)?
-                && expr_signedness(else_expr, identifiers, functions)?,
+            expr_signedness_with_return_types(
+                then_expr,
+                identifiers,
+                functions,
+                function_return_types,
+            )? && expr_signedness_with_return_types(
+                else_expr,
+                identifiers,
+                functions,
+                function_return_types,
+            )?,
         ),
-        Expr::Call { name, .. } => functions.get(name).map(|function| function.return_signed),
+        Expr::Call { name, .. } => functions
+            .get(name)
+            .map(|function| function.return_signed)
+            .or_else(|| {
+                function_return_types
+                    .get(name)
+                    .map(|(_, signed, _)| *signed)
+            }),
     }
 }
 
@@ -8668,6 +8715,34 @@ fn substitute_intermediate_comb_value_reads(
         }
 
         if !is_target_write {
+            // Keep the tracked value current across writes to an overlapping
+            // whole object or subrange. Otherwise a later read could be
+            // rewritten with the value from before that intervening write.
+            let tracked_target = match target {
+                LValue::Ident(name) => whole_packed_lvalue(name, packed_dimensions),
+                LValue::Select { .. } => Some(target.clone()),
+            };
+            if let Some(tracked_target) = tracked_target
+                && let Some((updated, covers_target)) = selected_value_after_write(
+                    &established,
+                    &tracked_target,
+                    guarded_assignment.assignment().lhs_value(),
+                    guarded_assignment.assignment().rhs(),
+                    packed_dimensions,
+                )
+            {
+                established = match guarded_assignment.condition() {
+                    None => {
+                        initialized |= covers_target;
+                        updated
+                    }
+                    Some(condition) => Expr::Mux {
+                        condition: Box::new(condition.clone()),
+                        then_expr: Box::new(updated),
+                        else_expr: Box::new(established),
+                    },
+                };
+            }
             continue;
         }
         write_index += 1;
@@ -9852,6 +9927,14 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
             }
             Ok(())
         }
+        sv_parser::StatementItem::LoopStatement(loop_statement) => {
+            let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
+                return Err(AnalyzerError::Unsupported(
+                    "unsupported statement inside always_comb".to_string(),
+                ));
+            };
+            validate_always_comb_statement_or_null(&loop_statement.nodes.2)
+        }
         _ => Err(AnalyzerError::Unsupported(
             "unsupported statement inside always_comb".to_string(),
         )),
@@ -10383,8 +10466,12 @@ fn coerce_procedural_assignment_rhs(
         .iter()
         .map(|(name, dimensions)| (name.clone(), dimensions.signed))
         .collect();
-    let Some(source_signed) = expr_signedness(&rhs, &identifier_signedness, &HashMap::default())
-    else {
+    let Some(source_signed) = expr_signedness_with_return_types(
+        &rhs,
+        &identifier_signedness,
+        &HashMap::default(),
+        &packed_dimensions.function_return_types,
+    ) else {
         return rhs;
     };
     let assigned = if source_signed == target_type.signed
@@ -10592,6 +10679,12 @@ fn conditional_assignments_from_case_statement(
     let complete_two_state_case = item_reachability
         .as_ref()
         .is_some_and(|(_, covered)| *covered);
+    let preserve_unmatched_writes =
+        item_reachability
+            .as_ref()
+            .is_some_and(|(reachable, covered)| {
+                !*covered && !reachable.iter().any(|reachable| *reachable)
+            });
 
     let mut branches = Vec::new();
     let mut default_branch = None;
@@ -10602,6 +10695,7 @@ fn conditional_assignments_from_case_statement(
         if item_reachability
             .as_ref()
             .is_some_and(|(reachable, _)| !reachable[item_index])
+            && !preserve_unmatched_writes
         {
             continue;
         }
@@ -10820,19 +10914,14 @@ fn two_state_case_item_reachability(
     )?;
     let selector = simplify_constant_mux_conditions(selector, const_env);
     let width = two_state_case_selector_width(&selector, packed_dimensions)?;
-    let selector_values = if let Some(value) = expr_to_const(selector.clone())
-        .and_then(|selector| eval_ast_const_expr(&selector, const_env))
-    {
-        vec![value]
-    } else {
-        let value_count = u32::try_from(width)
-            .ok()
-            .and_then(|width| 1usize.checked_shl(width))?;
-        if i128::try_from(value_count).is_err() {
-            return None;
-        }
-        (0..value_count).map(|value| value as i128).collect()
-    };
+    // Constant evaluation and the type model use i128 values. Wider dynamic
+    // selectors still lower normally, but are not candidates for this
+    // reachability optimization.
+    if width > 128 {
+        return None;
+    }
+    let constant_selector_value = expr_to_const(selector.clone())
+        .and_then(|selector| eval_ast_const_expr(&selector, const_env));
     let mut identifiers = packed_dimensions
         .iter()
         .map(|(name, dimensions)| (name.clone(), dimensions.signed))
@@ -10877,17 +10966,8 @@ fn two_state_case_item_reachability(
             }
         }
     }
-    let label_count = labels_by_item
-        .iter()
-        .filter_map(Option::as_ref)
-        .map(Vec::len)
-        .sum::<usize>();
-    if default_index.is_none() && label_count < selector_values.len() {
-        return None;
-    }
     let mut reachable = vec![false; labels_by_item.len()];
-    let mut covered = true;
-    for value in selector_values {
+    if let Some(value) = constant_selector_value {
         let selector = ConstExpr::Literal(format_typed_parameter_literal(
             value,
             width,
@@ -10916,15 +10996,65 @@ fn two_state_case_item_reachability(
                 break;
             }
         }
-        if let Some(index) = matched {
+        let covered = if let Some(index) = matched {
             reachable[index] = true;
+            true
         } else if let Some(index) = default_index {
             reachable[index] = true;
+            true
         } else {
-            covered = false;
+            false
+        };
+        return Some((reachable, covered));
+    }
+
+    // A constant case label can match at most one bit pattern of a two-state
+    // selector. Track those patterns directly instead of materializing every
+    // value in the selector's 2^width domain.
+    let mut matched_values = HashSet::default();
+    for (index, labels) in labels_by_item.iter().enumerate() {
+        let Some(labels) = labels else {
+            continue;
+        };
+        for label in labels {
+            let Some(label_value) = eval_ast_const_expr(label, const_env) else {
+                // X/Z-bearing labels cannot match a two-state selector.
+                continue;
+            };
+            let pattern = if width == 128 {
+                label_value as u128
+            } else {
+                let mask = 1u128.checked_shl(u32::try_from(width).ok()?)? - 1;
+                label_value as u128 & mask
+            };
+            let candidate = ConstExpr::Literal(format_typed_parameter_literal(
+                pattern as i128,
+                width,
+                selector_signed,
+            ));
+            let equal = eval_ast_const_expr(
+                &ConstExpr::Binary {
+                    left: Box::new(candidate),
+                    op: BinaryOp::EqCase,
+                    right: Box::new(label.clone()),
+                },
+                const_env,
+            )?;
+            if equal != 0 && matched_values.insert(pattern) {
+                reachable[index] = true;
+            }
         }
     }
-    Some((reachable, covered))
+    let domain_is_covered = u32::try_from(width)
+        .ok()
+        .and_then(|width| 1usize.checked_shl(width))
+        .is_some_and(|value_count| matched_values.len() == value_count);
+    if let Some(index) = default_index {
+        reachable[index] = !domain_is_covered;
+        Some((reachable, true))
+    } else {
+        Some((reachable, domain_is_covered))
+    }
 }
 
 fn mark_condition_context(
@@ -11151,6 +11281,41 @@ fn definitely_assigned_comb_targets(
             } else {
                 Vec::new()
             }
+        }
+        sv_parser::StatementItem::LoopStatement(loop_statement) => {
+            let Some((name, values)) = static_for_loop_iterations(
+                loop_statement,
+                syntax_tree,
+                &packed_dimensions.const_env,
+            ) else {
+                return Vec::new();
+            };
+            let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
+                return Vec::new();
+            };
+            let mut targets = Vec::new();
+            for value in values {
+                let mut iteration_dimensions = packed_dimensions.clone();
+                iteration_dimensions.const_env.insert(name.clone(), value);
+                insert_parameter_type_markers(
+                    &mut iteration_dimensions.const_env,
+                    &name,
+                    ExprType {
+                        width: 32,
+                        signed: true,
+                    },
+                );
+                for target in definitely_assigned_comb_targets_statement_or_null(
+                    &loop_statement.nodes.2,
+                    syntax_tree,
+                    &iteration_dimensions,
+                ) {
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+            }
+            targets
         }
         _ => Vec::new(),
     }
