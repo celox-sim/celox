@@ -55,6 +55,9 @@ interface MyPorts {
 }
 ```
 
+Array indices must be integers in the range `0 <= i < length`. Both `at()`
+and `set()` throw a `RangeError` for an invalid index.
+
 ## 4-State vs 2-State
 
 | Type | 4-State |
