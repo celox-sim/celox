@@ -15,6 +15,14 @@ use crate::{
 };
 use crate::{HashMap, HashSet};
 use crate::{RegionedAbsoluteAddr, STABLE_REGION};
+use celox_sir::analysis::{
+    ExactU64Constant as ExactSirConstant, UseSite as SirUseSite,
+    block_instruction_definitions as collect_sir_defs,
+    collect_unique_exact_u64_constants as collect_exact_sir_constants,
+    collect_use_sites as collect_sir_use_sites, exact_u64_constant as exact_sir_constant,
+    instruction_definition as sir_def_reg, reverse_postorder as ordered_sir_blocks,
+    visit_instruction_uses as collect_sir_inst_uses,
+};
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -1901,69 +1909,6 @@ pub fn lower_execution_unit_with_diagnostics(
     func
 }
 
-fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::BlockId> {
-    fn successors(term: &SIRTerminator) -> Vec<crate::BlockId> {
-        match term {
-            SIRTerminator::Jump(target, _) => vec![*target],
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => vec![true_block.0, false_block.0],
-            SIRTerminator::Switch { cases, default, .. } => cases
-                .iter()
-                .map(|case| case.target)
-                .chain(std::iter::once(*default))
-                .collect(),
-            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
-        }
-    }
-
-    fn visit_from(
-        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        start: crate::BlockId,
-        visited: &mut HashSet<crate::BlockId>,
-        postorder: &mut Vec<crate::BlockId>,
-    ) {
-        let mut stack = vec![(start, false)];
-        while let Some((block_id, expanded)) = stack.pop() {
-            if !eu.blocks.contains_key(&block_id) {
-                continue;
-            }
-            if expanded {
-                postorder.push(block_id);
-                continue;
-            }
-            if !visited.insert(block_id) {
-                continue;
-            }
-            stack.push((block_id, true));
-            let mut succs = successors(&eu.blocks[&block_id].terminator);
-            succs.reverse();
-            for succ in succs {
-                if !visited.contains(&succ) {
-                    stack.push((succ, false));
-                }
-            }
-        }
-    }
-
-    let mut visited = HashSet::default();
-    let mut postorder = Vec::new();
-    visit_from(eu, eu.entry_block_id, &mut visited, &mut postorder);
-
-    let mut sorted_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-    sorted_ids.sort();
-    for block_id in sorted_ids {
-        if !visited.contains(&block_id) {
-            visit_from(eu, block_id, &mut visited, &mut postorder);
-        }
-    }
-
-    postorder.reverse();
-    postorder
-}
-
 /// Compute a bitmask of `width` bits (e.g., width=8 → 0xFF).
 /// Returns u64::MAX for width >= 64 to avoid shift overflow.
 #[inline]
@@ -3035,12 +2980,6 @@ fn lower_low_bit(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
     dst
 }
 
-#[derive(Clone, Copy)]
-struct SirUseSite {
-    block: crate::BlockId,
-    inst_idx: Option<usize>,
-}
-
 #[derive(Default)]
 struct PriorityEncodePlans {
     roots: HashMap<usize, PriorityEncodePlan>,
@@ -3053,11 +2992,6 @@ struct PriorityEncodePlan {
     dst: RegisterId,
     src: RegisterId,
     width: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ExactSirConstant {
-    value: u64,
 }
 
 #[derive(Default)]
@@ -3363,44 +3297,6 @@ struct DenseLookupCandidate {
 struct DenseLookupEmitCache {
     byte_indices: HashMap<(RegisterId, usize), VReg>,
     table_addrs: HashMap<ConstantTableId, VReg>,
-}
-
-fn exact_sir_constant(value: &crate::SIRValue) -> Option<ExactSirConstant> {
-    if value.mask != num_bigint::BigUint::ZERO {
-        return None;
-    }
-    let digits = value.payload.to_u64_digits();
-    let value = match digits.as_slice() {
-        [] => 0,
-        [value] => *value,
-        _ => return None,
-    };
-    Some(ExactSirConstant { value })
-}
-
-fn collect_exact_sir_constants(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> HashMap<RegisterId, ExactSirConstant> {
-    let mut constants = HashMap::default();
-    let mut ambiguous = HashSet::default();
-    for block_id in ordered_sir_blocks(eu) {
-        let block = &eu.blocks[&block_id];
-        for inst in &block.instructions {
-            let SIRInstruction::Imm(dst, value) = inst else {
-                continue;
-            };
-            let Some(value) = exact_sir_constant(value) else {
-                continue;
-            };
-            if constants.insert(*dst, value).is_some() {
-                ambiguous.insert(*dst);
-            }
-        }
-    }
-    for reg in ambiguous {
-        constants.remove(&reg);
-    }
-    constants
 }
 
 fn find_dense_lookup_plans(
@@ -3709,113 +3605,6 @@ fn match_dense_lookup_condition(
     })
 }
 
-fn collect_sir_use_sites(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> HashMap<RegisterId, Vec<SirUseSite>> {
-    let mut uses: HashMap<RegisterId, Vec<SirUseSite>> = HashMap::default();
-    for block_id in ordered_sir_blocks(eu) {
-        let block = &eu.blocks[&block_id];
-        for (inst_idx, inst) in block.instructions.iter().enumerate() {
-            collect_sir_inst_uses(inst, |reg| {
-                uses.entry(reg).or_default().push(SirUseSite {
-                    block: block_id,
-                    inst_idx: Some(inst_idx),
-                });
-            });
-        }
-        collect_sir_term_uses(&block.terminator, |reg| {
-            uses.entry(reg).or_default().push(SirUseSite {
-                block: block_id,
-                inst_idx: None,
-            });
-        });
-    }
-    uses
-}
-
-fn collect_sir_inst_uses(
-    inst: &SIRInstruction<RegionedAbsoluteAddr>,
-    mut add: impl FnMut(RegisterId),
-) {
-    match inst {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            add(*lhs);
-            add(*rhs);
-        }
-        SIRInstruction::Unary(_, _, src) | SIRInstruction::Slice(_, src, _, _) => add(*src),
-        SIRInstruction::Load(_, _, offset, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                add(register);
-            }
-        }
-        SIRInstruction::Store(_, off, _, src, _, _) => {
-            for register in off.dynamic_registers().into_iter().flatten() {
-                add(register);
-            }
-            add(*src);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                add(register);
-            }
-        }
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for &arg in args {
-                add(arg);
-            }
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            add(*cond);
-            add(*then_val);
-            add(*else_val);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            add(*old);
-            add(*new);
-        }
-    }
-}
-
-fn collect_sir_defs(block: &crate::BasicBlock<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
-    let mut defs = HashMap::default();
-    for (idx, inst) in block.instructions.iter().enumerate() {
-        if let Some(dst) = sir_def_reg(inst) {
-            defs.insert(dst, idx);
-        }
-    }
-    defs
-}
-
-fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) {
-    match term {
-        SIRTerminator::Jump(_, args) => {
-            for &arg in args {
-                add(arg);
-            }
-        }
-        SIRTerminator::Branch {
-            cond,
-            true_block,
-            false_block,
-        } => {
-            add(*cond);
-            for &arg in &true_block.1 {
-                add(arg);
-            }
-            for &arg in &false_block.1 {
-                add(arg);
-            }
-        }
-        SIRTerminator::Switch { selector, .. } => {
-            add(*selector);
-        }
-        SIRTerminator::Return | SIRTerminator::Error(_) => {}
-    }
-}
-
 fn find_priority_encode_plans(
     block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
@@ -4111,23 +3900,6 @@ fn sir_imm_u64(
         [] => Some(0),
         [value] => Some(*value),
         _ => None,
-    }
-}
-
-fn sir_def_reg(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(_, _, _, _, _, _)
-        | SIRInstruction::Commit(_, _, _, _, _)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
     }
 }
 
