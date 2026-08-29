@@ -184,6 +184,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &type_aliases,
+            applicable_parameter_overrides,
         )?;
         for (name, value) in &enum_constants.numbers {
             const_env.entry(name.clone()).or_insert(*value);
@@ -3564,6 +3565,7 @@ fn enum_member_constants_from_module_node(
     syntax_tree: &SyntaxTree,
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
@@ -3595,7 +3597,7 @@ fn enum_member_constants_from_module_node(
                     false,
                     &eval_env,
                     type_aliases,
-                    &HashMap::default(),
+                    parameter_overrides,
                 )?;
                 extend_const_env_with_parameters(&mut eval_env, &parameters);
                 continue;

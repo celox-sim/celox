@@ -3369,6 +3369,27 @@ fn collects_enum_constants_from_parameterized_aliased_bases() {
 }
 
 #[test]
+fn preserves_body_parameter_overrides_during_enum_collection() {
+    let source = r#"
+        module Child(output logic y);
+            parameter P = 0;
+            typedef enum logic { A = P } E;
+            assign y = A;
+        endmodule
+        module Top(output logic y);
+            Child #(.P(1)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("body_parameter_override_enum.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), true.into());
+}
+
+#[test]
 fn coerces_selected_writes_before_whole_vector_normalization() {
     let source = r#"
         module Top(input logic c, output logic [7:0] x);
