@@ -3592,6 +3592,40 @@ fn recognizes_complete_cases_over_two_state_function_results() {
 }
 
 #[test]
+fn skips_unreachable_duplicate_items_in_complete_two_state_cases() {
+    let source = r#"
+        module Top(input bit s, input logic a, b, output logic y);
+            always_comb begin
+                case (s)
+                    1'b0: y = a;
+                    1'b1: y = b;
+                    1'b0: ;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unreachable_duplicate_case_item.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(s, false);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, true)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
 fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
     let error = cranelift_build_error(
         r#"
@@ -3828,6 +3862,30 @@ fn registers_enum_types_with_default_bases() {
     .build_cranelift()
     .unwrap();
     assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn substitutes_enum_members_after_expanding_instance_connection_functions() {
+    let source = r#"
+        module Child(input logic [1:0] x, output logic [1:0] y);
+            assign y = x;
+        endmodule
+
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 2'b10 } E;
+            function automatic logic [1:0] f();
+                return A;
+            endfunction
+            Child child(.x(f()), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("enum_function_instance_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
 }
 
 #[test]

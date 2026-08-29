@@ -314,7 +314,12 @@ impl Module {
         for instance in &mut instances {
             for connection in &mut instance.port_connections {
                 connection.actual_expr = connection.actual_expr.take().map(|expr| {
-                    expand_expr_calls(expr, &functions, &expression_signedness, 0, true)
+                    let expr = expand_expr_calls(expr, &functions, &expression_signedness, 0, true);
+                    substitute_expr_constants_with_parameter_literals(
+                        expr,
+                        &const_env,
+                        &enum_constants.exprs,
+                    )
                 });
             }
         }
@@ -10299,12 +10304,24 @@ fn conditional_assignments_from_case_statement(
         packed_dimensions,
     )
     .ok_or_else(|| AnalyzerError::Unsupported("always_ff case selector lowering".to_string()))?;
-    let complete_two_state_case =
-        two_state_case_items_cover_selector(stmt, syntax_tree, const_env, packed_dimensions);
+    let item_reachability =
+        two_state_case_item_reachability(stmt, syntax_tree, const_env, packed_dimensions);
+    let complete_two_state_case = item_reachability
+        .as_ref()
+        .is_some_and(|(_, covered)| *covered);
 
     let mut branches = Vec::new();
     let mut default_branch = None;
-    for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
+    for (item_index, item) in std::iter::once(&stmt.nodes.3)
+        .chain(stmt.nodes.4.iter())
+        .enumerate()
+    {
+        if item_reachability
+            .as_ref()
+            .is_some_and(|(reachable, _)| !reachable[item_index])
+        {
+            continue;
+        }
         match item {
             sv_parser::CaseItem::NonDefault(item) => {
                 let mut conditions = Vec::new();
@@ -10498,16 +10515,6 @@ fn select_bounds_are_statically_valid(
         (0, width)
     };
     msb.min(lsb) >= valid_low && msb.max(lsb) <= valid_high
-}
-
-fn two_state_case_items_cover_selector(
-    stmt: &sv_parser::CaseStatementNormal,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    packed_dimensions: &PackedDimensions,
-) -> bool {
-    two_state_case_item_reachability(stmt, syntax_tree, const_env, packed_dimensions)
-        .is_some_and(|(_, covered)| covered)
 }
 
 fn two_state_case_item_reachability(
