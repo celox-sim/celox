@@ -10332,72 +10332,112 @@ fn two_state_case_items_cover_selector(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
 ) -> bool {
+    two_state_case_item_reachability(stmt, syntax_tree, const_env, packed_dimensions)
+        .is_some_and(|(_, covered)| covered)
+}
+
+fn two_state_case_item_reachability(
+    stmt: &sv_parser::CaseStatementNormal,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(Vec<bool>, bool)> {
     if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
-        return false;
+        return None;
     }
-    let Some(selector) = expr_from_expression_with_types(
+    let selector = expr_from_expression_with_types(
         &stmt.nodes.2.nodes.1.nodes.0,
         syntax_tree,
         packed_dimensions,
-    ) else {
-        return false;
-    };
-    let Some(width) = two_state_case_selector_width(&selector, packed_dimensions) else {
-        return false;
-    };
-    let Some(value_count) = u32::try_from(width)
+    )?;
+    let width = two_state_case_selector_width(&selector, packed_dimensions)?;
+    let value_count = u32::try_from(width)
         .ok()
-        .and_then(|width| 1usize.checked_shl(width))
-    else {
-        return false;
-    };
+        .and_then(|width| 1usize.checked_shl(width))?;
     if i128::try_from(value_count).is_err() {
-        return false;
+        return None;
     }
     let identifiers = packed_dimensions
         .iter()
         .map(|(name, dimensions)| (name.clone(), dimensions.signed))
         .collect::<HashMap<_, _>>();
-    let Some(selector_signed) = expr_signedness(&selector, &identifiers, &HashMap::default())
-    else {
-        return false;
-    };
-    let mut labels = Vec::new();
+    let selector_signed = expr_signedness(&selector, &identifiers, &HashMap::default())?;
+    let mut labels_by_item = Vec::new();
+    let mut default_index = None;
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
-        let sv_parser::CaseItem::NonDefault(item) = item else {
-            continue;
-        };
-        for label in item.nodes.0.contents() {
-            let Some(label) =
-                expr_from_expression_with_types(&label.nodes.0, syntax_tree, packed_dimensions)
-            else {
-                return false;
-            };
-            if let Some(label) = expr_to_const(label) {
-                labels.push(label);
+        match item {
+            sv_parser::CaseItem::NonDefault(item) => {
+                let labels = item
+                    .nodes
+                    .0
+                    .contents()
+                    .into_iter()
+                    .map(|label| {
+                        expr_from_expression_with_types(
+                            &label.nodes.0,
+                            syntax_tree,
+                            packed_dimensions,
+                        )
+                        .and_then(expr_to_const)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                labels_by_item.push(Some(labels));
+            }
+            sv_parser::CaseItem::Default(_) => {
+                default_index = Some(labels_by_item.len());
+                labels_by_item.push(None);
             }
         }
     }
-    if labels.len() < value_count {
-        return false;
+    let label_count = labels_by_item
+        .iter()
+        .filter_map(Option::as_ref)
+        .map(Vec::len)
+        .sum::<usize>();
+    if label_count < value_count {
+        return None;
     }
-    (0..value_count).all(|value| {
+    let mut reachable = vec![false; labels_by_item.len()];
+    let mut covered = true;
+    for value in 0..value_count {
         let selector = ConstExpr::Literal(format_typed_parameter_literal(
             value as i128,
             width,
             selector_signed,
         ));
-        labels.iter().any(|label| {
-            eval_ast_const_expr(
-                &ConstExpr::Binary {
-                    left: Box::new(selector.clone()),
-                    op: BinaryOp::EqCase,
-                    right: Box::new(label.clone()),
-                },
-                const_env,
-            ) == Some(1)
-        })
-    })
+        let mut matched = None;
+        for (index, labels) in labels_by_item.iter().enumerate() {
+            let Some(labels) = labels else {
+                continue;
+            };
+            for label in labels {
+                let equal = eval_ast_const_expr(
+                    &ConstExpr::Binary {
+                        left: Box::new(selector.clone()),
+                        op: BinaryOp::EqCase,
+                        right: Box::new(label.clone()),
+                    },
+                    const_env,
+                )?;
+                if equal != 0 {
+                    matched = Some(index);
+                    break;
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+        if let Some(index) = matched {
+            reachable[index] = true;
+        } else {
+            covered = false;
+            if let Some(index) = default_index {
+                reachable[index] = true;
+            }
+        }
+    }
+    Some((reachable, covered))
 }
 
 fn mark_condition_context(
@@ -10586,10 +10626,25 @@ fn definitely_assigned_comb_targets(
             let sv_parser::CaseStatement::Normal(case) = &**case else {
                 return Vec::new();
             };
+            let reachability = two_state_case_item_reachability(
+                case,
+                syntax_tree,
+                &packed_dimensions.const_env,
+                packed_dimensions,
+            );
+            let complete_two_state_case =
+                reachability.as_ref().is_some_and(|(_, covered)| *covered);
             let mut has_default = false;
             let branches = std::iter::once(&case.nodes.3)
                 .chain(case.nodes.4.iter())
-                .map(|item| {
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    if reachability
+                        .as_ref()
+                        .is_some_and(|(reachable, _)| !reachable[index])
+                    {
+                        return None;
+                    }
                     let branch = match item {
                         sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
                         sv_parser::CaseItem::Default(item) => {
@@ -10597,21 +10652,14 @@ fn definitely_assigned_comb_targets(
                             &item.nodes.2
                         }
                     };
-                    definitely_assigned_comb_targets_statement_or_null(
+                    Some(definitely_assigned_comb_targets_statement_or_null(
                         branch,
                         syntax_tree,
                         packed_dimensions,
-                    )
+                    ))
                 })
                 .collect::<Vec<_>>();
-            if has_default
-                || two_state_case_items_cover_selector(
-                    case,
-                    syntax_tree,
-                    &packed_dimensions.const_env,
-                    packed_dimensions,
-                )
-            {
+            if has_default || complete_two_state_case {
                 intersect_lvalue_sets(branches, packed_dimensions)
             } else {
                 Vec::new()

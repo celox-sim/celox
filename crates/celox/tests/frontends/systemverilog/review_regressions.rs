@@ -3655,6 +3655,62 @@ fn recognizes_nested_complete_cases_as_definite_assignments() {
 }
 
 #[test]
+fn excludes_unreachable_case_arms_from_definite_assignments() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input bit s,
+            input logic a, b, d,
+            output logic y
+        );
+            always_comb begin
+                if (c)
+                    case (s)
+                        1'b0: y = a;
+                        1'b1: y = b;
+                        2'b10: ;
+                        default: ;
+                    endcase
+                else
+                    y = d;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("nested_complete_case_unreachable_arms.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(s, false);
+        io.set(a, true);
+        io.set(b, false);
+        io.set(d, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, true)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(d, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+}
+
+#[test]
 fn registers_enum_types_with_default_bases() {
     let source = r#"
         module Top(output logic [31:0] y);
