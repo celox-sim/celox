@@ -2877,6 +2877,42 @@ fn resolves_typedefs_in_size_function_cast_targets() {
 }
 
 #[test]
+fn resolves_parameterized_direct_types_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            parameter W = 8;
+            localparam Q = $bits(logic [W'(7):0])'(8'hff);
+            assign y = Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("direct_type_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
+fn infers_parameter_expression_widths_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            parameter logic [7:0] P = 0;
+            localparam Q = $bits(P)'(4'hf);
+            assign y = Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("expression_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x0fu8.into());
+}
+
+#[test]
 fn recognizes_exhaustive_comb_coverage_across_selected_writes() {
     let source = r#"
         module Top(input logic c, a, b, output logic [1:0] x);
@@ -3553,6 +3589,60 @@ fn recognizes_complete_cases_over_two_state_selectors() {
     assert_eq!(sim.get(y), 0u8.into());
     sim.modify(|io| io.set(s, 1u8)).unwrap();
     assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn recognizes_complete_cases_over_constant_selectors() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            localparam logic P = 1'b0;
+            always_comb begin
+                case (P)
+                    1'b0: y = a;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_constant_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, true)).unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(a, false)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn recognizes_identical_two_state_conditional_case_arms() {
+    let source = r#"
+        module Top(input logic c, a, output logic y);
+            always_comb begin
+                case (c ? 1'b0 : 1'b0)
+                    1'b0: y = a;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("identical_conditional_case_arms.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
 }
 
 #[test]

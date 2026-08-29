@@ -740,7 +740,12 @@ fn size_system_function_expr_type(
                         identifier_text(RefNode::TypeIdentifier(&data_type.nodes.1), syntax_tree)?;
                     type_aliases.get(&name).cloned()
                 }
-                _ => type_from_ref_node(RefNode::DataType(data_type), syntax_tree),
+                _ => type_from_ref_node_with_env(
+                    RefNode::DataType(data_type),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                ),
             }?;
             (name, r#type)
         }
@@ -754,10 +759,22 @@ fn size_system_function_expr_type(
                 return None;
             }
             let argument = arguments[0].as_ref()?;
-            let ConstExpr::Ident(alias) = const_expr_from_expr(argument, syntax_tree)? else {
-                return None;
-            };
-            (name, type_aliases.get(&alias)?.clone())
+            let argument = const_expr_from_expr(argument, syntax_tree)?;
+            if let ConstExpr::Ident(alias) = &argument
+                && let Some(r#type) = type_aliases.get(alias)
+            {
+                (name, r#type.clone())
+            } else {
+                if name != "$bits" && name != "$size" {
+                    return None;
+                }
+                let r#type =
+                    infer_const_expr_type(&argument, &parameter_types_from_const_env(const_env))?;
+                return Some(ExprType {
+                    width: r#type.width.max(1),
+                    signed: r#type.signed,
+                });
+            }
         }
         sv_parser::SystemTfCall::ArgOptionl(_) => return None,
     };
@@ -3386,7 +3403,19 @@ fn parameters_from_ref_node(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
-    if node.clone().into_iter().any(|child| {
+    // Restrict declaration-type queries to the header. Walking the complete
+    // declaration also visits data types and ranges nested in initializers,
+    // including the target of a size-function cast.
+    let type_node = match node.clone() {
+        RefNode::ParameterDeclaration(sv_parser::ParameterDeclaration::Param(declaration)) => {
+            RefNode::DataTypeOrImplicit(&declaration.nodes.1)
+        }
+        RefNode::LocalParameterDeclaration(sv_parser::LocalParameterDeclaration::Param(
+            declaration,
+        )) => RefNode::DataTypeOrImplicit(&declaration.nodes.1),
+        _ => node.clone(),
+    };
+    if type_node.clone().into_iter().any(|child| {
         matches!(
             child,
             RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(data_type))
@@ -3403,15 +3432,15 @@ fn parameters_from_ref_node(
             "unsupported parameter data type".to_string(),
         ));
     }
-    let declared_alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
+    let declared_alias = type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
     let parameter_width = parameter_declared_width(
-        node.clone(),
+        type_node.clone(),
         syntax_tree,
         base_const_env,
         parameters,
         type_aliases,
     );
-    let has_declared_type = node.clone().into_iter().any(|child| {
+    let has_declared_type = type_node.clone().into_iter().any(|child| {
         matches!(
             child,
             RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(_))
@@ -3422,13 +3451,13 @@ fn parameters_from_ref_node(
             .as_ref()
             .map(Type::is_signed)
             .unwrap_or_else(|| {
-                integer_atom_expr_type(node.clone())
+                integer_atom_expr_type(type_node.clone())
                     .map(|r#type| r#type.signed)
-                    .unwrap_or_else(|| is_signed_from_ref_node(node.clone()).unwrap_or(false))
+                    .unwrap_or_else(|| is_signed_from_ref_node(type_node.clone()).unwrap_or(false))
             })
     });
     let parameter_is_2state = declared_alias
-        .or_else(|| type_from_ref_node(node.clone(), syntax_tree))
+        .or_else(|| type_from_ref_node(type_node, syntax_tree))
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
@@ -8270,6 +8299,9 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             let condition = simplify_constant_mux_conditions(*condition, const_env);
             let then_expr = simplify_constant_mux_conditions(*then_expr, const_env);
             let else_expr = simplify_constant_mux_conditions(*else_expr, const_env);
+            if then_expr == else_expr {
+                return then_expr;
+            }
             match expr_to_const(condition.clone())
                 .and_then(|condition| eval_ast_const_expr(&condition, const_env))
             {
@@ -8627,7 +8659,12 @@ fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDime
 fn expr_static_width(expr: &Expr, packed_dimensions: &PackedDimensions) -> Option<usize> {
     match expr {
         Expr::Ident(name) => lvalue_expr_type(&LValue::Ident(name.clone()), packed_dimensions)
-            .map(|r#type| r#type.width),
+            .map(|r#type| r#type.width)
+            .or_else(|| {
+                parameter_types_from_const_env(&packed_dimensions.const_env)
+                    .get(name)
+                    .map(|r#type| r#type.width)
+            }),
         Expr::Literal(literal) => {
             typecheck::parse_integral_literal(literal).map(|literal| literal.width)
         }
@@ -10438,9 +10475,12 @@ fn two_state_case_selector_width(
 
 fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool {
     match expr {
-        Expr::Ident(name) => packed_dimensions
-            .get(name)
-            .is_some_and(|dimensions| dimensions.is_2state),
+        Expr::Ident(name) => {
+            packed_dimensions
+                .get(name)
+                .is_some_and(|dimensions| dimensions.is_2state)
+                || packed_dimensions.const_env.contains_key(name)
+        }
         Expr::Literal(value) => typecheck::parse_integral_literal(value)
             .is_some_and(|literal| literal.mask == num_bigint::BigUint::default()),
         Expr::Select { expr, msb, lsb, .. } => {
@@ -10470,9 +10510,10 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
             then_expr,
             else_expr,
         } => {
-            expr_is_two_state(condition, packed_dimensions)
-                && expr_is_two_state(then_expr, packed_dimensions)
-                && expr_is_two_state(else_expr, packed_dimensions)
+            expr_is_two_state(then_expr, packed_dimensions)
+                && (then_expr == else_expr
+                    || (expr_is_two_state(condition, packed_dimensions)
+                        && expr_is_two_state(else_expr, packed_dimensions)))
         }
         Expr::Call { name, .. } => packed_dimensions
             .function_return_types
@@ -10531,17 +10572,30 @@ fn two_state_case_item_reachability(
         syntax_tree,
         packed_dimensions,
     )?;
+    let selector = simplify_constant_mux_conditions(selector, const_env);
     let width = two_state_case_selector_width(&selector, packed_dimensions)?;
-    let value_count = u32::try_from(width)
-        .ok()
-        .and_then(|width| 1usize.checked_shl(width))?;
-    if i128::try_from(value_count).is_err() {
-        return None;
-    }
-    let identifiers = packed_dimensions
+    let selector_values = if let Some(value) = expr_to_const(selector.clone())
+        .and_then(|selector| eval_ast_const_expr(&selector, const_env))
+    {
+        vec![value]
+    } else {
+        let value_count = u32::try_from(width)
+            .ok()
+            .and_then(|width| 1usize.checked_shl(width))?;
+        if i128::try_from(value_count).is_err() {
+            return None;
+        }
+        (0..value_count).map(|value| value as i128).collect()
+    };
+    let mut identifiers = packed_dimensions
         .iter()
         .map(|(name, dimensions)| (name.clone(), dimensions.signed))
         .collect::<HashMap<_, _>>();
+    identifiers.extend(
+        parameter_types_from_const_env(const_env)
+            .into_iter()
+            .map(|(name, r#type)| (name, r#type.signed)),
+    );
     let selector_signed = if let Expr::Call { name, .. } = &selector {
         packed_dimensions
             .function_return_types
@@ -10582,14 +10636,14 @@ fn two_state_case_item_reachability(
         .filter_map(Option::as_ref)
         .map(Vec::len)
         .sum::<usize>();
-    if label_count < value_count {
+    if label_count < selector_values.len() {
         return None;
     }
     let mut reachable = vec![false; labels_by_item.len()];
     let mut covered = true;
-    for value in 0..value_count {
+    for value in selector_values {
         let selector = ConstExpr::Literal(format_typed_parameter_literal(
-            value as i128,
+            value,
             width,
             selector_signed,
         ));
