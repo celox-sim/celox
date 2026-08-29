@@ -2913,6 +2913,39 @@ fn infers_parameter_expression_widths_in_size_function_cast_targets() {
 }
 
 #[test]
+fn infers_variable_widths_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(
+            input logic [7:0] a,
+            output logic [7:0] port_bits,
+            output logic [7:0] port_size,
+            output logic [31:0] signal_bits,
+            output logic [7:0] signal_size
+        );
+            logic [7:0] internal [0:3];
+            localparam PB = $bits(a)'(12'h1ff);
+            localparam PS = $size(a)'(12'h1ff);
+            localparam SB = $bits(internal)'(40'h1fffffffff);
+            localparam SS = $size(internal)'(8'h1f);
+            assign port_bits = PB;
+            assign port_size = PS;
+            assign signal_bits = SB;
+            assign signal_size = SS;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("variable_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("port_bits")), 0xffu8.into());
+    assert_eq!(sim.get(sim.signal("port_size")), 0xffu8.into());
+    assert_eq!(sim.get(sim.signal("signal_bits")), 0xffff_ffffu32.into());
+    assert_eq!(sim.get(sim.signal("signal_size")), 0x0fu8.into());
+}
+
+#[test]
 fn recognizes_exhaustive_comb_coverage_across_selected_writes() {
     let source = r#"
         module Top(input logic c, a, b, output logic [1:0] x);

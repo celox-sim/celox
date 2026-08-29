@@ -221,7 +221,67 @@ impl Module {
         extend_const_env_with_parameters(&mut const_env, &parameters);
         type_aliases =
             type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
-        reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+
+        match reject_silently_ignored_constructs(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &type_aliases,
+        ) {
+            Ok(()) => {}
+            // A parameter initializer may inspect a port or signal type
+            // through `$bits`/`$size`. Collect declarations only when that
+            // missing type metadata is the remaining validation failure, so
+            // unsupported constructs keep their original diagnostics.
+            Err(AnalyzerError::Unsupported(construct))
+                if construct == "constant cast expression" =>
+            {
+                let preliminary_ports =
+                    ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+                let preliminary_signals =
+                    signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+                extend_const_env_with_variable_types(
+                    &mut const_env,
+                    preliminary_ports
+                        .iter()
+                        .map(|port| (port.name(), port.r#type()))
+                        .chain(
+                            preliminary_signals
+                                .iter()
+                                .map(|signal| (signal.name(), signal.r#type())),
+                        ),
+                );
+                parameters = parameters_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &type_aliases,
+                    &const_env,
+                    applicable_parameter_overrides,
+                )?;
+                for parameter in &mut parameters {
+                    parameter.value = parameter.value.take().map(|value| {
+                        substitute_typed_parameter_literals(
+                            value,
+                            &enum_constants.numbers,
+                            &enum_constants.types,
+                        )
+                    });
+                }
+                if name == override_module_name {
+                    apply_parameter_overrides(&mut parameters, parameter_overrides)?;
+                }
+                extend_const_env_with_parameters(&mut const_env, &parameters);
+                type_aliases =
+                    type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+                reject_silently_ignored_constructs(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &type_aliases,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
         let ports = ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
@@ -767,6 +827,15 @@ fn size_system_function_expr_type(
             } else {
                 if name != "$bits" && name != "$size" {
                     return None;
+                }
+                if let ConstExpr::Ident(identifier) = &argument
+                    && let Some(width) =
+                        variable_size_function_width(const_env, identifier, name == "$size")
+                {
+                    return Some(ExprType {
+                        width,
+                        signed: variable_type_is_signed(const_env, identifier),
+                    });
                 }
                 let r#type =
                     infer_const_expr_type(&argument, &parameter_types_from_const_env(const_env))?;
@@ -4383,6 +4452,83 @@ fn parameter_width_marker(name: &str) -> String {
 
 fn parameter_signed_marker(name: &str) -> String {
     format!("__parameter::signed::{name}")
+}
+
+fn variable_bits_marker(name: &str) -> String {
+    format!("__variable::bits::{name}")
+}
+
+fn variable_size_marker(name: &str) -> String {
+    format!("__variable::size::{name}")
+}
+
+fn variable_signed_marker(name: &str) -> String {
+    format!("__variable::signed::{name}")
+}
+
+fn variable_size_function_width(
+    const_env: &HashMap<String, i128>,
+    name: &str,
+    first_dimension_only: bool,
+) -> Option<usize> {
+    let marker = if first_dimension_only {
+        variable_size_marker(name)
+    } else {
+        variable_bits_marker(name)
+    };
+    usize::try_from(*const_env.get(&marker)?).ok()
+}
+
+fn variable_type_is_signed(const_env: &HashMap<String, i128>, name: &str) -> bool {
+    const_env
+        .get(&variable_signed_marker(name))
+        .is_some_and(|signed| *signed != 0)
+}
+
+fn extend_const_env_with_variable_types<'a>(
+    const_env: &mut HashMap<String, i128>,
+    variables: impl Iterator<Item = (&'a str, &'a Type)>,
+) {
+    for (name, r#type) in variables {
+        let dimension_width = |range: &PackedRange| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
+        };
+        let unpacked_widths = r#type
+            .unpacked_ranges()
+            .iter()
+            .map(|range| {
+                let left = eval_ast_const_expr(range.left(), const_env)?;
+                let right = eval_ast_const_expr(range.right(), const_env)?;
+                usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
+            })
+            .collect::<Option<Vec<_>>>();
+        let packed_widths = r#type
+            .packed_ranges()
+            .iter()
+            .map(dimension_width)
+            .collect::<Option<Vec<_>>>();
+        let (Some(unpacked_widths), Some(packed_widths)) = (unpacked_widths, packed_widths) else {
+            continue;
+        };
+        let bits = unpacked_widths
+            .iter()
+            .chain(&packed_widths)
+            .try_fold(1usize, |width, dimension| width.checked_mul(*dimension));
+        let size = unpacked_widths
+            .first()
+            .or_else(|| packed_widths.first())
+            .copied()
+            .unwrap_or(1);
+        if let Some(bits) = bits.and_then(|bits| i128::try_from(bits).ok()) {
+            const_env.insert(variable_bits_marker(name), bits);
+        }
+        if let Ok(size) = i128::try_from(size) {
+            const_env.insert(variable_size_marker(name), size);
+        }
+        const_env.insert(variable_signed_marker(name), r#type.is_signed() as i128);
+    }
 }
 
 fn insert_parameter_type_markers(
