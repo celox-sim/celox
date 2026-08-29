@@ -3772,7 +3772,8 @@ fn enum_member_constants_from_module_node(
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
-    for item in module_non_port_items(node) {
+    let mut resolved_type_aliases = type_aliases.clone();
+    for item in module_non_port_items(node.clone()) {
         let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
             continue;
         };
@@ -3785,10 +3786,12 @@ fn enum_member_constants_from_module_node(
                     &mut parameters,
                     true,
                     &eval_env,
-                    type_aliases,
+                    &resolved_type_aliases,
                     &HashMap::default(),
                 )?;
                 extend_const_env_with_parameters(&mut eval_env, &parameters);
+                resolved_type_aliases =
+                    type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &eval_env)?;
                 continue;
             }
             sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
@@ -3799,10 +3802,12 @@ fn enum_member_constants_from_module_node(
                     &mut parameters,
                     false,
                     &eval_env,
-                    type_aliases,
+                    &resolved_type_aliases,
                     parameter_overrides,
                 )?;
                 extend_const_env_with_parameters(&mut eval_env, &parameters);
+                resolved_type_aliases =
+                    type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &eval_env)?;
                 continue;
             }
             sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => data,
@@ -3822,10 +3827,14 @@ fn enum_member_constants_from_module_node(
                 RefNode::EnumBaseType(base),
                 syntax_tree,
                 &eval_env,
-                type_aliases,
+                &resolved_type_aliases,
             )
             .or_else(|| {
-                type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, type_aliases)
+                type_alias_from_ref_node(
+                    RefNode::EnumBaseType(base),
+                    syntax_tree,
+                    &resolved_type_aliases,
+                )
             })
             .and_then(|r#type| expr_type_from_type(&r#type, &eval_env)),
             None => Some(ExprType {
@@ -3853,7 +3862,7 @@ fn enum_member_constants_from_module_node(
                 RefNode::ConstantExpression(value),
                 syntax_tree,
                 &eval_env,
-                type_aliases,
+                &resolved_type_aliases,
             )
             .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
             let value_type =
@@ -3884,6 +3893,11 @@ fn enum_member_constants_from_module_node(
                 )),
             );
         }
+        // A later typedef may use a cast or range that depends on this
+        // enum's members. Rebuild aliases from the enriched environment
+        // before resolving a subsequent enum base through that typedef.
+        resolved_type_aliases =
+            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &eval_env)?;
     }
     Ok(constants)
 }
@@ -8497,6 +8511,9 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             if then_expr == else_expr {
                 return then_expr;
             }
+            if let Some(value) = equivalent_constant_mux_value(&then_expr, &else_expr, const_env) {
+                return value;
+            }
             match expr_to_const(condition.clone())
                 .and_then(|condition| eval_ast_const_expr(&condition, const_env))
             {
@@ -8518,6 +8535,33 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
         },
         Expr::Ident(_) | Expr::Literal(_) => expr,
     }
+}
+
+fn equivalent_constant_mux_value(
+    then_expr: &Expr,
+    else_expr: &Expr,
+    const_env: &HashMap<String, i128>,
+) -> Option<Expr> {
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let ir_parameter_types = parameter_types
+        .iter()
+        .map(|(name, r#type)| (name.clone(), (r#type.width, r#type.signed)))
+        .collect::<HashMap<_, _>>();
+    let then_value = typecheck::eval_const_integral_literal_with_types(
+        &expr_to_const(then_expr.clone())?.into(),
+        const_env,
+        &ir_parameter_types,
+    )?;
+    let else_value = typecheck::eval_const_integral_literal_with_types(
+        &expr_to_const(else_expr.clone())?.into(),
+        const_env,
+        &ir_parameter_types,
+    )?;
+    let width = then_value.width.max(else_value.width);
+    let signed = then_value.signed && else_value.signed;
+    let then_value = resize_integral_literal_for_cast(then_value, width, signed);
+    let else_value = resize_integral_literal_for_cast(else_value, width, signed);
+    (then_value == else_value).then_some(Expr::Literal(then_value))
 }
 
 /// Substitute the value established by earlier writes to `target` into reads
@@ -10838,7 +10882,7 @@ fn two_state_case_item_reachability(
         .filter_map(Option::as_ref)
         .map(Vec::len)
         .sum::<usize>();
-    if label_count < selector_values.len() {
+    if default_index.is_none() && label_count < selector_values.len() {
         return None;
     }
     let mut reachable = vec![false; labels_by_item.len()];
@@ -10874,11 +10918,10 @@ fn two_state_case_item_reachability(
         }
         if let Some(index) = matched {
             reachable[index] = true;
+        } else if let Some(index) = default_index {
+            reachable[index] = true;
         } else {
             covered = false;
-            if let Some(index) = default_index {
-                reachable[index] = true;
-            }
         }
     }
     Some((reachable, covered))

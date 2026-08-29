@@ -972,6 +972,66 @@ mod tests {
     }
 
     #[test]
+    fn rebuilds_typedefs_after_preceding_enum_members() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum int { W = 3 } E;
+                    typedef logic [W'(2):0] B;
+                    typedef enum B { A = 3'b101 } F;
+                    logic [A-1:0] data;
+                endmodule
+            "#,
+            Path::new("enum_dependent_typedef.sv"),
+        )
+        .expect("later enum bases should use typedefs rebuilt from preceding members");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(5));
+    }
+
+    #[test]
+    fn treats_constant_equivalent_mux_case_selectors_as_two_state() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, output logic y);
+                    localparam logic P = 0;
+                    localparam logic Q = 0;
+                    always_comb begin
+                        case (c ? P : Q)
+                            1'b0: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_equivalent_mux_case.sv"),
+        )
+        .expect("equal constant mux arms should make the case selector exhaustive");
+    }
+
+    #[test]
+    fn skips_unreachable_sparse_case_items_with_default() {
+        analyze_source(
+            r#"
+                module Top(input bit [1:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            2'd0: y = a;
+                            2'd0: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("sparse_case_duplicate_with_default.sv"),
+        )
+        .expect("unreachable duplicate items should not prevent definite assignment");
+    }
+
+    #[test]
     fn preserves_named_constant_casts_in_packed_ranges() {
         let ir = analyze_source(
             r#"
