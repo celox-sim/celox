@@ -8190,8 +8190,15 @@ fn substitute_intermediate_comb_value_reads(
         if initialized || path_value.is_some() {
             let value = path_value.unwrap_or(&established);
             let assignment = guarded_assignment.assignment.clone();
-            guarded_assignment.assignment = Assignment::new(
+            let lhs = substitute_comb_lvalue_reads(
                 assignment.lhs_value().clone(),
+                target,
+                value,
+                whole_established.as_ref(),
+                packed_dimensions,
+            );
+            guarded_assignment.assignment = Assignment::new(
+                lhs,
                 substitute_comb_value_reads(
                     assignment.rhs,
                     target,
@@ -8282,6 +8289,45 @@ fn substitute_comb_value_reads(
             substitute_expr_lvalue(expr, target, value, packed_dimensions)
         };
     simplify_single_bit_concat_selects(substituted, packed_dimensions)
+}
+
+fn substitute_comb_lvalue_reads(
+    lvalue: LValue,
+    target: &LValue,
+    value: &Expr,
+    whole_value: Option<&Expr>,
+    packed_dimensions: &PackedDimensions,
+) -> LValue {
+    let LValue::Select {
+        name,
+        msb,
+        lsb,
+        signed,
+        array_slice_width,
+        array_slice_reversed,
+    } = lvalue
+    else {
+        return lvalue;
+    };
+    let substitute_bound = |bound: ConstExpr| {
+        let original = bound.clone();
+        expr_to_const(substitute_comb_value_reads(
+            const_expr_to_expr(bound),
+            target,
+            value,
+            whole_value,
+            packed_dimensions,
+        ))
+        .unwrap_or(original)
+    };
+    LValue::Select {
+        name,
+        msb: substitute_bound(msb),
+        lsb: substitute_bound(lsb),
+        signed,
+        array_slice_width,
+        array_slice_reversed,
+    }
 }
 
 fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDimensions) -> Expr {
@@ -10504,6 +10550,7 @@ fn definitely_assigned_comb_targets(
                 )
             {
                 let condition = expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions)
+                    .map(procedural_truth_condition)
                     .and_then(expr_to_const)
                     .and_then(|condition| {
                         eval_ast_const_expr(&condition, &packed_dimensions.const_env)

@@ -180,6 +180,53 @@ fn substitutes_blocking_values_inside_dynamic_select_indices() {
 }
 
 #[test]
+fn substitutes_blocking_values_inside_dynamic_write_indices() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [1:0] a,
+            input logic [1:0] d,
+            output logic [3:0] y
+        );
+            logic bits[4];
+            logic [1:0] index;
+            always_comb begin
+                bits = '0;
+                index = a;
+                bits[index] = 1'b1;
+                if (c)
+                    index = d;
+            end
+            assign y = {bits[3], bits[2], bits[1], bits[0]};
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("blocking_dynamic_write_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let d = sim.signal("d");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, 1u8);
+        io.set(d, 3u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0b0010u8.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, 0u8);
+        io.set(d, 2u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0b0001u8.into());
+}
+
+#[test]
 fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
@@ -3139,6 +3186,48 @@ fn recognizes_constant_true_nested_comb_guards_as_definite() {
         vec![(source, Path::new("constant_true_nested_comb_guard.sv"))],
         "Top",
     )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, false);
+        io.set(b, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn treats_constant_unknown_nested_comb_guards_as_false() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic y);
+            always_comb begin
+                if (c) begin
+                    if (1'bx)
+                        ;
+                    else
+                        y = a;
+                end else begin
+                    y = b;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_unknown_nested_comb_guard.sv"))],
+        "Top",
+    )
+    .four_state(true)
     .build_cranelift()
     .unwrap();
     let c = sim.signal("c");
