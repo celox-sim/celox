@@ -118,30 +118,11 @@ export class Simulator<P = Record<string, unknown>> {
 			);
 		}
 
-		const {
-			fourState,
-			vcd,
-			optimize,
-			falseLoops,
-			trueLoops,
-			clockType,
-			resetType,
-			parameters,
-			deadStorePolicy,
-			tier,
-		} = merged ?? {};
-		const result = createFn(module.sources, module.name, {
-			fourState,
-			vcd,
-			optimize,
-			falseLoops,
-			trueLoops,
-			clockType,
-			resetType,
-			parameters,
-			deadStorePolicy,
-			tier,
-		});
+		// Forward every public SimulatorOptions field so newly added options do not
+		// require this factory to maintain a second allowlist. The create override is
+		// test-only plumbing and must not cross the native factory boundary.
+		const { __nativeCreate: _createOverride, ...nativeOptions } = merged;
+		const result = createFn(module.sources, module.name, nativeOptions);
 		const state: DirtyState = { dirty: false };
 
 		// Always prefer NAPI-derived ports (from hierarchy) over module.ports.
@@ -149,7 +130,7 @@ export class Simulator<P = Record<string, unknown>> {
 		// stale when parameters are overridden. hierarchy.ports reflects the actual
 		// compiled layout, consistent with fromSource()/fromProject().
 		const hierarchy = result.hierarchy
-			? filterHierarchyForDse(result.hierarchy, deadStorePolicy)
+			? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
 			: undefined;
 		const portDefs = hierarchy?.ports ?? module.ports;
 		const dut = createDut<P>(

@@ -4,6 +4,7 @@ import type {
 	CreateResult,
 	ModuleDefinition,
 	NativeSimulationHandle,
+	SimulatorOptions,
 } from "./types.js";
 import { SimulationTimeoutError } from "./types.js";
 
@@ -128,6 +129,56 @@ describe("Simulation", () => {
 
 		sim.addClock("clk", { period: 10 });
 		expect(mock.handle.addClock).toHaveBeenCalledWith(0, 10, 0);
+	});
+
+	test("create forwards merged public options without the native override", () => {
+		const mock = createMockNative();
+		const defaultOptions = {
+			fourState: true,
+			vcd: "default.vcd",
+			optLevel: "O2",
+			passOverrides: ["-sir:gvn"],
+			optimize: true,
+			optimizeOptions: { reschedule: true },
+			craneliftOptLevel: "speed",
+			regallocAlgorithm: "backtracking",
+			enableAliasAnalysis: true,
+			enableVerifier: true,
+			falseLoops: [{ from: "d", to: "q" }],
+			trueLoops: [{ from: "rst", to: "q", maxIter: 8 }],
+			clockType: "posedge",
+			resetType: "async_low",
+			extraSource: "module DefaultHelper {}",
+			parameters: [{ name: "WIDTH", value: 8 }],
+			deadStorePolicy: "preserveTopPorts",
+		} satisfies SimulatorOptions;
+		const module = { ...TopModule, defaultOptions };
+
+		const sim = Simulation.create(module, {
+			__nativeCreate: mock.create,
+			optLevel: "O0",
+			optimizeOptions: { reschedule: false },
+			craneliftOptLevel: "none",
+			regallocAlgorithm: "singlePass",
+			enableAliasAnalysis: false,
+			enableVerifier: false,
+			extraSource: "module OverrideHelper {}",
+		});
+
+		expect(mock.create).toHaveBeenCalledWith(module.sources, module.name, {
+			...defaultOptions,
+			optLevel: "O0",
+			optimizeOptions: { reschedule: false },
+			craneliftOptLevel: "none",
+			regallocAlgorithm: "singlePass",
+			enableAliasAnalysis: false,
+			enableVerifier: false,
+			extraSource: "module OverrideHelper {}",
+		});
+		expect(vi.mocked(mock.create).mock.calls[0]?.[2]).not.toHaveProperty(
+			"__nativeCreate",
+		);
+		sim.dispose();
 	});
 
 	test("addClock with initialDelay", () => {
