@@ -294,14 +294,6 @@ pub(crate) fn allocate_with_spills(
             )
         })
         .collect::<BTreeSet<_>>();
-    for block in &function.blocks {
-        for instruction in &block.insts {
-            if let MInst::Scratch { dst } = instruction {
-                candidates.remove(dst);
-            }
-        }
-    }
-
     let mut next_value = function
         .blocks
         .iter()

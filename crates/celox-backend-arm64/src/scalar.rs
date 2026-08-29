@@ -561,7 +561,7 @@ fn emit_instruction(
             dynasm!(ops ; .arch aarch64 ; mov W(dst), W(src));
         }
         MInst::LoadImm { dst, value } => emit_load_imm(ops, resolve(assignment, *dst)?, *value),
-        MInst::Scratch { .. } | MInst::KeepAlive { .. } => {}
+        MInst::KeepAlive { .. } => {}
         MInst::LoadConstantTableAddr { dst, table } => {
             let dst = resolve(assignment, *dst)?;
             let label = *table_labels
@@ -906,17 +906,12 @@ fn emit_instruction(
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
             dynasm!(ops ; .arch aarch64 ; rbit x16, X(src) ; clz X(dst), x16);
         }
-        MInst::Bsr { dst, src } | MInst::BsrOr { dst, src, .. } => {
+        MInst::Bsr { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
             dynasm!(ops ; .arch aarch64 ; clz x16, X(src));
             emit_load_imm(ops, SCRATCH1, 63);
             dynasm!(ops ; .arch aarch64 ; sub x16, x17, x16);
-            if let MInst::BsrOr { zero_value, .. } = instruction {
-                emit_load_imm(ops, SCRATCH1, u64::from(*zero_value));
-                dynasm!(ops ; .arch aarch64 ; cmp XSP(src), #0 ; csel X(dst), x16, x17, ne);
-            } else {
-                dynasm!(ops ; .arch aarch64 ; mov X(dst), x16);
-            }
+            dynasm!(ops ; .arch aarch64 ; mov X(dst), x16);
         }
         MInst::Select {
             dst,
