@@ -5,7 +5,7 @@ use fxhash::FxHashMap;
 use crate::{
     SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
-    scheduler::{ClockDef, Scheduler, SimEvent},
+    scheduler::{ClockDef, Scheduler, SimEvent, SimEventOrigin},
 };
 
 /// Backend execution hooks needed by the timed simulation engine.
@@ -179,6 +179,7 @@ impl<B: SimBackend> SimulationState<B> {
             event_ref: event,
             signal,
             next_val: 1,
+            origin: SimEventOrigin::PeriodicClock,
         });
     }
 
@@ -188,6 +189,7 @@ impl<B: SimBackend> SimulationState<B> {
             event_ref: event,
             signal,
             next_val: value,
+            origin: SimEventOrigin::OneShot,
         });
     }
 
@@ -357,6 +359,9 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         for event in &events_to_process {
+            if event.origin != SimEventOrigin::PeriodicClock {
+                continue;
+            }
             let event_id = event.event_ref.id();
             if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
                 self.scheduler.push(SimEvent {
@@ -364,6 +369,7 @@ impl<B: SimBackend> SimulationState<B> {
                     event_ref: event.event_ref,
                     signal: event.signal,
                     next_val: 1 - event.next_val,
+                    origin: SimEventOrigin::PeriodicClock,
                 });
             }
         }
