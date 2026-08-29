@@ -217,7 +217,6 @@ pub(crate) enum CmpKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)] // Reserved for target-owned MIR optimization and branch folding.
 pub(crate) enum BranchPredicate {
     Compare {
         lhs: VReg,
@@ -277,7 +276,6 @@ impl SparseCommitDescriptor {
 
 /// Word-level AArch64 operations before physical-register substitution.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Some recipes are introduced only by optional late MIR passes.
 pub(crate) enum MInst {
     Mov {
         dst: VReg,
@@ -290,9 +288,6 @@ pub(crate) enum MInst {
     LoadImm {
         dst: VReg,
         value: u64,
-    },
-    Scratch {
-        dst: VReg,
     },
     /// Allocation-only edge use. Emission intentionally produces no code.
     KeepAlive {
@@ -313,18 +308,6 @@ pub(crate) enum MInst {
         offset: i32,
         src: VReg,
         size: OpSize,
-    },
-    AndStoreImm {
-        base: BaseReg,
-        offset: i32,
-        size: OpSize,
-        imm: u64,
-    },
-    OrStoreImm {
-        base: BaseReg,
-        offset: i32,
-        size: OpSize,
-        imm: u64,
     },
     LoadPtr {
         dst: VReg,
@@ -609,21 +592,6 @@ pub(crate) enum MInst {
         dst: VReg,
         src: VReg,
     },
-    BsrOr {
-        dst: VReg,
-        src: VReg,
-        zero_value: u8,
-    },
-    Pext {
-        dst: VReg,
-        src: VReg,
-        mask: VReg,
-    },
-    Pdep {
-        dst: VReg,
-        src: VReg,
-        mask: VReg,
-    },
     Select {
         dst: VReg,
         cond: VReg,
@@ -684,7 +652,6 @@ impl MInst {
             Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
-            | Self::Scratch { dst }
             | Self::LoadConstantTableAddr { dst, .. }
             | Self::Load { dst, .. }
             | Self::LoadPtr { dst, .. }
@@ -727,17 +694,12 @@ impl MInst {
             | Self::Popcnt { dst, .. }
             | Self::Bsf { dst, .. }
             | Self::Bsr { dst, .. }
-            | Self::BsrOr { dst, .. }
-            | Self::Pext { dst, .. }
-            | Self::Pdep { dst, .. }
             | Self::Select { dst, .. }
             | Self::CmpSelect { dst, .. }
             | Self::CmpImmSelect { dst, .. }
             | Self::GuardedCmpSelect { dst, .. } => Some(*dst),
             Self::Store { .. }
             | Self::KeepAlive { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::StorePtr { .. }
             | Self::ReleaseStorePtr { .. }
             | Self::StoreIndexed { .. }
@@ -763,7 +725,6 @@ impl MInst {
             Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
-            | Self::Scratch { dst }
             | Self::LoadConstantTableAddr { dst, .. }
             | Self::Load { dst, .. }
             | Self::LoadPtr { dst, .. }
@@ -806,17 +767,12 @@ impl MInst {
             | Self::Popcnt { dst, .. }
             | Self::Bsf { dst, .. }
             | Self::Bsr { dst, .. }
-            | Self::BsrOr { dst, .. }
-            | Self::Pext { dst, .. }
-            | Self::Pdep { dst, .. }
             | Self::Select { dst, .. }
             | Self::CmpSelect { dst, .. }
             | Self::CmpImmSelect { dst, .. }
             | Self::GuardedCmpSelect { dst, .. } => Some(dst),
             Self::Store { .. }
             | Self::KeepAlive { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::StorePtr { .. }
             | Self::ReleaseStorePtr { .. }
             | Self::StoreIndexed { .. }
@@ -841,11 +797,8 @@ impl MInst {
         match self {
             Self::Mov { src, .. } | Self::Mov32 { src, .. } | Self::KeepAlive { src } => vec![*src],
             Self::LoadImm { .. }
-            | Self::Scratch { .. }
             | Self::LoadConstantTableAddr { .. }
             | Self::Load { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::MemCopy { .. }
             | Self::MemFill { .. }
             | Self::SparseCommit { .. }
@@ -909,10 +862,8 @@ impl MInst {
             | Self::Neg { src, .. }
             | Self::Popcnt { src, .. }
             | Self::Bsf { src, .. }
-            | Self::Bsr { src, .. }
-            | Self::BsrOr { src, .. } => vec![*src],
+            | Self::Bsr { src, .. } => vec![*src],
             Self::CmpImm { lhs, .. } => vec![*lhs],
-            Self::Pext { src, mask, .. } | Self::Pdep { src, mask, .. } => vec![*src, *mask],
             Self::Select {
                 cond,
                 true_val,
@@ -1039,13 +990,8 @@ impl MInst {
             | Self::Neg { src, .. }
             | Self::Popcnt { src, .. }
             | Self::Bsf { src, .. }
-            | Self::Bsr { src, .. }
-            | Self::BsrOr { src, .. } => rewrite(src),
+            | Self::Bsr { src, .. } => rewrite(src),
             Self::CmpImm { lhs, .. } => rewrite(lhs),
-            Self::Pext { src, mask, .. } | Self::Pdep { src, mask, .. } => {
-                rewrite(src);
-                rewrite(mask);
-            }
             Self::Select {
                 cond,
                 true_val,
@@ -1106,11 +1052,8 @@ impl MInst {
             } => rewrite(lhs),
             Self::JumpTable { index, .. } => rewrite(index),
             Self::LoadImm { .. }
-            | Self::Scratch { .. }
             | Self::LoadConstantTableAddr { .. }
             | Self::Load { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::PackedLaneCompare {
                 rhs: PackedLaneCompareRhs::Memory { .. },
                 ..

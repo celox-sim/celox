@@ -3,6 +3,11 @@
 //! Supports 2-state and 4-state (IEEE 1800) with full mask propagation.
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
+mod dynamic_load_cache;
+mod packed_bit_store;
+mod sparse;
+mod target_policy;
+
 use super::mir::*;
 use super::sparse_write_state::{
     SparseChunkState, SparseMetadataAction, SparseWriteState, SparseWriteStates,
@@ -14,8 +19,20 @@ use crate::{
 };
 use crate::{HashMap, HashSet};
 use crate::{RegionedAbsoluteAddr, STABLE_REGION};
+use celox_sir::analysis::{
+    ExactU64Constant as ExactSirConstant, UseSite as SirUseSite,
+    block_instruction_definitions as collect_sir_defs,
+    collect_unique_exact_u64_constants as collect_exact_sir_constants,
+    collect_use_sites as collect_sir_use_sites, exact_u64_constant as exact_sir_constant,
+    instruction_definition as sir_def_reg, reverse_postorder as ordered_sir_blocks,
+    visit_instruction_uses as collect_sir_inst_uses,
+};
 #[cfg(test)]
 use celox_state_layout::MemoryLayoutMode;
+use dynamic_load_cache::{block_dynamic_load_cache_plans, native_plane_access_size};
+use packed_bit_store::{PackedBitStorePlan, PackedBitStorePlans, find_packed_bit_store_plans};
+use sparse::{find_sparse_worklist_run, sparse_descriptor_table};
+use target_policy::TargetIselPolicy;
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -36,82 +53,6 @@ impl RegMap {
     fn set(&mut self, reg: RegisterId, vreg: VReg) {
         self.map[reg.0] = Some(vreg);
     }
-}
-
-fn find_sparse_worklist_run(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> Option<(crate::BlockId, usize, usize)> {
-    let stored = eu
-        .blocks
-        .values()
-        .flat_map(|block| &block.instructions)
-        .filter_map(|instruction| match instruction {
-            SIRInstruction::Store(address, ..)
-                if address.region == crate::SPARSE_WORKING_REGION =>
-            {
-                Some(address.absolute_addr())
-            }
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    if stored.is_empty() {
-        return None;
-    }
-
-    for block_id in ordered_sir_blocks(eu) {
-        let block = &eu.blocks[&block_id];
-        let mut start = 0usize;
-        while start < block.instructions.len() {
-            let is_sparse_commit = |instruction: &SIRInstruction<RegionedAbsoluteAddr>| {
-                matches!(
-                    instruction,
-                    SIRInstruction::Commit(source, destination, ..)
-                        if source.region == crate::SPARSE_WORKING_REGION
-                            && destination.region == STABLE_REGION
-                )
-            };
-            if !is_sparse_commit(&block.instructions[start]) {
-                start += 1;
-                continue;
-            }
-            let mut end = start + 1;
-            while end < block.instructions.len() && is_sparse_commit(&block.instructions[end]) {
-                end += 1;
-            }
-            let committed = block.instructions[start..end]
-                .iter()
-                .filter_map(|instruction| match instruction {
-                    SIRInstruction::Commit(source, ..) => Some(source.absolute_addr()),
-                    _ => None,
-                })
-                .collect::<HashSet<_>>();
-            if stored.is_subset(&committed) {
-                return Some((block_id, start, end));
-            }
-            start = end;
-        }
-    }
-    None
-}
-
-fn sparse_descriptor_table(layout: &MemoryLayout) -> Vec<u64> {
-    let mut rows = layout.sparse_layouts.iter().collect::<Vec<_>>();
-    rows.sort_by_key(|(_, sparse)| sparse.active_index);
-    let mut table = Vec::with_capacity(rows.len() * SparseCommitDescriptor::WORDS);
-    for (address, sparse) in rows {
-        let descriptor = SparseCommitDescriptor {
-            src_offset: (layout.sparse_base_offset + layout.sparse_offsets[address]) as u64,
-            dst_offset: layout.offsets[address] as u64,
-            byte_size: layout.plane_size(address) as u64,
-            dirty_words_offset: sparse.dirty_words_offset as u64,
-            dirty_word_count: sparse.dirty_word_count as u64,
-            summary_words_offset: sparse.summary_words_offset as u64,
-            summary_word_count: sparse.summary_word_count as u64,
-            four_state: u64::from(layout.four_state && layout.is_4states[address]),
-        };
-        table.extend(descriptor.words());
-    }
-    table
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,201 +112,10 @@ struct PackedByteAffineComparePlans {
     skip_indices: HashSet<usize>,
 }
 
-#[derive(Debug, Default)]
-struct BlockDynamicLoadCachePlans {
-    addresses: HashSet<RegionedAbsoluteAddr>,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct BlockDynamicLoadCacheEntry {
     value: VReg,
     mask: Option<VReg>,
-}
-
-fn native_plane_access_size(byte_size: usize) -> Option<OpSize> {
-    match byte_size {
-        1 => Some(OpSize::S8),
-        2 => Some(OpSize::S16),
-        4 => Some(OpSize::S32),
-        8 => Some(OpSize::S64),
-        _ => None,
-    }
-}
-
-fn block_dynamic_load_cache_plans(
-    block: &BasicBlock<RegionedAbsoluteAddr>,
-    layout: &MemoryLayout,
-) -> BlockDynamicLoadCachePlans {
-    const MIN_LOADS: usize = 4;
-
-    let mut counts = HashMap::<RegionedAbsoluteAddr, usize>::default();
-    let mut written_ranges = Vec::<(i32, usize)>::new();
-    let physical_range = |address: &RegionedAbsoluteAddr| {
-        let base = layout.regioned_static_byte_and_intra(address, 0)?.0;
-        Some((base, layout.plane_size(&address.absolute_addr())))
-    };
-
-    for instruction in &block.instructions {
-        match instruction {
-            SIRInstruction::Load(_, address, offset, width)
-                if *width <= 64
-                    && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. }) =>
-            {
-                *counts.entry(*address).or_default() += 1;
-            }
-            SIRInstruction::Store(address, ..) => {
-                if let Some(range) = physical_range(address) {
-                    written_ranges.push(range);
-                }
-            }
-            SIRInstruction::Commit(_, destination, ..) => {
-                if let Some(range) = physical_range(destination) {
-                    written_ranges.push(range);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let addresses = counts
-        .into_iter()
-        .filter_map(|(address, count)| {
-            if count < MIN_LOADS {
-                return None;
-            }
-            let absolute = address.absolute_addr();
-            let byte_size = layout.plane_size(&absolute);
-            native_plane_access_size(byte_size)?;
-            if layout.widths.get(&absolute).copied().unwrap_or(usize::MAX) > 64 {
-                return None;
-            }
-            if layout.unpacked_arrays.contains_key(&absolute) {
-                return None;
-            }
-            let (base, size) = physical_range(&address)?;
-            let end = i64::from(base).checked_add(i64::try_from(size).ok()?)?;
-            let overlaps_write = written_ranges.iter().any(|&(write_base, write_size)| {
-                let write_end =
-                    i64::from(write_base) + i64::try_from(write_size).unwrap_or(i64::MAX);
-                i64::from(base) < write_end && i64::from(write_base) < end
-            });
-            (!overlaps_write).then_some(address)
-        })
-        .collect();
-    BlockDynamicLoadCachePlans { addresses }
-}
-
-#[derive(Debug, Clone)]
-struct PackedBitStorePlan {
-    source: RegisterId,
-    address: RegionedAbsoluteAddr,
-    first_lane: usize,
-    lane_count: usize,
-}
-
-#[derive(Debug, Default)]
-struct PackedBitStorePlans {
-    roots: HashMap<usize, PackedBitStorePlan>,
-    skip_indices: HashSet<usize>,
-}
-
-fn find_packed_bit_store_plans(
-    block: &BasicBlock<RegionedAbsoluteAddr>,
-    register_types: &HashMap<RegisterId, RegisterType>,
-    layout: &MemoryLayout,
-) -> PackedBitStorePlans {
-    let mut plans = PackedBitStorePlans::default();
-    let mut index = 0usize;
-    while index + 1 < block.instructions.len() {
-        let SIRInstruction::Slice(_, source, first_lane, 1) = block.instructions[index] else {
-            index += 1;
-            continue;
-        };
-        let SIRInstruction::Store(
-            address,
-            SIROffset::Static(first_store_lane),
-            1,
-            first_slice,
-            ref triggers,
-            ref captures,
-        ) = block.instructions[index + 1]
-        else {
-            index += 1;
-            continue;
-        };
-        let SIRInstruction::Slice(first_slice_definition, _, _, _) = block.instructions[index]
-        else {
-            unreachable!();
-        };
-        let Some(array) = layout.unpacked_arrays.get(&address.absolute_addr()) else {
-            index += 1;
-            continue;
-        };
-        if first_slice != first_slice_definition
-            || first_store_lane != first_lane
-            || !triggers.is_empty()
-            || !captures.is_empty()
-            || array.element_width != 1
-            || array.element_stride != 1
-        {
-            index += 1;
-            continue;
-        }
-
-        let mut lane_count = 0usize;
-        while index + lane_count * 2 + 1 < block.instructions.len() {
-            let slice_index = index + lane_count * 2;
-            let store_index = slice_index + 1;
-            let SIRInstruction::Slice(slice, lane_source, lane, 1) =
-                block.instructions[slice_index]
-            else {
-                break;
-            };
-            let SIRInstruction::Store(
-                lane_address,
-                SIROffset::Static(store_lane),
-                1,
-                stored,
-                ref lane_triggers,
-                ref lane_captures,
-            ) = block.instructions[store_index]
-            else {
-                break;
-            };
-            if lane_source != source
-                || lane != first_lane + lane_count
-                || lane_address != address
-                || store_lane != lane
-                || stored != slice
-                || !lane_triggers.is_empty()
-                || !lane_captures.is_empty()
-            {
-                break;
-            }
-            lane_count += 1;
-        }
-        let source_width = register_types.get(&source).map(RegisterType::width);
-        if lane_count >= 8
-            && lane_count.is_multiple_of(8)
-            && lane_count <= 64
-            && first_lane.is_multiple_of(8)
-            && source_width.is_some_and(|width| first_lane + lane_count <= width)
-            && first_lane + lane_count <= array.element_count
-        {
-            let plan = PackedBitStorePlan {
-                source,
-                address,
-                first_lane,
-                lane_count,
-            };
-            plans.skip_indices.extend(index..index + lane_count * 2);
-            plans.roots.insert(index, plan);
-            index += lane_count * 2;
-        } else {
-            index += 1;
-        }
-    }
-    plans
 }
 
 #[derive(Clone, Copy)]
@@ -1221,8 +971,7 @@ pub fn lower_execution_unit_with_diagnostics(
     }
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
-    let native_packed_bit_stores = !four_state && func.target_features.bmi2();
-    let native_packed_field_compares = !four_state && func.target_features.bmi2();
+    let target_policy = TargetIselPolicy::for_function(&func, four_state);
     let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
     let sparse_write_states = match sparse_worklist_run {
@@ -1373,7 +1122,7 @@ pub fn lower_execution_unit_with_diagnostics(
         } else {
             PriorityEncodePlans::default()
         };
-        let packed_bit_store_plans = if native_packed_bit_stores {
+        let packed_bit_store_plans = if target_policy.select_packed_bit_stores {
             find_packed_bit_store_plans(sir_block, &eu.register_map, layout)
         } else {
             PackedBitStorePlans::default()
@@ -1397,7 +1146,7 @@ pub fn lower_execution_unit_with_diagnostics(
         } else {
             PackedLaneComparePlans::default()
         };
-        let packed_field_compare_plans = if native_packed_field_compares {
+        let packed_field_compare_plans = if target_policy.select_packed_field_compares {
             find_packed_field_compare_plans(
                 sir_block,
                 &eu.register_map,
@@ -1899,69 +1648,6 @@ pub fn lower_execution_unit_with_diagnostics(
     }
 
     func
-}
-
-fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::BlockId> {
-    fn successors(term: &SIRTerminator) -> Vec<crate::BlockId> {
-        match term {
-            SIRTerminator::Jump(target, _) => vec![*target],
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => vec![true_block.0, false_block.0],
-            SIRTerminator::Switch { cases, default, .. } => cases
-                .iter()
-                .map(|case| case.target)
-                .chain(std::iter::once(*default))
-                .collect(),
-            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
-        }
-    }
-
-    fn visit_from(
-        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        start: crate::BlockId,
-        visited: &mut HashSet<crate::BlockId>,
-        postorder: &mut Vec<crate::BlockId>,
-    ) {
-        let mut stack = vec![(start, false)];
-        while let Some((block_id, expanded)) = stack.pop() {
-            if !eu.blocks.contains_key(&block_id) {
-                continue;
-            }
-            if expanded {
-                postorder.push(block_id);
-                continue;
-            }
-            if !visited.insert(block_id) {
-                continue;
-            }
-            stack.push((block_id, true));
-            let mut succs = successors(&eu.blocks[&block_id].terminator);
-            succs.reverse();
-            for succ in succs {
-                if !visited.contains(&succ) {
-                    stack.push((succ, false));
-                }
-            }
-        }
-    }
-
-    let mut visited = HashSet::default();
-    let mut postorder = Vec::new();
-    visit_from(eu, eu.entry_block_id, &mut visited, &mut postorder);
-
-    let mut sorted_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-    sorted_ids.sort();
-    for block_id in sorted_ids {
-        if !visited.contains(&block_id) {
-            visit_from(eu, block_id, &mut visited, &mut postorder);
-        }
-    }
-
-    postorder.reverse();
-    postorder
 }
 
 /// Compute a bitmask of `width` bits (e.g., width=8 → 0xFF).
@@ -3035,12 +2721,6 @@ fn lower_low_bit(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
     dst
 }
 
-#[derive(Clone, Copy)]
-struct SirUseSite {
-    block: crate::BlockId,
-    inst_idx: Option<usize>,
-}
-
 #[derive(Default)]
 struct PriorityEncodePlans {
     roots: HashMap<usize, PriorityEncodePlan>,
@@ -3053,11 +2733,6 @@ struct PriorityEncodePlan {
     dst: RegisterId,
     src: RegisterId,
     width: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ExactSirConstant {
-    value: u64,
 }
 
 #[derive(Default)]
@@ -3363,44 +3038,6 @@ struct DenseLookupCandidate {
 struct DenseLookupEmitCache {
     byte_indices: HashMap<(RegisterId, usize), VReg>,
     table_addrs: HashMap<ConstantTableId, VReg>,
-}
-
-fn exact_sir_constant(value: &crate::SIRValue) -> Option<ExactSirConstant> {
-    if value.mask != num_bigint::BigUint::ZERO {
-        return None;
-    }
-    let digits = value.payload.to_u64_digits();
-    let value = match digits.as_slice() {
-        [] => 0,
-        [value] => *value,
-        _ => return None,
-    };
-    Some(ExactSirConstant { value })
-}
-
-fn collect_exact_sir_constants(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> HashMap<RegisterId, ExactSirConstant> {
-    let mut constants = HashMap::default();
-    let mut ambiguous = HashSet::default();
-    for block_id in ordered_sir_blocks(eu) {
-        let block = &eu.blocks[&block_id];
-        for inst in &block.instructions {
-            let SIRInstruction::Imm(dst, value) = inst else {
-                continue;
-            };
-            let Some(value) = exact_sir_constant(value) else {
-                continue;
-            };
-            if constants.insert(*dst, value).is_some() {
-                ambiguous.insert(*dst);
-            }
-        }
-    }
-    for reg in ambiguous {
-        constants.remove(&reg);
-    }
-    constants
 }
 
 fn find_dense_lookup_plans(
@@ -3709,113 +3346,6 @@ fn match_dense_lookup_condition(
     })
 }
 
-fn collect_sir_use_sites(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> HashMap<RegisterId, Vec<SirUseSite>> {
-    let mut uses: HashMap<RegisterId, Vec<SirUseSite>> = HashMap::default();
-    for block_id in ordered_sir_blocks(eu) {
-        let block = &eu.blocks[&block_id];
-        for (inst_idx, inst) in block.instructions.iter().enumerate() {
-            collect_sir_inst_uses(inst, |reg| {
-                uses.entry(reg).or_default().push(SirUseSite {
-                    block: block_id,
-                    inst_idx: Some(inst_idx),
-                });
-            });
-        }
-        collect_sir_term_uses(&block.terminator, |reg| {
-            uses.entry(reg).or_default().push(SirUseSite {
-                block: block_id,
-                inst_idx: None,
-            });
-        });
-    }
-    uses
-}
-
-fn collect_sir_inst_uses(
-    inst: &SIRInstruction<RegionedAbsoluteAddr>,
-    mut add: impl FnMut(RegisterId),
-) {
-    match inst {
-        SIRInstruction::Imm(..) => {}
-        SIRInstruction::Binary(_, lhs, _, rhs) => {
-            add(*lhs);
-            add(*rhs);
-        }
-        SIRInstruction::Unary(_, _, src) | SIRInstruction::Slice(_, src, _, _) => add(*src),
-        SIRInstruction::Load(_, _, offset, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                add(register);
-            }
-        }
-        SIRInstruction::Store(_, off, _, src, _, _) => {
-            for register in off.dynamic_registers().into_iter().flatten() {
-                add(register);
-            }
-            add(*src);
-        }
-        SIRInstruction::Commit(_, _, offset, _, _) => {
-            for register in offset.dynamic_registers().into_iter().flatten() {
-                add(register);
-            }
-        }
-        SIRInstruction::Concat(_, args)
-        | SIRInstruction::RuntimeEvent { args, .. }
-        | SIRInstruction::CombCaptureEvent { args, .. } => {
-            for &arg in args {
-                add(arg);
-            }
-        }
-        SIRInstruction::Mux(_, cond, then_val, else_val) => {
-            add(*cond);
-            add(*then_val);
-            add(*else_val);
-        }
-        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
-            add(*old);
-            add(*new);
-        }
-    }
-}
-
-fn collect_sir_defs(block: &crate::BasicBlock<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
-    let mut defs = HashMap::default();
-    for (idx, inst) in block.instructions.iter().enumerate() {
-        if let Some(dst) = sir_def_reg(inst) {
-            defs.insert(dst, idx);
-        }
-    }
-    defs
-}
-
-fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) {
-    match term {
-        SIRTerminator::Jump(_, args) => {
-            for &arg in args {
-                add(arg);
-            }
-        }
-        SIRTerminator::Branch {
-            cond,
-            true_block,
-            false_block,
-        } => {
-            add(*cond);
-            for &arg in &true_block.1 {
-                add(arg);
-            }
-            for &arg in &false_block.1 {
-                add(arg);
-            }
-        }
-        SIRTerminator::Switch { selector, .. } => {
-            add(*selector);
-        }
-        SIRTerminator::Return | SIRTerminator::Error(_) => {}
-    }
-}
-
 fn find_priority_encode_plans(
     block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
@@ -4111,23 +3641,6 @@ fn sir_imm_u64(
         [] => Some(0),
         [value] => Some(*value),
         _ => None,
-    }
-}
-
-fn sir_def_reg(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
-    match inst {
-        SIRInstruction::Imm(dst, _)
-        | SIRInstruction::Binary(dst, _, _, _)
-        | SIRInstruction::Unary(dst, _, _)
-        | SIRInstruction::Load(dst, _, _, _)
-        | SIRInstruction::Concat(dst, _)
-        | SIRInstruction::Slice(dst, _, _, _)
-        | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
-        SIRInstruction::Store(_, _, _, _, _, _)
-        | SIRInstruction::Commit(_, _, _, _, _)
-        | SIRInstruction::RuntimeEvent { .. }
-        | SIRInstruction::CombCaptureEvent { .. }
-        | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
     }
 }
 
