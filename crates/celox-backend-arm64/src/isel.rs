@@ -7,6 +7,7 @@
 mod dynamic_load_cache;
 mod packed_bit_store;
 mod sparse;
+mod target_policy;
 
 use super::mir::*;
 use super::sparse_write_state::{
@@ -30,6 +31,7 @@ use celox_sir::analysis::{
 use dynamic_load_cache::{block_dynamic_load_cache_plans, native_plane_access_size};
 use packed_bit_store::{PackedBitStorePlan, PackedBitStorePlans, find_packed_bit_store_plans};
 use sparse::{find_sparse_worklist_run, sparse_descriptor_table};
+use target_policy::TargetIselPolicy;
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -966,11 +968,7 @@ pub fn lower_execution_unit_with_diagnostics(
     }
 
     let mut func = MFunction::for_isel(vregs.clone(), spill_descs);
-    // Packed deposit/extract are available as multi-instruction AArch64
-    // recipes. Keep the portable scalar path until an AArch64-specific
-    // profitability model is added.
-    let native_packed_bit_stores = false;
-    let native_packed_field_compares = false;
+    let target_policy = TargetIselPolicy::for_function(&func, four_state);
     let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
     let sparse_write_states = match sparse_worklist_run {
@@ -1121,7 +1119,7 @@ pub fn lower_execution_unit_with_diagnostics(
         } else {
             PriorityEncodePlans::default()
         };
-        let packed_bit_store_plans = if native_packed_bit_stores {
+        let packed_bit_store_plans = if target_policy.select_packed_bit_stores {
             find_packed_bit_store_plans(sir_block, &eu.register_map, layout)
         } else {
             PackedBitStorePlans::default()
@@ -1145,7 +1143,7 @@ pub fn lower_execution_unit_with_diagnostics(
         } else {
             PackedLaneComparePlans::default()
         };
-        let packed_field_compare_plans = if native_packed_field_compares {
+        let packed_field_compare_plans = if target_policy.select_packed_field_compares {
             find_packed_field_compare_plans(
                 sir_block,
                 &eu.register_map,
