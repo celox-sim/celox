@@ -3369,6 +3369,44 @@ fn collects_enum_constants_from_parameterized_aliased_bases() {
 }
 
 #[test]
+fn collects_enum_constants_from_parameterized_direct_bases() {
+    let source = r#"
+        module Top #(parameter W = 2) (output logic [3:0] y);
+            typedef enum logic [W'(2'd3):0] { A = 4'b1010 } E;
+            assign y = A;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parameterized_direct_enum_base.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xau8.into());
+}
+
+#[test]
+fn preserves_masks_in_compound_constant_cast_operands() {
+    let source = r#"
+        module Top(output logic [3:0] y);
+            localparam logic [3:0] Q = 4'(2'bx1 | 2'b00);
+            assign y = Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("compound_masked_constant_cast.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("y")),
+        (BigUint::from(0b0011u8), BigUint::from(0b0010u8))
+    );
+}
+
+#[test]
 fn preserves_body_parameter_overrides_during_enum_collection() {
     let source = r#"
         module Child(output logic y);
@@ -3527,6 +3565,33 @@ fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
                     1'b0: y = 1'b0;
                     1'b1: y = 1'b1;
                 endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn regroups_comb_targets_after_dynamic_index_substitution() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic c, a, b,
+            output logic [1:0] x
+        );
+            logic i;
+            always_comb begin
+                if (c) begin
+                    i = 1'b0;
+                    x[i] = a;
+                end else begin
+                    i = 1'b1;
+                    x[i] = b;
+                end
             end
         endmodule
         "#,

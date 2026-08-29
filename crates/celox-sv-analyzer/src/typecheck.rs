@@ -146,6 +146,16 @@ pub fn eval_const_expr_with_types(
     eval_const_expr(&expr, constants)
 }
 
+/// Evaluate a literal constant expression without discarding four-state masks.
+pub fn eval_const_integral_literal_with_types(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    integral_literal_from_const_expr(&expr)
+}
+
 pub fn substitute_typed_constants(
     expr: ConstExpr,
     constants: &HashMap<String, i128>,
@@ -401,6 +411,20 @@ fn eval_four_state_binary(
         return None;
     }
 
+    let result = eval_four_state_binary_literal(left, op, right, signed)?;
+    integral_literal_as_i128(&result, signed)
+}
+
+fn eval_four_state_binary_literal(
+    left: &IntegralLiteral,
+    op: BinaryOp,
+    right: &IntegralLiteral,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    if !matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
+        return None;
+    }
+
     let width = left.width;
     let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
     let left_known = &width_mask ^ &left.mask;
@@ -421,15 +445,12 @@ fn eval_four_state_binary(
     };
     let known = &known_zero | &known_one;
     let mask = &width_mask ^ known;
-    integral_literal_as_i128(
-        &IntegralLiteral {
-            width,
-            signed,
-            value: known_one | &mask,
-            mask,
-        },
+    Some(IntegralLiteral {
+        width,
         signed,
-    )
+        value: known_one | &mask,
+        mask,
+    })
 }
 
 fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> {
@@ -497,13 +518,34 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             op: UnaryOp::BitNot,
             expr,
         } => {
-            let ConstExpr::Literal(literal) = &**expr else {
-                return None;
-            };
-            let mut literal = parse_integral_literal(literal)?;
+            let mut literal = integral_literal_from_const_expr(expr)?;
             let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
-            literal.value = width_mask ^ literal.value;
+            let known = &width_mask ^ &literal.mask;
+            literal.value = ((&width_mask ^ literal.value) & known) | &literal.mask;
             Some(literal)
+        }
+        ConstExpr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr,
+        } => {
+            let mut literal = integral_literal_from_const_expr(expr)?;
+            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
+            literal.value &= width_mask ^ &literal.mask;
+            literal.mask = BigUint::default();
+            Some(literal)
+        }
+        ConstExpr::Binary { left, op, right }
+            if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) =>
+        {
+            let mut left = integral_literal_from_const_expr(left)?;
+            let mut right = integral_literal_from_const_expr(right)?;
+            let width = left.width.max(right.width);
+            let signed = left.signed && right.signed;
+            let left_extension = signed_extension(&left, signed);
+            let right_extension = signed_extension(&right, signed);
+            left = resize_integral_literal(left, width, signed, left_extension);
+            right = resize_integral_literal(right, width, signed, right_extension);
+            eval_four_state_binary_literal(&left, *op, &right, signed)
         }
         _ => None,
     }

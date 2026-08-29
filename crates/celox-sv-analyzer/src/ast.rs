@@ -872,14 +872,30 @@ fn constant_cast_const_expr(
         const_env,
         type_aliases,
     )?;
-    let operand_type = infer_const_expr_type(&operand, &parameter_types_from_const_env(const_env))?;
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let operand_type = infer_const_expr_type(&operand, &parameter_types)?;
     let literal = if let ConstExpr::Literal(literal) = &operand {
         typecheck::parse_integral_literal(literal)?
     } else {
-        let operand_value = eval_ast_const_expr(&operand, const_env)?;
-        let operand_literal =
-            format_typed_parameter_literal(operand_value, operand_type.width, operand_type.signed);
-        typecheck::parse_integral_literal(&operand_literal)?
+        let ir_operand: crate::ir::ConstExpr = operand.clone().into();
+        let ir_parameter_types = parameter_types
+            .iter()
+            .map(|(name, r#type)| (name.clone(), (r#type.width, r#type.signed)))
+            .collect();
+        typecheck::eval_const_integral_literal_with_types(
+            &ir_operand,
+            const_env,
+            &ir_parameter_types,
+        )
+        .or_else(|| {
+            let operand_value = eval_ast_const_expr(&operand, const_env)?;
+            let operand_literal = format_typed_parameter_literal(
+                operand_value,
+                operand_type.width,
+                operand_type.signed,
+            );
+            typecheck::parse_integral_literal(&operand_literal)
+        })?
     };
     let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
     // A numeric size cast keeps the source expression's signedness; a type
@@ -3615,11 +3631,16 @@ fn enum_member_constants_from_module_node(
             continue;
         };
         let member_type = match &r#enum.nodes.1 {
-            Some(base) => type_from_ref_node(RefNode::EnumBaseType(base), syntax_tree)
-                .or_else(|| {
-                    type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, type_aliases)
-                })
-                .and_then(|r#type| expr_type_from_type(&r#type, &eval_env)),
+            Some(base) => type_from_ref_node_with_env(
+                RefNode::EnumBaseType(base),
+                syntax_tree,
+                &eval_env,
+                type_aliases,
+            )
+            .or_else(|| {
+                type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, type_aliases)
+            })
+            .and_then(|r#type| expr_type_from_type(&r#type, &eval_env)),
             None => Some(ExprType {
                 width: 32,
                 signed: true,
@@ -7836,54 +7857,14 @@ fn comb_assignments_from_guarded(
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     normalize_mixed_whole_selected_comb_writes(&mut guarded, packed_dimensions);
     let const_env = &packed_dimensions.const_env;
-    let mut targets: Vec<LValue> = Vec::new();
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for (index, conditional) in guarded.iter().enumerate() {
-        let target = conditional.assignment().lhs_value();
-        let reusable_group = targets
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(group, existing)| {
-                if existing != target {
-                    return None;
-                }
-                let previous = *groups[group].last()?;
-                let separated_by_overlap = guarded[previous + 1..index].iter().any(|assignment| {
-                    lvalues_overlap(assignment.assignment().lhs_value(), target, const_env)
-                        && assignment.assignment().lhs_value() != target
-                });
-                (!separated_by_overlap).then_some(group)
-            });
-        match reusable_group {
-            Some(group) => groups[group].push(index),
-            None => {
-                targets.push(target.clone());
-                groups.push(vec![index]);
-            }
-        }
-    }
-    // Every arm that will participate in a mux must first undergo its own
-    // procedural assignment conversion. This includes an unconditional
-    // initializer that becomes the fallback of a later guarded write.
-    for indices in &groups {
-        let has_conditional = indices
-            .iter()
-            .any(|index| guarded[*index].condition().is_some());
-        if !has_conditional {
-            continue;
-        }
-        for index in indices {
-            let assignment = guarded[*index].assignment().clone();
-            let lhs = assignment.lhs_value().clone();
-            let rhs =
-                coerce_procedural_assignment_rhs(assignment.rhs().clone(), &lhs, packed_dimensions);
-            guarded[*index].assignment = Assignment::new(lhs, rhs);
-        }
-    }
+    let (mut targets, mut groups) = comb_assignment_target_groups(&guarded, const_env);
+    coerce_conditional_comb_groups(&mut guarded, &groups, packed_dimensions);
+
     // Apply every cross-target blocking-assignment substitution before any
     // group is materialized. A later group may rewrite an assignment that
     // belongs to an earlier group.
+    let mut lvalues_changed = false;
+    let mut changed_chains = HashSet::default();
     for (target, indices) in targets.iter().zip(&groups) {
         if indices
             .iter()
@@ -7892,13 +7873,31 @@ fn comb_assignments_from_guarded(
             continue;
         }
         let initial = overlapping_value_before(&guarded, indices[0], target, packed_dimensions);
-        substitute_intermediate_comb_value_reads(
+        let (changed, chains) = substitute_intermediate_comb_value_reads(
             &mut guarded,
             indices,
             target,
             initial,
             packed_dimensions,
         )?;
+        lvalues_changed |= changed;
+        changed_chains.extend(chains);
+    }
+    if lvalues_changed {
+        // A blocking assignment used by a dynamic index can turn one
+        // syntactic target into different concrete targets on sibling paths.
+        // Any fallback proof for that chain and the old target grouping are
+        // stale after the rewrite.
+        for write in &mut guarded {
+            if write
+                .exhaustive_fallback_start
+                .is_some_and(|chain| changed_chains.contains(&chain))
+            {
+                write.exhaustive_fallback_start = None;
+            }
+        }
+        (targets, groups) = comb_assignment_target_groups(&guarded, const_env);
+        coerce_conditional_comb_groups(&mut guarded, &groups, packed_dimensions);
     }
 
     // Merged groups land on the slot of their last write so relative
@@ -7951,6 +7950,65 @@ fn comb_assignments_from_guarded(
         slots[last] = Some(Assignment::new(target, rhs));
     }
     Ok(slots.into_iter().flatten().collect())
+}
+
+fn comb_assignment_target_groups(
+    guarded: &[ConditionalAssignment],
+    const_env: &HashMap<String, i128>,
+) -> (Vec<LValue>, Vec<Vec<usize>>) {
+    let mut targets: Vec<LValue> = Vec::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, conditional) in guarded.iter().enumerate() {
+        let target = conditional.assignment().lhs_value();
+        let reusable_group = targets
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(group, existing)| {
+                if existing != target {
+                    return None;
+                }
+                let previous = *groups[group].last()?;
+                let separated_by_overlap = guarded[previous + 1..index].iter().any(|assignment| {
+                    lvalues_overlap(assignment.assignment().lhs_value(), target, const_env)
+                        && assignment.assignment().lhs_value() != target
+                });
+                (!separated_by_overlap).then_some(group)
+            });
+        match reusable_group {
+            Some(group) => groups[group].push(index),
+            None => {
+                targets.push(target.clone());
+                groups.push(vec![index]);
+            }
+        }
+    }
+    (targets, groups)
+}
+
+fn coerce_conditional_comb_groups(
+    guarded: &mut [ConditionalAssignment],
+    groups: &[Vec<usize>],
+    packed_dimensions: &PackedDimensions,
+) {
+    // Every arm that will participate in a mux must first undergo its own
+    // procedural assignment conversion. This includes an unconditional
+    // initializer that becomes the fallback of a later guarded write.
+    for indices in groups {
+        let has_conditional = indices
+            .iter()
+            .any(|index| guarded[*index].condition().is_some());
+        if !has_conditional {
+            continue;
+        }
+        for index in indices {
+            let assignment = guarded[*index].assignment().clone();
+            let lhs = assignment.lhs_value().clone();
+            let rhs =
+                coerce_procedural_assignment_rhs(assignment.rhs().clone(), &lhs, packed_dimensions);
+            guarded[*index].assignment = Assignment::new(lhs, rhs);
+        }
+    }
 }
 
 fn normalize_mixed_whole_selected_comb_writes(
@@ -8137,7 +8195,7 @@ fn substitute_intermediate_comb_value_reads(
     target: &LValue,
     initial: Option<Expr>,
     packed_dimensions: &PackedDimensions,
-) -> Result<(), AnalyzerError> {
+) -> Result<(bool, HashSet<usize>), AnalyzerError> {
     let first = *indices.first().expect("group is non-empty");
     let mut initialized = initial.is_some();
     let mut established = initial.unwrap_or_else(comb_previous_value_placeholder);
@@ -8145,6 +8203,8 @@ fn substitute_intermediate_comb_value_reads(
     let mut prior_target_writes: Vec<(usize, ConditionalAssignment)> = Vec::new();
     let mut guard_values: HashMap<usize, Expr> = HashMap::default();
     let mut path_values: HashMap<usize, Expr> = HashMap::default();
+    let mut lvalues_changed = false;
+    let mut changed_chains = HashSet::default();
     let whole_target = match target {
         LValue::Select { name, .. } => whole_packed_lvalue(name, packed_dimensions),
         LValue::Ident(_) => None,
@@ -8199,6 +8259,11 @@ fn substitute_intermediate_comb_value_reads(
                 whole_established.as_ref(),
                 packed_dimensions,
             );
+            if &lhs != assignment.lhs_value() {
+                lvalues_changed = true;
+                changed_chains.extend(guarded_assignment.guard_boundary);
+                changed_chains.extend(guarded_assignment.exhaustive_fallback_start);
+            }
             guarded_assignment.assignment = Assignment::new(
                 lhs,
                 substitute_comb_value_reads(
@@ -8272,7 +8337,7 @@ fn substitute_intermediate_comb_value_reads(
         }
         prior_target_writes.push((index, write.clone()));
     }
-    Ok(())
+    Ok((lvalues_changed, changed_chains))
 }
 
 fn substitute_comb_value_reads(
