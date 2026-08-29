@@ -561,7 +561,7 @@ fn emit_instruction(
             dynasm!(ops ; .arch aarch64 ; mov W(dst), W(src));
         }
         MInst::LoadImm { dst, value } => emit_load_imm(ops, resolve(assignment, *dst)?, *value),
-        MInst::Scratch { .. } | MInst::KeepAlive { .. } => {}
+        MInst::KeepAlive { .. } => {}
         MInst::LoadConstantTableAddr { dst, table } => {
             let dst = resolve(assignment, *dst)?;
             let label = *table_labels
@@ -729,45 +729,6 @@ fn emit_instruction(
                 emit_release_store(ops, src, SCRATCH0, *size);
             } else {
                 emit_store_indexed_at(ops, src, ptr, index, i64::from(*offset), 1, *size);
-            }
-        }
-        MInst::AndStoreImm {
-            base,
-            offset,
-            size,
-            imm,
-        }
-        | MInst::OrStoreImm {
-            base,
-            offset,
-            size,
-            imm,
-        } => {
-            let address_offset = base_offset(*base, *offset);
-            let (base_register, address_offset) =
-                select_memory_base(*base, address_offset, SCRATCH1, *size, false, state_pages);
-            if memory_access_encoding(SCRATCH1, base_register, address_offset, *size, false)
-                .is_some()
-            {
-                emit_load_at(ops, SCRATCH1, base_register, address_offset, *size);
-                emit_load_imm(ops, SCRATCH0, *imm);
-                if matches!(instruction, MInst::AndStoreImm { .. }) {
-                    dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
-                } else {
-                    dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
-                }
-                emit_store_at(ops, 30, base_register, address_offset, *size);
-            } else {
-                emit_base_address(ops, *base, *offset)?;
-                emit_load(ops, SCRATCH1, SCRATCH0, *size);
-                emit_load_imm(ops, SCRATCH0, *imm);
-                if matches!(instruction, MInst::AndStoreImm { .. }) {
-                    dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
-                } else {
-                    dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
-                }
-                emit_base_address(ops, *base, *offset)?;
-                emit_store(ops, 30, SCRATCH0, *size);
             }
         }
         MInst::Add { dst, lhs, rhs }
@@ -945,17 +906,12 @@ fn emit_instruction(
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
             dynasm!(ops ; .arch aarch64 ; rbit x16, X(src) ; clz X(dst), x16);
         }
-        MInst::Bsr { dst, src } | MInst::BsrOr { dst, src, .. } => {
+        MInst::Bsr { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
             dynasm!(ops ; .arch aarch64 ; clz x16, X(src));
             emit_load_imm(ops, SCRATCH1, 63);
             dynasm!(ops ; .arch aarch64 ; sub x16, x17, x16);
-            if let MInst::BsrOr { zero_value, .. } = instruction {
-                emit_load_imm(ops, SCRATCH1, u64::from(*zero_value));
-                dynasm!(ops ; .arch aarch64 ; cmp XSP(src), #0 ; csel X(dst), x16, x17, ne);
-            } else {
-                dynasm!(ops ; .arch aarch64 ; mov X(dst), x16);
-            }
+            dynasm!(ops ; .arch aarch64 ; mov X(dst), x16);
         }
         MInst::Select {
             dst,
@@ -1245,15 +1201,6 @@ fn emit_instruction(
             *active_bits_offset,
             *active_capacity,
         )?,
-        MInst::Pext { dst, src, mask } | MInst::Pdep { dst, src, mask } => {
-            emit_parallel_bits(
-                ops,
-                resolve(assignment, *dst)?,
-                resolve(assignment, *src)?,
-                resolve(assignment, *mask)?,
-                matches!(instruction, MInst::Pdep { .. }),
-            );
-        }
         MInst::GuardedCmpSelect {
             dst,
             guard,
@@ -1423,132 +1370,6 @@ fn emit_mem_copy_forward_vectors(
     }
     if remainder % 2 == 1 {
         dynasm!(ops ; .arch aarch64 ; ldrb w30, [x16] ; strb w30, [x17]);
-    }
-}
-
-fn emit_parallel_bits(
-    ops: &mut VecAssembler<Aarch64Relocation>,
-    destination: u8,
-    source: u8,
-    mask: u8,
-    deposit: bool,
-) {
-    if destination != source && destination != mask {
-        emit_parallel_bits_loop(ops, destination, source, mask, deposit);
-        return;
-    }
-
-    emit_parallel_bits_saved_loop(ops, destination, source, mask, deposit);
-}
-
-fn emit_parallel_bits_loop(
-    ops: &mut VecAssembler<Aarch64Relocation>,
-    destination: u8,
-    source: u8,
-    mask: u8,
-    deposit: bool,
-) {
-    let loop_label = ops.new_dynamic_label();
-    let done = ops.new_dynamic_label();
-    dynasm!(ops
-        ; .arch aarch64
-        ; mov X(destination), xzr
-        ; mov x16, X(mask)
-        ; mov x17, xzr
-        ; =>loop_label
-        ; cbz x16, =>done
-        ; rbit x30, x16
-        ; clz x30, x30
-        ; fmov d4, x30
-        ; sub x30, x16, #1
-        ; and x16, x16, x30
-    );
-    if deposit {
-        // x17 counts source bits while d4 retains the destination bit
-        // selected by the lowest set mask bit. d5 protects the working mask
-        // while x16 is reused as the variable shift amount.
-        dynasm!(ops
-            ; .arch aarch64
-            ; fmov d5, x16
-            ; lsrv x30, X(source), x17
-            ; and x30, x30, #1
-            ; fmov x16, d4
-            ; lslv x30, x30, x16
-            ; orr X(destination), X(destination), x30
-            ; fmov x16, d5
-            ; add x17, x17, #1
-            ; b =>loop_label
-            ; =>done
-        );
-    } else {
-        dynasm!(ops
-            ; .arch aarch64
-            ; fmov x30, d4
-            ; lsrv x30, X(source), x30
-            ; and x30, x30, #1
-            ; lslv x30, x30, x17
-            ; orr X(destination), X(destination), x30
-            ; add x17, x17, #1
-            ; b =>loop_label
-            ; =>done
-        );
-    }
-}
-
-fn emit_parallel_bits_saved_loop(
-    ops: &mut VecAssembler<Aarch64Relocation>,
-    destination: u8,
-    source: u8,
-    mask: u8,
-    deposit: bool,
-) {
-    // Save both inputs before defining the result: allocation may coalesce a
-    // dying input with the destination. The result can then reuse the
-    // destination register, while d4-d7 hold the transient scalar values.
-    let loop_label = ops.new_dynamic_label();
-    let done = ops.new_dynamic_label();
-    dynasm!(ops
-        ; .arch aarch64
-        ; fmov d6, X(source)
-        ; fmov d7, X(mask)
-        ; mov X(destination), xzr
-        ; mov x17, xzr
-        ; =>loop_label
-        ; fmov x16, d7
-        ; cbz x16, =>done
-        ; rbit x30, x16
-        ; clz x30, x30
-        ; fmov d4, x30
-        ; sub x30, x16, #1
-        ; and x16, x16, x30
-        ; fmov d7, x16
-    );
-    if deposit {
-        dynasm!(ops
-            ; .arch aarch64
-            ; fmov x16, d6
-            ; lsrv x30, x16, x17
-            ; and x30, x30, #1
-            ; fmov x16, d4
-            ; lslv x30, x30, x16
-            ; orr X(destination), X(destination), x30
-            ; add x17, x17, #1
-            ; b =>loop_label
-            ; =>done
-        );
-    } else {
-        dynasm!(ops
-            ; .arch aarch64
-            ; fmov x16, d6
-            ; fmov x30, d4
-            ; lsrv x30, x16, x30
-            ; and x30, x30, #1
-            ; lslv x30, x30, x17
-            ; orr X(destination), X(destination), x30
-            ; add x17, x17, #1
-            ; b =>loop_label
-            ; =>done
-        );
     }
 }
 
@@ -2415,30 +2236,6 @@ fn collect_state_page_accesses(function: &MFunction) -> Vec<StatePageAccess> {
                     size: *size,
                     store: true,
                 }),
-                MInst::AndStoreImm {
-                    base: BaseReg::SimState,
-                    offset,
-                    size,
-                    ..
-                }
-                | MInst::OrStoreImm {
-                    base: BaseReg::SimState,
-                    offset,
-                    size,
-                    ..
-                } => {
-                    let offset = i64::from(*offset);
-                    accesses.push(StatePageAccess::Direct {
-                        offset,
-                        size: *size,
-                        store: false,
-                    });
-                    accesses.push(StatePageAccess::Direct {
-                        offset,
-                        size: *size,
-                        store: true,
-                    });
-                }
                 MInst::LoadIndexed {
                     base: BaseReg::SimState,
                     offset,
@@ -2765,16 +2562,6 @@ fn base_register(base: BaseReg) -> u8 {
         BaseReg::SimState => STATE_REG,
         BaseReg::StackFrame => SPILL_REG,
     }
-}
-
-fn emit_base_address(
-    ops: &mut VecAssembler<Aarch64Relocation>,
-    base: BaseReg,
-    offset: i32,
-) -> Result<(), EmitError> {
-    let offset = base_offset(base, offset);
-    emit_address(ops, base_register(base), offset);
-    Ok(())
 }
 
 fn base_offset(base: BaseReg, offset: i32) -> i64 {

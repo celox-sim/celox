@@ -8,6 +8,7 @@ use std::{fmt, fmt::Display};
 
 pub use celox_design::{BinaryOp, DomainKind, TriggerIdWithKind, UnaryOp};
 
+pub mod analysis;
 pub mod builder;
 pub mod cfg;
 mod serde_helpers;

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::HashMap;
-use crate::mir::{CmpKind, MFunction, MInst, VReg};
+use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 /// Recover the compact immediate and copy forms expected by AArch64 emission.
 ///
@@ -22,6 +22,76 @@ pub(crate) fn optimize(function: &mut MFunction) {
     remove_redundant_low_masks(function);
     propagate_exact_copies(function);
     dead_code_eliminate(function);
+    fold_branch_predicates(function);
+}
+
+/// Select AArch64 flag-consuming branches after value optimizations settle.
+///
+/// A comparison or direct load used only by the immediately following branch
+/// does not need a materialized 0/1 result. Keeping the predicate in MIR lets
+/// emission use `cmp` followed directly by a conditional branch.
+fn fold_branch_predicates(function: &mut MFunction) -> usize {
+    let mut use_counts = HashMap::<VReg, usize>::default();
+    for block in &function.blocks {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+        for instruction in &block.insts {
+            for source in instruction.uses() {
+                *use_counts.entry(source).or_default() += 1;
+            }
+        }
+    }
+
+    let mut folded = 0;
+    for block in &mut function.blocks {
+        if block.insts.len() < 2 {
+            continue;
+        }
+        let MInst::Branch {
+            cond,
+            true_bb,
+            false_bb,
+        } = block.insts[block.insts.len() - 1].clone()
+        else {
+            continue;
+        };
+        if use_counts.get(&cond).copied() != Some(1) {
+            continue;
+        }
+
+        let predicate = match block.insts[block.insts.len() - 2].clone() {
+            MInst::Cmp {
+                dst,
+                lhs,
+                rhs,
+                kind,
+            } if dst == cond => BranchPredicate::Compare { lhs, rhs, kind },
+            MInst::CmpImm {
+                dst,
+                lhs,
+                imm,
+                kind,
+            } if dst == cond => BranchPredicate::CompareImm { lhs, imm, kind },
+            MInst::Load {
+                dst,
+                base,
+                offset,
+                size,
+            } if dst == cond => BranchPredicate::MemoryNonZero { base, offset, size },
+            _ => continue,
+        };
+        block.insts.truncate(block.insts.len() - 2);
+        block.insts.push(MInst::BranchPred {
+            predicate,
+            true_bb,
+            false_bb,
+        });
+        folded += 1;
+    }
+    folded
 }
 
 fn canonicalize_identity_operations(function: &mut MFunction) {
@@ -83,7 +153,6 @@ enum CseOpcode {
     Popcnt,
     Bsf,
     Bsr,
-    BsrOr,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -180,9 +249,6 @@ fn cse_key(instruction: &MInst) -> Option<CseKey> {
         MInst::Popcnt { src, .. } => CseKey::Immediate(CseOpcode::Popcnt, src, 0),
         MInst::Bsf { src, .. } => CseKey::Immediate(CseOpcode::Bsf, src, 0),
         MInst::Bsr { src, .. } => CseKey::Immediate(CseOpcode::Bsr, src, 0),
-        MInst::BsrOr {
-            src, zero_value, ..
-        } => CseKey::Immediate(CseOpcode::BsrOr, src, u64::from(zero_value)),
         MInst::Cmp { lhs, rhs, kind, .. } => CseKey::Compare(lhs, rhs, kind),
         MInst::CmpImm { lhs, imm, kind, .. } => CseKey::CompareImmediate(lhs, imm, kind),
         MInst::Select {
@@ -621,8 +687,7 @@ fn known_u32_values(function: &MFunction) -> BTreeSet<VReg> {
                     | MInst::Cmp { dst, .. }
                     | MInst::CmpImm { dst, .. }
                     | MInst::Popcnt { dst, .. }
-                    | MInst::Bsf { dst, .. }
-                    | MInst::BsrOr { dst, .. } => Some(*dst),
+                    | MInst::Bsf { dst, .. } => Some(*dst),
                     MInst::Mov { dst, src } if known.contains(src) => Some(*dst),
                     MInst::AndImm { dst, imm, .. } if *imm <= u64::from(u32::MAX) => Some(*dst),
                     MInst::OrImm { dst, src, imm }
@@ -762,6 +827,97 @@ mod tests {
         let mut block = MBlock::new(BlockId(0));
         block.insts = instructions;
         MFunction::new(vec![block], Vec::new())
+    }
+
+    #[test]
+    fn folds_single_use_compare_into_flag_branch() {
+        let mut function = function(vec![
+            MInst::Cmp {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+                kind: CmpKind::LtU,
+            },
+            MInst::Branch {
+                cond: VReg(2),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ]);
+
+        optimize(&mut function);
+
+        assert_eq!(
+            function.blocks[0].insts,
+            vec![MInst::BranchPred {
+                predicate: BranchPredicate::Compare {
+                    lhs: VReg(0),
+                    rhs: VReg(1),
+                    kind: CmpKind::LtU,
+                },
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            }]
+        );
+    }
+
+    #[test]
+    fn folds_single_use_load_into_memory_branch() {
+        let mut function = function(vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: crate::mir::BaseReg::SimState,
+                offset: 24,
+                size: crate::mir::OpSize::S32,
+            },
+            MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ]);
+
+        optimize(&mut function);
+
+        assert!(matches!(
+            function.blocks[0].insts.as_slice(),
+            [MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero {
+                    base: crate::mir::BaseReg::SimState,
+                    offset: 24,
+                    size: crate::mir::OpSize::S32,
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn keeps_compare_result_with_multiple_uses() {
+        let original = vec![
+            MInst::CmpImm {
+                dst: VReg(1),
+                lhs: VReg(0),
+                imm: 0,
+                kind: CmpKind::Ne,
+            },
+            MInst::Store {
+                base: crate::mir::BaseReg::SimState,
+                offset: 0,
+                src: VReg(1),
+                size: crate::mir::OpSize::S8,
+            },
+            MInst::Branch {
+                cond: VReg(1),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ];
+        let mut function = function(original.clone());
+
+        optimize(&mut function);
+
+        assert_eq!(function.blocks[0].insts, original);
     }
 
     #[test]
@@ -1005,25 +1161,10 @@ mod tests {
                 dst: VReg(2),
                 src: VReg(1),
             },
-            MInst::BsrOr {
-                dst: VReg(3),
-                src: VReg(0),
-                zero_value: 0,
-            },
-            MInst::Mov32 {
-                dst: VReg(4),
-                src: VReg(3),
-            },
             MInst::Store {
                 base: crate::mir::BaseReg::SimState,
                 offset: 0,
                 src: VReg(2),
-                size: crate::mir::OpSize::S64,
-            },
-            MInst::Store {
-                base: crate::mir::BaseReg::SimState,
-                offset: 8,
-                src: VReg(4),
                 size: crate::mir::OpSize::S64,
             },
             MInst::Return,
@@ -1036,14 +1177,6 @@ mod tests {
             MInst::Mov32 {
                 dst: VReg(2),
                 src: VReg(1)
-            }
-        )));
-        assert!(function.blocks[0].insts.iter().any(|instruction| matches!(
-            instruction,
-            MInst::Store {
-                src: VReg(3),
-                offset: 8,
-                ..
             }
         )));
     }
