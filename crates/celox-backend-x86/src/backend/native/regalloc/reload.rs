@@ -78,6 +78,20 @@ pub(super) struct StateRecipe {
     observed_bits: StateBitRange,
 }
 
+#[cfg(test)]
+impl StateRecipe {
+    pub(super) fn live_on_entry_for_test(load: StateLoad) -> Self {
+        Self {
+            load,
+            snapshot: MemorySnapshot {
+                root: SnapshotAccess::LiveOnEntry,
+                phis: Box::default(),
+            },
+            observed_bits: StateBitRange::from_load(load).unwrap(),
+        }
+    }
+}
+
 /// One independently versioned physical fragment of a 32/64-bit machine
 /// value.  `value_bit_offset` describes assembly of that machine value; it is
 /// not an arbitrary-width VReg type.
