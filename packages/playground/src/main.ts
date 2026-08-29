@@ -15,6 +15,7 @@ import {
 	FourState,
 	initializeFourStateMemory,
 	type PlaygroundSignalValue,
+	runPlaygroundTicks,
 	writeSignalValue,
 	X,
 	Z,
@@ -1471,6 +1472,7 @@ async function run() {
 				}
 			}
 			const defaultEventId = eventNames.length > 0 ? events[eventNames[0]] : -1;
+			const knownEventIds = new Set(Object.values(events));
 
 			const view = new DataView(memory.buffer);
 			let dirty = false;
@@ -1504,13 +1506,23 @@ async function run() {
 				dirty = false;
 			}
 
-			function tickOne(eventId: number) {
+			function flushDirty() {
 				if (dirty) evalComb();
+			}
+
+			function tickOne(eventId: number) {
 				const inst = eventInsts[eventId];
 				if (inst) (inst.exports.run as Function)();
 				(combInst.exports.run as Function)();
 				dirty = false;
 			}
+
+			const tickRuntime = {
+				defaultEventId,
+				knownEventIds,
+				flushDirty,
+				tickOne,
+			};
 
 			return {
 				dut,
@@ -1520,24 +1532,7 @@ async function run() {
 					eventOrCount?: { name: string; id: number } | number,
 					count?: number,
 				) {
-					let eventId: number;
-					let ticks: number;
-					if (typeof eventOrCount === "object" && eventOrCount !== null) {
-						eventId = eventOrCount.id;
-						ticks = count ?? 1;
-					} else if (typeof eventOrCount === "number") {
-						if (count !== undefined) {
-							eventId = eventOrCount;
-							ticks = count;
-						} else {
-							eventId = defaultEventId;
-							ticks = eventOrCount;
-						}
-					} else {
-						eventId = defaultEventId;
-						ticks = count ?? 1;
-					}
-					for (let i = 0; i < ticks; i++) tickOne(eventId);
+					runPlaygroundTicks(tickRuntime, eventOrCount, count);
 				},
 				event(name: string): { name: string; id: number } {
 					const id = events[name];

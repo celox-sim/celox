@@ -18,6 +18,17 @@ interface AdderPorts {
 	readonly sum: bigint;
 }
 
+const U32_MAX = 0xffff_ffff;
+const INVALID_U32_VALUES = [
+	-1,
+	0.5,
+	1.5,
+	Number.NaN,
+	Infinity,
+	-Infinity,
+	U32_MAX + 1,
+];
+
 const AdderModule: ModuleDefinition<AdderPorts> = {
 	__celox_module: true,
 	name: "Adder",
@@ -32,7 +43,9 @@ const AdderModule: ModuleDefinition<AdderPorts> = {
 	events: ["clk", "aux"],
 };
 
-function createMockNative(): {
+function createMockNative(
+	events: Record<string, number> = { clk: 0, aux: 7 },
+): {
 	create: NativeCreateFn;
 	handle: NativeSimulatorHandle;
 	buffer: SharedArrayBuffer;
@@ -93,7 +106,7 @@ function createMockNative(): {
 				direction: "output",
 			},
 		},
-		events: { clk: 0, aux: 7 },
+		events,
 		handle,
 	} satisfies CreateResult<NativeSimulatorHandle>);
 
@@ -217,6 +230,127 @@ describe("Simulator", () => {
 		expect(mock.handle.tickN).toHaveBeenCalledWith(0, 5);
 	});
 
+	test("accepts the maximum u32 tick count", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+		vi.mocked(mock.handle.tickN).mockImplementationOnce(() => undefined);
+
+		sim.tick(U32_MAX);
+		expect(mock.handle.tickN).toHaveBeenCalledWith(0, U32_MAX);
+	});
+
+	test.each(INVALID_U32_VALUES)(
+		"rejects invalid tick count %s",
+		(invalidCount) => {
+			const mock = createMockNative();
+			const sim = Simulator.create(AdderModule, {
+				__nativeCreate: mock.create,
+			});
+			vi.mocked(mock.handle.tickN).mockImplementation(() => {
+				throw new Error("invalid count reached tickN");
+			});
+
+			expect(() => sim.tick(invalidCount)).toThrow(RangeError);
+			expect(() => sim.tick(invalidCount)).toThrow(
+				`Tick count ${invalidCount} must be an integer between 0 and ${U32_MAX}`,
+			);
+			expect(mock.handle.evalComb).not.toHaveBeenCalled();
+			expect(mock.handle.tick).not.toHaveBeenCalled();
+			expect(mock.handle.tickN).not.toHaveBeenCalled();
+		},
+	);
+
+	test("validates the second argument as a tick count", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		expect(() => sim.tick(7, 1.5)).toThrow(
+			`Tick count 1.5 must be an integer between 0 and ${U32_MAX}`,
+		);
+		expect(mock.handle.tickN).not.toHaveBeenCalled();
+	});
+
+	test("tick count zero flushes dirty combinational logic without an event", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.dut.a = 100n;
+		sim.dut.b = 200n;
+
+		sim.tick(0);
+
+		expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+		expect(mock.handle.tick).not.toHaveBeenCalled();
+		expect(mock.handle.tickN).not.toHaveBeenCalled();
+		expect(sim.dut.sum).toBe(300n);
+		expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+	});
+
+	test("invalid input throws before evaluating dirty combinational logic", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.dut.a = 100n;
+
+		expect(() => sim.tick(-1)).toThrow(RangeError);
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+		expect(mock.handle.tick).not.toHaveBeenCalled();
+		expect(mock.handle.tickN).not.toHaveBeenCalled();
+
+		void sim.dut.sum;
+		expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+	});
+
+	test.each(INVALID_U32_VALUES)(
+		"rejects invalid raw event ID %s",
+		(invalidEventId) => {
+			const mock = createMockNative();
+			const sim = Simulator.create(AdderModule, {
+				__nativeCreate: mock.create,
+			});
+
+			expect(() => sim.tick(invalidEventId, 1)).toThrow(RangeError);
+			expect(() => sim.tick(invalidEventId, 1)).toThrow(
+				`Event ID ${invalidEventId} must be an integer between 0 and ${U32_MAX}`,
+			);
+			expect(mock.handle.tick).not.toHaveBeenCalled();
+		},
+	);
+
+	test("accepts known raw event IDs at both u32 boundaries", () => {
+		const mock = createMockNative({ first: 0, last: U32_MAX });
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.tick(0, 1);
+		sim.tick(U32_MAX, 1);
+		expect(mock.handle.tick).toHaveBeenNthCalledWith(1, 0);
+		expect(mock.handle.tick).toHaveBeenNthCalledWith(2, U32_MAX);
+	});
+
+	test("rejects an unknown raw event ID before evaluating dirty state", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.dut.a = 100n;
+
+		expect(() => sim.tick(6, 1)).toThrow(RangeError);
+		expect(() => sim.tick(6, 1)).toThrow(
+			"Unknown event ID 6. Available IDs: 0, 7",
+		);
+		expect(() => sim.tick(6, 0)).toThrow(RangeError);
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+		expect(mock.handle.tick).not.toHaveBeenCalled();
+	});
+
 	test("tick with event handle", () => {
 		const mock = createMockNative();
 		const sim = Simulator.create(AdderModule, {
@@ -240,6 +374,52 @@ describe("Simulator", () => {
 		const clk = sim.event("clk");
 		sim.tick(clk, 5);
 		expect(mock.handle.tickN).toHaveBeenCalledWith(0, 5);
+	});
+
+	test("validates event handles before dispatch", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		expect(() => sim.tick({ name: "invalid", id: Number.NaN })).toThrow(
+			`Event ID NaN must be an integer between 0 and ${U32_MAX}`,
+		);
+		expect(() => sim.tick({ name: "missing", id: 6 })).toThrow(
+			"Unknown event ID 6. Available IDs: 0, 7",
+		);
+		expect(mock.handle.tick).not.toHaveBeenCalled();
+	});
+
+	test("requires a default event only for a positive tick count", () => {
+		const mock = createMockNative({});
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.dut.a = 100n;
+
+		expect(() => sim.tick()).toThrow("Simulator has no events to tick");
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+		expect(mock.handle.tick).not.toHaveBeenCalled();
+
+		sim.tick(0);
+		sim.tick(undefined, 0);
+		expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+		expect(mock.handle.tick).not.toHaveBeenCalled();
+		expect(mock.handle.tickN).not.toHaveBeenCalled();
+	});
+
+	test("validates default event metadata before dispatch", () => {
+		const mock = createMockNative({ invalid: Number.NaN });
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		expect(() => sim.tick()).toThrow(
+			`Event ID NaN must be an integer between 0 and ${U32_MAX}`,
+		);
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+		expect(mock.handle.tick).not.toHaveBeenCalled();
 	});
 
 	test("event() throws for unknown event", () => {
