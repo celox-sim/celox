@@ -88,6 +88,11 @@ enum MaterializedOp {
         fresh: VReg,
         recipe: Option<PreparedRecipe>,
     },
+    HomeTransferBase {
+        fresh: VReg,
+        expected: ResolvedRecipe,
+        planned_use: PointUse,
+    },
 }
 
 #[derive(Clone)]
@@ -289,10 +294,42 @@ pub(super) fn reconstruct(
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let cacheable_bases =
+            cacheable_home_transfer_bases(operations, &recipes, &plan.state_homes);
         let mut recipe_cache = HomeTransferRecipeCache {
-            cacheable_bases: cacheable_home_transfer_bases(operations, &recipes, &plan.state_homes),
+            cacheable_bases,
             bases: HashMap::default(),
         };
+        for (operation, recipe) in operations.iter().zip(&recipes) {
+            let PlannedEdgeOp::Reload { source, .. } = *operation else {
+                continue;
+            };
+            let Some(recipe) = recipe else {
+                continue;
+            };
+            if !recipe_cache.cacheable_bases.contains(&recipe.base)
+                || recipe_cache.bases.contains_key(&recipe.base)
+            {
+                continue;
+            }
+            let fresh = alloc_fresh(func, &mut logical_for_vreg, source)?;
+            recipe_cache.bases.insert(recipe.base.clone(), fresh);
+            insertions
+                .entry((insertion.block, insertion.instruction))
+                .or_default()
+                .push(MaterializedOp::HomeTransferBase {
+                    fresh,
+                    expected: ResolvedRecipe {
+                        base: recipe.base.clone(),
+                        steps: Vec::new(),
+                    },
+                    planned_use: PointUse {
+                        block: func.blocks[insertion.block].id,
+                        instruction: insertion.instruction,
+                        value: VReg(source.0),
+                    },
+                });
+        }
         let mut operation_index = 0usize;
         while operation_index < operations.len() {
             let operation = operations[operation_index];
@@ -1200,13 +1237,7 @@ fn cacheable_home_transfer_bases(
         let ResolvedBase::State(state) = base else {
             continue;
         };
-        let Some(previously_loaded) = transfers[..later]
-            .iter()
-            .rposition(|(previous_base, _)| previous_base.as_ref() == Some(base))
-        else {
-            continue;
-        };
-        if transfers[previously_loaded..later]
+        if transfers[..later]
             .iter()
             .any(|(_, home)| home.is_some_and(|home| state_load_overlaps_home(state.load, home)))
         {
@@ -1244,6 +1275,22 @@ fn materialize_recipe_base(base: &ResolvedBase, destination: VReg) -> MInst {
             size: state.load.size,
         },
     }
+}
+
+fn prepared_recipe_is_direct_state_home_reload(
+    recipe: &PreparedRecipe,
+    destination: VReg,
+    home: crate::native::mir::PackedStateHome,
+) -> bool {
+    matches!(
+        recipe.instructions.as_slice(),
+        [MInst::Load {
+            dst,
+            base: BaseReg::SimState,
+            offset,
+            size,
+        }] if *dst == destination && *offset == home.offset && *size == home.size
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1671,8 +1718,9 @@ fn emit_insertions(
     // evictions must free their registers before operand reloads consume them.
     operations.sort_by_key(|operation| match operation {
         MaterializedOp::Spill { .. } => 0,
-        MaterializedOp::HomeTransfer { .. } => 1,
-        MaterializedOp::Reload { .. } => 2,
+        MaterializedOp::HomeTransferBase { .. } => 1,
+        MaterializedOp::HomeTransfer { .. } => 2,
+        MaterializedOp::Reload { .. } => 3,
     });
     for operation in operations {
         match operation {
@@ -1821,7 +1869,9 @@ fn emit_insertions(
                             "prepared edge-transfer recipe final definition changed",
                         ));
                     }
-                    if let Some(physical) = plan.state_homes.get(&source_home) {
+                    if let Some(physical) = plan.state_homes.get(&source_home)
+                        && prepared_recipe_is_direct_state_home_reload(&recipe, fresh, *physical)
+                    {
                         state_reloads.push(MaterializedStateReload {
                             reload: fresh,
                             home: *physical,
@@ -1896,6 +1946,18 @@ fn emit_insertions(
                         size: OpSize::S64,
                     });
                 }
+            }
+            MaterializedOp::HomeTransferBase {
+                fresh,
+                expected,
+                planned_use,
+            } => {
+                output.push(materialize_recipe_base(&expected.base, fresh));
+                recipe_reloads.push(ExpectedMaterializedReload {
+                    reload: fresh,
+                    expected,
+                    planned_use: Some(planned_use),
+                });
             }
         }
     }
@@ -2296,6 +2358,22 @@ mod tests {
                 if *dst == second_result && *src == cached_base
         ));
         assert_eq!(second.expected.steps, vec![PureStep::Copy64]);
+        let physical_home = crate::native::mir::PackedStateHome {
+            id: crate::native::mir::StateHomeId(0),
+            offset: 16,
+            size: OpSize::S64,
+            live_on_entry: true,
+        };
+        assert!(prepared_recipe_is_direct_state_home_reload(
+            &first,
+            cached_base,
+            physical_home,
+        ));
+        assert!(!prepared_recipe_is_direct_state_home_reload(
+            &second,
+            second_result,
+            physical_home,
+        ));
 
         let mut block = MBlock::new(BlockId(0));
         block.insts.extend(first.instructions);
@@ -2380,6 +2458,64 @@ mod tests {
         homes.get_mut(&first_home).unwrap().offset = 64;
         let cacheable = cacheable_home_transfer_bases(&operations, &recipes, &homes);
         assert!(!cacheable.contains(&base));
+    }
+
+    #[test]
+    fn overlapping_transfer_store_snapshots_a_later_first_state_base() {
+        let first = LogicalValue(0);
+        let second = LogicalValue(1);
+        let first_home = SpillHome(0);
+        let operations = [
+            PlannedEdgeOp::Reload {
+                source: first,
+                source_home: SpillHome(2),
+                destination: first,
+            },
+            PlannedEdgeOp::Spill {
+                source: first,
+                destination: first,
+                destination_home: first_home,
+            },
+            PlannedEdgeOp::Reload {
+                source: second,
+                source_home: SpillHome(3),
+                destination: second,
+            },
+            PlannedEdgeOp::Spill {
+                source: second,
+                destination: second,
+                destination_home: SpillHome(1),
+            },
+        ];
+        let load = super::super::reload::StateLoad {
+            offset: 16,
+            size: OpSize::S64,
+        };
+        let base = ResolvedBase::State(super::super::reload::StateRecipe::live_on_entry_for_test(
+            load,
+        ));
+        let recipes = [
+            None,
+            None,
+            Some(ResolvedRecipe {
+                base: base.clone(),
+                steps: vec![PureStep::ShrImm64 { immediate: 1 }],
+            }),
+            None,
+        ];
+        let mut homes = std::collections::BTreeMap::new();
+        homes.insert(
+            first_home,
+            crate::native::mir::PackedStateHome {
+                id: crate::native::mir::StateHomeId(0),
+                offset: 16,
+                size: OpSize::S64,
+                live_on_entry: false,
+            },
+        );
+
+        let cacheable = cacheable_home_transfer_bases(&operations, &recipes, &homes);
+        assert!(cacheable.contains(&base));
     }
 
     #[test]
