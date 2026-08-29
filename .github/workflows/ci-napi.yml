@@ -163,6 +163,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: napi-${{ matrix.target }}
+
       - name: Install ziglang (musl targets)
         if: matrix.zigbuild
         uses: goto-bus-stop/setup-zig@v2
