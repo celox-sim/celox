@@ -822,6 +822,22 @@ fn napi_runtime_error(
     }
 }
 
+/// Validate a raw numeric event ID before it reaches an unchecked backend lookup.
+///
+/// Standard Celox metadata assigns IDs by enumerating the backend event table, so
+/// valid IDs are dense in `0..event_count`. Numeric N-API entry points must keep
+/// this check in front of every backend call that indexes by event ID.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_event_id(event_id: u32, event_count: usize) -> Result<()> {
+    if (event_id as usize) < event_count {
+        return Ok(());
+    }
+
+    Err(Error::from_reason(
+        celox::RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")).to_string(),
+    ))
+}
+
 /// The backend driving a [`NativeSimulatorHandle`].
 ///
 /// Either the default compiled backend (as before) or the tiered backend,
@@ -836,6 +852,13 @@ enum HandleBackend {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl HandleBackend {
+    fn event_count(&self) -> usize {
+        match self {
+            Self::Default(backend) => backend.id_to_event_slice().len(),
+            Self::Tiered(backend) => backend.id_to_event_slice().len(),
+        }
+    }
+
     fn eval_comb(&mut self) -> std::result::Result<(), celox::RuntimeErrorCode> {
         match self {
             Self::Default(backend) => backend.eval_comb(),
@@ -1308,6 +1331,7 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        validate_event_id(event_id, b.event_count())?;
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         b.eval_apply_ff_at(event_id as usize)
@@ -1324,6 +1348,9 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        // Validate even when `count` is zero so invalid raw IDs never receive
+        // call-shape-dependent treatment at the N-API boundary.
+        validate_event_id(event_id, b.event_count())?;
         for _ in 0..count {
             b.eval_comb()
                 .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
@@ -1611,8 +1638,8 @@ impl NativeSimulationHandle {
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        sim.add_clock_by_id(event_id, period as u64, initial_delay as u64);
-        Ok(())
+        sim.try_add_clock_by_id(event_id, period as u64, initial_delay as u64)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Schedule a one-shot event by event ID.
@@ -3173,6 +3200,137 @@ mod tests {
             .iter()
             .map(|(content, path)| (content.to_string(), std::path::PathBuf::from(path)))
             .collect()
+    }
+
+    fn napi_sources(source: &str) -> Vec<NapiSourceFile> {
+        vec![NapiSourceFile {
+            content: source.to_string(),
+            path: "top.veryl".to_string(),
+        }]
+    }
+
+    const NO_EVENTS_SOURCE: &str = "module Top () {}";
+    const TWO_EVENTS_SOURCE: &str = r#"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            en: input logic,
+            count: output logic<8>,
+        ) {
+            var count_r: logic<8>;
+
+            always_ff (clk, rst) {
+                if_reset {
+                    count_r = 0;
+                } else if en {
+                    count_r = count_r + 1;
+                }
+            }
+
+            always_comb {
+                count = count_r;
+            }
+        }
+    "#;
+
+    #[test]
+    fn raw_event_methods_reject_eventless_handles_with_the_same_error() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None).unwrap();
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+
+        let errors = [
+            simulator.tick(0).unwrap_err(),
+            simulator.tick_n(0, 0).unwrap_err(),
+            simulation.add_clock(0, 10.0, 0.0).unwrap_err(),
+            simulation.schedule(0, 0.0, 1.0).unwrap_err(),
+        ];
+        let expected = celox::RuntimeErrorCode::NotAnEvent("event_id=0".to_string()).to_string();
+
+        for error in errors {
+            assert_eq!(error.reason, expected);
+        }
+    }
+
+    #[test]
+    fn raw_event_methods_reject_the_first_out_of_bounds_id() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+
+        let errors = [
+            simulator.tick(2).unwrap_err(),
+            simulator.tick_n(2, 0).unwrap_err(),
+            simulation.add_clock(2, 10.0, 0.0).unwrap_err(),
+            simulation.schedule(2, 0.0, 1.0).unwrap_err(),
+        ];
+        let expected = celox::RuntimeErrorCode::NotAnEvent("event_id=2".to_string()).to_string();
+
+        for error in errors {
+            assert_eq!(error.reason, expected);
+        }
+    }
+
+    #[test]
+    fn disposed_errors_take_precedence_over_event_validation() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None).unwrap();
+        simulator.dispose();
+        assert_eq!(
+            simulator.tick(0).unwrap_err().reason,
+            "Simulator has been disposed"
+        );
+        assert_eq!(
+            simulator.tick_n(0, 0).unwrap_err().reason,
+            "Simulator has been disposed"
+        );
+
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        simulation.dispose();
+        assert_eq!(
+            simulation.add_clock(0, 10.0, 0.0).unwrap_err().reason,
+            "Simulation has been disposed"
+        );
+        assert_eq!(
+            simulation.schedule(0, 0.0, 1.0).unwrap_err().reason,
+            "Simulation has been disposed"
+        );
+    }
+
+    #[test]
+    fn standard_event_metadata_is_dense_and_valid_ids_still_work() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        let simulator_events: HashMap<String, u32> =
+            serde_json::from_str(&simulator.events_json()).unwrap();
+        let mut simulator_ids = simulator_events.values().copied().collect::<Vec<_>>();
+        simulator_ids.sort_unstable();
+        assert_eq!(simulator_ids, [0, 1]);
+        assert_eq!(
+            simulator.backend.as_ref().unwrap().event_count(),
+            simulator_ids.len()
+        );
+        simulator.tick(0).unwrap();
+        simulator.tick_n(1, 0).unwrap();
+
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        let simulation_events: HashMap<String, u32> =
+            serde_json::from_str(&simulation.events_json()).unwrap();
+        let mut simulation_ids = simulation_events.values().copied().collect::<Vec<_>>();
+        simulation_ids.sort_unstable();
+        assert_eq!(simulation_ids, [0, 1]);
+        simulation.add_clock(0, 10.0, 0.0).unwrap();
+        simulation.schedule(1, 5.0, 1.0).unwrap();
     }
 
     #[test]

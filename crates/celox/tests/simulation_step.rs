@@ -1,4 +1,4 @@
-use celox::Simulation;
+use celox::{RuntimeErrorCode, Simulation};
 
 #[test]
 fn test_simulation_step() {
@@ -98,4 +98,87 @@ fn test_step_decorates_runtime_errors() {
         vsim.step().unwrap_err().to_string(),
         "Non-progressing for loop in always_ff (loop variable `i`): i"
     );
+}
+
+#[test]
+fn test_simulation_by_id_methods_validate_before_enqueuing() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            q: output logic
+        ) {
+            always_ff (clk) {
+                q = ~q;
+            }
+        }
+    "#;
+    let mut sim = Simulation::builder(code, "Top").build().unwrap();
+    let events = sim.named_events();
+    assert_eq!(events.len(), 1);
+    let event_id = events[0].id as u32;
+    assert_eq!(event_id, 0);
+    let first_unknown_id = events.len() as u32;
+
+    assert_eq!(sim.next_event_time(), None);
+    assert_eq!(
+        sim.schedule_by_id(first_unknown_id, 5, 1),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={first_unknown_id}"
+        )))
+    );
+    assert_eq!(
+        sim.schedule_by_id(u32::MAX, 5, 1),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={}",
+            u32::MAX
+        )))
+    );
+    assert_eq!(
+        sim.try_add_clock_by_id(first_unknown_id, 10, 0),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={first_unknown_id}"
+        )))
+    );
+    assert_eq!(
+        sim.try_add_clock_by_id(u32::MAX, 10, 0),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={}",
+            u32::MAX
+        )))
+    );
+
+    sim.add_clock_by_id(first_unknown_id, 10, 0);
+    sim.add_clock_by_id(u32::MAX, 10, 0);
+    assert_eq!(sim.next_event_time(), None);
+
+    sim.try_add_clock_by_id(event_id, 10, 30).unwrap();
+    assert_eq!(sim.next_event_time(), Some(30));
+    sim.add_clock_by_id(event_id, 10, 20);
+    assert_eq!(sim.next_event_time(), Some(20));
+    sim.schedule_by_id(event_id, 5, 1).unwrap();
+    assert_eq!(sim.next_event_time(), Some(5));
+}
+
+#[test]
+fn test_simulation_by_id_methods_reject_ids_when_no_events_exist() {
+    let code = r#"
+        module Top (
+            q: output logic
+        ) {
+            assign q = 0;
+        }
+    "#;
+    let mut sim = Simulation::builder(code, "Top").build().unwrap();
+    assert!(sim.named_events().is_empty());
+
+    assert_eq!(
+        sim.schedule_by_id(0, 5, 1),
+        Err(RuntimeErrorCode::NotAnEvent("event_id=0".to_string()))
+    );
+    assert_eq!(
+        sim.try_add_clock_by_id(0, 10, 0),
+        Err(RuntimeErrorCode::NotAnEvent("event_id=0".to_string()))
+    );
+    sim.add_clock_by_id(0, 10, 0);
+    assert_eq!(sim.next_event_time(), None);
 }
