@@ -5,9 +5,7 @@
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
 mod dynamic_load_cache;
-mod packed_bit_store;
 mod sparse;
-mod target_policy;
 
 use super::mir::*;
 use super::sparse_write_state::{
@@ -29,9 +27,7 @@ use celox_sir::analysis::{
     visit_instruction_uses as collect_sir_inst_uses,
 };
 use dynamic_load_cache::{block_dynamic_load_cache_plans, native_plane_access_size};
-use packed_bit_store::{PackedBitStorePlan, PackedBitStorePlans, find_packed_bit_store_plans};
 use sparse::{find_sparse_worklist_run, sparse_descriptor_table};
-use target_policy::TargetIselPolicy;
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -76,23 +72,6 @@ struct PackedLaneComparePlan {
 #[derive(Debug, Default)]
 struct PackedLaneComparePlans {
     roots: HashMap<usize, PackedLaneComparePlan>,
-    skip_indices: HashSet<usize>,
-}
-
-#[derive(Debug, Clone)]
-struct PackedFieldComparePlan {
-    dst: RegisterId,
-    address: RegionedAbsoluteAddr,
-    first_bit: usize,
-    lane_count: usize,
-    field_width: usize,
-    value: u64,
-    covered_indices: Vec<usize>,
-}
-
-#[derive(Debug, Default)]
-struct PackedFieldComparePlans {
-    roots: HashMap<usize, PackedFieldComparePlan>,
     skip_indices: HashSet<usize>,
 }
 
@@ -688,235 +667,6 @@ fn find_packed_lane_compare_plans(
     result
 }
 
-#[derive(Debug)]
-struct PackedFieldSource {
-    address: RegionedAbsoluteAddr,
-    bit_offset: usize,
-    covered_indices: Vec<usize>,
-}
-
-fn resolve_packed_field_source(
-    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
-    defs: &HashMap<RegisterId, usize>,
-    constants: &HashMap<RegisterId, ExactSirConstant>,
-    register_types: &HashMap<RegisterId, RegisterType>,
-    register: RegisterId,
-    field_width: usize,
-) -> Option<PackedFieldSource> {
-    let mut current = register;
-    let mut relative_offset = 0usize;
-    let mut covered_indices = Vec::new();
-    let mut visited = HashSet::default();
-
-    while visited.insert(current) {
-        let definition = *defs.get(&current)?;
-        covered_indices.push(definition);
-        match block.instructions.get(definition)? {
-            SIRInstruction::Unary(_, UnaryOp::Ident, source) => current = *source,
-            SIRInstruction::Slice(_, source, offset, width) if *width == field_width => {
-                relative_offset = relative_offset.checked_add(*offset)?;
-                current = *source;
-            }
-            SIRInstruction::Binary(_, lhs, BinaryOp::And, rhs) => {
-                let expected_mask = mask_for_width(field_width);
-                current = match (constants.get(lhs), constants.get(rhs)) {
-                    (Some(value), None) if value.value == expected_mask => *rhs,
-                    (None, Some(value)) if value.value == expected_mask => *lhs,
-                    _ => return None,
-                };
-            }
-            SIRInstruction::Binary(_, source, BinaryOp::Shr, amount) => {
-                let shift = usize::try_from(constants.get(amount)?.value).ok()?;
-                relative_offset = relative_offset.checked_add(shift)?;
-                current = *source;
-            }
-            SIRInstruction::Load(_, address, offset, load_width) => {
-                let base = match offset {
-                    SIROffset::Static(offset)
-                    | SIROffset::PackedElements {
-                        bit_offset: offset, ..
-                    } => *offset,
-                    SIROffset::Dynamic(offset) => {
-                        usize::try_from(constants.get(offset)?.value).ok()?
-                    }
-                    SIROffset::Element { .. } => return None,
-                };
-                if relative_offset.checked_add(field_width)? > *load_width
-                    || register_types.get(&register)?.width() != field_width
-                {
-                    return None;
-                }
-                return Some(PackedFieldSource {
-                    address: *address,
-                    bit_offset: base.checked_add(relative_offset)?,
-                    covered_indices,
-                });
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Recognize a predicate pack over a physically packed fixed-width field
-/// sequence. `PackedLaneCompare` handles byte-addressable array slots; this
-/// companion recognizes bit-packed fields such as 32 consecutive 12-bit
-/// entries and lowers them with word-level SWAR plus bit extraction.
-fn find_packed_field_compare_plans(
-    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
-    register_types: &HashMap<RegisterId, RegisterType>,
-    constants: &HashMap<RegisterId, ExactSirConstant>,
-    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
-) -> PackedFieldComparePlans {
-    let mut result = PackedFieldComparePlans::default();
-    let defs = collect_sir_defs(block);
-
-    for (root_idx, instruction) in block.instructions.iter().enumerate() {
-        let SIRInstruction::Concat(dst, predicates) = instruction else {
-            continue;
-        };
-        let lane_count = predicates.len();
-        if !(8..=64).contains(&lane_count)
-            || register_types.get(dst).map(RegisterType::width) != Some(lane_count)
-        {
-            continue;
-        }
-
-        let mut address = None;
-        let mut field_width = None;
-        let mut value = None;
-        let mut sources = Vec::with_capacity(lane_count);
-        let mut covered_indices = vec![root_idx];
-        let mut valid = true;
-
-        for &predicate in predicates {
-            let Some(&compare_idx) = defs.get(&predicate).filter(|&&index| index < root_idx) else {
-                valid = false;
-                break;
-            };
-            let SIRInstruction::Binary(compare_dst, lhs, BinaryOp::Eq, rhs) =
-                &block.instructions[compare_idx]
-            else {
-                valid = false;
-                break;
-            };
-            if *compare_dst != predicate
-                || uses.get(compare_dst).is_none_or(|sites| sites.len() != 1)
-            {
-                valid = false;
-                break;
-            }
-            let (source, constant_register, constant) =
-                match (constants.get(lhs), constants.get(rhs)) {
-                    (None, Some(constant)) => (*lhs, *rhs, constant.value),
-                    (Some(constant), None) => (*rhs, *lhs, constant.value),
-                    _ => {
-                        valid = false;
-                        break;
-                    }
-                };
-            let Some(width) = register_types.get(&source).map(RegisterType::width) else {
-                valid = false;
-                break;
-            };
-            if !(2..=16).contains(&width)
-                || constant > mask_for_width(width)
-                || field_width.is_some_and(|known| known != width)
-                || value.is_some_and(|known| known != constant)
-            {
-                valid = false;
-                break;
-            }
-            let Some(source) =
-                resolve_packed_field_source(block, &defs, constants, register_types, source, width)
-            else {
-                valid = false;
-                break;
-            };
-            if address.is_some_and(|known| known != source.address) {
-                valid = false;
-                break;
-            }
-            address.get_or_insert(source.address);
-            field_width.get_or_insert(width);
-            value.get_or_insert(constant);
-            covered_indices.push(compare_idx);
-            covered_indices.extend(source.covered_indices.iter().copied());
-            if let Some(&constant_idx) = defs.get(&constant_register) {
-                covered_indices.push(constant_idx);
-            }
-            sources.push(source);
-        }
-        if !valid {
-            continue;
-        }
-
-        let address = address.expect("nonempty packed field compare has an address");
-        let field_width = field_width.expect("nonempty packed field compare has a field width");
-        let value = value.expect("nonempty packed field compare has a constant");
-        let first_bit = sources
-            .last()
-            .expect("nonempty packed field compare has a low lane")
-            .bit_offset;
-        if sources.iter().enumerate().any(|(position, source)| {
-            let lane = lane_count - position - 1;
-            source.bit_offset != first_bit.saturating_add(lane.saturating_mul(field_width))
-        }) {
-            continue;
-        }
-
-        covered_indices.sort_unstable();
-        covered_indices.dedup();
-        let earliest_load = covered_indices.iter().copied().min().unwrap_or(root_idx);
-        if block.instructions[earliest_load..root_idx]
-            .iter()
-            .any(|instruction| match instruction {
-                SIRInstruction::Store(destination, ..) => *destination == address,
-                SIRInstruction::Commit(_, destination, ..) => *destination == address,
-                _ => false,
-            })
-        {
-            continue;
-        }
-
-        result.roots.insert(
-            root_idx,
-            PackedFieldComparePlan {
-                dst: *dst,
-                address,
-                first_bit,
-                lane_count,
-                field_width,
-                value,
-                covered_indices,
-            },
-        );
-    }
-
-    let covered = result
-        .roots
-        .values()
-        .flat_map(|plan| plan.covered_indices.iter().copied())
-        .collect::<HashSet<_>>();
-    for &index in &covered {
-        let is_root = result.roots.contains_key(&index);
-        let all_uses_covered = sir_def_reg(&block.instructions[index]).is_some_and(|definition| {
-            uses.get(&definition).is_none_or(|sites| {
-                sites.iter().all(|site| {
-                    site.block == block.id
-                        && site
-                            .inst_idx
-                            .is_some_and(|use_idx| covered.contains(&use_idx))
-                })
-            })
-        });
-        if is_root || all_uses_covered {
-            result.skip_indices.insert(index);
-        }
-    }
-    result
-}
-
 /// Lower a single SIR execution unit to a MIR function.
 pub fn lower_execution_unit(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
@@ -968,7 +718,6 @@ pub fn lower_execution_unit_with_diagnostics(
     }
 
     let mut func = MFunction::for_isel(vregs.clone(), spill_descs);
-    let target_policy = TargetIselPolicy::for_function(&func, four_state);
     let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
     let sparse_write_states = match sparse_worklist_run {
@@ -1119,11 +868,6 @@ pub fn lower_execution_unit_with_diagnostics(
         } else {
             PriorityEncodePlans::default()
         };
-        let packed_bit_store_plans = if target_policy.select_packed_bit_stores {
-            find_packed_bit_store_plans(sir_block, &eu.register_map, layout)
-        } else {
-            PackedBitStorePlans::default()
-        };
         let lookup_plans = dense_lookup_plans_by_block
             .remove(&sir_block_id)
             .unwrap_or_default();
@@ -1143,20 +887,6 @@ pub fn lower_execution_unit_with_diagnostics(
         } else {
             PackedLaneComparePlans::default()
         };
-        let packed_field_compare_plans = if target_policy.select_packed_field_compares {
-            find_packed_field_compare_plans(
-                sir_block,
-                &eu.register_map,
-                exact_constants
-                    .as_ref()
-                    .expect("two-state packed field compares require exact constants"),
-                sir_use_sites
-                    .as_ref()
-                    .expect("two-state packed field compares require SIR uses"),
-            )
-        } else {
-            PackedFieldComparePlans::default()
-        };
         let packed_byte_affine_compare_plans = if !four_state {
             find_packed_byte_affine_compare_plans(
                 sir_block,
@@ -1174,7 +904,6 @@ pub fn lower_execution_unit_with_diagnostics(
         let dynamic_load_cache_plans = block_dynamic_load_cache_plans(sir_block, layout);
         let mut dynamic_load_cache = HashMap::default();
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
-        let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
         // Lower instructions
@@ -1205,12 +934,6 @@ pub fn lower_execution_unit_with_diagnostics(
                 }
                 continue;
             }
-            if packed_bit_store_plans.skip_indices.contains(&inst_idx) {
-                if let Some(plan) = packed_bit_store_plans.roots.get(&inst_idx) {
-                    emit_packed_bit_stores(&mut ctx, &mut mblock, plan);
-                }
-                continue;
-            }
             if let Some(dst) = sir_def_reg(inst)
                 && ctx.trace_regs.contains(&dst)
             {
@@ -1221,17 +944,6 @@ pub fn lower_execution_unit_with_diagnostics(
                     dst.0,
                     inst
                 );
-            }
-            if packed_field_compare_plans.skip_indices.contains(&inst_idx) {
-                if let Some(plan) = packed_field_compare_plans.roots.get(&inst_idx) {
-                    emit_packed_field_compare(
-                        &mut ctx,
-                        &mut mblock,
-                        plan,
-                        &mut packed_field_load_cache,
-                    );
-                }
-                continue;
             }
             if packed_lane_compare_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = packed_lane_compare_plans.roots.get(&inst_idx) {
@@ -3797,45 +3509,6 @@ fn emit_priority_encode(ctx: &mut ISelContext<'_>, block: &mut MBlock, plan: &Pr
         (usize::BITS as usize - plan.width.leading_zeros() as usize).min(ctx.sir_width(&plan.dst))
     };
     ctx.known_bits.insert(dst, known_bits);
-}
-
-fn emit_packed_bit_stores(
-    ctx: &mut ISelContext<'_>,
-    block: &mut MBlock,
-    plan: &PackedBitStorePlan,
-) {
-    let source = ctx.reg_map.get(plan.source);
-    let deposit_mask = ctx.alloc_vreg(SpillDesc::remat(0x0101_0101_0101_0101));
-    block.push(MInst::LoadImm {
-        dst: deposit_mask,
-        value: 0x0101_0101_0101_0101,
-    });
-    for chunk in 0..plan.lane_count / 8 {
-        let shift = plan.first_lane + chunk * 8;
-        let chunk_source = if shift == 0 {
-            source
-        } else {
-            let shifted = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::ShrImm {
-                dst: shifted,
-                src: source,
-                imm: shift as u8,
-            });
-            shifted
-        };
-        let expanded = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Pdep {
-            dst: expanded,
-            src: chunk_source,
-            mask: deposit_mask,
-        });
-        block.push(MInst::Store {
-            base: BaseReg::SimState,
-            offset: ctx.byte_offset(&plan.address, plan.first_lane + chunk * 8),
-            src: expanded,
-            size: OpSize::S64,
-        });
-    }
 }
 
 /// Lower the SystemVerilog truth state of a mux condition.
@@ -12342,154 +12015,6 @@ fn lower_dynamic_wide_load_chunks(
 // ────────────────────────────────────────────────────────────────
 // 4-state mask computation
 // ────────────────────────────────────────────────────────────────
-
-fn repeat_packed_field(value: u64, field_width: usize, lane_count: usize) -> Option<u64> {
-    let mut packed = 0u64;
-    for lane in 0..lane_count {
-        packed |= value.checked_shl(u32::try_from(lane.checked_mul(field_width)?).ok()?)?;
-    }
-    Some(packed)
-}
-
-type PackedFieldLoadCache = HashMap<(RegionedAbsoluteAddr, usize, usize, usize), Vec<VReg>>;
-
-fn emit_packed_field_compare(
-    ctx: &mut ISelContext,
-    block: &mut MBlock,
-    plan: &PackedFieldComparePlan,
-    load_cache: &mut PackedFieldLoadCache,
-) {
-    let lanes_per_word = 64 / plan.field_width;
-    debug_assert!(lanes_per_word != 0);
-    let cache_key = (
-        plan.address,
-        plan.first_bit,
-        plan.lane_count,
-        plan.field_width,
-    );
-    let sources = load_cache.entry(cache_key).or_insert_with(|| {
-        let mut sources = Vec::with_capacity(plan.lane_count.div_ceil(lanes_per_word));
-        for first_lane in (0..plan.lane_count).step_by(lanes_per_word) {
-            let lanes = lanes_per_word.min(plan.lane_count - first_lane);
-            let width = lanes * plan.field_width;
-            let bit_offset = plan.first_bit + first_lane * plan.field_width;
-            let (base, intra) = ctx.static_byte_and_intra(&plan.address, bit_offset);
-            let chunks = lower_static_wide_load_chunks(ctx, block, base, intra, width);
-            sources.push(chunks[0].0);
-        }
-        sources
-    });
-
-    let mut accumulated = None;
-    for (group, &source) in sources.iter().enumerate() {
-        let first_lane = group * lanes_per_word;
-        let lanes = lanes_per_word.min(plan.lane_count - first_lane);
-        let low_lane_mask = mask_for_width(plan.field_width - 1);
-        let high_lane_mask = 1u64 << (plan.field_width - 1);
-        let needle = repeat_packed_field(plan.value, plan.field_width, lanes)
-            .expect("validated packed field constant must fit one word");
-        let low_mask = repeat_packed_field(low_lane_mask, plan.field_width, lanes)
-            .expect("validated packed field low mask must fit one word");
-        let high_mask = repeat_packed_field(high_lane_mask, plan.field_width, lanes)
-            .expect("validated packed field high mask must fit one word");
-
-        let needle_reg = ctx.alloc_vreg(SpillDesc::remat(needle));
-        block.push(MInst::LoadImm {
-            dst: needle_reg,
-            value: needle,
-        });
-        let different = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Xor {
-            dst: different,
-            lhs: source,
-            rhs: needle_reg,
-        });
-
-        let low_mask_reg = ctx.alloc_vreg(SpillDesc::remat(low_mask));
-        block.push(MInst::LoadImm {
-            dst: low_mask_reg,
-            value: low_mask,
-        });
-        let low = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::And {
-            dst: low,
-            lhs: different,
-            rhs: low_mask_reg,
-        });
-        let carried = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Add {
-            dst: carried,
-            lhs: low,
-            rhs: low_mask_reg,
-        });
-        let with_value = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Or {
-            dst: with_value,
-            lhs: carried,
-            rhs: different,
-        });
-        let with_low_bits = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Or {
-            dst: with_low_bits,
-            lhs: with_value,
-            rhs: low_mask_reg,
-        });
-        let inverted = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::BitNot {
-            dst: inverted,
-            src: with_low_bits,
-        });
-
-        let high_mask_reg = ctx.alloc_vreg(SpillDesc::remat(high_mask));
-        block.push(MInst::LoadImm {
-            dst: high_mask_reg,
-            value: high_mask,
-        });
-        let zero_markers = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::And {
-            dst: zero_markers,
-            lhs: inverted,
-            rhs: high_mask_reg,
-        });
-        let packed = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Pext {
-            dst: packed,
-            src: zero_markers,
-            mask: high_mask_reg,
-        });
-        ctx.known_bits.insert(packed, lanes);
-
-        let placed = if first_lane == 0 {
-            packed
-        } else {
-            let shifted = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::ShlImm {
-                dst: shifted,
-                src: packed,
-                imm: first_lane as u8,
-            });
-            shifted
-        };
-        accumulated = Some(match accumulated {
-            None => placed,
-            Some(previous) => {
-                let merged = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Or {
-                    dst: merged,
-                    lhs: previous,
-                    rhs: placed,
-                });
-                merged
-            }
-        });
-    }
-
-    if let Some(result) = accumulated {
-        let dst = ctx.reg_map.get(plan.dst);
-        ctx.emit_mov(block, dst, result);
-        ctx.known_bits.insert(dst, plan.lane_count);
-    }
-}
 
 fn lower_static_wide_load_chunks(
     ctx: &mut ISelContext,

@@ -614,16 +614,6 @@ pub(crate) enum MInst {
         src: VReg,
         zero_value: u8,
     },
-    Pext {
-        dst: VReg,
-        src: VReg,
-        mask: VReg,
-    },
-    Pdep {
-        dst: VReg,
-        src: VReg,
-        mask: VReg,
-    },
     Select {
         dst: VReg,
         cond: VReg,
@@ -728,8 +718,6 @@ impl MInst {
             | Self::Bsf { dst, .. }
             | Self::Bsr { dst, .. }
             | Self::BsrOr { dst, .. }
-            | Self::Pext { dst, .. }
-            | Self::Pdep { dst, .. }
             | Self::Select { dst, .. }
             | Self::CmpSelect { dst, .. }
             | Self::CmpImmSelect { dst, .. }
@@ -807,8 +795,6 @@ impl MInst {
             | Self::Bsf { dst, .. }
             | Self::Bsr { dst, .. }
             | Self::BsrOr { dst, .. }
-            | Self::Pext { dst, .. }
-            | Self::Pdep { dst, .. }
             | Self::Select { dst, .. }
             | Self::CmpSelect { dst, .. }
             | Self::CmpImmSelect { dst, .. }
@@ -912,7 +898,6 @@ impl MInst {
             | Self::Bsr { src, .. }
             | Self::BsrOr { src, .. } => vec![*src],
             Self::CmpImm { lhs, .. } => vec![*lhs],
-            Self::Pext { src, mask, .. } | Self::Pdep { src, mask, .. } => vec![*src, *mask],
             Self::Select {
                 cond,
                 true_val,
@@ -1042,10 +1027,6 @@ impl MInst {
             | Self::Bsr { src, .. }
             | Self::BsrOr { src, .. } => rewrite(src),
             Self::CmpImm { lhs, .. } => rewrite(lhs),
-            Self::Pext { src, mask, .. } | Self::Pdep { src, mask, .. } => {
-                rewrite(src);
-                rewrite(mask);
-            }
             Self::Select {
                 cond,
                 true_val,
