@@ -29,6 +29,11 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
+      # rust-cache prunes Criterion's sample data while retaining its baseline
+      # directories, which makes Criterion try to compare against incomplete data.
+      - name: Discard cached Criterion data
+        run: rm -rf target/criterion
+
       - name: Run Rust benchmarks
         shell: bash
         run: set -o pipefail && cargo bench --locked -p celox --bench simulation --bench overhead --bench tiered -- --output-format bencher | tee rust-output.txt
