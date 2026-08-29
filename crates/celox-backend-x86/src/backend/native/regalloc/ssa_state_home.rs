@@ -183,6 +183,41 @@ pub(super) fn select(
     verify(func, cfg, plan)
 }
 
+/// Fall back allocator-managed state homes which can overwrite a reload
+/// recipe at the same serial edge insertion point. Overlapping homes are
+/// selected and retired as one component so a retained home never depends on
+/// a store removed from the component proof.
+pub(super) fn fallback_to_stack(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    plan: &mut SpillPlan,
+    hazardous: &BTreeSet<SpillHome>,
+) -> Result<(), StateHomeError> {
+    if hazardous.is_empty() {
+        return Ok(());
+    }
+    let removed = overlap_components(&plan.state_homes)
+        .into_iter()
+        .filter(|component| component.iter().any(|home| hazardous.contains(home)))
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    if removed.is_empty() {
+        return Ok(());
+    }
+
+    let reloads = reload_locations(func, cfg, plan)?;
+    let removed_reload_keys = removed
+        .iter()
+        .flat_map(|home| reloads.get(home).into_iter().flatten().copied())
+        .collect::<BTreeSet<_>>();
+    for home in &removed {
+        plan.state_homes.remove(home);
+    }
+    plan.state_reload_recipes
+        .retain(|key, _| !removed_reload_keys.contains(key));
+    verify(func, cfg, plan)
+}
+
 /// Check the selected-home table independently from candidate selection.
 pub(super) fn verify(
     func: &MFunction,
@@ -899,6 +934,97 @@ mod tests {
         )
         .unwrap();
         reload::verify_expected_materialized_reloads(&func, &cfg, &result.recipe_reloads).unwrap();
+    }
+
+    #[test]
+    fn hazardous_selected_home_falls_back_to_stack() {
+        let mut vregs = VRegAllocator::new();
+        let value = vregs.alloc();
+        let marker = vregs.alloc();
+        let mut func = MFunction::new(
+            vregs,
+            vec![
+                SpillDesc::transient().with_deferred_state_home(home(0, 0)),
+                SpillDesc::transient(),
+            ],
+        );
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: value,
+            value: 0x1234,
+        });
+        block.push(MInst::LoadImm {
+            dst: marker,
+            value: 1,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 16,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.blocks.push(block);
+
+        let cfg = cfg::normalize(&mut func).unwrap();
+        let next_use = next_use::analyze(&func, &cfg).unwrap();
+        let mut plan = blank_plan(&func, &cfg, &next_use);
+        let logical = plan.logical.of(value);
+        let spill_home = plan.homes.of_vreg(value);
+        plan.point_ops = vec![
+            (
+                point(1),
+                PlannedOp::Spill {
+                    value: logical,
+                    home: spill_home,
+                },
+            ),
+            (
+                point(2),
+                PlannedOp::Reload {
+                    value: logical,
+                    home: spill_home,
+                },
+            ),
+        ];
+        select(&func, &cfg, &mut plan).unwrap();
+        assert!(plan.state_homes.contains_key(&spill_home));
+
+        fallback_to_stack(&func, &cfg, &mut plan, &BTreeSet::from([spill_home])).unwrap();
+
+        assert!(!plan.state_homes.contains_key(&spill_home));
+        assert!(plan.state_reload_recipes.is_empty());
+        let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
+        let ordinary_recipes = reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
+        let result = reconstruct::reconstruct(
+            &mut func,
+            &cfg,
+            &plan,
+            &next_use,
+            &ordinary_recipes,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.frame_size, 8);
+        assert!(func.blocks[0].insts.iter().any(|inst| {
+            matches!(
+                inst,
+                MInst::Store {
+                    base: BaseReg::StackFrame,
+                    ..
+                }
+            )
+        }));
+        assert!(func.blocks[0].insts.iter().any(|inst| {
+            matches!(
+                inst,
+                MInst::Load {
+                    base: BaseReg::StackFrame,
+                    ..
+                }
+            )
+        }));
     }
 
     #[test]

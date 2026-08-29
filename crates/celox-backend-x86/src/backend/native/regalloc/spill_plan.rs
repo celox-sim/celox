@@ -736,13 +736,11 @@ fn plan_internal(
                     });
                 }
             }
-            // A reload/store home transfer needs one transient result. State
-            // recipe bases may additionally need to survive earlier transfer
-            // stores so reconstruction can preserve the insertion-point
-            // snapshot. Recipe resolution happens after W/S planning, so
-            // conservatively reserve one slot for every transfer base here.
+            // A reload/store home transfer needs one transient register.
+            // When every successor-resident value already survives in
+            // predecessor W, no ordinary edge spill or reload creates that
+            // slot. Explicitly park one such value across all home transfers.
             if !home_transfers.is_empty() {
-                let home_transfer_count = home_transfers.len() / 2;
                 let surviving_residents = result.w_entry[successor]
                     .iter()
                     .copied()
@@ -754,12 +752,8 @@ fn plan_internal(
                             .then_some((source, destination))
                     })
                     .collect::<Vec<_>>();
-                let parked = home_transfer_park_count(
-                    surviving_residents.len(),
-                    home_transfer_count,
-                    registers,
-                );
-                for &(source, destination) in surviving_residents.iter().take(parked) {
+                if surviving_residents.len() == registers {
+                    let (source, destination) = surviving_residents[0];
                     let destination_home = result.homes.of_logical(destination);
                     if !resident_spills.iter().any(|operation| {
                         matches!(
@@ -779,29 +773,14 @@ fn plan_internal(
                             destination_home,
                         });
                     }
-                    if !scratch_reloads.iter().any(|operation| {
-                        matches!(
-                            operation,
-                            PlannedEdgeOp::Reload {
-                                source: reload_source,
-                                source_home: reload_home,
-                                destination: reload_destination,
-                            } if *reload_source == source
-                                && *reload_home == destination_home
-                                && *reload_destination == destination
-                        )
-                    }) {
-                        scratch_reloads.push(PlannedEdgeOp::Reload {
-                            // The reload is physically read from the successor
-                            // home, but it must split the predecessor logical
-                            // live range. Using `destination` as both
-                            // identities leaves the original phi source live
-                            // across every home transfer.
-                            source,
-                            source_home: destination_home,
-                            destination,
-                        });
-                    }
+                    scratch_reloads.push(PlannedEdgeOp::Reload {
+                        // The reload is physically read from the successor
+                        // home, but it must split the predecessor logical live
+                        // range across every home transfer.
+                        source,
+                        source_home: destination_home,
+                        destination,
+                    });
                 }
             }
             // Consume edge-resident values before introducing reload
@@ -817,18 +796,6 @@ fn plan_internal(
         }
     }
     Ok(result)
-}
-
-fn home_transfer_park_count(
-    surviving_residents: usize,
-    home_transfer_count: usize,
-    registers: usize,
-) -> usize {
-    let scratch_slots = home_transfer_count.saturating_add(1);
-    surviving_residents
-        .saturating_add(scratch_slots)
-        .saturating_sub(registers)
-        .min(surviving_residents)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3928,14 +3895,6 @@ mod tests {
                 ..
             } if reload_source == source && reload_destination == destination
         ));
-    }
-
-    #[test]
-    fn home_transfer_parks_residents_for_retained_recipe_bases() {
-        assert_eq!(home_transfer_park_count(15, 0, 15), 1);
-        assert_eq!(home_transfer_park_count(15, 1, 15), 2);
-        assert_eq!(home_transfer_park_count(15, 2, 15), 3);
-        assert_eq!(home_transfer_park_count(13, 1, 15), 0);
     }
 
     #[test]
