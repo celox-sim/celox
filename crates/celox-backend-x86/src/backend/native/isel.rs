@@ -3,6 +3,8 @@
 //! Supports 2-state and 4-state (IEEE 1800) with full mask propagation.
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
+mod sparse;
+
 use super::mir::*;
 use super::sparse_write_state::{
     SparseChunkState, SparseMetadataAction, SparseWriteState, SparseWriteStates,
@@ -24,6 +26,7 @@ use celox_sir::analysis::{
 };
 #[cfg(test)]
 use celox_state_layout::MemoryLayoutMode;
+use sparse::{find_sparse_worklist_run, sparse_descriptor_table};
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -44,82 +47,6 @@ impl RegMap {
     fn set(&mut self, reg: RegisterId, vreg: VReg) {
         self.map[reg.0] = Some(vreg);
     }
-}
-
-fn find_sparse_worklist_run(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> Option<(crate::BlockId, usize, usize)> {
-    let stored = eu
-        .blocks
-        .values()
-        .flat_map(|block| &block.instructions)
-        .filter_map(|instruction| match instruction {
-            SIRInstruction::Store(address, ..)
-                if address.region == crate::SPARSE_WORKING_REGION =>
-            {
-                Some(address.absolute_addr())
-            }
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    if stored.is_empty() {
-        return None;
-    }
-
-    for block_id in ordered_sir_blocks(eu) {
-        let block = &eu.blocks[&block_id];
-        let mut start = 0usize;
-        while start < block.instructions.len() {
-            let is_sparse_commit = |instruction: &SIRInstruction<RegionedAbsoluteAddr>| {
-                matches!(
-                    instruction,
-                    SIRInstruction::Commit(source, destination, ..)
-                        if source.region == crate::SPARSE_WORKING_REGION
-                            && destination.region == STABLE_REGION
-                )
-            };
-            if !is_sparse_commit(&block.instructions[start]) {
-                start += 1;
-                continue;
-            }
-            let mut end = start + 1;
-            while end < block.instructions.len() && is_sparse_commit(&block.instructions[end]) {
-                end += 1;
-            }
-            let committed = block.instructions[start..end]
-                .iter()
-                .filter_map(|instruction| match instruction {
-                    SIRInstruction::Commit(source, ..) => Some(source.absolute_addr()),
-                    _ => None,
-                })
-                .collect::<HashSet<_>>();
-            if stored.is_subset(&committed) {
-                return Some((block_id, start, end));
-            }
-            start = end;
-        }
-    }
-    None
-}
-
-fn sparse_descriptor_table(layout: &MemoryLayout) -> Vec<u64> {
-    let mut rows = layout.sparse_layouts.iter().collect::<Vec<_>>();
-    rows.sort_by_key(|(_, sparse)| sparse.active_index);
-    let mut table = Vec::with_capacity(rows.len() * SparseCommitDescriptor::WORDS);
-    for (address, sparse) in rows {
-        let descriptor = SparseCommitDescriptor {
-            src_offset: (layout.sparse_base_offset + layout.sparse_offsets[address]) as u64,
-            dst_offset: layout.offsets[address] as u64,
-            byte_size: layout.plane_size(address) as u64,
-            dirty_words_offset: sparse.dirty_words_offset as u64,
-            dirty_word_count: sparse.dirty_word_count as u64,
-            summary_words_offset: sparse.summary_words_offset as u64,
-            summary_word_count: sparse.summary_word_count as u64,
-            four_state: u64::from(layout.four_state && layout.is_4states[address]),
-        };
-        table.extend(descriptor.words());
-    }
-    table
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
