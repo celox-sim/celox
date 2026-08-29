@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 (2026-08-29)
+
+## What's Changed
+* chore(deps): update dependency @biomejs/biome to v2.5.10 by @renovate[bot] in https://github.com/celox-sim/celox/pull/715
+* fix(x86): preserve regalloc pressure for reload recipes by @tignear in https://github.com/celox-sim/celox/pull/718
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.2...v0.4.3
+
 ## 0.4.2 (2026-08-27)
 
 ## What's Changed
