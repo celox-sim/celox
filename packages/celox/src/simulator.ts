@@ -447,8 +447,14 @@ export class Simulator<P = Record<string, unknown>> {
 	/**
 	 * Trigger a clock edge.
 	 *
-	 * @param event  Optional event handle from `this.event()`.
-	 *               If omitted, ticks the first (default) event.
+	 * A single numeric argument is the tick count for the default event. When a
+	 * second argument is not `undefined`, a numeric first argument is treated as
+	 * a raw event ID. Therefore, use `tick(id, 1)` to tick a raw event ID once.
+	 * Prefer an `EventHandle` returned by `this.event()` when selecting an event.
+	 * `tick(undefined, count)` ticks the default event.
+	 *
+	 * @param event  Optional event handle or raw event ID. If omitted, ticks the
+	 *               first (default) event.
 	 * @param count  Number of ticks. Default: 1.
 	 */
 	tick(event?: EventHandle | number, count?: number): void;
@@ -464,13 +470,19 @@ export class Simulator<P = Record<string, unknown>> {
 			eventId = (eventOrCount as EventHandle).id;
 			ticks = count ?? 1;
 		} else if (typeof eventOrCount === "number") {
-			// tick(count) — default event
-			eventId = this._defaultEventId;
-			ticks = eventOrCount;
+			if (count !== undefined) {
+				// tick(rawEventId, count)
+				eventId = eventOrCount;
+				ticks = count;
+			} else {
+				// tick(count) — default event
+				eventId = this._defaultEventId;
+				ticks = eventOrCount;
+			}
 		} else {
-			// tick() — default event, 1 tick
+			// tick() / tick(undefined, count) — default event
 			eventId = this._defaultEventId;
-			ticks = 1;
+			ticks = count ?? 1;
 		}
 
 		if (this._state.dirty) {

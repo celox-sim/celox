@@ -1526,11 +1526,16 @@ async function run() {
 						eventId = eventOrCount.id;
 						ticks = count ?? 1;
 					} else if (typeof eventOrCount === "number") {
-						eventId = defaultEventId;
-						ticks = eventOrCount;
+						if (count !== undefined) {
+							eventId = eventOrCount;
+							ticks = count;
+						} else {
+							eventId = defaultEventId;
+							ticks = eventOrCount;
+						}
 					} else {
 						eventId = defaultEventId;
-						ticks = 1;
+						ticks = count ?? 1;
 					}
 					for (let i = 0; i < ticks; i++) tickOne(eventId);
 				},

@@ -29,7 +29,7 @@ const AdderModule: ModuleDefinition<AdderPorts> = {
 		b: { direction: "input", type: "logic", width: 16 },
 		sum: { direction: "output", type: "logic", width: 17 },
 	},
-	events: ["clk"],
+	events: ["clk", "aux"],
 };
 
 function createMockNative(): {
@@ -93,7 +93,7 @@ function createMockNative(): {
 				direction: "output",
 			},
 		},
-		events: { clk: 0 },
+		events: { clk: 0, aux: 7 },
 		handle,
 	} satisfies CreateResult<NativeSimulatorHandle>);
 
@@ -175,6 +175,46 @@ describe("Simulator", () => {
 
 		sim.tick(3);
 		expect(mock.handle.tickN).toHaveBeenCalledWith(0, 3);
+	});
+
+	test("an undefined second argument preserves the single-number form", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.tick(3, undefined);
+		expect(mock.handle.tickN).toHaveBeenCalledWith(0, 3);
+	});
+
+	test("tick with a raw event ID and count", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.tick(7, 3);
+		expect(mock.handle.tickN).toHaveBeenCalledWith(7, 3);
+	});
+
+	test("tick with a raw event ID once requires an explicit count", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.tick(7, 1);
+		expect(mock.handle.tick).toHaveBeenCalledWith(7);
+	});
+
+	test("tick with undefined and count uses the default event", () => {
+		const mock = createMockNative();
+		const sim = Simulator.create(AdderModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.tick(undefined, 5);
+		expect(mock.handle.tickN).toHaveBeenCalledWith(0, 5);
 	});
 
 	test("tick with event handle", () => {
