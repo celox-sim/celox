@@ -3094,6 +3094,87 @@ fn recognizes_constant_true_nested_comb_guards_as_definite() {
 }
 
 #[test]
+fn recognizes_complementary_guarded_writes_as_definite() {
+    let source = r#"
+        module Top(
+            input logic c, a, b, e,
+            input bit d,
+            output logic x
+        );
+            always_comb begin
+                if (c)
+                    x = a;
+                else begin
+                    if (d)
+                        x = b;
+                    if (!d)
+                        x = e;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complementary_guarded_comb_writes.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let e = sim.signal("e");
+    let x = sim.signal("x");
+
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, true);
+        io.set(b, false);
+        io.set(d, false);
+        io.set(e, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), true.into());
+
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(d, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), false.into());
+
+    sim.modify(|io| {
+        io.set(d, false);
+        io.set(e, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), true.into());
+}
+
+#[test]
+fn does_not_combine_guards_across_condition_writes() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit s, input logic a, b, output logic x);
+            bit d;
+            always_comb begin
+                d = s;
+                if (d)
+                    x = a;
+                d = !d;
+                if (!d)
+                    x = b;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn registers_enum_types_with_aliased_bases() {
     let source = r#"
         module Top(output logic [1:0] y);

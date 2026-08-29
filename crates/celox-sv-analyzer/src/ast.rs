@@ -10423,16 +10423,54 @@ fn definitely_assigned_comb_targets(
         }
         sv_parser::StatementItem::SeqBlock(block) => {
             let mut targets = Vec::new();
+            let mut guarded_targets: Vec<(Expr, Vec<LValue>)> = Vec::new();
             for stmt in &block.nodes.3 {
-                for target in definitely_assigned_comb_targets_statement_or_null(
+                let statement_targets = definitely_assigned_comb_targets_statement_or_null(
                     stmt,
                     syntax_tree,
                     packed_dimensions,
-                ) {
+                );
+                guarded_targets.retain(|(condition, _)| {
+                    !statement_targets
+                        .iter()
+                        .any(|target| expr_references_lvalue(condition, target))
+                });
+                for target in statement_targets {
                     if !targets.contains(&target) {
                         targets.push(target);
                     }
                 }
+                let Some((condition, branch_targets)) =
+                    guarded_comb_targets(stmt, syntax_tree, packed_dimensions)
+                else {
+                    if !statement_or_null_is_blocking_assignment(stmt) {
+                        guarded_targets.clear();
+                    }
+                    continue;
+                };
+                guarded_targets.retain(|(prior_condition, _)| {
+                    !branch_targets
+                        .iter()
+                        .any(|target| expr_references_lvalue(prior_condition, target))
+                });
+                for (prior_condition, prior_targets) in &guarded_targets {
+                    if !two_state_conditions_are_complements(
+                        prior_condition,
+                        &condition,
+                        packed_dimensions,
+                    ) {
+                        continue;
+                    }
+                    for target in intersect_lvalue_sets(
+                        vec![prior_targets.clone(), branch_targets.clone()],
+                        packed_dimensions,
+                    ) {
+                        if !targets.contains(&target) {
+                            targets.push(target);
+                        }
+                    }
+                }
+                guarded_targets.push((condition, branch_targets));
             }
             targets
         }
@@ -10515,6 +10553,64 @@ fn definitely_assigned_comb_targets(
         }
         _ => Vec::new(),
     }
+}
+
+fn guarded_comb_targets(
+    stmt: &sv_parser::StatementOrNull,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(Expr, Vec<LValue>)> {
+    let sv_parser::StatementOrNull::Statement(stmt) = stmt else {
+        return None;
+    };
+    let sv_parser::StatementItem::ConditionalStatement(conditional) = &stmt.nodes.2 else {
+        return None;
+    };
+    if !conditional.nodes.4.is_empty() || conditional.nodes.5.is_some() {
+        return None;
+    }
+    let condition =
+        expr_from_cond_predicate(&conditional.nodes.2.nodes.1, syntax_tree, packed_dimensions)?;
+    if !statement_or_null_is_blocking_assignment(&conditional.nodes.3) {
+        return None;
+    }
+    let targets = definitely_assigned_comb_targets_statement_or_null(
+        &conditional.nodes.3,
+        syntax_tree,
+        packed_dimensions,
+    );
+    if targets
+        .iter()
+        .any(|target| expr_references_lvalue(&condition, target))
+    {
+        return None;
+    }
+    Some((condition, targets))
+}
+
+fn statement_or_null_is_blocking_assignment(stmt: &sv_parser::StatementOrNull) -> bool {
+    matches!(
+        stmt,
+        sv_parser::StatementOrNull::Statement(stmt)
+            if matches!(stmt.nodes.2, sv_parser::StatementItem::BlockingAssignment(_))
+    )
+}
+
+fn two_state_conditions_are_complements(
+    left: &Expr,
+    right: &Expr,
+    packed_dimensions: &PackedDimensions,
+) -> bool {
+    let is_complement = |candidate: &Expr, other: &Expr| {
+        matches!(
+            candidate,
+            Expr::Unary {
+                op: UnaryOp::LogicNot,
+                expr,
+            } if &**expr == other && expr_is_two_state(other, packed_dimensions)
+        )
+    };
+    is_complement(left, right) || is_complement(right, left)
 }
 
 fn intersect_lvalue_sets(
