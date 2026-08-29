@@ -731,45 +731,6 @@ fn emit_instruction(
                 emit_store_indexed_at(ops, src, ptr, index, i64::from(*offset), 1, *size);
             }
         }
-        MInst::AndStoreImm {
-            base,
-            offset,
-            size,
-            imm,
-        }
-        | MInst::OrStoreImm {
-            base,
-            offset,
-            size,
-            imm,
-        } => {
-            let address_offset = base_offset(*base, *offset);
-            let (base_register, address_offset) =
-                select_memory_base(*base, address_offset, SCRATCH1, *size, false, state_pages);
-            if memory_access_encoding(SCRATCH1, base_register, address_offset, *size, false)
-                .is_some()
-            {
-                emit_load_at(ops, SCRATCH1, base_register, address_offset, *size);
-                emit_load_imm(ops, SCRATCH0, *imm);
-                if matches!(instruction, MInst::AndStoreImm { .. }) {
-                    dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
-                } else {
-                    dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
-                }
-                emit_store_at(ops, 30, base_register, address_offset, *size);
-            } else {
-                emit_base_address(ops, *base, *offset)?;
-                emit_load(ops, SCRATCH1, SCRATCH0, *size);
-                emit_load_imm(ops, SCRATCH0, *imm);
-                if matches!(instruction, MInst::AndStoreImm { .. }) {
-                    dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
-                } else {
-                    dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
-                }
-                emit_base_address(ops, *base, *offset)?;
-                emit_store(ops, 30, SCRATCH0, *size);
-            }
-        }
         MInst::Add { dst, lhs, rhs }
         | MInst::Sub { dst, lhs, rhs }
         | MInst::Mul { dst, lhs, rhs }
@@ -2280,30 +2241,6 @@ fn collect_state_page_accesses(function: &MFunction) -> Vec<StatePageAccess> {
                     size: *size,
                     store: true,
                 }),
-                MInst::AndStoreImm {
-                    base: BaseReg::SimState,
-                    offset,
-                    size,
-                    ..
-                }
-                | MInst::OrStoreImm {
-                    base: BaseReg::SimState,
-                    offset,
-                    size,
-                    ..
-                } => {
-                    let offset = i64::from(*offset);
-                    accesses.push(StatePageAccess::Direct {
-                        offset,
-                        size: *size,
-                        store: false,
-                    });
-                    accesses.push(StatePageAccess::Direct {
-                        offset,
-                        size: *size,
-                        store: true,
-                    });
-                }
                 MInst::LoadIndexed {
                     base: BaseReg::SimState,
                     offset,
@@ -2630,16 +2567,6 @@ fn base_register(base: BaseReg) -> u8 {
         BaseReg::SimState => STATE_REG,
         BaseReg::StackFrame => SPILL_REG,
     }
-}
-
-fn emit_base_address(
-    ops: &mut VecAssembler<Aarch64Relocation>,
-    base: BaseReg,
-    offset: i32,
-) -> Result<(), EmitError> {
-    let offset = base_offset(base, offset);
-    emit_address(ops, base_register(base), offset);
-    Ok(())
 }
 
 fn base_offset(base: BaseReg, offset: i32) -> i64 {

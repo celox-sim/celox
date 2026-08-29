@@ -314,18 +314,6 @@ pub(crate) enum MInst {
         src: VReg,
         size: OpSize,
     },
-    AndStoreImm {
-        base: BaseReg,
-        offset: i32,
-        size: OpSize,
-        imm: u64,
-    },
-    OrStoreImm {
-        base: BaseReg,
-        offset: i32,
-        size: OpSize,
-        imm: u64,
-    },
     LoadPtr {
         dst: VReg,
         ptr: VReg,
@@ -724,8 +712,6 @@ impl MInst {
             | Self::GuardedCmpSelect { dst, .. } => Some(*dst),
             Self::Store { .. }
             | Self::KeepAlive { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::StorePtr { .. }
             | Self::ReleaseStorePtr { .. }
             | Self::StoreIndexed { .. }
@@ -801,8 +787,6 @@ impl MInst {
             | Self::GuardedCmpSelect { dst, .. } => Some(dst),
             Self::Store { .. }
             | Self::KeepAlive { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::StorePtr { .. }
             | Self::ReleaseStorePtr { .. }
             | Self::StoreIndexed { .. }
@@ -830,8 +814,6 @@ impl MInst {
             | Self::Scratch { .. }
             | Self::LoadConstantTableAddr { .. }
             | Self::Load { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::MemCopy { .. }
             | Self::MemFill { .. }
             | Self::SparseCommit { .. }
@@ -1090,8 +1072,6 @@ impl MInst {
             | Self::Scratch { .. }
             | Self::LoadConstantTableAddr { .. }
             | Self::Load { .. }
-            | Self::AndStoreImm { .. }
-            | Self::OrStoreImm { .. }
             | Self::PackedLaneCompare {
                 rhs: PackedLaneCompareRhs::Memory { .. },
                 ..
