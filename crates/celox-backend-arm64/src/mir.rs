@@ -217,7 +217,6 @@ pub(crate) enum CmpKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)] // Reserved for target-owned MIR optimization and branch folding.
 pub(crate) enum BranchPredicate {
     Compare {
         lhs: VReg,
