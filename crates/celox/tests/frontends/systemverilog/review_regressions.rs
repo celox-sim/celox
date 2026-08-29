@@ -3556,6 +3556,42 @@ fn recognizes_complete_cases_over_two_state_selectors() {
 }
 
 #[test]
+fn recognizes_complete_cases_over_two_state_function_results() {
+    let source = r#"
+        module Top(input bit s, input logic a, b, output logic y);
+            function automatic bit select();
+                return s;
+            endfunction
+            always_comb begin
+                case (select())
+                    1'b0: y = a;
+                    1'b1: y = b;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_two_state_function_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(s, false);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, true)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
 fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
     let error = cranelift_build_error(
         r#"
@@ -3811,6 +3847,22 @@ fn rejects_ranged_enum_members_instead_of_registering_the_base_name() {
 }
 
 #[test]
+fn rejects_enum_initializers_that_do_not_fit_the_base_type() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 3'd4 } E;
+            assign y = A;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("enum member `A` value does not fit its base type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn preserves_masked_parameter_guards_before_latch_detection() {
     let source = r#"
         module Top(input logic a, output logic y);
@@ -3958,6 +4010,72 @@ fn merges_exhaustive_writes_across_different_slice_partitions() {
     })
     .unwrap();
     assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn merges_exhaustive_slice_partitions_within_a_wider_vector() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [1:0] a,
+            input logic b, d,
+            output logic [3:0] x
+        );
+            always_comb begin
+                if (c)
+                    x[1:0] = a;
+                else begin
+                    x[1] = b;
+                    x[0] = d;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("partial_exhaustive_slice_partitions.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, 0u8);
+        io.set(b, true);
+        io.set(d, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn rejects_incomplete_slice_partitions_within_a_wider_vector() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic c, input logic [1:0] a, input logic b, output logic [3:0] x);
+            always_comb begin
+                if (c)
+                    x[1:0] = a;
+                else
+                    x[0] = b;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

@@ -256,7 +256,7 @@ impl Module {
                 parameter.name()
             )));
         }
-        let packed_dimensions =
+        let mut packed_dimensions =
             packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
         let mut instances =
             instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
@@ -299,6 +299,18 @@ impl Module {
         );
         let functions =
             functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
+        packed_dimensions
+            .function_return_types
+            .extend(functions.iter().map(|(name, function)| {
+                (
+                    name.clone(),
+                    (
+                        function.return_width,
+                        function.return_signed,
+                        function.return_is_2state,
+                    ),
+                )
+            }));
         for instance in &mut instances {
             for connection in &mut instance.port_connections {
                 connection.actual_expr = connection.actual_expr.take().map(|expr| {
@@ -3560,6 +3572,27 @@ fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128
         bits as i128
     }
 }
+
+fn enum_initializer_fits_base_type(value: i128, value_type: ExprType, base_type: ExprType) -> bool {
+    // A same-width initializer may change its numeric interpretation when
+    // the enum base has different signedness, but it does not lose any bits.
+    if value_type.width <= base_type.width || base_type.width >= 128 {
+        return true;
+    }
+    if base_type.width == 0 {
+        return false;
+    }
+    if base_type.signed {
+        let magnitude = 1i128 << (base_type.width - 1);
+        (-magnitude..magnitude).contains(&value)
+    } else if value < 0 {
+        false
+    } else if base_type.width >= 127 {
+        true
+    } else {
+        value < (1i128 << base_type.width)
+    }
+}
 /// Enum member constants collected from module-level `typedef enum`
 /// declarations.
 #[derive(Default)]
@@ -3669,9 +3702,19 @@ fn enum_member_constants_from_module_node(
                 type_aliases,
             )
             .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
+            let value_type =
+                infer_const_expr_type(&value, &parameter_types_from_const_env(&eval_env))
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
+                    })?;
             let number = eval_ast_const_expr(&value, &eval_env).ok_or_else(|| {
                 AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
             })?;
+            if !enum_initializer_fits_base_type(number, value_type, member_type) {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "enum member `{name}` value does not fit its base type"
+                )));
+            }
             let number =
                 coerce_const_parameter_value(number, member_type.width, member_type.signed);
             constants.numbers.insert(name.clone(), number);
@@ -4136,6 +4179,7 @@ struct PackedDimensions {
     variables: VariablePackedDimensions,
     const_env: HashMap<String, i128>,
     type_aliases: HashMap<String, Type>,
+    function_return_types: HashMap<String, (Option<usize>, bool, bool)>,
 }
 
 impl PackedDimensions {
@@ -4148,6 +4192,7 @@ impl PackedDimensions {
             variables,
             const_env: const_env.clone(),
             type_aliases: type_aliases.clone(),
+            function_return_types: HashMap::default(),
         }
     }
 }
@@ -8040,6 +8085,22 @@ fn normalize_mixed_whole_selected_comb_writes(
         }
     }
     whole_names.retain(|name| selected_targets.contains_key(name));
+    let mut fallback_targets = HashMap::<usize, Vec<LValue>>::default();
+    for write in guarded.iter() {
+        if let Some(chain_start) = write.exhaustive_fallback_start {
+            fallback_targets
+                .entry(chain_start)
+                .or_default()
+                .push(write.assignment().lhs_value().clone());
+        }
+    }
+    let mut normalization_targets = HashMap::default();
+    for name in &whole_names {
+        let Some(whole_target) = whole_packed_lvalue(name, packed_dimensions) else {
+            continue;
+        };
+        normalization_targets.insert(name.clone(), (whole_target, LValue::Ident(name.clone())));
+    }
     for name in conditional_selected_names {
         let Some(whole_target) = whole_packed_lvalue(&name, packed_dimensions) else {
             continue;
@@ -8048,7 +8109,38 @@ fn normalize_mixed_whole_selected_comb_writes(
             .get(&name)
             .is_some_and(|targets| lvalue_is_covered_by(&whole_target, targets, packed_dimensions))
         {
-            whole_names.insert(name);
+            normalization_targets.insert(name.clone(), (whole_target, LValue::Ident(name)));
+            continue;
+        }
+        // Different partitions can exhaustively cover only a subrange of a
+        // wider declaration. Use the widest written selection that contains
+        // another partition as their common target.
+        let Some(targets) = selected_targets.get(&name) else {
+            continue;
+        };
+        let normalization_target = targets
+            .iter()
+            .filter(|candidate| {
+                targets.iter().any(|target| {
+                    target != *candidate
+                        && lvalue_is_covered_by(
+                            target,
+                            std::slice::from_ref(*candidate),
+                            packed_dimensions,
+                        )
+                })
+            })
+            .filter_map(|candidate| {
+                let (_, low, high) = lvalue_bit_range(candidate, packed_dimensions)?;
+                fallback_targets
+                    .values()
+                    .any(|targets| lvalue_is_covered_by(candidate, targets, packed_dimensions))
+                    .then_some((high.abs_diff(low), candidate.clone()))
+            })
+            .max_by_key(|(width, _)| *width)
+            .map(|(_, target)| target);
+        if let Some(target) = normalization_target {
+            normalization_targets.insert(name, (target.clone(), target));
         }
     }
     for write in guarded.iter_mut() {
@@ -8056,27 +8148,38 @@ fn normalize_mixed_whole_selected_comb_writes(
         let LValue::Select { name, .. } = &target else {
             continue;
         };
-        if !whole_names.contains(name) {
-            continue;
-        }
-        let Some(whole_target) = whole_packed_lvalue(name, packed_dimensions) else {
+        let Some((normalization_target, assignment_target)) = normalization_targets.get(name)
+        else {
             continue;
         };
+        if !matches!(assignment_target, LValue::Ident(_))
+            && !lvalue_is_covered_by(
+                &target,
+                std::slice::from_ref(normalization_target),
+                packed_dimensions,
+            )
+        {
+            continue;
+        }
         let write_value = coerce_procedural_assignment_rhs(
             write.assignment().rhs().clone(),
             &target,
             packed_dimensions,
         );
+        let current = match assignment_target {
+            LValue::Ident(_) => Expr::Ident(name.clone()),
+            LValue::Select { .. } => expr_from_lvalue(normalization_target, packed_dimensions),
+        };
         let Some((rhs, _)) = selected_value_after_write(
-            &Expr::Ident(name.clone()),
-            &whole_target,
+            &current,
+            normalization_target,
             &target,
             &write_value,
             packed_dimensions,
         ) else {
             continue;
         };
-        write.assignment = Assignment::new(LValue::Ident(name.clone()), rhs);
+        write.assignment = Assignment::new(assignment_target.clone(), rhs);
     }
 
     // Several selected writes in one fallback branch become writes to the
@@ -8584,7 +8687,10 @@ fn expr_static_width(expr: &Expr, packed_dimensions: &PackedDimensions) -> Optio
             expr_static_width(then_expr, packed_dimensions)?
                 .max(expr_static_width(else_expr, packed_dimensions)?),
         ),
-        Expr::Call { .. } => None,
+        Expr::Call { name, .. } => packed_dimensions
+            .function_return_types
+            .get(name)
+            .and_then(|(width, _, _)| *width),
     }
 }
 
@@ -10351,7 +10457,10 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
                 && expr_is_two_state(then_expr, packed_dimensions)
                 && expr_is_two_state(else_expr, packed_dimensions)
         }
-        Expr::Call { .. } => false,
+        Expr::Call { name, .. } => packed_dimensions
+            .function_return_types
+            .get(name)
+            .is_some_and(|(_, _, is_2state)| *is_2state),
     }
 }
 
@@ -10426,7 +10535,14 @@ fn two_state_case_item_reachability(
         .iter()
         .map(|(name, dimensions)| (name.clone(), dimensions.signed))
         .collect::<HashMap<_, _>>();
-    let selector_signed = expr_signedness(&selector, &identifiers, &HashMap::default())?;
+    let selector_signed = if let Expr::Call { name, .. } = &selector {
+        packed_dimensions
+            .function_return_types
+            .get(name)
+            .map(|(_, signed, _)| *signed)?
+    } else {
+        expr_signedness(&selector, &identifiers, &HashMap::default())?
+    };
     let mut labels_by_item = Vec::new();
     let mut default_index = None;
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
