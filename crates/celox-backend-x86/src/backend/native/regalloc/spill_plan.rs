@@ -739,9 +739,7 @@ fn plan_internal(
             // A reload/store home transfer needs one transient register.
             // When every successor-resident value already survives in
             // predecessor W, no ordinary edge spill or reload creates that
-            // slot.  Explicitly park one such value across all home
-            // transfers.  Treating edge operations as free parallel copies
-            // here produces NUM_REGS + 1 live values after reconstruction.
+            // slot. Explicitly park one such value across all home transfers.
             if !home_transfers.is_empty() {
                 let surviving_residents = result.w_entry[successor]
                     .iter()
@@ -777,11 +775,8 @@ fn plan_internal(
                     }
                     scratch_reloads.push(PlannedEdgeOp::Reload {
                         // The reload is physically read from the successor
-                        // home, but it must split the predecessor logical
-                        // live range.  Using `destination` as both identities
-                        // leaves the original phi source live across every
-                        // home transfer and reconstruction reaches
-                        // NUM_REGS + 1 pressure despite the scratch spill.
+                        // home, but it must split the predecessor logical live
+                        // range across every home transfer.
                         source,
                         source_home: destination_home,
                         destination,

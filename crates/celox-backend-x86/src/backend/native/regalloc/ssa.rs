@@ -134,6 +134,30 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
+    let hazardous_state_homes =
+        super::reconstruct::hazardous_edge_state_homes(func, cfg, &plan, &reload_recipes).map_err(
+            |error| {
+                super::RegallocError::new(
+                    "edge state-home hazard analysis",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            },
+        )?;
+    super::ssa_state_home::fallback_to_stack(func, cfg, &mut plan, &hazardous_state_homes)
+        .map_err(|error| {
+            super::RegallocError::new(
+                "edge state-home fallback",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
     if verify {
         plan.verify(func, cfg, register_count).map_err(|error| {
             super::RegallocError::new(
