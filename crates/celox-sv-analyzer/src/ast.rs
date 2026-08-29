@@ -819,15 +819,28 @@ fn size_system_function_expr_type(
                 return None;
             }
             let argument = arguments[0].as_ref()?;
+            if name != "$bits" && name != "$size" {
+                return None;
+            }
+            // A size-function argument only needs a statically known type;
+            // it need not itself be a constant expression. Lower the typed
+            // expression first so selects and other runtime-valued forms can
+            // still determine the cast width.
+            if let Some(r#type) = size_function_expression_type(
+                argument,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                name == "$size",
+            ) {
+                return Some(r#type);
+            }
             let argument = const_expr_from_expr(argument, syntax_tree)?;
             if let ConstExpr::Ident(alias) = &argument
                 && let Some(r#type) = type_aliases.get(alias)
             {
                 (name, r#type.clone())
             } else {
-                if name != "$bits" && name != "$size" {
-                    return None;
-                }
                 if let ConstExpr::Ident(identifier) = &argument
                     && let Some(width) =
                         variable_size_function_width(const_env, identifier, name == "$size")
@@ -897,6 +910,44 @@ fn size_system_function_expr_type(
     Some(ExprType {
         width: width.max(1),
         signed: r#type.is_signed(),
+    })
+}
+
+fn size_function_expression_type(
+    argument: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    first_dimension_only: bool,
+) -> Option<ExprType> {
+    let packed_dimensions = PackedDimensions {
+        const_env: const_env.clone(),
+        type_aliases: type_aliases.clone(),
+        ..PackedDimensions::default()
+    };
+    let expression = expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions)?;
+    let width = if first_dimension_only {
+        match &expression {
+            Expr::Ident(name) => variable_size_function_width(const_env, name, true),
+            _ => expr_static_width(&expression, &packed_dimensions),
+        }
+    } else {
+        expr_static_width(&expression, &packed_dimensions)
+    }?;
+    let mut identifier_signedness = parameter_types_from_const_env(const_env)
+        .into_iter()
+        .map(|(name, r#type)| (name, r#type.signed))
+        .collect::<HashMap<_, _>>();
+    const VARIABLE_SIGNED_PREFIX: &str = "__variable::signed::";
+    identifier_signedness.extend(const_env.iter().filter_map(|(marker, signed)| {
+        marker
+            .strip_prefix(VARIABLE_SIGNED_PREFIX)
+            .map(|name| (name.to_string(), *signed != 0))
+    }));
+    let signed = expr_signedness(&expression, &identifier_signedness, &HashMap::default())?;
+    Some(ExprType {
+        width: width.max(1),
+        signed,
     })
 }
 
@@ -8091,12 +8142,9 @@ fn comb_assignments_from_guarded(
     let mut lvalues_changed = false;
     let mut changed_chains = HashSet::default();
     for (target, indices) in targets.iter().zip(&groups) {
-        if indices
+        let preserve_target_writes = indices
             .iter()
-            .all(|index| guarded[*index].condition().is_none())
-        {
-            continue;
-        }
+            .all(|index| guarded[*index].condition().is_none());
         let initial = overlapping_value_before(&guarded, indices[0], target, packed_dimensions);
         let (changed, chains) = substitute_intermediate_comb_value_reads(
             &mut guarded,
@@ -8104,6 +8152,7 @@ fn comb_assignments_from_guarded(
             target,
             initial,
             packed_dimensions,
+            preserve_target_writes,
         )?;
         lvalues_changed |= changed;
         changed_chains.extend(chains);
@@ -8481,6 +8530,7 @@ fn substitute_intermediate_comb_value_reads(
     target: &LValue,
     initial: Option<Expr>,
     packed_dimensions: &PackedDimensions,
+    preserve_target_writes: bool,
 ) -> Result<(bool, HashSet<usize>), AnalyzerError> {
     let first = *indices.first().expect("group is non-empty");
     let mut initialized = initial.is_some();
@@ -8501,6 +8551,8 @@ fn substitute_intermediate_comb_value_reads(
 
     for (index, guarded_assignment) in guarded.iter_mut().enumerate().skip(first) {
         let is_target_write = indices.get(write_index) == Some(&index);
+        let original_target_assignment = (is_target_write && preserve_target_writes)
+            .then(|| guarded_assignment.assignment().clone());
         if let Some(condition) = guarded_assignment.condition.take() {
             let condition = if let Some(boundary) = guarded_assignment.guard_boundary {
                 let value = guard_values
@@ -8545,7 +8597,7 @@ fn substitute_intermediate_comb_value_reads(
                 whole_established.as_ref(),
                 packed_dimensions,
             );
-            if &lhs != assignment.lhs_value() {
+            if &lhs != assignment.lhs_value() && !(is_target_write && preserve_target_writes) {
                 lvalues_changed = true;
                 changed_chains.extend(guarded_assignment.guard_boundary);
                 changed_chains.extend(guarded_assignment.exhaustive_fallback_start);
@@ -8622,6 +8674,9 @@ fn substitute_intermediate_comb_value_reads(
             }
         }
         prior_target_writes.push((index, write.clone()));
+        if let Some(assignment) = original_target_assignment {
+            guarded_assignment.assignment = assignment;
+        }
     }
     Ok((lvalues_changed, changed_chains))
 }
@@ -8806,6 +8861,7 @@ fn expr_static_width(expr: &Expr, packed_dimensions: &PackedDimensions) -> Optio
     match expr {
         Expr::Ident(name) => lvalue_expr_type(&LValue::Ident(name.clone()), packed_dimensions)
             .map(|r#type| r#type.width)
+            .or_else(|| variable_size_function_width(&packed_dimensions.const_env, name, false))
             .or_else(|| {
                 parameter_types_from_const_env(&packed_dimensions.const_env)
                     .get(name)

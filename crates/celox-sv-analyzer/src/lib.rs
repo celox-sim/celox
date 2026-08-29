@@ -219,6 +219,36 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_unconditional_sources_before_relocated_conditional_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic a, b, c, d, e, output logic x, y);
+                    always_comb begin
+                        y = a;
+                        if (c) x = y;
+                        else x = b;
+                        y = d;
+                        if (e) x = b;
+                    end
+                endmodule
+            "#,
+            Path::new("relocated_cross_target_read.sv"),
+        )
+        .expect("a relocated write should retain values read at its source position");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let x = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "x")
+            .expect("x assignment");
+        assert!(expr_references_ident_name(x.rhs(), "a"));
+        assert!(
+            !expr_references_ident_name(x.rhs(), "y"),
+            "x must snapshot y before its later overwrite: {:?}",
+            x.rhs()
+        );
+    }
+
+    #[test]
     fn preserves_fallback_guards_for_each_comb_target() {
         let ir = analyze_source(
             r#"
@@ -660,6 +690,22 @@ mod tests {
         // keeps it.
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
         assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(7));
+    }
+
+    #[test]
+    fn infers_size_cast_targets_from_selected_expressions() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic [7:0] a);
+                    localparam Q = $bits(a[3:0])'(4'hf);
+                    localparam S = $size(a[3:0])'(4'hf);
+                endmodule
+            "#,
+            Path::new("selected_expression_size_cast.sv"),
+        )
+        .expect("selected expression types should determine size cast widths");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(15));
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(15));
     }
 
     #[test]
