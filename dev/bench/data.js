@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787998644958,
+  "lastUpdate": 1788080509371,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -218394,6 +218394,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution",
             "value": 150578.656623,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "username": "tignear",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "a61e07827e9b092319936b2270d1ff91c170393b",
+          "message": "fix(celox): harden simulation API boundaries (#723)",
+          "timestamp": "2026-08-30T06:04:17Z",
+          "url": "https://github.com/celox-sim/celox/commit/a61e07827e9b092319936b2270d1ff91c170393b"
+        },
+        "date": 1788080478942,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 153775.616265,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 153812.240909,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 188478.412962,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 52571.204413,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 62397.547216,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_linux_boot_end_to_end",
+            "value": 211049.415086,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_linux_boot_startup",
+            "value": 30308.881455,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_linux_boot_execution",
+            "value": 180724.187276,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_linux_boot_compilation",
+            "value": 52571.204413,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_linux_boot_execution",
+            "value": 153812.240909,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_linux_boot_compilation",
+            "value": 62397.547216,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_linux_boot_execution",
+            "value": 188478.412962,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_linux_boot_compilation",
+            "value": 122722.489107,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_linux_boot_execution",
+            "value": 222058.80295,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_compilation",
+            "value": 81645.566091,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution",
+            "value": 128803.422462,
             "unit": "ms"
           }
         ]
