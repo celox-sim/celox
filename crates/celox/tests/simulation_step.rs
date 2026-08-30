@@ -66,6 +66,47 @@ fn test_next_event_time() {
 }
 
 #[test]
+fn test_scheduled_clock_event_remains_one_shot() {
+    let code = r#"
+        module Top (
+            clk: input clock
+        ) {
+            always_ff (clk) {}
+        }
+    "#;
+    let mut vsim = Simulation::builder(code, "Top").build().unwrap();
+    vsim.add_clock("clk", 10, 0);
+    vsim.schedule("clk", 2, 0).unwrap();
+
+    let event_times: Vec<_> = (0..4).map(|_| vsim.step().unwrap().unwrap()).collect();
+
+    assert_eq!(event_times, vec![0, 2, 5, 10]);
+    assert_eq!(vsim.next_event_time(), Some(15));
+}
+
+#[test]
+fn test_scheduled_clock_event_does_not_duplicate_a_periodic_edge() {
+    let code = r#"
+        module Top (
+            clk: input clock
+        ) {
+            always_ff (clk) {}
+        }
+    "#;
+    let mut vsim = Simulation::builder(code, "Top").build().unwrap();
+    let clk = vsim.signal("clk");
+    vsim.add_clock("clk", 10, 0);
+    vsim.schedule("clk", 0, 0).unwrap();
+
+    assert_eq!(vsim.step().unwrap(), Some(0));
+    assert_eq!(vsim.get(clk), 1u8.into());
+
+    assert_eq!(vsim.step().unwrap(), Some(5));
+    assert_eq!(vsim.get(clk), 0u8.into());
+    assert_eq!(vsim.next_event_time(), Some(10));
+}
+
+#[test]
 fn test_step_decorates_runtime_errors() {
     let code = r#"
         module Top (
