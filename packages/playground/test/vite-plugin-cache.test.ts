@@ -36,16 +36,16 @@ describe("GenTsCache", () => {
 		const newest = join(root, "newest.veryl");
 		writeFileSync(older, "module Older {}\n");
 		writeFileSync(newest, "module Newest {}\n");
-		utimesSync(older, 1_000, 1_000);
-		utimesSync(newest, 2_000, 2_000);
+		utimesSync(older, 1_700_000_000, 1_700_000_000);
+		utimesSync(newest, 1_700_000_100, 1_700_000_100);
 
 		const cache = new GenTsCache(root);
 		cache.get();
 		cache.get();
 		expect(runGenTs).toHaveBeenCalledTimes(1);
 
-		writeFileSync(older, "module Older { const CHANGED: u32 = 1; }\n");
-		utimesSync(older, 1_500, 1_500);
+		writeFileSync(older, "module Other {}\n");
+		utimesSync(older, 1_700_000_050, 1_700_000_050);
 
 		cache.get();
 		expect(runGenTs).toHaveBeenCalledTimes(2);
