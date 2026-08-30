@@ -324,23 +324,62 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.child_signal(instance_path, var)
     }
 
-    /// Register a clock signal by event ID.
+    /// Registers a clock signal by event ID.
+    ///
+    /// Invalid IDs and IDs that do not resolve to events are ignored for
+    /// backward compatibility. Use [`Self::try_add_clock_by_id`] to detect
+    /// registration errors.
     pub fn add_clock_by_id(&mut self, event_id: u32, period: u64, initial_delay: u64) {
-        let addr = self.simulator.backend.id_to_addr_slice()[event_id as usize];
+        let _ = self.try_add_clock_by_id(event_id, period, initial_delay);
+    }
+
+    /// Registers a clock signal by event ID, reporting invalid IDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is unknown or
+    /// does not resolve to an event (clock or asynchronous reset).
+    pub fn try_add_clock_by_id(
+        &mut self,
+        event_id: u32,
+        period: u64,
+        initial_delay: u64,
+    ) -> Result<(), RuntimeErrorCode> {
+        let addr = self
+            .simulator
+            .backend
+            .id_to_addr_slice()
+            .get(event_id as usize)
+            .copied()
+            .ok_or_else(|| RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))?;
         let signal = self.simulator.backend.resolve_signal(&addr);
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
             self.state.add_clock(ev, signal, period, initial_delay);
+            Ok(())
+        } else {
+            Err(RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))
         }
     }
 
     /// Schedule a one-shot event by event ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is unknown or
+    /// does not resolve to a schedulable event.
     pub fn schedule_by_id(
         &mut self,
         event_id: u32,
         time: u64,
         value: u64,
     ) -> Result<(), RuntimeErrorCode> {
-        let addr = self.simulator.backend.id_to_addr_slice()[event_id as usize];
+        let addr = self
+            .simulator
+            .backend
+            .id_to_addr_slice()
+            .get(event_id as usize)
+            .copied()
+            .ok_or_else(|| RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))?;
         let signal = self.simulator.backend.resolve_signal(&addr);
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
         if let Some(ev) = ev_opt {

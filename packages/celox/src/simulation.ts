@@ -440,19 +440,29 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const max = opts.maxSteps;
 		let steps = 0;
-		while (this._handle.time() < endTime) {
-			const t = this._handle.step();
-			if (t == null) break;
-			steps++;
+		if (this._handle.time() >= endTime) {
+			this._state.dirty = false;
+			return;
+		}
+		while (true) {
+			const nextEventTime = this._handle.nextEventTime();
+			if (nextEventTime == null || nextEventTime > endTime) break;
 			if (steps >= max) {
-				this._state.dirty = false;
 				throw new SimulationTimeoutError(
 					`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
 					this._handle.time(),
 					steps,
 				);
 			}
+			const t = this._handle.step();
+			if (t == null) break;
+			this._state.dirty = false;
+			steps++;
 		}
+		// Match the native fast path: after all events due by endTime have been
+		// processed, advance the clock exactly to endTime without consuming a
+		// later event, and perform the native path's final dump.
+		this._handle.runUntil(endTime);
 		this._state.dirty = false;
 	}
 
@@ -495,17 +505,19 @@ export class Simulation<P = Record<string, unknown>> {
 		const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
 		let steps = 0;
 		while (!condition()) {
-			const t = this._handle.step();
-			this._state.dirty = false;
-			if (t == null) break;
-			steps++;
-			if (steps >= max) {
+			// An exhausted queue is a normal completion, even when the budget is
+			// already spent. Preserve that behavior instead of reporting a timeout.
+			if (steps >= max && this._handle.nextEventTime() != null) {
 				throw new SimulationTimeoutError(
 					`waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
 					this._handle.time(),
 					steps,
 				);
 			}
+			const t = this._handle.step();
+			this._state.dirty = false;
+			if (t == null) break;
+			steps++;
 		}
 		return this._handle.time();
 	}

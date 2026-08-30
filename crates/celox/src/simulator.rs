@@ -1366,19 +1366,40 @@ mod host {
         }
 
         /// Triggers a clock/event by its numeric ID.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is not a
+        /// known event ID, or a runtime error if evaluating the event fails.
         pub fn tick_by_id(&mut self, event_id: usize) -> Result<(), RuntimeErrorCode> {
-            let event = self.backend.id_to_event_slice()[event_id];
+            let event = self
+                .backend
+                .id_to_event_slice()
+                .get(event_id)
+                .copied()
+                .ok_or_else(|| RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))?;
             self.tick(event)
         }
 
         /// Triggers a clock/event N times by its numeric ID.
         /// Avoids repeated cross-boundary calls when used from FFI.
+        /// The event ID is validated even when `count` is zero.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is not a
+        /// known event ID, or a runtime error if evaluating an event fails.
         pub fn tick_by_id_n(
             &mut self,
             event_id: usize,
             count: u32,
         ) -> Result<(), RuntimeErrorCode> {
-            let event = self.backend.id_to_event_slice()[event_id];
+            let event = self
+                .backend
+                .id_to_event_slice()
+                .get(event_id)
+                .copied()
+                .ok_or_else(|| RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))?;
             for _ in 0..count {
                 self.tick(event)?;
             }
