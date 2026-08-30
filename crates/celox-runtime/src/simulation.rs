@@ -3,9 +3,9 @@ use celox_design::DomainKind;
 use fxhash::FxHashMap;
 
 use crate::{
-    SignalRef, SimulatorErrorCode,
+    AbsoluteAddr, SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
-    scheduler::{ClockDef, Scheduler, SimEvent, SimEventOrigin},
+    scheduler::{ClockDef, Scheduler, SimEvent},
 };
 
 /// Backend execution hooks needed by the timed simulation engine.
@@ -84,9 +84,31 @@ impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PeriodicEventKey {
+    time: u64,
+    event_id: usize,
+    event_addr: AbsoluteAddr,
+    signal: SignalRef,
+    next_val: u8,
+}
+
+impl PeriodicEventKey {
+    fn from_event<B: SimBackend>(event: &SimEvent<B>) -> Self {
+        Self {
+            time: event.time,
+            event_id: event.event_ref.id(),
+            event_addr: event.event_ref.addr(),
+            signal: event.signal,
+            next_val: event.next_val,
+        }
+    }
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
+    periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     topo_signals: Vec<(SignalRef, usize, usize)>,
     domain_kinds: Vec<Option<DomainKind>>,
@@ -154,6 +176,7 @@ impl<B: SimBackend> SimulationState<B> {
 
         Self {
             scheduler: Scheduler::new(),
+            periodic_events: FxHashMap::default(),
             last_clock_values,
             topo_signals,
             domain_kinds,
@@ -174,12 +197,11 @@ impl<B: SimBackend> SimulationState<B> {
             self.scheduler.clocks.resize(event_id + 1, None);
         }
         self.scheduler.clocks[event_id] = Some(ClockDef { period });
-        self.scheduler.push(SimEvent {
+        self.push_periodic_event(SimEvent {
             time: initial_delay,
             event_ref: event,
             signal,
             next_val: 1,
-            origin: SimEventOrigin::PeriodicClock,
         });
     }
 
@@ -189,8 +211,15 @@ impl<B: SimBackend> SimulationState<B> {
             event_ref: event,
             signal,
             next_val: value,
-            origin: SimEventOrigin::OneShot,
         });
+    }
+
+    fn push_periodic_event(&mut self, event: SimEvent<B>) {
+        *self
+            .periodic_events
+            .entry(PeriodicEventKey::from_event(&event))
+            .or_default() += 1;
+        self.scheduler.push(event);
     }
 
     pub fn step<E>(&mut self, executor: &mut E) -> Result<Option<u64>, SimulatorErrorCode>
@@ -202,6 +231,34 @@ impl<B: SimBackend> SimulationState<B> {
             None => return Ok(None),
         };
         self.scheduler.time = current_time;
+
+        // Keep periodic provenance private so the public SimEvent shape stays
+        // stable. Consume matching sidecar counts before fallible work so an
+        // execution error cannot leave a stale periodic marker behind.
+        let mut periodic_events_to_process: Vec<SimEvent<B>> = Vec::new();
+        for event in &events_to_process {
+            let key = PeriodicEventKey::from_event(event);
+            let mut remove_key = false;
+            if let Some(count) = self.periodic_events.get_mut(&key) {
+                periodic_events_to_process.push(SimEvent {
+                    time: event.time,
+                    event_ref: event.event_ref,
+                    signal: event.signal,
+                    next_val: event.next_val,
+                });
+                *count -= 1;
+                remove_key = *count == 0;
+            }
+            if remove_key {
+                self.periodic_events.remove(&key);
+            }
+        }
+        debug_assert!(
+            self.periodic_events
+                .keys()
+                .all(|event| event.time > current_time),
+            "periodic event sidecar fell behind the scheduler"
+        );
 
         let num_events = executor.backend().num_events();
         for event in &events_to_process {
@@ -358,18 +415,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for event in &events_to_process {
-            if event.origin != SimEventOrigin::PeriodicClock {
-                continue;
-            }
+        for event in periodic_events_to_process {
             let event_id = event.event_ref.id();
             if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
-                self.scheduler.push(SimEvent {
+                self.push_periodic_event(SimEvent {
                     time: current_time + clock.period / 2,
                     event_ref: event.event_ref,
                     signal: event.signal,
                     next_val: 1 - event.next_val,
-                    origin: SimEventOrigin::PeriodicClock,
                 });
             }
         }

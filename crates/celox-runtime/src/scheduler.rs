@@ -9,19 +9,12 @@ pub struct ClockDef {
     pub period: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SimEventOrigin {
-    PeriodicClock,
-    OneShot,
-}
-
 #[derive(Debug, Clone)]
 pub struct SimEvent<B: SimBackend> {
     pub time: u64,
     pub event_ref: B::Event,
     pub signal: SignalRef,
     pub next_val: u8,
-    pub origin: SimEventOrigin,
 }
 
 impl<B: SimBackend> PartialEq for SimEvent<B> {
@@ -30,7 +23,6 @@ impl<B: SimBackend> PartialEq for SimEvent<B> {
             && self.event_ref.addr() == other.event_ref.addr()
             && self.signal == other.signal
             && self.next_val == other.next_val
-            && self.origin == other.origin
     }
 }
 
@@ -55,7 +47,6 @@ impl<B: SimBackend> Ord for SimEvent<B> {
             })
             .then_with(|| other.signal.cmp(&self.signal))
             .then_with(|| other.next_val.cmp(&self.next_val))
-            .then_with(|| other.origin.cmp(&self.origin))
     }
 }
 
