@@ -321,7 +321,7 @@ describe("FourStateDemo", () => {
     it("starts every unpacked array element as X", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
-        sim.tick();
+        sim.evalComb();
 
         expect(sim.fourState("array_snapshot").mask).toBe(0xffn);
 
