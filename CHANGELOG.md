@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.4 (2026-08-31)
+
+## What's Changed
+* ci(napi): cache native build artifacts by @tignear in https://github.com/celox-sim/celox/pull/720
+* perf(arm64): separate target instruction selection by @tignear in https://github.com/celox-sim/celox/pull/722
+* fix(vite): invalidate generated types for every source change by @tignear in https://github.com/celox-sim/celox/pull/725
+* fix(celox): harden simulation API boundaries by @tignear in https://github.com/celox-sim/celox/pull/723
+* fix(celox): preserve simulation API contracts by @tignear in https://github.com/celox-sim/celox/pull/724
+* chore(deps): update pnpm to v11.23.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/726
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.3...v0.4.4
+
 ## 0.4.3 (2026-08-29)
 
 ## What's Changed
