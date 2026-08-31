@@ -147,7 +147,7 @@ jobs:
       - uses: actions/setup-python@v7
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install cocotb
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
