@@ -1,18 +1,18 @@
 ---
 source: crates/celox/tests/error_readability.rs
+assertion_line: 20
 expression: err
 ---
 combinational_loop (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#combinational_loop)
 
-  × combinational loop detected on "y"
+  × combinational loop detected
    ╭─[:6:20]
  5 │         ) {
  6 │             assign y = ~y & a;
    ·                    ┬
-   ·                    ╰── Error location
+   ·                    ╰── involved in combinational feedback
  7 │         }
    ╰────
-  help: 
 
 
 --- warnings ---
