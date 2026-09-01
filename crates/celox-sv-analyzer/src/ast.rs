@@ -5,7 +5,10 @@
 //! Celox runtime IR.
 
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
@@ -371,6 +374,8 @@ impl Module {
                     ),
                 )
             }));
+        packed_dimensions.functions = Arc::new(functions.clone());
+        packed_dimensions.expression_signedness = Arc::new(expression_signedness.clone());
         for instance in &mut instances {
             for connection in &mut instance.port_connections {
                 connection.actual_expr = connection.actual_expr.take().map(|expr| {
@@ -4422,6 +4427,8 @@ struct PackedDimensions {
     const_env: HashMap<String, i128>,
     type_aliases: HashMap<String, Type>,
     function_return_types: HashMap<String, (Option<usize>, bool, bool)>,
+    functions: Arc<HashMap<String, Function>>,
+    expression_signedness: Arc<HashMap<String, bool>>,
 }
 
 impl PackedDimensions {
@@ -4435,6 +4442,8 @@ impl PackedDimensions {
             const_env: const_env.clone(),
             type_aliases: type_aliases.clone(),
             function_return_types: HashMap::default(),
+            functions: Arc::default(),
+            expression_signedness: Arc::default(),
         }
     }
 }
@@ -8654,11 +8663,33 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             expr,
             width,
             signed,
-        } => Expr::Resize {
-            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
-            width,
-            signed,
-        },
+        } => {
+            let expr = simplify_constant_mux_conditions(*expr, const_env);
+            if let Some(value) =
+                expr_to_const(expr.clone()).and_then(|expr| eval_ast_const_expr(&expr, const_env))
+            {
+                Expr::Literal(format_typed_parameter_literal(value, width, signed))
+            } else if let Some(expr) = expr_to_const(expr.clone())
+                && let Some(literal) = typecheck::context_size_const_integral_literal(
+                    &crate::ir::ConstExpr::from(expr),
+                    const_env,
+                    &parameter_types_from_const_env(const_env)
+                        .into_iter()
+                        .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
+                        .collect(),
+                    width,
+                    signed,
+                )
+            {
+                Expr::Literal(typecheck::format_integral_literal_binary(&literal))
+            } else {
+                Expr::Resize {
+                    expr: Box::new(expr),
+                    width,
+                    signed,
+                }
+            }
+        }
         Expr::Unary { op, expr } => Expr::Unary {
             op,
             expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
@@ -11148,6 +11179,13 @@ fn two_state_case_item_reachability(
         syntax_tree,
         packed_dimensions,
     )?;
+    let selector = expand_expr_calls(
+        selector,
+        &packed_dimensions.functions,
+        &packed_dimensions.expression_signedness,
+        0,
+        true,
+    );
     let selector = simplify_constant_mux_conditions(selector, const_env);
     let mut labels_by_item = Vec::new();
     let mut default_index = None;
@@ -11176,8 +11214,8 @@ fn two_state_case_item_reachability(
             }
         }
     }
-    let (duplicate_reachability, has_duplicate) =
-        case_item_duplicate_reachability(&labels_by_item, const_env);
+    let (mut duplicate_reachability, mut has_duplicate) =
+        case_item_duplicate_reachability(&labels_by_item, const_env, None);
     let constant_selector = expr_to_const(selector.clone());
     if let Some(constant_selector) = constant_selector.as_ref()
         && eval_ast_const_expr(constant_selector, const_env).is_none()
@@ -11213,6 +11251,14 @@ fn two_state_case_item_reachability(
     let Some(selector_signed) = selector_signed else {
         return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
     };
+    (duplicate_reachability, has_duplicate) = case_item_duplicate_reachability(
+        &labels_by_item,
+        const_env,
+        Some(ExprType {
+            width,
+            signed: selector_signed,
+        }),
+    );
     if !expr_is_two_state(&selector, packed_dimensions) {
         if let Some(reachability) = finite_four_state_case_item_reachability(
             &labels_by_item,
@@ -11427,7 +11473,12 @@ fn finite_four_state_case_item_reachability(
 fn case_item_duplicate_reachability(
     labels_by_item: &[Option<Vec<ConstExpr>>],
     const_env: &HashMap<String, i128>,
+    selector_type: Option<ExprType>,
 ) -> (Vec<bool>, bool) {
+    let constant_types = parameter_types_from_const_env(const_env)
+        .into_iter()
+        .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
+        .collect::<HashMap<_, _>>();
     let mut reachable = vec![false; labels_by_item.len()];
     let mut prior_labels: Vec<&ConstExpr> = Vec::new();
     let mut has_duplicate = false;
@@ -11438,7 +11489,29 @@ fn case_item_duplicate_reachability(
         };
         for label in labels {
             let duplicate = prior_labels.iter().any(|prior| {
-                *prior == label
+                let normalized_equal = selector_type.is_some_and(|selector_type| {
+                    let prior_expr: crate::ir::ConstExpr = (*prior).clone().into();
+                    let label_expr: crate::ir::ConstExpr = label.clone().into();
+                    let prior = typecheck::context_size_const_integral_literal(
+                        &prior_expr,
+                        const_env,
+                        &constant_types,
+                        selector_type.width,
+                        selector_type.signed,
+                    );
+                    let label = typecheck::context_size_const_integral_literal(
+                        &label_expr,
+                        const_env,
+                        &constant_types,
+                        selector_type.width,
+                        selector_type.signed,
+                    );
+                    prior.zip(label).is_some_and(|(prior, label)| {
+                        prior.value == label.value && prior.mask == label.mask
+                    })
+                });
+                normalized_equal
+                    || *prior == label
                     || eval_ast_const_expr(
                         &ConstExpr::Binary {
                             left: Box::new((*prior).clone()),
@@ -11655,9 +11728,13 @@ fn definitely_assigned_comb_targets(
                 );
                 if let Some(written_targets) = &written_targets {
                     guarded_targets.retain(|(condition, _)| {
-                        !written_targets
-                            .iter()
-                            .any(|target| expr_references_lvalue(condition, target))
+                        !written_targets.iter().any(|target| {
+                            expr_references_overlapping_lvalue(
+                                condition,
+                                target,
+                                &packed_dimensions.const_env,
+                            )
+                        })
                     });
                 } else {
                     guarded_targets.clear();
@@ -11673,9 +11750,13 @@ fn definitely_assigned_comb_targets(
                     continue;
                 };
                 guarded_targets.retain(|(prior_condition, _)| {
-                    !branch_targets
-                        .iter()
-                        .any(|target| expr_references_lvalue(prior_condition, target))
+                    !branch_targets.iter().any(|target| {
+                        expr_references_overlapping_lvalue(
+                            prior_condition,
+                            target,
+                            &packed_dimensions.const_env,
+                        )
+                    })
                 });
                 for (prior_condition, prior_targets) in &guarded_targets {
                     if !two_state_conditions_are_complements(
@@ -11847,9 +11928,9 @@ fn guarded_comb_targets(
         packed_dimensions,
     );
     if targets.is_empty()
-        || targets
-            .iter()
-            .any(|target| expr_references_lvalue(&condition, target))
+        || targets.iter().any(|target| {
+            expr_references_overlapping_lvalue(&condition, target, &packed_dimensions.const_env)
+        })
     {
         return None;
     }

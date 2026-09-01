@@ -156,6 +156,38 @@ pub fn eval_const_integral_literal_with_types(
     integral_literal_from_const_expr(&expr)
 }
 
+/// Evaluate and resize a constant expression in a case selector's comparison
+/// context without discarding X/Z masks.
+pub fn context_size_const_integral_literal(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+    width: usize,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    let literal = eval_const_integral_literal_with_types(expr, constants, types)?;
+    let extension = signed_extension(&literal, literal.signed);
+    Some(resize_integral_literal(literal, width, signed, extension))
+}
+
+pub fn format_integral_literal_binary(literal: &IntegralLiteral) -> String {
+    let bits = (0..literal.width)
+        .rev()
+        .map(|bit| {
+            let bit = bit as u64;
+            if literal.mask.bit(bit) {
+                if literal.value.bit(bit) { 'x' } else { 'z' }
+            } else if literal.value.bit(bit) {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect::<String>();
+    let signing = if literal.signed { "s" } else { "" };
+    format!("{}'{signing}b{bits}", literal.width)
+}
+
 pub fn substitute_typed_constants(
     expr: ConstExpr,
     constants: &HashMap<String, i128>,

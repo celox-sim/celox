@@ -392,6 +392,38 @@ mod tests {
     }
 
     #[test]
+    fn invalidates_complementary_guards_for_overlapping_selected_writes() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic outer, q, a, b, c,
+                    input bit idx,
+                    output logic y
+                );
+                    logic [1:0] s;
+                    always_comb begin
+                        s = {q, q};
+                        if (outer) begin
+                            if (s[0]) y = a;
+                            s[idx] = b;
+                            if (!s[0]) y = c;
+                        end else begin
+                            y = a;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("overlapping_write_between_complementary_guards.sv"),
+        )
+        .expect_err("a dynamic overlapping write must invalidate the guard proof");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+    }
+
+    #[test]
     fn substitutes_reads_of_selected_comb_targets() {
         let ir = analyze_source(
             r#"
@@ -1192,6 +1224,22 @@ mod tests {
             Path::new("wide_normalized_four_state_case_labels.sv"),
         )
         .expect("equivalent wide labels should be normalized without domain enumeration");
+
+        analyze_source(
+            r#"
+                module Top(input logic signed [8:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'sb1: y = a;
+                            9'b111111111: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("selector_typed_four_state_case_labels.sv"),
+        )
+        .expect("labels should be normalized in the signed selector context");
     }
 
     #[test]
@@ -1229,6 +1277,43 @@ mod tests {
             Path::new("constant_four_state_case_selector.sv"),
         )
         .expect("a matching X-valued constant case item should be exhaustive");
+    }
+
+    #[test]
+    fn expands_constant_function_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    function automatic bit f();
+                        return 1'b0;
+                    endfunction
+                    always_comb begin
+                        case (f())
+                            1'b0: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_function_case_selector.sv"),
+        )
+        .expect("a constant function selector should make its matching item exhaustive");
+
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    function automatic logic f();
+                        return 1'bx;
+                    endfunction
+                    always_comb begin
+                        case (f())
+                            1'bx: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_unknown_function_case_selector.sv"),
+        )
+        .expect("an X-valued constant function selector should preserve its mask");
     }
 
     #[test]
