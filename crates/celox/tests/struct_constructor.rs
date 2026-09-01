@@ -39,6 +39,9 @@ o = S'{x: a, y: b};
     }
 
     fn test_struct_constructor_member_width_adjustment(sim) {
+        // Veryl 867deb1's reference simulator debug-asserts when a non-literal
+        // struct member expression needs width adjustment.
+        @omit_veryl;
         @ignore_on(sv);
         @setup { let code = r#"
 module Top (

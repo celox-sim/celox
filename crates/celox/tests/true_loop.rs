@@ -11,6 +11,8 @@ all_backends! {
 // assign passes the analyzer (no UnassignVariable), and true_loop
 // declaration allows the SIR scheduler to accept the cycle.
 fn test_converging_true_loop_with_assign(sim) {
+    // The Veryl adapter cannot apply Celox's explicit true-loop guard config.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (i: input logic<2>, o: output logic<2>) {

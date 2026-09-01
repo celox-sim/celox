@@ -90,19 +90,10 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
     }
 
     let mut sorted_paths = vec![];
-    let sorted_symbols = veryl_analyzer::type_dag::toposort();
-    for symbol in sorted_symbols {
-        if matches!(
-            symbol.kind,
-            veryl_analyzer::symbol::SymbolKind::Module(_)
-                | veryl_analyzer::symbol::SymbolKind::Interface(_)
-                | veryl_analyzer::symbol::SymbolKind::Package(_)
-        ) && let veryl_parser::veryl_token::TokenSource::File { path, .. } = symbol.token.source
-        {
-            let path = PathBuf::from(format!("{path}"));
-            if let Some(x) = used_paths.remove(&path) {
-                sorted_paths.push(x.clone());
-            }
+    for path in veryl_analyzer::type_dag::toposort_file() {
+        let path = PathBuf::from(format!("{path}"));
+        if let Some(x) = used_paths.remove(&path) {
+            sorted_paths.push(x.clone());
         }
     }
 

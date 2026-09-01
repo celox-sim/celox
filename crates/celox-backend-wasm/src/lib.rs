@@ -1723,7 +1723,17 @@ fn compile_binary_wide(
             instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
         }
 
-        compile_binary_mask_wide(&d, &l, op, &r, d_width, operand_width, locals, instrs);
+        compile_binary_mask_wide(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            operand_width,
+            l_width,
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
         return;
     }
@@ -1817,7 +1827,7 @@ fn compile_binary_wide(
             emit_wide_shift(op, &l, &r, &d, d_chunks, locals, instrs);
         }
         BinaryOp::Sar => {
-            emit_wide_sar(&l, &r, &d, d_chunks, d_width, locals, instrs);
+            emit_wide_sar(&l, &r, &d, d_chunks, l_width, locals, instrs);
         }
         // 5. Eq/Ne
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
@@ -2280,6 +2290,7 @@ fn compile_binary_wide(
             &r,
             d_width,
             l_width.max(r_width),
+            l_width,
             locals,
             instrs,
         );
@@ -2537,6 +2548,7 @@ fn compile_binary_mask_wide(
     rhs: &RegLocal,
     d_width: usize,
     operand_width: usize,
+    lhs_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2776,7 +2788,7 @@ fn compile_binary_mask_wide(
                         rhs,
                         &shifted_mask,
                         dst.num_chunks,
-                        d_width,
+                        lhs_width,
                         locals,
                         instrs,
                     );
@@ -3103,7 +3115,7 @@ fn emit_wide_sar(
     r: &RegLocal,
     d: &RegLocal,
     d_chunks: usize,
-    d_width: usize,
+    l_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -3130,8 +3142,8 @@ fn emit_wide_sar(
     instrs.push(Instruction::I64Sub);
     instrs.push(Instruction::LocalSet(inv_bit));
 
-    let msb_chunk = ((d_width - 1) / 64) as u32;
-    let msb_bit = ((d_width - 1) % 64) as i64;
+    let msb_chunk = ((l_width - 1) / 64) as u32;
+    let msb_bit = ((l_width - 1) % 64) as i64;
     instrs.push(Instruction::I64Const(0));
     instrs.push(Instruction::LocalSet(sign_fill));
     instrs.push(Instruction::LocalGet(l.value_idx + msb_chunk));
@@ -6186,6 +6198,83 @@ mod bit_count_tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn wide_sar_uses_the_lhs_width_for_sign_fill() {
+        let lhs = RegisterId(0);
+        let rhs = RegisterId(1);
+        let dst = RegisterId(2);
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            lhs,
+            RegisterType::Bit {
+                width: 65,
+                signed: true,
+            },
+        );
+        register_map.insert(
+            rhs,
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            dst,
+            RegisterType::Bit {
+                width: 128,
+                signed: true,
+            },
+        );
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(
+                    lhs,
+                    SIRValue::new_four_state(
+                        BigUint::from(1u8) << 64usize,
+                        BigUint::from(1u8) << 64usize,
+                    ),
+                ),
+                SIRInstruction::Imm(rhs, SIRValue::new(1u8)),
+                SIRInstruction::Binary(dst, lhs, BinaryOp::Sar, rhs),
+                SIRInstruction::Store(
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address()),
+                    SIROffset::Static(0),
+                    128,
+                    dst,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: std::iter::once((BlockId(0), block)).collect(),
+            register_map,
+        };
+        let two_state_layout = layout(128, false);
+        let expected = (BigUint::from(1u8) << 127usize) | (BigUint::from(1u8) << 63usize);
+
+        let cranelift = read_bits(&run_cranelift(&unit, &two_state_layout, false), 0, 128);
+        let wasm = read_bits(&run_wasm(&unit, &two_state_layout, false), 0, 128);
+        assert_eq!(cranelift, expected);
+        assert_eq!(wasm, expected);
+
+        let four_state_layout = layout(128, true);
+        for memory in [
+            run_cranelift(&unit, &four_state_layout, true),
+            run_wasm(&unit, &four_state_layout, true),
+        ] {
+            assert_eq!(read_bits(&memory, 0, 128), expected);
+            assert_eq!(
+                read_bits_at(&memory, OUTPUT_OFFSET + get_byte_size(128), 0, 128),
+                expected,
+            );
         }
     }
 }

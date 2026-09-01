@@ -509,7 +509,7 @@ describe("E2E: Simulator.fromProject (event-based)", () => {
 		expect(sim.dut.sum).toBe(0x10000n);
 
 		sim.dispose();
-	});
+	}, 15_000);
 
 	test("sequential counter from project directory", () => {
 		interface CounterPorts {

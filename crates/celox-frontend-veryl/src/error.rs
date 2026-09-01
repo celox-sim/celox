@@ -17,7 +17,7 @@ impl SourceLocation {
         let text = token.beg.source.get_text();
         Self {
             source: MultiSources {
-                sources: vec![Source { path, text }],
+                sources: vec![Source::new(path, text)],
             },
             span: token.into(),
         }
@@ -35,10 +35,7 @@ impl From<celox_frontend_core::SourceLocation> for SourceLocation {
     fn from(location: celox_frontend_core::SourceLocation) -> Self {
         Self {
             source: MultiSources {
-                sources: vec![Source {
-                    path: location.path,
-                    text: location.text,
-                }],
+                sources: vec![Source::new(location.path, location.text)],
             },
             span: location.span,
         }

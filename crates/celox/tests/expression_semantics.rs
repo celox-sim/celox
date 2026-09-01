@@ -565,15 +565,23 @@ module Top (
     ternary_then_followup: output logic,
     ternary_else_followup: output logic,
 ) {
-    var and_side_effect: logic;
-    var or_side_effect: logic;
-    var ternary_then_side_effect: logic;
-    var ternary_else_side_effect: logic;
     function set_side_effect (y: output logic) -> logic {
         y = 1'b1;
         return 1'b1;
     }
     always_ff (clk) {
+        #[allow(multiple_assign)]
+        var and_side_effect: logic;
+        #[allow(multiple_assign)]
+        var or_side_effect: logic;
+        #[allow(multiple_assign)]
+        var ternary_then_side_effect: logic;
+        #[allow(multiple_assign)]
+        var ternary_else_side_effect: logic;
+        and_side_effect = 1'b0;
+        or_side_effect = 1'b0;
+        ternary_then_side_effect = 1'b0;
+        ternary_else_side_effect = 1'b0;
         and_result = 1'b0 && set_side_effect(and_side_effect);
         or_result = 1'b1 || set_side_effect(or_side_effect);
         true_result = if 1'b1 ? 1'b0 : set_side_effect(ternary_else_side_effect);
@@ -582,11 +590,11 @@ module Top (
         or_followup = or_side_effect;
         ternary_then_followup = ternary_then_side_effect;
         ternary_else_followup = ternary_else_side_effect;
+        and_state = and_side_effect;
+        or_state = or_side_effect;
+        ternary_then_state = ternary_then_side_effect;
+        ternary_else_state = ternary_else_side_effect;
     }
-    assign and_state = and_side_effect;
-    assign or_state = or_side_effect;
-    assign ternary_then_state = ternary_then_side_effect;
-    assign ternary_else_state = ternary_else_side_effect;
 }
 "#, "Top");
 

@@ -4794,7 +4794,7 @@ mod tests {
     use super::*;
     use crate::BuildConfig;
     use veryl_analyzer::{
-        Analyzer, Context, attribute_table,
+        Analyzer, AnalyzerError, Context, attribute_table,
         ir::{Component, Declaration, Ir},
         symbol_table,
     };
@@ -4983,10 +4983,15 @@ module Top (
         let mut ir = Ir::default();
         assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
         assert!(Analyzer::analyze_post_pass1().is_empty());
+        let errors = analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
         assert!(
-            analyzer
-                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
-                .is_empty()
+            !errors.is_empty()
+                && errors.iter().all(|error| matches!(
+                    error,
+                    AnalyzerError::FunctionOutputInAlwaysFf { function, .. }
+                        if function == "touch"
+                )),
+            "expected only always_ff output diagnostics for touch, got: {errors:?}"
         );
         assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
 
