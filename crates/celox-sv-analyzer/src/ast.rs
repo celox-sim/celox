@@ -3569,6 +3569,7 @@ fn parameters_from_ref_node(
         base_const_env,
         parameters,
         type_aliases,
+        parameter_overrides,
     );
     let has_declared_type = type_node.clone().into_iter().any(|child| {
         matches!(
@@ -3626,20 +3627,42 @@ fn parameter_declared_width(
     base_const_env: &HashMap<String, i128>,
     parameters: &[Parameter],
     type_aliases: &HashMap<String, Type>,
+    parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Option<usize> {
     let declared_alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
-    let ranges = declared_alias
-        .as_ref()
-        .map(|r#type| r#type.packed_ranges.clone())
-        .unwrap_or_else(|| packed_ranges_from_ref_node(node.clone(), syntax_tree));
-    if ranges.is_empty() {
-        if declared_alias.is_some() {
-            return Some(1);
+    let mut range_env = base_const_env.clone();
+    range_env.extend(const_env_from_parameters(parameters));
+    // Numeric-size casts in a later parameter declaration can refer to an
+    // earlier assignment in the same parameter-port list. Seed range lowering
+    // from those assignments while retaining the separate environment below
+    // for evaluating the resulting symbolic ranges without stale self-values.
+    for child in node.clone() {
+        let RefNode::ParamAssignment(parameter) = child else {
+            continue;
+        };
+        let Ok(name) = parameter_name(
+            RefNode::ParameterIdentifier(&parameter.nodes.0),
+            syntax_tree,
+        ) else {
+            continue;
+        };
+        let value = parameter_overrides
+            .get(&name)
+            .cloned()
+            .or_else(|| {
+                parameter.nodes.2.as_ref().and_then(|(_, expr)| {
+                    const_expr_from_constant_param_with_env(
+                        expr,
+                        syntax_tree,
+                        &range_env,
+                        type_aliases,
+                    )
+                })
+            })
+            .and_then(|value| eval_ast_const_expr(&value, &range_env));
+        if let Some(value) = value {
+            range_env.insert(name, value);
         }
-        if let Some(r#type) = integer_atom_expr_type(node.clone()) {
-            return Some(r#type.width);
-        }
-        return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
     }
     let mut env = base_const_env.clone();
     // A second lowering pass receives values from the first pass in the base
@@ -3657,6 +3680,26 @@ fn parameter_declared_width(
         }
     }
     env.extend(const_env_from_parameters(parameters));
+    let ranges = declared_alias
+        .as_ref()
+        .map(|r#type| r#type.packed_ranges.clone())
+        .unwrap_or_else(|| {
+            packed_ranges_from_ref_node_with_env(
+                node.clone(),
+                syntax_tree,
+                &range_env,
+                type_aliases,
+            )
+        });
+    if ranges.is_empty() {
+        if declared_alias.is_some() {
+            return Some(1);
+        }
+        if let Some(r#type) = integer_atom_expr_type(node.clone()) {
+            return Some(r#type.width);
+        }
+        return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
+    }
     ranges.iter().try_fold(1usize, |acc, range| {
         let left = eval_ast_const_expr(range.left(), &env)?;
         let right = eval_ast_const_expr(range.right(), &env)?;
@@ -10966,32 +11009,6 @@ fn two_state_case_item_reachability(
         packed_dimensions,
     )?;
     let selector = simplify_constant_mux_conditions(selector, const_env);
-    let width = two_state_case_selector_width(&selector, packed_dimensions)?;
-    // Constant evaluation and the type model use i128 values. Wider dynamic
-    // selectors still lower normally, but are not candidates for this
-    // reachability optimization.
-    if width > 128 {
-        return None;
-    }
-    let constant_selector_value = expr_to_const(selector.clone())
-        .and_then(|selector| eval_ast_const_expr(&selector, const_env));
-    let mut identifiers = packed_dimensions
-        .iter()
-        .map(|(name, dimensions)| (name.clone(), dimensions.signed))
-        .collect::<HashMap<_, _>>();
-    identifiers.extend(
-        parameter_types_from_const_env(const_env)
-            .into_iter()
-            .map(|(name, r#type)| (name, r#type.signed)),
-    );
-    let selector_signed = if let Expr::Call { name, .. } = &selector {
-        packed_dimensions
-            .function_return_types
-            .get(name)
-            .map(|(_, signed, _)| *signed)?
-    } else {
-        expr_signedness(&selector, &identifiers, &HashMap::default())?
-    };
     let mut labels_by_item = Vec::new();
     let mut default_index = None;
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
@@ -11019,6 +11036,35 @@ fn two_state_case_item_reachability(
             }
         }
     }
+    let (duplicate_reachability, has_duplicate) = case_item_duplicate_reachability(&labels_by_item);
+    let Some(width) = two_state_case_selector_width(&selector, packed_dimensions) else {
+        return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
+    };
+    // Constant evaluation and the type model use i128 values. Wider dynamic
+    // selectors still lower normally, but duplicate constant items can still
+    // be excluded from definite-assignment analysis.
+    if width > 128 {
+        return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
+    }
+    let constant_selector_value = expr_to_const(selector.clone())
+        .and_then(|selector| eval_ast_const_expr(&selector, const_env));
+    let mut identifiers = packed_dimensions
+        .iter()
+        .map(|(name, dimensions)| (name.clone(), dimensions.signed))
+        .collect::<HashMap<_, _>>();
+    identifiers.extend(
+        parameter_types_from_const_env(const_env)
+            .into_iter()
+            .map(|(name, r#type)| (name, r#type.signed)),
+    );
+    let selector_signed = if let Expr::Call { name, .. } = &selector {
+        packed_dimensions
+            .function_return_types
+            .get(name)
+            .map(|(_, signed, _)| *signed)?
+    } else {
+        expr_signedness(&selector, &identifiers, &HashMap::default())?
+    };
     let mut reachable = vec![false; labels_by_item.len()];
     if let Some(value) = constant_selector_value {
         let selector = ConstExpr::Literal(format_typed_parameter_literal(
@@ -11108,6 +11154,27 @@ fn two_state_case_item_reachability(
     } else {
         Some((reachable, domain_is_covered))
     }
+}
+
+fn case_item_duplicate_reachability(
+    labels_by_item: &[Option<Vec<ConstExpr>>],
+) -> (Vec<bool>, bool) {
+    let mut reachable = vec![false; labels_by_item.len()];
+    let mut prior_labels: Vec<&ConstExpr> = Vec::new();
+    let mut has_duplicate = false;
+    for (index, labels) in labels_by_item.iter().enumerate() {
+        let Some(labels) = labels else {
+            reachable[index] = true;
+            continue;
+        };
+        for label in labels {
+            let duplicate = prior_labels.contains(&label);
+            has_duplicate |= duplicate;
+            reachable[index] |= !duplicate;
+            prior_labels.push(label);
+        }
+    }
+    (reachable, has_duplicate)
 }
 
 fn mark_condition_context(
@@ -11429,7 +11496,37 @@ fn two_state_conditions_are_complements(
             } if &**expr == other && expr_is_two_state(other, packed_dimensions)
         )
     };
-    is_complement(left, right) || is_complement(right, left)
+    let are_inverse_equalities = |left: &Expr, right: &Expr| {
+        let (
+            Expr::Binary {
+                left: left_lhs,
+                op: left_op,
+                right: left_rhs,
+            },
+            Expr::Binary {
+                left: right_lhs,
+                op: right_op,
+                right: right_rhs,
+            },
+        ) = (left, right)
+        else {
+            return false;
+        };
+        let operands_match = (left_lhs == right_lhs && left_rhs == right_rhs)
+            || (left_lhs == right_rhs && left_rhs == right_lhs);
+        if !operands_match {
+            return false;
+        }
+        match (left_op, right_op) {
+            (BinaryOp::Eq, BinaryOp::Ne) | (BinaryOp::Ne, BinaryOp::Eq) => {
+                expr_is_two_state(left_lhs, packed_dimensions)
+                    && expr_is_two_state(left_rhs, packed_dimensions)
+            }
+            (BinaryOp::EqCase, BinaryOp::NeCase) | (BinaryOp::NeCase, BinaryOp::EqCase) => true,
+            _ => false,
+        }
+    };
+    is_complement(left, right) || is_complement(right, left) || are_inverse_equalities(left, right)
 }
 
 fn intersect_lvalue_sets(

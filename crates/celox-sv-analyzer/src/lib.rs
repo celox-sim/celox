@@ -330,6 +330,26 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_complementary_equality_guards_as_exhaustive() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, c, output logic y);
+                    always_comb begin
+                        if (outer) begin
+                            if (s == 0) y = a;
+                            if (s != 0) y = b;
+                        end else begin
+                            y = c;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("complementary_equality_guards.sv"),
+        )
+        .expect("complementary two-state equality guards should define y exhaustively");
+    }
+
+    #[test]
     fn substitutes_reads_of_selected_comb_targets() {
         let ir = analyze_source(
             r#"
@@ -1079,6 +1099,25 @@ mod tests {
     }
 
     #[test]
+    fn skips_duplicate_case_items_for_four_state_selectors() {
+        analyze_source(
+            r#"
+                module Top(input logic s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'b0: y = a;
+                            1'b0: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("four_state_duplicate_case_item.sv"),
+        )
+        .expect("an unreachable duplicate case item should not infer a latch");
+    }
+
+    #[test]
     fn preserves_named_constant_casts_in_packed_ranges() {
         let ir = analyze_source(
             r#"
@@ -1096,6 +1135,24 @@ mod tests {
             ir.modules()[0].ports()[0].r#type().resolved_width(),
             Some(16)
         );
+    }
+
+    #[test]
+    fn resolves_named_casts_while_collecting_parameter_ranges() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 3,
+                    parameter logic [W'(2):0] P = 3'b100
+                ) ();
+                endmodule
+            "#,
+            Path::new("named_cast_parameter_range.sv"),
+        )
+        .expect("parameter ranges should use preceding parameters in named casts");
+        let parameter = &ir.modules()[0].parameters()[1];
+        assert_eq!(parameter.declared_width(), Some(3));
+        assert_eq!(parameter.resolved_value(), Some(4));
     }
 
     #[test]
