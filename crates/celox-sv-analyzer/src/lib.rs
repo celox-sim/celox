@@ -1529,6 +1529,58 @@ mod tests {
     }
 
     #[test]
+    fn folds_four_state_conditional_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb begin
+                        case (1'bx ? 1'b0 : 1'b1)
+                            1'bx: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("conditional_four_state_case_selector.sv"),
+        )
+        .expect("a constant conditional selector should retain its merged X mask");
+    }
+
+    #[test]
+    fn types_unpacked_array_elements_in_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a[2];
+                    localparam P = $bits(a[0])'(16'hffff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("array_element_size_cast_target.sv"),
+        )
+        .expect("size-function expression typing should include module variable dimensions");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
+    }
+
+    #[test]
+    fn applies_function_return_types_in_procedural_lvalue_indices() {
+        analyze_source(
+            r#"
+                module Top(input logic [1:0] index, input logic data, output logic [1:0] x);
+                    function automatic bit idx();
+                        return index;
+                    endfunction
+                    always_comb begin
+                        x = '0;
+                        x[idx()] = data;
+                    end
+                endmodule
+            "#,
+            Path::new("function_typed_lvalue_index.sv"),
+        )
+        .expect("the one-bit function return should truncate the expanded lvalue index");
+    }
+
+    #[test]
     fn restricts_enum_alias_types_to_the_declared_base() {
         let ir = analyze_source(
             r#"

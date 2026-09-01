@@ -522,8 +522,16 @@ fn merge_unknown_const_mux_arms(
         return Some(then_value);
     }
 
-    let mut then_literal = integral_literal_from_const_expr(then_expr)?;
-    let mut else_literal = integral_literal_from_const_expr(else_expr)?;
+    let then_literal = integral_literal_from_const_expr(then_expr)?;
+    let else_literal = integral_literal_from_const_expr(else_expr)?;
+    let merged = merge_unknown_integral_literals(then_literal, else_literal);
+    integral_literal_as_i128(&merged, merged.signed)
+}
+
+fn merge_unknown_integral_literals(
+    mut then_literal: IntegralLiteral,
+    mut else_literal: IntegralLiteral,
+) -> IntegralLiteral {
     let width = then_literal.width.max(else_literal.width);
     let signed = then_literal.signed && else_literal.signed;
     let then_extension = signed_extension(&then_literal, signed);
@@ -532,20 +540,16 @@ fn merge_unknown_const_mux_arms(
     else_literal = resize_integral_literal(else_literal, width, signed, else_extension);
 
     let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-    let same_value = &width_mask ^ (&then_literal.value ^ &else_literal.value);
-    let same_mask = &width_mask ^ (&then_literal.mask ^ &else_literal.mask);
-    let matching = same_value & same_mask;
-    let mask = &then_literal.mask | &else_literal.mask | (&width_mask ^ &matching);
-    let value = (&then_literal.value & &matching) | &mask;
-    integral_literal_as_i128(
-        &IntegralLiteral {
-            width,
-            signed,
-            value,
-            mask,
-        },
+    let different = ((&then_literal.value ^ &else_literal.value)
+        | (&then_literal.mask ^ &else_literal.mask))
+        & &width_mask;
+    let matching = &width_mask ^ &different;
+    IntegralLiteral {
+        width,
         signed,
-    )
+        value: (&then_literal.value & &matching) | &different,
+        mask: (&then_literal.mask & matching) | different,
+    }
 }
 
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
@@ -584,6 +588,18 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             right = resize_integral_literal(right, width, signed, right_extension);
             eval_four_state_binary_literal(&left, *op, &right, signed)
         }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => match integral_literal_truth(&integral_literal_from_const_expr(condition)?) {
+            Some(true) => integral_literal_from_const_expr(then_expr),
+            Some(false) => integral_literal_from_const_expr(else_expr),
+            None => Some(merge_unknown_integral_literals(
+                integral_literal_from_const_expr(then_expr)?,
+                integral_literal_from_const_expr(else_expr)?,
+            )),
+        },
         _ => None,
     }
 }
@@ -1119,6 +1135,35 @@ mod literal_tests {
 
         assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
         assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(1));
+    }
+
+    #[test]
+    fn merges_constant_mux_arms_without_losing_four_state_masks() {
+        let merged = ConstExpr::Mux {
+            condition: Box::new(ConstExpr::Literal("1'bx".to_string())),
+            then_expr: Box::new(ConstExpr::Literal("1'b0".to_string())),
+            else_expr: Box::new(ConstExpr::Literal("1'b1".to_string())),
+        };
+        let identical_z = ConstExpr::Mux {
+            condition: Box::new(ConstExpr::Literal("1'bx".to_string())),
+            then_expr: Box::new(ConstExpr::Literal("1'bz".to_string())),
+            else_expr: Box::new(ConstExpr::Literal("1'bz".to_string())),
+        };
+
+        let merged = eval_const_integral_literal_with_types(
+            &merged,
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        assert_eq!(format_integral_literal_binary(&merged), "1'bx");
+        let identical_z = eval_const_integral_literal_with_types(
+            &identical_z,
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        assert_eq!(format_integral_literal_binary(&identical_z), "1'bz");
     }
 
     #[test]

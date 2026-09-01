@@ -963,11 +963,17 @@ fn size_function_expression_type(
     type_aliases: &HashMap<String, Type>,
     first_dimension_only: bool,
 ) -> Option<ExprType> {
-    let mut packed_dimensions = PackedDimensions {
+    let mut packed_dimensions = containing_packed_dimensions(
+        RefNode::Expression(argument),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .unwrap_or_else(|| PackedDimensions {
         const_env: const_env.clone(),
         type_aliases: type_aliases.clone(),
         ..PackedDimensions::default()
-    };
+    });
     packed_dimensions.function_return_types = containing_function_return_types(
         RefNode::Expression(argument),
         syntax_tree,
@@ -1007,6 +1013,39 @@ fn size_function_expression_type(
         width: width.max(1),
         signed,
     })
+}
+
+fn containing_packed_dimensions(
+    target: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<PackedDimensions> {
+    let (target_start, target_end) = ref_node_source_span(target)?;
+    for node in syntax_tree {
+        let module = match node {
+            RefNode::ModuleDeclarationAnsi(module) => RefNode::ModuleDeclarationAnsi(module),
+            RefNode::ModuleDeclarationNonansi(module) => RefNode::ModuleDeclarationNonansi(module),
+            _ => continue,
+        };
+        let Some((module_start, module_end)) = ref_node_source_span(module.clone()) else {
+            continue;
+        };
+        if target_start < module_start || target_end > module_end {
+            continue;
+        }
+        let ports =
+            ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
+        let signals =
+            signals_from_module_node(module, syntax_tree, const_env, type_aliases).ok()?;
+        return Some(packed_dimensions_from_ports_and_signals(
+            &ports,
+            &signals,
+            const_env,
+            type_aliases,
+        ));
+    }
+    None
 }
 
 fn containing_function_return_types(
@@ -7995,7 +8034,7 @@ fn expand_lvalue_calls(
             functions,
             expression_signedness,
             0,
-            false,
+            true,
         ))
         .unwrap_or(original)
     };
