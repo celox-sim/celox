@@ -370,6 +370,28 @@ mod tests {
     }
 
     #[test]
+    fn preserves_complementary_guards_across_harmless_blocks() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, output logic y, z);
+                    always_comb begin
+                        if (outer) begin
+                            if (s) y = a;
+                            begin z = 1'b0; end
+                            if (!s) y = b;
+                        end else begin
+                            y = a;
+                            z = 1'b1;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("harmless_block_between_complementary_guards.sv"),
+        )
+        .expect("a block that cannot change the guard should preserve its proof");
+    }
+
+    #[test]
     fn substitutes_reads_of_selected_comb_targets() {
         let ir = analyze_source(
             r#"
@@ -1190,6 +1212,49 @@ mod tests {
             Path::new("complete_four_state_case.sv"),
         )
         .expect("all four states should exhaust a one-bit logic selector");
+    }
+
+    #[test]
+    fn recognizes_exhaustive_constant_four_state_cases() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic y);
+                    always_comb begin
+                        case (1'bx)
+                            1'bx: if (c) y = a; else y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_four_state_case_selector.sv"),
+        )
+        .expect("a matching X-valued constant case item should be exhaustive");
+    }
+
+    #[test]
+    fn caps_dynamic_select_normalization_expansion() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic [16:0] index,
+                    input logic data, replace,
+                    output logic [4096:0] value
+                );
+                    always_comb begin
+                        value = '0;
+                        value[index] = data;
+                        if (replace) value = '1;
+                    end
+                endmodule
+            "#,
+            Path::new("capped_dynamic_select_expansion.sv"),
+        )
+        .expect_err("oversized dynamic-select expansion should be rejected compactly");
+        assert!(
+            error
+                .to_string()
+                .contains("dynamic selected write expansion exceeds limit")
+        );
     }
 
     #[test]

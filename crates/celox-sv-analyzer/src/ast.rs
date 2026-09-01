@@ -8274,6 +8274,7 @@ fn comb_assignments_from_guarded(
     mut guarded: Vec<ConditionalAssignment>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
+    validate_dynamic_select_expansion_limits(&guarded, packed_dimensions)?;
     normalize_mixed_whole_selected_comb_writes(&mut guarded, packed_dimensions);
     let const_env = &packed_dimensions.const_env;
     let (mut targets, mut groups) = comb_assignment_target_groups(&guarded, const_env);
@@ -8367,6 +8368,44 @@ fn comb_assignments_from_guarded(
         slots[last] = Some(Assignment::new(target, rhs));
     }
     Ok(slots.into_iter().flatten().collect())
+}
+
+const MAX_DYNAMIC_SELECT_EXPANSION: u128 = 4_096;
+
+fn validate_dynamic_select_expansion_limits(
+    guarded: &[ConditionalAssignment],
+    packed_dimensions: &PackedDimensions,
+) -> Result<(), AnalyzerError> {
+    for write in guarded {
+        let LValue::Select { name, msb, lsb, .. } = write.assignment().lhs_value() else {
+            continue;
+        };
+        if eval_ast_const_expr(msb, &packed_dimensions.const_env).is_some()
+            && eval_ast_const_expr(lsb, &packed_dimensions.const_env).is_some()
+        {
+            continue;
+        }
+        let Some(LValue::Select {
+            msb: whole_msb,
+            lsb: whole_lsb,
+            ..
+        }) = whole_packed_lvalue(name, packed_dimensions)
+        else {
+            continue;
+        };
+        let (Some(whole_msb), Some(whole_lsb)) = (
+            eval_ast_const_expr(&whole_msb, &packed_dimensions.const_env),
+            eval_ast_const_expr(&whole_lsb, &packed_dimensions.const_env),
+        ) else {
+            continue;
+        };
+        if whole_msb.abs_diff(whole_lsb).saturating_add(1) > MAX_DYNAMIC_SELECT_EXPANSION {
+            return Err(AnalyzerError::Unsupported(
+                "dynamic selected write expansion exceeds limit".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn comb_assignment_target_groups(
@@ -9543,6 +9582,10 @@ fn dynamic_selected_value_after_write(
     let whole_lsb = eval_ast_const_expr(&whole_lsb, &packed_dimensions.const_env)?;
     let whole_low = whole_msb.min(whole_lsb);
     let whole_high = whole_msb.max(whole_lsb);
+    let candidate_count = whole_high.abs_diff(whole_low).checked_add(1)?;
+    if candidate_count > MAX_DYNAMIC_SELECT_EXPANSION {
+        return None;
+    }
     let mut result = current.clone();
     let mut matched = false;
     for candidate_lsb in whole_low..=whole_high {
@@ -11135,6 +11178,18 @@ fn two_state_case_item_reachability(
     }
     let (duplicate_reachability, has_duplicate) =
         case_item_duplicate_reachability(&labels_by_item, const_env);
+    let constant_selector = expr_to_const(selector.clone());
+    if let Some(constant_selector) = constant_selector.as_ref()
+        && eval_ast_const_expr(constant_selector, const_env).is_none()
+        && let Some(reachability) = constant_case_item_reachability(
+            constant_selector,
+            &labels_by_item,
+            default_index,
+            const_env,
+        )
+    {
+        return Some(reachability);
+    }
     let Some(width) = expr_static_width(&selector, packed_dimensions) else {
         return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
     };
@@ -11176,8 +11231,9 @@ fn two_state_case_item_reachability(
     if width > 128 {
         return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
     }
-    let constant_selector_value = expr_to_const(selector.clone())
-        .and_then(|selector| eval_ast_const_expr(&selector, const_env));
+    let constant_selector_value = constant_selector
+        .as_ref()
+        .and_then(|selector| eval_ast_const_expr(selector, const_env));
     let mut reachable = vec![false; labels_by_item.len()];
     if let Some(value) = constant_selector_value {
         let selector = ConstExpr::Literal(format_typed_parameter_literal(
@@ -11267,6 +11323,45 @@ fn two_state_case_item_reachability(
     } else {
         Some((reachable, domain_is_covered))
     }
+}
+
+fn constant_case_item_reachability(
+    selector: &ConstExpr,
+    labels_by_item: &[Option<Vec<ConstExpr>>],
+    default_index: Option<usize>,
+    const_env: &HashMap<String, i128>,
+) -> Option<(Vec<bool>, bool)> {
+    let mut reachable = vec![false; labels_by_item.len()];
+    let mut matched = None;
+    for (index, labels) in labels_by_item.iter().enumerate() {
+        let Some(labels) = labels else {
+            continue;
+        };
+        for label in labels {
+            let equal = eval_ast_const_expr(
+                &ConstExpr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: BinaryOp::EqCase,
+                    right: Box::new(label.clone()),
+                },
+                const_env,
+            )?;
+            if equal != 0 {
+                matched = Some(index);
+                break;
+            }
+        }
+        if matched.is_some() {
+            break;
+        }
+    }
+    let covered = if let Some(index) = matched.or(default_index) {
+        reachable[index] = true;
+        true
+    } else {
+        false
+    };
+    Some((reachable, covered))
 }
 
 fn finite_four_state_case_item_reachability(
@@ -11429,6 +11524,106 @@ fn definitely_assigned_comb_targets_statement_or_null(
     }
 }
 
+fn written_comb_targets_statement_or_null(
+    stmt: &sv_parser::StatementOrNull,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Vec<LValue>> {
+    let sv_parser::StatementOrNull::Statement(stmt) = stmt else {
+        return Some(Vec::new());
+    };
+    written_comb_targets(stmt, syntax_tree, packed_dimensions)
+}
+
+fn written_comb_targets(
+    stmt: &sv_parser::Statement,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Vec<LValue>> {
+    let collect = |nested: &sv_parser::StatementOrNull, targets: &mut Vec<LValue>| {
+        for target in
+            written_comb_targets_statement_or_null(nested, syntax_tree, packed_dimensions)?
+        {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        Some(())
+    };
+    match &stmt.nodes.2 {
+        sv_parser::StatementItem::BlockingAssignment(assignment) => {
+            let target = match &assignment.0 {
+                sv_parser::BlockingAssignment::Variable(assignment) => {
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                }
+                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                }
+                _ => None,
+            }?;
+            Some(vec![target])
+        }
+        sv_parser::StatementItem::NonblockingAssignment(assignment) => {
+            Some(vec![variable_lvalue_from_node(
+                &assignment.0.nodes.0,
+                syntax_tree,
+                packed_dimensions,
+            )?])
+        }
+        sv_parser::StatementItem::SeqBlock(block) => {
+            let mut targets = Vec::new();
+            for stmt in &block.nodes.3 {
+                collect(stmt, &mut targets)?;
+            }
+            Some(targets)
+        }
+        sv_parser::StatementItem::ConditionalStatement(conditional) => {
+            let mut targets = Vec::new();
+            collect(&conditional.nodes.3, &mut targets)?;
+            for (_, _, _, branch) in &conditional.nodes.4 {
+                collect(branch, &mut targets)?;
+            }
+            if let Some((_, branch)) = &conditional.nodes.5 {
+                collect(branch, &mut targets)?;
+            }
+            Some(targets)
+        }
+        sv_parser::StatementItem::CaseStatement(case) => {
+            let sv_parser::CaseStatement::Normal(case) = &**case else {
+                return None;
+            };
+            let mut targets = Vec::new();
+            for item in std::iter::once(&case.nodes.3).chain(case.nodes.4.iter()) {
+                let branch = match item {
+                    sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
+                    sv_parser::CaseItem::Default(item) => &item.nodes.2,
+                };
+                collect(branch, &mut targets)?;
+            }
+            Some(targets)
+        }
+        sv_parser::StatementItem::LoopStatement(loop_statement) => {
+            let (_, values) = static_for_loop_iterations(
+                loop_statement,
+                syntax_tree,
+                &packed_dimensions.const_env,
+            )?;
+            if values.is_empty() {
+                return Some(Vec::new());
+            }
+            let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
+                return None;
+            };
+            written_comb_targets_statement_or_null(
+                &loop_statement.nodes.2,
+                syntax_tree,
+                packed_dimensions,
+            )
+        }
+        _ => None,
+    }
+}
+
 fn definitely_assigned_comb_targets(
     stmt: &sv_parser::Statement,
     syntax_tree: &SyntaxTree,
@@ -11451,16 +11646,22 @@ fn definitely_assigned_comb_targets(
             let mut targets = Vec::new();
             let mut guarded_targets: Vec<(Expr, Vec<LValue>)> = Vec::new();
             for stmt in &block.nodes.3 {
+                let written_targets =
+                    written_comb_targets_statement_or_null(stmt, syntax_tree, packed_dimensions);
                 let statement_targets = definitely_assigned_comb_targets_statement_or_null(
                     stmt,
                     syntax_tree,
                     packed_dimensions,
                 );
-                guarded_targets.retain(|(condition, _)| {
-                    !statement_targets
-                        .iter()
-                        .any(|target| expr_references_lvalue(condition, target))
-                });
+                if let Some(written_targets) = &written_targets {
+                    guarded_targets.retain(|(condition, _)| {
+                        !written_targets
+                            .iter()
+                            .any(|target| expr_references_lvalue(condition, target))
+                    });
+                } else {
+                    guarded_targets.clear();
+                }
                 for target in statement_targets {
                     if !targets.contains(&target) {
                         targets.push(target);
@@ -11469,9 +11670,6 @@ fn definitely_assigned_comb_targets(
                 let Some((condition, branch_targets)) =
                     guarded_comb_targets(stmt, syntax_tree, packed_dimensions)
                 else {
-                    if !statement_or_null_is_blocking_assignment(stmt) {
-                        guarded_targets.clear();
-                    }
                     continue;
                 };
                 guarded_targets.retain(|(prior_condition, _)| {
@@ -11656,14 +11854,6 @@ fn guarded_comb_targets(
         return None;
     }
     Some((condition, targets))
-}
-
-fn statement_or_null_is_blocking_assignment(stmt: &sv_parser::StatementOrNull) -> bool {
-    matches!(
-        stmt,
-        sv_parser::StatementOrNull::Statement(stmt)
-            if matches!(stmt.nodes.2, sv_parser::StatementItem::BlockingAssignment(_))
-    )
 }
 
 fn two_state_conditions_are_complements(
