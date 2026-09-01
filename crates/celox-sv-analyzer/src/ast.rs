@@ -8718,6 +8718,14 @@ fn substitute_intermediate_comb_value_reads(
             // Keep the tracked value current across writes to an overlapping
             // whole object or subrange. Otherwise a later read could be
             // rewritten with the value from before that intervening write.
+            // Track the value after procedural assignment conversion: an
+            // unsized RHS such as `wide = 0` has only 32 self-determined bits,
+            // but subsequent selected writes and reads observe the full LHS.
+            let write_value = coerce_procedural_assignment_rhs(
+                guarded_assignment.assignment().rhs().clone(),
+                guarded_assignment.assignment().lhs_value(),
+                packed_dimensions,
+            );
             let tracked_target = match target {
                 LValue::Ident(name) => whole_packed_lvalue(name, packed_dimensions),
                 LValue::Select { .. } => Some(target.clone()),
@@ -8727,7 +8735,7 @@ fn substitute_intermediate_comb_value_reads(
                     &established,
                     &tracked_target,
                     guarded_assignment.assignment().lhs_value(),
-                    guarded_assignment.assignment().rhs(),
+                    &write_value,
                     packed_dimensions,
                 )
             {
@@ -8747,7 +8755,14 @@ fn substitute_intermediate_comb_value_reads(
         }
         write_index += 1;
         let write = &*guarded_assignment;
-        let value = write.assignment().rhs().clone();
+        let value = coerce_procedural_assignment_rhs(
+            write.assignment().rhs().clone(),
+            write.assignment().lhs_value(),
+            packed_dimensions,
+        );
+        let mut tracked_write = write.clone();
+        tracked_write.assignment =
+            Assignment::new(write.assignment().lhs_value().clone(), value.clone());
         if let (Some(whole_target), Some(current_whole)) =
             (whole_target.as_ref(), whole_established.clone())
             && let Some((updated, _)) = selected_value_after_write(
@@ -8768,9 +8783,11 @@ fn substitute_intermediate_comb_value_reads(
             });
         }
         if let Some(chain_start) = write.exhaustive_fallback_start {
-            established = value;
+            established = value.clone();
             for (prior_index, prior_write) in &prior_target_writes {
-                if *prior_index >= chain_start && prior_write.path_epochs != write.path_epochs {
+                if *prior_index >= chain_start
+                    && prior_write.path_epochs != tracked_write.path_epochs
+                {
                     established = fold_conditional_assignment_over(established, prior_write);
                 }
             }
@@ -8779,20 +8796,23 @@ fn substitute_intermediate_comb_value_reads(
             if write.condition().is_none() {
                 initialized = true;
             }
-            established = fold_conditional_assignment_over(established, write);
+            established = fold_conditional_assignment_over(established, &tracked_write);
         }
-        for (depth, epoch) in write.path_epochs.iter().enumerate() {
+        for (depth, epoch) in tracked_write.path_epochs.iter().enumerate() {
             if depth == 0 {
-                path_values.insert(*epoch, write.assignment().rhs().clone());
+                path_values.insert(*epoch, value.clone());
             } else {
                 let current = path_values
                     .get(epoch)
                     .cloned()
                     .unwrap_or_else(|| established.clone());
-                path_values.insert(*epoch, fold_conditional_assignment_over(current, write));
+                path_values.insert(
+                    *epoch,
+                    fold_conditional_assignment_over(current, &tracked_write),
+                );
             }
         }
-        prior_target_writes.push((index, write.clone()));
+        prior_target_writes.push((index, tracked_write));
         if let Some(assignment) = original_target_assignment {
             guarded_assignment.assignment = assignment;
         }
