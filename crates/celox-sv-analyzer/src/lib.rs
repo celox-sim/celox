@@ -1409,6 +1409,24 @@ mod tests {
         )
         .expect("a size-function cast target should use the function return type");
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
+
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [7:0] y);
+                    function automatic logic [$bits(g())'(7):0] f();
+                        return 8'h00;
+                    endfunction
+                    function automatic logic [7:0] g();
+                        return 8'h00;
+                    endfunction
+                    localparam P = $bits(f())'(16'hffff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("dependent_function_size_cast_target.sv"),
+        )
+        .expect("function return metadata discovery should resolve dependencies without recursion");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
     }
 
     #[test]

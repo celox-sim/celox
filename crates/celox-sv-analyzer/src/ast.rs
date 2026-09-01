@@ -6,6 +6,7 @@
 
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::{
+    cell::RefCell,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -998,22 +999,67 @@ fn containing_function_return_types(
         if target_start < module_start || target_end > module_end {
             continue;
         }
-        return module
+        let module_span = (module_start, module_end);
+        if let Some(active) = ACTIVE_FUNCTION_RETURN_METADATA
+            .with(|metadata| metadata.borrow().get(&module_span).cloned())
+        {
+            return active;
+        }
+        ACTIVE_FUNCTION_RETURN_METADATA.with(|metadata| {
+            metadata
+                .borrow_mut()
+                .insert(module_span, HashMap::default());
+        });
+        let _guard = ActiveFunctionReturnMetadataGuard { module_span };
+        let declarations = module
             .into_iter()
             .filter_map(|child| {
                 let RefNode::FunctionDeclaration(declaration) = child else {
                     return None;
                 };
-                function_declaration_return_metadata(
+                Some(declaration)
+            })
+            .collect::<Vec<_>>();
+        let mut result = HashMap::default();
+        // A return range may depend on a function declared later in the
+        // module. Revisit declarations after publishing each partial pass;
+        // recursive discovery reads that partial map instead of recursing.
+        for _ in 0..=declarations.len() {
+            for declaration in &declarations {
+                if let Some((name, metadata)) = function_declaration_return_metadata(
                     declaration,
                     syntax_tree,
                     const_env,
                     type_aliases,
-                )
-            })
-            .collect();
+                ) {
+                    result.insert(name, metadata);
+                }
+            }
+            ACTIVE_FUNCTION_RETURN_METADATA.with(|active| {
+                active.borrow_mut().insert(module_span, result.clone());
+            });
+        }
+        return result;
     }
     HashMap::default()
+}
+
+thread_local! {
+    static ACTIVE_FUNCTION_RETURN_METADATA:
+        RefCell<HashMap<(usize, usize), HashMap<String, (Option<usize>, bool, bool)>>> =
+        RefCell::new(HashMap::default());
+}
+
+struct ActiveFunctionReturnMetadataGuard {
+    module_span: (usize, usize),
+}
+
+impl Drop for ActiveFunctionReturnMetadataGuard {
+    fn drop(&mut self) {
+        ACTIVE_FUNCTION_RETURN_METADATA.with(|metadata| {
+            metadata.borrow_mut().remove(&self.module_span);
+        });
+    }
 }
 
 fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> {
