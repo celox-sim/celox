@@ -368,11 +368,12 @@ impl Module {
             .extend(functions.iter().map(|(name, function)| {
                 (
                     name.clone(),
-                    (
-                        function.return_width,
-                        function.return_signed,
-                        function.return_is_2state,
-                    ),
+                    FunctionReturnMetadata {
+                        width: function.return_width,
+                        first_packed_dimension_width: function.return_first_packed_dimension_width,
+                        signed: function.return_signed,
+                        is_2state: function.return_is_2state,
+                    },
                 )
             }));
         packed_dimensions.functions = Arc::new(functions.clone());
@@ -560,6 +561,9 @@ fn static_for_loop_iterations(
     let (_, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
     let (name, initial_value) =
         static_for_loop_initial_value(loop_statement, syntax_tree, const_env)?;
+    if for_loop_body_writes_index(loop_statement, &name, syntax_tree) {
+        return None;
+    }
     let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
     let steps = step.as_ref()?.nodes.0.contents();
     let [step] = steps.as_slice() else {
@@ -599,6 +603,29 @@ fn static_for_loop_iterations(
         },
     );
     (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
+}
+
+fn for_loop_body_writes_index(
+    loop_statement: &sv_parser::LoopStatementFor,
+    name: &str,
+    syntax_tree: &SyntaxTree,
+) -> bool {
+    RefNode::StatementOrNull(&loop_statement.nodes.2)
+        .into_iter()
+        .any(|node| {
+            let lvalue = match node {
+                RefNode::BlockingAssignment(assignment) => match assignment {
+                    sv_parser::BlockingAssignment::Variable(assignment) => &assignment.nodes.0,
+                    sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
+                        &assignment.nodes.0
+                    }
+                    _ => return false,
+                },
+                RefNode::NonblockingAssignment(assignment) => &assignment.nodes.0,
+                _ => return false,
+            };
+            for_loop_variable_lvalue_name(lvalue, syntax_tree).as_deref() == Some(name)
+        })
 }
 
 fn static_for_loop_initial_value(
@@ -951,6 +978,10 @@ fn size_function_expression_type(
     let width = if first_dimension_only {
         match &expression {
             Expr::Ident(name) => variable_size_function_width(const_env, name, true),
+            Expr::Call { name, .. } => packed_dimensions
+                .function_return_types
+                .get(name)
+                .and_then(|metadata| metadata.first_packed_dimension_width),
             _ => expr_static_width(&expression, &packed_dimensions),
         }
     } else {
@@ -983,7 +1014,7 @@ fn containing_function_return_types(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-) -> HashMap<String, (Option<usize>, bool, bool)> {
+) -> HashMap<String, FunctionReturnMetadata> {
     let Some((target_start, target_end)) = ref_node_source_span(target) else {
         return HashMap::default();
     };
@@ -1046,7 +1077,7 @@ fn containing_function_return_types(
 
 thread_local! {
     static ACTIVE_FUNCTION_RETURN_METADATA:
-        RefCell<HashMap<(usize, usize), HashMap<String, (Option<usize>, bool, bool)>>> =
+        RefCell<HashMap<(usize, usize), HashMap<String, FunctionReturnMetadata>>> =
         RefCell::new(HashMap::default());
 }
 
@@ -1080,7 +1111,7 @@ fn function_declaration_return_metadata(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-) -> Option<(String, (Option<usize>, bool, bool))> {
+) -> Option<(String, FunctionReturnMetadata)> {
     let (return_node, identifier) = match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => (&body.nodes.0, &body.nodes.2),
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => (&body.nodes.0, &body.nodes.2),
@@ -1089,11 +1120,18 @@ fn function_declaration_return_metadata(
     let return_type = function_return_type(return_node, syntax_tree, const_env, type_aliases);
     Some((
         name,
-        (
-            return_type.map(|r#type| r#type.width),
-            return_type.is_some_and(|r#type| r#type.signed),
-            function_return_is_2state(return_node, syntax_tree, type_aliases),
-        ),
+        FunctionReturnMetadata {
+            width: return_type.map(|r#type| r#type.width),
+            first_packed_dimension_width: function_return_first_packed_dimension_width(
+                return_node,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                return_type,
+            ),
+            signed: return_type.is_some_and(|r#type| r#type.signed),
+            is_2state: function_return_is_2state(return_node, syntax_tree, type_aliases),
+        },
     ))
 }
 
@@ -2818,6 +2856,7 @@ struct Function {
     params: Vec<FunctionParam>,
     body: Expr,
     return_width: Option<usize>,
+    return_first_packed_dimension_width: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
 }
@@ -4648,12 +4687,20 @@ struct VariableDimensions {
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FunctionReturnMetadata {
+    width: Option<usize>,
+    first_packed_dimension_width: Option<usize>,
+    signed: bool,
+    is_2state: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackedDimensions {
     variables: VariablePackedDimensions,
     const_env: HashMap<String, i128>,
     type_aliases: HashMap<String, Type>,
-    function_return_types: HashMap<String, (Option<usize>, bool, bool)>,
+    function_return_types: HashMap<String, FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     expression_signedness: Arc<HashMap<String, bool>>,
 }
@@ -5908,6 +5955,13 @@ fn function_from_declaration(
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
+            let return_first_packed_dimension_width = function_return_first_packed_dimension_width(
+                &body.nodes.0,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                return_type,
+            );
             let return_is_2state =
                 function_return_is_2state(&body.nodes.0, syntax_tree, type_aliases);
             Some(Function {
@@ -5915,6 +5969,7 @@ fn function_from_declaration(
                 params,
                 body: expr,
                 return_width: return_type.map(|r#type| r#type.width),
+                return_first_packed_dimension_width,
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -5968,6 +6023,13 @@ fn function_from_declaration(
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
+            let return_first_packed_dimension_width = function_return_first_packed_dimension_width(
+                &body.nodes.0,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                return_type,
+            );
             let return_is_2state =
                 function_return_is_2state(&body.nodes.0, syntax_tree, type_aliases);
             Some(Function {
@@ -5975,6 +6037,7 @@ fn function_from_declaration(
                 params,
                 body: expr,
                 return_width: return_type.map(|r#type| r#type.width),
+                return_first_packed_dimension_width,
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
                 return_is_2state,
             })
@@ -6144,6 +6207,43 @@ fn function_return_type(
             )
         }
     }
+}
+
+fn function_return_first_packed_dimension_width(
+    node: &sv_parser::FunctionDataTypeOrImplicit,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    return_type: Option<ExprType>,
+) -> Option<usize> {
+    let r#type = match node {
+        sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(data_type) => match &**data_type {
+            sv_parser::DataTypeOrVoid::DataType(data_type) => type_from_ref_node_with_env(
+                RefNode::DataType(data_type),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .or_else(|| type_alias_from_data_type(data_type, syntax_tree, type_aliases)),
+            sv_parser::DataTypeOrVoid::Void(_) => None,
+        },
+        sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(data_type) => {
+            let node = RefNode::ImplicitDataType(data_type);
+            type_from_ref_node_with_env(node.clone(), syntax_tree, const_env, type_aliases)
+                .or_else(|| type_alias_from_ref_node(node, syntax_tree, type_aliases))
+        }
+    };
+    let Some(first) = r#type
+        .as_ref()
+        .and_then(|r#type| r#type.packed_ranges().first())
+    else {
+        return return_type.map(|r#type| r#type.width);
+    };
+    let left = eval_ast_const_expr(first.left(), const_env)?;
+    let right = eval_ast_const_expr(first.right(), const_env)?;
+    usize::try_from(left.abs_diff(right))
+        .ok()
+        .and_then(|width| width.checked_add(1))
 }
 
 fn tf_params(
@@ -6987,11 +7087,13 @@ fn comb_processes_from_module_common_item(
             );
         }
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
+            let mut local_packed_dimensions = packed_dimensions.clone();
+            local_packed_dimensions.const_env = const_env.clone();
             if let Some(process) = comb_process_from_always_construct(
                 always,
                 condition,
                 syntax_tree,
-                packed_dimensions,
+                &local_packed_dimensions,
                 functions,
                 expression_signedness,
                 parameter_literals,
@@ -7929,7 +8031,7 @@ fn expr_signedness_with_return_types(
     expr: &Expr,
     identifiers: &HashMap<String, bool>,
     functions: &HashMap<String, Function>,
-    function_return_types: &HashMap<String, (Option<usize>, bool, bool)>,
+    function_return_types: &HashMap<String, FunctionReturnMetadata>,
 ) -> Option<bool> {
     match expr {
         Expr::Ident(name) => identifiers.get(name).copied(),
@@ -8017,7 +8119,7 @@ fn expr_signedness_with_return_types(
             .or_else(|| {
                 function_return_types
                     .get(name)
-                    .map(|(_, signed, _)| *signed)
+                    .map(|metadata| metadata.signed)
             }),
     }
 }
@@ -9619,7 +9721,7 @@ fn expr_static_width(expr: &Expr, packed_dimensions: &PackedDimensions) -> Optio
         Expr::Call { name, .. } => packed_dimensions
             .function_return_types
             .get(name)
-            .and_then(|(width, _, _)| *width),
+            .and_then(|metadata| metadata.width),
     }
 }
 
@@ -11422,7 +11524,7 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
         Expr::Call { name, .. } => packed_dimensions
             .function_return_types
             .get(name)
-            .is_some_and(|(_, _, is_2state)| *is_2state),
+            .is_some_and(|metadata| metadata.is_2state),
     }
 }
 
@@ -11542,7 +11644,7 @@ fn two_state_case_item_reachability(
         packed_dimensions
             .function_return_types
             .get(name)
-            .map(|(_, signed, _)| *signed)
+            .map(|metadata| metadata.signed)
     } else {
         expr_signedness(&selector, &identifiers, &HashMap::default())
     };
@@ -12004,7 +12106,7 @@ fn written_comb_targets(
             Some(targets)
         }
         sv_parser::StatementItem::LoopStatement(loop_statement) => {
-            let (_, values) = static_for_loop_iterations(
+            let (name, values) = static_for_loop_iterations(
                 loop_statement,
                 syntax_tree,
                 &packed_dimensions.const_env,
@@ -12015,11 +12117,31 @@ fn written_comb_targets(
             let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
                 return None;
             };
-            written_comb_targets_statement_or_null(
-                &loop_statement.nodes.2,
-                syntax_tree,
-                packed_dimensions,
-            )
+            let mut targets = Vec::new();
+            for value in values {
+                let mut iteration_dimensions = packed_dimensions.clone();
+                iteration_dimensions.const_env.insert(name.clone(), value);
+                insert_parameter_type_markers(
+                    &mut iteration_dimensions.const_env,
+                    &name,
+                    ExprType {
+                        width: 32,
+                        signed: true,
+                    },
+                );
+                for target in written_comb_targets_statement_or_null(
+                    &loop_statement.nodes.2,
+                    syntax_tree,
+                    &iteration_dimensions,
+                )? {
+                    let target =
+                        substitute_lvalue_constants(target, &iteration_dimensions.const_env);
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+            }
+            Some(targets)
         }
         _ => None,
     }

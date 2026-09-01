@@ -1430,6 +1430,105 @@ mod tests {
     }
 
     #[test]
+    fn preserves_function_return_dimensions_in_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [1:0] y);
+                    function automatic logic [1:0][3:0] f();
+                        return '0;
+                    endfunction
+                    localparam P = $size(f())'(8'hff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("function_dimension_size_cast_target.sv"),
+        )
+        .expect("$size should use the first packed function return dimension");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
+
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [1:0] y);
+                    function automatic logic [$bits(g())'(1):0][3:0] f();
+                        return '0;
+                    endfunction
+                    function automatic logic [7:0] g();
+                        return '0;
+                    endfunction
+                    localparam P = $size(f())'(8'hff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("dependent_function_dimension_size_cast_target.sv"),
+        )
+        .expect("dependent function return dimensions should remain available to $size");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
+    }
+
+    #[test]
+    fn substitutes_loop_indices_when_tracking_comb_writes() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, q, a, b, c, output logic y);
+                    logic [1:0] s;
+                    always_comb begin
+                        s = {q, q};
+                        if (outer) begin
+                            if (s[0] === 1'b1) y = a;
+                            for (int i = 1; i < 2; i++) s[i] = b;
+                            if (s[0] !== 1'b1) y = c;
+                        end else begin
+                            y = a;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("indexed_loop_comb_writes.sv"),
+        )
+        .expect("a concrete nonoverlapping loop write should preserve the guard proof");
+    }
+
+    #[test]
+    fn rejects_static_for_loops_that_write_their_index() {
+        let error = analyze_source(
+            r#"
+                module Top(output logic [3:0] y);
+                    always_comb begin
+                        for (int i = 0; i < 4; i++) begin
+                            y[i] = 1'b1;
+                            i = i + 1;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("loop_body_index_write.sv"),
+        )
+        .expect_err("a loop body that changes its index must not be statically unrolled")
+        .to_string();
+        assert!(error.contains("procedural loop inside always_comb"));
+    }
+
+    #[test]
+    fn analyzes_comb_processes_with_generate_local_constants() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    if (1) begin : selected
+                        localparam bit S = 1'b0;
+                        always_comb begin
+                            case (S)
+                                1'b0: y = a;
+                            endcase
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("generate_local_comb_constant.sv"),
+        )
+        .expect("generate-local constants should participate in always_comb analysis");
+    }
+
+    #[test]
     fn restricts_enum_alias_types_to_the_declared_base() {
         let ir = analyze_source(
             r#"
