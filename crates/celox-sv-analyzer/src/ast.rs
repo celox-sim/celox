@@ -935,11 +935,17 @@ fn size_function_expression_type(
     type_aliases: &HashMap<String, Type>,
     first_dimension_only: bool,
 ) -> Option<ExprType> {
-    let packed_dimensions = PackedDimensions {
+    let mut packed_dimensions = PackedDimensions {
         const_env: const_env.clone(),
         type_aliases: type_aliases.clone(),
         ..PackedDimensions::default()
     };
+    packed_dimensions.function_return_types = containing_function_return_types(
+        RefNode::Expression(argument),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    );
     let expression = expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions)?;
     let width = if first_dimension_only {
         match &expression {
@@ -959,11 +965,90 @@ fn size_function_expression_type(
             .strip_prefix(VARIABLE_SIGNED_PREFIX)
             .map(|name| (name.to_string(), *signed != 0))
     }));
-    let signed = expr_signedness(&expression, &identifier_signedness, &HashMap::default())?;
+    let signed = expr_signedness_with_return_types(
+        &expression,
+        &identifier_signedness,
+        &HashMap::default(),
+        &packed_dimensions.function_return_types,
+    )?;
     Some(ExprType {
         width: width.max(1),
         signed,
     })
+}
+
+fn containing_function_return_types(
+    target: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> HashMap<String, (Option<usize>, bool, bool)> {
+    let Some((target_start, target_end)) = ref_node_source_span(target) else {
+        return HashMap::default();
+    };
+    for node in syntax_tree {
+        let module = match node {
+            RefNode::ModuleDeclarationAnsi(module) => RefNode::ModuleDeclarationAnsi(module),
+            RefNode::ModuleDeclarationNonansi(module) => RefNode::ModuleDeclarationNonansi(module),
+            _ => continue,
+        };
+        let Some((module_start, module_end)) = ref_node_source_span(module.clone()) else {
+            continue;
+        };
+        if target_start < module_start || target_end > module_end {
+            continue;
+        }
+        return module
+            .into_iter()
+            .filter_map(|child| {
+                let RefNode::FunctionDeclaration(declaration) = child else {
+                    return None;
+                };
+                function_declaration_return_metadata(
+                    declaration,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+            })
+            .collect();
+    }
+    HashMap::default()
+}
+
+fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> {
+    let mut start = None;
+    let mut end = None;
+    for child in node {
+        let RefNode::Locate(locate) = child else {
+            continue;
+        };
+        start.get_or_insert(locate.offset);
+        end = Some(locate.offset.checked_add(locate.len)?);
+    }
+    start.zip(end)
+}
+
+fn function_declaration_return_metadata(
+    declaration: &sv_parser::FunctionDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<(String, (Option<usize>, bool, bool))> {
+    let (return_node, identifier) = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => (&body.nodes.0, &body.nodes.2),
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => (&body.nodes.0, &body.nodes.2),
+    };
+    let name = identifier_text(RefNode::FunctionIdentifier(identifier), syntax_tree)?;
+    let return_type = function_return_type(return_node, syntax_tree, const_env, type_aliases);
+    Some((
+        name,
+        (
+            return_type.map(|r#type| r#type.width),
+            return_type.is_some_and(|r#type| r#type.signed),
+            function_return_is_2state(return_node, syntax_tree, type_aliases),
+        ),
+    ))
 }
 
 fn expr_type_from_type(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<ExprType> {
@@ -3397,18 +3482,15 @@ fn add_type_alias_from_data_declaration(
     else {
         return Ok(());
     };
-    let r#type = type_from_ref_node_with_env(
-        RefNode::DataType(&declaration.nodes.1),
-        syntax_tree,
-        const_env,
-        aliases,
-    )
-    .or_else(|| {
-        let sv_parser::DataType::Enum(r#enum) = &declaration.nodes.1 else {
-            return None;
-        };
+    let r#type = if let sv_parser::DataType::Enum(r#enum) = &declaration.nodes.1 {
         if let Some(base) = &r#enum.nodes.1 {
-            type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases)
+            type_from_ref_node_with_env(
+                RefNode::EnumBaseType(base),
+                syntax_tree,
+                const_env,
+                aliases,
+            )
+            .or_else(|| type_alias_from_ref_node(RefNode::EnumBaseType(base), syntax_tree, aliases))
         } else {
             let mut r#type = Type::new(TypeKind::Bit);
             r#type.is_signed = true;
@@ -3418,7 +3500,14 @@ fn add_type_alias_from_data_declaration(
             ));
             Some(r#type)
         }
-    });
+    } else {
+        type_from_ref_node_with_env(
+            RefNode::DataType(&declaration.nodes.1),
+            syntax_tree,
+            const_env,
+            aliases,
+        )
+    };
     let Some(r#type) = r#type else {
         return Ok(());
     };
@@ -8887,20 +8976,65 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
 }
 
 fn fold_const_integral_expr_preserving_mask(expr: Expr, const_env: &HashMap<String, i128>) -> Expr {
-    let Some(constant) = expr_to_const(expr.clone()) else {
-        return expr;
-    };
     let parameter_types = parameter_types_from_const_env(const_env)
         .into_iter()
         .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
         .collect();
-    typecheck::eval_const_integral_literal_with_types(
-        &crate::ir::ConstExpr::from(constant),
-        const_env,
-        &parameter_types,
-    )
-    .map(|literal| Expr::Literal(typecheck::format_integral_literal_binary(&literal)))
-    .unwrap_or(expr)
+    eval_const_integral_expr_preserving_mask(&expr, const_env, &parameter_types)
+        .map(|literal| Expr::Literal(typecheck::format_integral_literal_binary(&literal)))
+        .unwrap_or(expr)
+}
+
+fn eval_const_integral_expr_preserving_mask(
+    expr: &Expr,
+    const_env: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<typecheck::IntegralLiteral> {
+    match expr {
+        Expr::Concat(parts) => concat_integral_literals(
+            parts
+                .iter()
+                .map(|part| {
+                    eval_const_integral_expr_preserving_mask(part, const_env, parameter_types)
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        Expr::RepeatConcat { count, parts } => {
+            let count = usize::try_from(eval_ast_const_expr(count, const_env)?).ok()?;
+            let part = concat_integral_literals(
+                parts
+                    .iter()
+                    .map(|part| {
+                        eval_const_integral_expr_preserving_mask(part, const_env, parameter_types)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )?;
+            concat_integral_literals(std::iter::repeat_n(part, count))
+        }
+        _ => {
+            let constant: crate::ir::ConstExpr = expr_to_const(expr.clone())?.into();
+            typecheck::eval_const_integral_literal_with_types(&constant, const_env, parameter_types)
+        }
+    }
+}
+
+fn concat_integral_literals(
+    parts: impl IntoIterator<Item = typecheck::IntegralLiteral>,
+) -> Option<typecheck::IntegralLiteral> {
+    let mut width = 0usize;
+    let mut value = num_bigint::BigUint::default();
+    let mut mask = num_bigint::BigUint::default();
+    for part in parts {
+        width = width.checked_add(part.width)?;
+        value = (value << part.width) | part.value;
+        mask = (mask << part.width) | part.mask;
+    }
+    Some(typecheck::IntegralLiteral {
+        width,
+        signed: false,
+        value,
+        mask,
+    })
 }
 
 fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
@@ -12109,6 +12243,14 @@ fn two_state_conditions_are_complements(
     right: &Expr,
     packed_dimensions: &PackedDimensions,
 ) -> bool {
+    if let (Some((left, left_positive)), Some((right, right_positive))) = (
+        normalized_two_state_boolean(left, packed_dimensions),
+        normalized_two_state_boolean(right, packed_dimensions),
+    ) && left == right
+        && left_positive != right_positive
+    {
+        return true;
+    }
     let is_complement = |candidate: &Expr, other: &Expr| {
         matches!(
             candidate,
@@ -12149,6 +12291,42 @@ fn two_state_conditions_are_complements(
         }
     };
     is_complement(left, right) || is_complement(right, left) || are_inverse_equalities(left, right)
+}
+
+fn normalized_two_state_boolean<'a>(
+    expr: &'a Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(&'a Expr, bool)> {
+    if let Expr::Unary {
+        op: UnaryOp::LogicNot,
+        expr,
+    } = expr
+    {
+        let (expr, positive) = normalized_two_state_boolean(expr, packed_dimensions)?;
+        return Some((expr, !positive));
+    }
+    if let Expr::Binary { left, op, right } = expr
+        && matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqCase | BinaryOp::NeCase
+        )
+    {
+        let nonzero_side = if expr_is_constant_zero(left, &packed_dimensions.const_env) {
+            &**right
+        } else if expr_is_constant_zero(right, &packed_dimensions.const_env) {
+            &**left
+        } else {
+            return expr_is_two_state(expr, packed_dimensions).then_some((expr, true));
+        };
+        if expr_is_two_state(nonzero_side, packed_dimensions) {
+            return Some((nonzero_side, matches!(op, BinaryOp::Ne | BinaryOp::NeCase)));
+        }
+    }
+    expr_is_two_state(expr, packed_dimensions).then_some((expr, true))
+}
+
+fn expr_is_constant_zero(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
+    expr_to_const(expr.clone()).and_then(|expr| eval_ast_const_expr(&expr, const_env)) == Some(0)
 }
 
 fn intersect_lvalue_sets(

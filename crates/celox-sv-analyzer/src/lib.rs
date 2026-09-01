@@ -1357,6 +1357,80 @@ mod tests {
     }
 
     #[test]
+    fn folds_concatenated_four_state_constant_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb begin
+                        case ({1'bx})
+                            1'bx: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("concatenated_four_state_constant_case_selector.sv"),
+        )
+        .expect("a constant concatenation should retain its X mask for case coverage");
+    }
+
+    #[test]
+    fn recognizes_mixed_boolean_and_zero_equality_complements() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, c, output logic y);
+                    always_comb begin
+                        if (outer) begin
+                            if (s) y = a;
+                            if (s == 0) y = b;
+                        end else begin
+                            y = c;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("mixed_boolean_equality_complements.sv"),
+        )
+        .expect("a two-state predicate and its zero equality should be complementary");
+    }
+
+    #[test]
+    fn resolves_function_types_in_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [7:0] y);
+                    function automatic logic [7:0] f();
+                        return 8'h00;
+                    endfunction
+                    localparam P = $bits(f())'(16'hffff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("function_size_cast_target.sv"),
+        )
+        .expect("a size-function cast target should use the function return type");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
+    }
+
+    #[test]
+    fn restricts_enum_alias_types_to_the_declared_base() {
+        let ir = analyze_source(
+            r#"
+                module Top(output E y);
+                    typedef enum logic { A = int'(1) } E;
+                    always_comb y = A;
+                endmodule
+            "#,
+            Path::new("enum_member_cast_type_is_not_base.sv"),
+        )
+        .expect("types in enum member initializers must not replace the enum base");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(1)
+        );
+        assert!(!ir.modules()[0].ports()[0].r#type().is_signed());
+    }
+
+    #[test]
     fn recognizes_complete_four_state_cases() {
         analyze_source(
             r#"
