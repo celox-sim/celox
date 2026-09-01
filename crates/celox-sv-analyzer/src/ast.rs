@@ -1130,7 +1130,14 @@ fn casting_type_is_numeric_size(
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
     match casting_type {
-        sv_parser::CastingType::ConstantPrimary(_) => true,
+        sv_parser::CastingType::ConstantPrimary(primary) => {
+            let Some(ConstExpr::Ident(name)) =
+                const_expr_from_ref_node(RefNode::ConstantPrimary(primary), syntax_tree)
+            else {
+                return true;
+            };
+            !type_aliases.contains_key(&name)
+        }
         sv_parser::CastingType::SimpleType(simple_type) => {
             let sv_parser::SimpleType::PsTypeIdentifier(identifier) = simple_type.as_ref() else {
                 return false;
@@ -3868,6 +3875,17 @@ fn enum_member_constants_from_module_node(
                 &resolved_type_aliases,
             )
             .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
+            let value = match value {
+                ConstExpr::Literal(literal) => ConstExpr::Literal(
+                    resize_unbased_fill_literal_for_cast(
+                        &literal,
+                        member_type.width,
+                        member_type.signed,
+                    )
+                    .unwrap_or(literal),
+                ),
+                value => value,
+            };
             let value_type =
                 infer_const_expr_type(&value, &parameter_types_from_const_env(&eval_env))
                     .ok_or_else(|| {
@@ -8639,6 +8657,21 @@ fn substitute_intermediate_comb_value_reads(
     let mut whole_established = whole_target.as_ref().and_then(|whole_target| {
         overlapping_value_before(guarded, first, whole_target, packed_dimensions)
     });
+
+    // A merged group can be emitted after a later write to one of the values
+    // used by its original guard or RHS. If that source is not established
+    // before its first write, there is no expression that can snapshot the
+    // entry value without introducing hidden process state.
+    if guarded[..first].iter().any(|assignment| {
+        assignment
+            .condition()
+            .is_some_and(|condition| expr_references_lvalue(condition, target))
+            || expr_references_lvalue(assignment.assignment().rhs(), target)
+    }) {
+        return Err(AnalyzerError::Unsupported(
+            "read-before-write dependency inside always_comb".to_string(),
+        ));
+    }
 
     for (index, guarded_assignment) in guarded.iter_mut().enumerate().skip(first) {
         let is_target_write = indices.get(write_index) == Some(&index);

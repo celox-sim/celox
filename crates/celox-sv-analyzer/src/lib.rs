@@ -580,6 +580,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_entry_value_guards_relocated_past_their_first_write() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic a, b, d, e,
+                    output logic t, x
+                );
+                    always_comb begin
+                        if (t) x = a;
+                        else x = b;
+                        t = d;
+                        if (e) x = b;
+                    end
+                endmodule
+            "#,
+            Path::new("relocated_entry_guard.sv"),
+        )
+        .expect_err("the entry value of t cannot be moved past t's first write");
+        assert!(
+            error
+                .to_string()
+                .contains("read-before-write dependency inside always_comb"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn preserves_prior_partially_overlapping_selected_writes() {
         let ir = analyze_source(
             r#"
@@ -799,6 +826,26 @@ mod tests {
             "expected the folded member value in {:?}",
             assignments[0].rhs()
         );
+    }
+
+    #[test]
+    fn context_sizes_unbased_enum_member_initializers() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic [3:0] { A = '1 } E;
+                    logic [A:0] data;
+                endmodule
+            "#,
+            Path::new("unbased_enum_initializer.sv"),
+        )
+        .expect("an unbased fill should be sized to the enum base type");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(16));
     }
 
     #[test]
@@ -1088,6 +1135,23 @@ mod tests {
         assert_eq!(parameters[1].resolved_value(), Some(-1));
         assert_eq!(parameters[1].resolved_signed(), Some(true));
         assert_eq!(parameters[2].resolved_value(), Some(-1));
+    }
+
+    #[test]
+    fn applies_typedef_signedness_to_constant_primary_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef logic signed [7:0] S;
+                    localparam P = S'(8'hff);
+                endmodule
+            "#,
+            Path::new("constant_primary_typedef_cast.sv"),
+        )
+        .expect("a typedef cast should use the typedef signedness");
+        let parameter = &ir.modules()[0].parameters()[0];
+        assert_eq!(parameter.resolved_value(), Some(-1));
+        assert_eq!(parameter.resolved_signed(), Some(true));
     }
 
     #[test]
