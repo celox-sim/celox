@@ -129,33 +129,16 @@ export class Simulation<P = Record<string, unknown>> {
 			);
 		}
 
-		const {
-			fourState,
-			vcd,
-			optimize,
-			falseLoops,
-			trueLoops,
-			clockType,
-			resetType,
-			parameters,
-			deadStorePolicy,
-		} = merged ?? {};
-		const result = createFn(module.sources, module.name, {
-			fourState,
-			vcd,
-			optimize,
-			falseLoops,
-			trueLoops,
-			clockType,
-			resetType,
-			parameters,
-			deadStorePolicy,
-		});
+		// Forward every public SimulatorOptions field so newly added options do not
+		// require this factory to maintain a second allowlist. The create override is
+		// test-only plumbing and must not cross the native factory boundary.
+		const { __nativeCreate: _createOverride, ...nativeOptions } = merged;
+		const result = createFn(module.sources, module.name, nativeOptions);
 		const state: DirtyState = { dirty: false };
 
 		// Always prefer NAPI-derived ports over module.ports (see simulator.ts).
 		const hierarchy = result.hierarchy
-			? filterHierarchyForDse(result.hierarchy, deadStorePolicy)
+			? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
 			: undefined;
 		const portDefs = hierarchy?.ports ?? module.ports;
 		const dut = createDut<P>(
@@ -457,19 +440,29 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const max = opts.maxSteps;
 		let steps = 0;
-		while (this._handle.time() < endTime) {
-			const t = this._handle.step();
-			if (t == null) break;
-			steps++;
+		if (this._handle.time() >= endTime) {
+			this._state.dirty = false;
+			return;
+		}
+		while (true) {
+			const nextEventTime = this._handle.nextEventTime();
+			if (nextEventTime == null || nextEventTime > endTime) break;
 			if (steps >= max) {
-				this._state.dirty = false;
 				throw new SimulationTimeoutError(
 					`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
 					this._handle.time(),
 					steps,
 				);
 			}
+			const t = this._handle.step();
+			if (t == null) break;
+			this._state.dirty = false;
+			steps++;
 		}
+		// Match the native fast path: after all events due by endTime have been
+		// processed, advance the clock exactly to endTime without consuming a
+		// later event, and perform the native path's final dump.
+		this._handle.runUntil(endTime);
 		this._state.dirty = false;
 	}
 
@@ -512,17 +505,19 @@ export class Simulation<P = Record<string, unknown>> {
 		const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
 		let steps = 0;
 		while (!condition()) {
-			const t = this._handle.step();
-			this._state.dirty = false;
-			if (t == null) break;
-			steps++;
-			if (steps >= max) {
+			// An exhausted queue is a normal completion, even when the budget is
+			// already spent. Preserve that behavior instead of reporting a timeout.
+			if (steps >= max && this._handle.nextEventTime() != null) {
 				throw new SimulationTimeoutError(
 					`waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
 					this._handle.time(),
 					steps,
 				);
 			}
+			const t = this._handle.step();
+			this._state.dirty = false;
+			if (t == null) break;
+			steps++;
 		}
 		return this._handle.time();
 	}
@@ -597,28 +592,48 @@ export class Simulation<P = Record<string, unknown>> {
 			typeKind === "reset_async_low" || typeKind === "reset_sync_low";
 		const activeValue = isActiveLow ? 0n : 1n;
 		const inactiveValue = isActiveLow ? 1n : 0n;
+		const associatedClock = sig.associatedClock;
+		const duration = opts?.duration;
+
+		// Validate the execution strategy before changing DUT state. A rejected
+		// reset call must not leave the signal asserted.
+		let execution:
+			| { kind: "duration"; duration: number }
+			| { kind: "cycles"; clock: string; cycles: number };
+		if (duration != null) {
+			execution = { kind: "duration", duration };
+		} else {
+			if (!associatedClock) {
+				throw new Error(
+					`Reset '${signal}' has no associated clock. Specify opts.duration.`,
+				);
+			}
+			if (!this._clocks.has(associatedClock)) {
+				throw new Error(
+					`No clock registered for '${associatedClock}'. Call addClock() first.`,
+				);
+			}
+			execution = {
+				kind: "cycles",
+				clock: associatedClock,
+				cycles: opts?.activeCycles ?? 2,
+			};
+		}
 
 		const dut = this._dut as Record<string, unknown>;
 		dut[signal] = activeValue;
-
-		const associatedClock = sig.associatedClock;
-
-		if (opts?.duration != null) {
-			// Explicit duration (works for both sync and async resets)
-			this._handle.runUntil(this._handle.time() + opts.duration);
-		} else if (associatedClock) {
-			// Clock-associated reset → advance by activeCycles
-			const cycles = opts?.activeCycles ?? 2;
-			this.waitForCycles(associatedClock, cycles);
-		} else {
-			// No associated clock and no explicit duration → error
-			throw new Error(
-				`Reset '${signal}' has no associated clock. Specify opts.duration.`,
-			);
+		try {
+			if (execution.kind === "duration") {
+				// Explicit duration (works for both sync and async resets)
+				this.runUntil(this.time() + execution.duration);
+			} else {
+				this.waitForCycles(execution.clock, execution.cycles);
+			}
+		} finally {
+			// Releasing reset changes an input after the final timed step. Keep the
+			// DUT dirty so the next output read observes the released state.
+			dut[signal] = inactiveValue;
 		}
-
-		dut[signal] = inactiveValue;
-		this._state.dirty = false;
 	}
 
 	/**

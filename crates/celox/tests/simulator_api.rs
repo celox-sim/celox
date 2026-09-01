@@ -1,4 +1,4 @@
-use celox::{Simulator, SimulatorErrorKind};
+use celox::{RuntimeErrorCode, Simulator, SimulatorErrorKind};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -246,6 +246,90 @@ assign out = x;
     assert_eq!(sim.get(out), 0b11u8.into());
 
     }
+
+    fn test_tick_by_id_validates_before_ticking(sim) {
+        @omit_veryl;
+        @ignore_on(sv);
+        @setup { let code = r#"
+module Top (
+clk: input clock,
+q: output logic<8>,
+) {
+always_ff (clk) {
+q = q + 1;
+}
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let q = sim.signal("q");
+    let events = sim.named_events();
+    assert_eq!(events.len(), 1);
+    let event_id = events[0].id;
+    assert_eq!(event_id, 0);
+    let first_unknown_id = events.len();
+
+    assert_eq!(sim.get_as::<u8>(q), 0);
+    sim.tick_by_id_n(event_id, 0).unwrap();
+    assert_eq!(sim.get_as::<u8>(q), 0);
+    assert_eq!(
+        sim.tick_by_id(first_unknown_id),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={first_unknown_id}"
+        )))
+    );
+    assert_eq!(
+        sim.tick_by_id(usize::MAX),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={}",
+            usize::MAX
+        )))
+    );
+    assert_eq!(
+        sim.tick_by_id_n(first_unknown_id, 0),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={first_unknown_id}"
+        )))
+    );
+    assert_eq!(
+        sim.tick_by_id_n(usize::MAX, 1),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={}",
+            usize::MAX
+        )))
+    );
+    assert_eq!(sim.get_as::<u8>(q), 0);
+
+    sim.tick_by_id(event_id).unwrap();
+    assert_eq!(sim.get_as::<u8>(q), 1);
+    sim.tick_by_id_n(event_id, 2).unwrap();
+    assert_eq!(sim.get_as::<u8>(q), 3);
+
+    }
+}
+
+#[test]
+fn test_tick_by_id_rejects_ids_when_no_events_exist() {
+    let code = r#"
+        module Top (
+            q: output logic
+        ) {
+            assign q = 0;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    assert!(sim.named_events().is_empty());
+
+    assert_eq!(
+        sim.tick_by_id(0),
+        Err(RuntimeErrorCode::NotAnEvent("event_id=0".to_string()))
+    );
+    assert_eq!(
+        sim.tick_by_id_n(usize::MAX, 0),
+        Err(RuntimeErrorCode::NotAnEvent(format!(
+            "event_id={}",
+            usize::MAX
+        )))
+    );
 }
 
 /// Test that `try_new` returns Ok for valid designs.

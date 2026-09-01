@@ -608,6 +608,134 @@ function writeBitPackedWide(
 	}
 }
 
+interface ArrayElementStorage {
+	read(index: number, maskPlane: boolean): bigint;
+	write(index: number, maskPlane: boolean, value: bigint): void;
+}
+
+function createArrayStorage(
+	view: DataView,
+	baseSig: SignalLayout,
+	elementWidth: number,
+	totalElements: number,
+): ArrayElementStorage {
+	const baseOffset = baseSig.offset;
+	const elementMask = (1n << BigInt(elementWidth)) - 1n;
+
+	if (
+		baseSig.arrayElementStride !== undefined &&
+		baseSig.arrayPlaneSize !== undefined
+	) {
+		const elementStride = baseSig.arrayElementStride;
+		const elementByteSize = Math.ceil(elementWidth / 8);
+		const planeSize = baseSig.arrayPlaneSize;
+		const elementOffset = (index: number, maskPlane: boolean): number =>
+			baseOffset + (maskPlane ? planeSize : 0) + index * elementStride;
+
+		return {
+			read(index, maskPlane) {
+				return (
+					readBigInt(view, elementOffset(index, maskPlane), elementByteSize) &
+					elementMask
+				);
+			},
+			write(index, maskPlane, value) {
+				writeBigInt(
+					view,
+					elementOffset(index, maskPlane),
+					elementByteSize,
+					value & elementMask,
+				);
+			},
+		};
+	}
+
+	// Packed arrays store the entire value plane before the optional mask plane.
+	const totalValueBytes = Math.ceil((totalElements * elementWidth) / 8);
+	const planeOffset = (maskPlane: boolean): number =>
+		baseOffset + (maskPlane ? totalValueBytes : 0);
+
+	if (elementWidth < 8) {
+		return {
+			read(index, maskPlane) {
+				return BigInt(
+					readBitPackedElement(
+						view,
+						planeOffset(maskPlane),
+						elementWidth,
+						index,
+					),
+				);
+			},
+			write(index, maskPlane, value) {
+				writeBitPackedElement(
+					view,
+					planeOffset(maskPlane),
+					elementWidth,
+					index,
+					Number(value & elementMask),
+				);
+			},
+		};
+	}
+
+	if (elementWidth % 8 !== 0) {
+		return {
+			read(index, maskPlane) {
+				return readBitPackedWide(
+					view,
+					planeOffset(maskPlane),
+					elementWidth,
+					index,
+				);
+			},
+			write(index, maskPlane, value) {
+				writeBitPackedWide(
+					view,
+					planeOffset(maskPlane),
+					elementWidth,
+					index,
+					value,
+				);
+			},
+		};
+	}
+
+	const elementByteSize = elementWidth / 8;
+	const canUseNumberIo =
+		elementWidth === 8 || elementWidth === 16 || elementWidth === 32;
+	const elementOffset = (index: number, maskPlane: boolean): number =>
+		planeOffset(maskPlane) + index * elementByteSize;
+
+	return {
+		read(index, maskPlane) {
+			const offset = elementOffset(index, maskPlane);
+			return canUseNumberIo
+				? BigInt(readNumber(view, offset, elementWidth))
+				: readBigInt(view, offset, elementByteSize) & elementMask;
+		},
+		write(index, maskPlane, value) {
+			const offset = elementOffset(index, maskPlane);
+			const normalized = value & elementMask;
+			if (canUseNumberIo) {
+				writeNumber(view, offset, elementWidth, Number(normalized));
+			} else {
+				// Widths such as 24 or 40 bits occupy fewer bytes than the next
+				// DataView integer size. Exact-size I/O avoids touching neighbours.
+				writeBigInt(view, offset, elementByteSize, normalized);
+			}
+		},
+	};
+}
+
+function assertArrayIndex(index: number, length: number): void {
+	if (!Number.isInteger(index) || index < 0 || index >= length) {
+		throw new RangeError(
+			`Array index ${index} is out of bounds for length ${length}`,
+		);
+	}
+}
+
 function createArrayDut(
 	view: DataView,
 	baseSig: SignalLayout,
@@ -620,324 +748,58 @@ function createArrayDut(
 	const totalElements = dims.reduce((a, b) => a * b, 1);
 	const isOutput = port.direction === "output";
 	const isInput = port.direction === "input";
-	const baseOffset = baseSig.offset;
 	const is4state = baseSig.is4state;
-
-	// All elements are bit-packed: element i starts at bit i*elementWidth.
-	// 4-state mask region starts immediately after the value region.
-	const totalValueBytes = Math.ceil((totalElements * elementWidth) / 8);
-	const maskBase = baseOffset + totalValueBytes;
-
-	if (
-		baseSig.arrayElementStride !== undefined &&
-		baseSig.arrayPlaneSize !== undefined
-	) {
-		const elementStride = baseSig.arrayElementStride;
-		const elementByteSize = Math.ceil(elementWidth / 8);
-		const planeSize = baseSig.arrayPlaneSize;
-		const elementMask = (1n << BigInt(elementWidth)) - 1n;
-		const elementOffset = (i: number, mask: boolean): number =>
-			baseOffset + (mask ? planeSize : 0) + i * elementStride;
-		const readElement = (i: number, mask: boolean): bigint =>
-			readBigInt(view, elementOffset(i, mask), elementByteSize) & elementMask;
-		const writeElement = (i: number, mask: boolean, value: bigint): void =>
-			writeBigInt(
-				view,
-				elementOffset(i, mask),
-				elementByteSize,
-				value & elementMask,
-			);
-
-		return {
-			length: totalElements,
-
-			at(i: number): bigint {
-				if (state.disposed) throw new Error("Simulator has been disposed");
-				if (state.dirty && !isInput) {
-					handle.evalComb();
-					state.dirty = false;
-				}
-				return readElement(i, false);
-			},
-
-			set(i: number, value: bigint | number | symbol | FourStateValue): void {
-				if (state.disposed) throw new Error("Simulator has been disposed");
-				if (isOutput) {
-					throw new Error("Cannot write to output array port");
-				}
-
-				if (value === Symbol.for("veryl:X")) {
-					if (!is4state) {
-						throw new Error("Array port is not 4-state; cannot assign X");
-					}
-					writeElement(i, false, elementMask);
-					writeElement(i, true, elementMask);
-				} else if (value === Symbol.for("veryl:Z")) {
-					if (!is4state) {
-						throw new Error("Array port is not 4-state; cannot assign Z");
-					}
-					writeElement(i, false, 0n);
-					writeElement(i, true, elementMask);
-				} else if (isFourStateValue(value)) {
-					if (!is4state) {
-						throw new Error(
-							"Array port is not 4-state; cannot assign FourState",
-						);
-					}
-					writeElement(i, false, value.value);
-					writeElement(i, true, value.mask);
-				} else {
-					const bigVal =
-						typeof value === "bigint" ? value : BigInt(value as number);
-					writeElement(i, false, bigVal);
-					if (is4state) writeElement(i, true, 0n);
-				}
-				state.dirty = true;
-			},
-		};
-	}
-
-	if (elementWidth < 8) {
-		// Sub-byte elements: use optimised number-based bit-packed I/O.
-		return {
-			length: totalElements,
-
-			at(i: number): bigint {
-				if (state.disposed) throw new Error("Simulator has been disposed");
-				if (state.dirty && !isInput) {
-					handle.evalComb();
-					state.dirty = false;
-				}
-				return BigInt(readBitPackedElement(view, baseOffset, elementWidth, i));
-			},
-
-			set(i: number, value: bigint | number | symbol | FourStateValue): void {
-				if (state.disposed) throw new Error("Simulator has been disposed");
-				if (isOutput) {
-					throw new Error("Cannot write to output array port");
-				}
-				if (value === Symbol.for("veryl:X")) {
-					if (!is4state) {
-						throw new Error("Array port is not 4-state; cannot assign X");
-					}
-					const allOnes = (1 << elementWidth) - 1;
-					writeBitPackedElement(view, baseOffset, elementWidth, i, allOnes);
-					writeBitPackedElement(view, maskBase, elementWidth, i, allOnes);
-				} else if (value === Symbol.for("veryl:Z")) {
-					if (!is4state) {
-						throw new Error("Array port is not 4-state; cannot assign Z");
-					}
-					writeBitPackedElement(view, baseOffset, elementWidth, i, 0);
-					writeBitPackedElement(
-						view,
-						maskBase,
-						elementWidth,
-						i,
-						(1 << elementWidth) - 1,
-					);
-				} else if (isFourStateValue(value)) {
-					if (!is4state) {
-						throw new Error(
-							"Array port is not 4-state; cannot assign FourState",
-						);
-					}
-					writeBitPackedElement(
-						view,
-						baseOffset,
-						elementWidth,
-						i,
-						Number(value.value),
-					);
-					writeBitPackedElement(
-						view,
-						maskBase,
-						elementWidth,
-						i,
-						Number(value.mask),
-					);
-				} else {
-					const bigVal =
-						typeof value === "bigint" ? value : BigInt(value as number);
-					writeBitPackedElement(
-						view,
-						baseOffset,
-						elementWidth,
-						i,
-						Number(bigVal),
-					);
-					if (is4state) {
-						writeBitPackedElement(view, maskBase, elementWidth, i, 0);
-					}
-				}
-				state.dirty = true;
-			},
-		};
-	}
-
-	if (elementWidth % 8 !== 0) {
-		// Non-byte-aligned elements (>= 8 bits): use BigInt-based bit-packed I/O.
-		return {
-			length: totalElements,
-
-			at(i: number): bigint {
-				if (state.disposed) throw new Error("Simulator has been disposed");
-				if (state.dirty && !isInput) {
-					handle.evalComb();
-					state.dirty = false;
-				}
-				return readBitPackedWide(view, baseOffset, elementWidth, i);
-			},
-
-			set(i: number, value: bigint | number | symbol | FourStateValue): void {
-				if (state.disposed) throw new Error("Simulator has been disposed");
-				if (isOutput) {
-					throw new Error("Cannot write to output array port");
-				}
-				if (value === Symbol.for("veryl:X")) {
-					if (!is4state) {
-						throw new Error("Array port is not 4-state; cannot assign X");
-					}
-					const allOnes = (1n << BigInt(elementWidth)) - 1n;
-					writeBitPackedWide(view, baseOffset, elementWidth, i, allOnes);
-					writeBitPackedWide(view, maskBase, elementWidth, i, allOnes);
-				} else if (value === Symbol.for("veryl:Z")) {
-					if (!is4state) {
-						throw new Error("Array port is not 4-state; cannot assign Z");
-					}
-					const allOnes = (1n << BigInt(elementWidth)) - 1n;
-					writeBitPackedWide(view, baseOffset, elementWidth, i, 0n);
-					writeBitPackedWide(view, maskBase, elementWidth, i, allOnes);
-				} else if (isFourStateValue(value)) {
-					if (!is4state) {
-						throw new Error(
-							"Array port is not 4-state; cannot assign FourState",
-						);
-					}
-					writeBitPackedWide(view, baseOffset, elementWidth, i, value.value);
-					writeBitPackedWide(view, maskBase, elementWidth, i, value.mask);
-				} else {
-					const bigVal =
-						typeof value === "bigint" ? value : BigInt(value as number);
-					writeBitPackedWide(view, baseOffset, elementWidth, i, bigVal);
-					if (is4state) {
-						writeBitPackedWide(view, maskBase, elementWidth, i, 0n);
-					}
-				}
-				state.dirty = true;
-			},
-		};
-	}
-
-	// Byte-aligned elements (elementWidth % 8 === 0): use byte-stride I/O.
-	const elementByteSize = elementWidth >> 3;
-	const maskBase2 = baseOffset + totalElements * elementByteSize;
+	const elementMask = (1n << BigInt(elementWidth)) - 1n;
+	const storage = createArrayStorage(
+		view,
+		baseSig,
+		elementWidth,
+		totalElements,
+	);
 
 	return {
 		length: totalElements,
 
-		at(i: number): bigint {
+		at(index: number): bigint {
 			if (state.disposed) throw new Error("Simulator has been disposed");
+			assertArrayIndex(index, totalElements);
 			if (state.dirty && !isInput) {
 				handle.evalComb();
 				state.dirty = false;
 			}
-			const offset = baseOffset + i * elementByteSize;
-			if (elementWidth <= 53) {
-				return BigInt(readNumber(view, offset, elementWidth));
-			}
-			return readBigInt(view, offset, elementByteSize);
+			return storage.read(index, false);
 		},
 
-		set(i: number, value: bigint | number | symbol | FourStateValue): void {
+		set(index: number, value: bigint | number | symbol | FourStateValue): void {
 			if (state.disposed) throw new Error("Simulator has been disposed");
+			assertArrayIndex(index, totalElements);
 			if (isOutput) {
 				throw new Error("Cannot write to output array port");
 			}
-			const offset = baseOffset + i * elementByteSize;
-			const maskOffset = maskBase2 + i * elementByteSize;
+
 			if (value === Symbol.for("veryl:X")) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign X");
 				}
-				const allOnes = (1n << BigInt(elementWidth)) - 1n;
-				const valSig: SignalLayout = {
-					offset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				const mskSig: SignalLayout = {
-					offset: maskOffset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				writeSignal(view, valSig, allOnes);
-				writeSignal(view, mskSig, allOnes);
+				storage.write(index, false, elementMask);
+				storage.write(index, true, elementMask);
 			} else if (value === Symbol.for("veryl:Z")) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign Z");
 				}
-				const allOnes = (1n << BigInt(elementWidth)) - 1n;
-				const valSig: SignalLayout = {
-					offset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				const mskSig: SignalLayout = {
-					offset: maskOffset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				writeSignal(view, valSig, 0n);
-				writeSignal(view, mskSig, allOnes);
+				storage.write(index, false, 0n);
+				storage.write(index, true, elementMask);
 			} else if (isFourStateValue(value)) {
 				if (!is4state) {
 					throw new Error("Array port is not 4-state; cannot assign FourState");
 				}
-				const elemSig: SignalLayout = {
-					offset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				writeSignal(view, elemSig, value.value);
-				const maskSig: SignalLayout = {
-					offset: maskOffset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				writeSignal(view, maskSig, value.mask);
+				storage.write(index, false, value.value);
+				storage.write(index, true, value.mask);
 			} else {
 				const bigVal =
 					typeof value === "bigint" ? value : BigInt(value as number);
-				const elemSig: SignalLayout = {
-					offset,
-					width: elementWidth,
-					byteSize: elementByteSize,
-					is4state: false,
-					direction: baseSig.direction,
-				};
-				writeSignal(view, elemSig, bigVal);
-				if (is4state) {
-					const maskSig: SignalLayout = {
-						offset: maskOffset,
-						width: elementWidth,
-						byteSize: elementByteSize,
-						is4state: false,
-						direction: baseSig.direction,
-					};
-					writeSignal(view, maskSig, 0n);
-				}
+				storage.write(index, false, bigVal);
+				if (is4state) storage.write(index, true, 0n);
 			}
 			state.dirty = true;
 		},

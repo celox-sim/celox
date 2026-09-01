@@ -7,8 +7,8 @@ use crate::{
     ir::{AbsoluteAddr, SignalRef},
 };
 
-use super::RuntimeEventBuffer;
 use super::{JitEngine, MemoryLayout, SimulatorErrorCode, get_byte_size};
+use super::{RuntimeEventBuffer, memory_image::MemoryImage};
 pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 
 /// Opaque handle to a compiled event (clock / async-reset) function.
@@ -83,7 +83,7 @@ impl SharedJitCode {
 
 pub struct JitBackend {
     shared: Arc<SharedJitCode>,
-    memory: Vec<u64>,
+    memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     /// Cached from `shared.comb_func` to avoid Arc dereference on the hot path.
@@ -587,7 +587,7 @@ impl JitBackend {
     /// regions. The compiled function pointers are shared across instances.
     pub fn from_shared(shared: Arc<SharedJitCode>) -> Self {
         let num_u64 = shared.layout.merged_total_size.div_ceil(8);
-        let mut memory = vec![0u64; num_u64];
+        let mut memory = MemoryImage::zeroed(num_u64);
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
@@ -624,7 +624,7 @@ impl JitBackend {
     /// valid without reinstallation.
     pub(crate) fn adopt_shared_with_state(
         shared: Arc<SharedJitCode>,
-        memory: Vec<u64>,
+        memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
@@ -634,8 +634,8 @@ impl JitBackend {
         // memory past the allocation; the tail is fresh zeroed scratch.
         let target_words = shared.layout.merged_total_size.div_ceil(8);
         let mut memory = memory;
-        if memory.len() < target_words {
-            memory.resize(target_words, 0);
+        if memory.len_words() < target_words {
+            memory.resize_zeroed_within_capacity(target_words);
         }
         let comb_func = shared.comb_func;
         Self {
@@ -1112,6 +1112,10 @@ impl super::SimBackend for JitBackend {
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         self.memory_as_mut_ptr()
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.memory.owner())
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {

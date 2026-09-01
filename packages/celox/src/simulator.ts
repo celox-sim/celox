@@ -44,6 +44,16 @@ export type NativeCreateFn = (
 
 let _nativeCreate: NativeCreateFn | undefined;
 
+const U32_MAX = 0xffff_ffff;
+
+function assertU32(value: number, label: string): void {
+	if (!Number.isInteger(value) || value < 0 || value > U32_MAX) {
+		throw new RangeError(
+			`${label} ${value} must be an integer between 0 and ${U32_MAX}`,
+		);
+	}
+}
+
 /**
  * Register the NAPI binding at module load time.
  * Called once by the package entry point after loading the native addon.
@@ -61,6 +71,7 @@ export class Simulator<P = Record<string, unknown>> {
 	private readonly _handle: NativeSimulatorHandle;
 	private readonly _dut: P;
 	private readonly _events: Record<string, number>;
+	private readonly _eventIds: ReadonlySet<number>;
 	private readonly _defaultEventId: number;
 	private readonly _state: DirtyState;
 	private readonly _buffer: ArrayBuffer | SharedArrayBuffer;
@@ -80,6 +91,7 @@ export class Simulator<P = Record<string, unknown>> {
 		this._handle = handle;
 		this._dut = dut;
 		this._events = events;
+		this._eventIds = new Set(Object.values(events));
 		this._state = state;
 		this._buffer = buffer;
 		this._layout = layout;
@@ -118,30 +130,11 @@ export class Simulator<P = Record<string, unknown>> {
 			);
 		}
 
-		const {
-			fourState,
-			vcd,
-			optimize,
-			falseLoops,
-			trueLoops,
-			clockType,
-			resetType,
-			parameters,
-			deadStorePolicy,
-			tier,
-		} = merged ?? {};
-		const result = createFn(module.sources, module.name, {
-			fourState,
-			vcd,
-			optimize,
-			falseLoops,
-			trueLoops,
-			clockType,
-			resetType,
-			parameters,
-			deadStorePolicy,
-			tier,
-		});
+		// Forward every public SimulatorOptions field so newly added options do not
+		// require this factory to maintain a second allowlist. The create override is
+		// test-only plumbing and must not cross the native factory boundary.
+		const { __nativeCreate: _createOverride, ...nativeOptions } = merged;
+		const result = createFn(module.sources, module.name, nativeOptions);
 		const state: DirtyState = { dirty: false };
 
 		// Always prefer NAPI-derived ports (from hierarchy) over module.ports.
@@ -149,7 +142,7 @@ export class Simulator<P = Record<string, unknown>> {
 		// stale when parameters are overridden. hierarchy.ports reflects the actual
 		// compiled layout, consistent with fromSource()/fromProject().
 		const hierarchy = result.hierarchy
-			? filterHierarchyForDse(result.hierarchy, deadStorePolicy)
+			? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
 			: undefined;
 		const portDefs = hierarchy?.ports ?? module.ports;
 		const dut = createDut<P>(
@@ -447,9 +440,21 @@ export class Simulator<P = Record<string, unknown>> {
 	/**
 	 * Trigger a clock edge.
 	 *
-	 * @param event  Optional event handle from `this.event()`.
-	 *               If omitted, ticks the first (default) event.
-	 * @param count  Number of ticks. Default: 1.
+	 * A single numeric argument is the tick count for the default event. When a
+	 * second argument is not `undefined`, a numeric first argument is treated as
+	 * a raw event ID. Therefore, use `tick(id, 1)` to tick a raw event ID once.
+	 * Prefer an `EventHandle` returned by `this.event()` when selecting an event.
+	 * `tick(undefined, count)` ticks the default event.
+	 *
+	 * @param event  Optional event handle or known raw event ID. If omitted,
+	 *               ticks the first (default) event.
+	 * @param count  Number of ticks as an unsigned 32-bit integer. Zero evaluates
+	 *               pending combinational logic without triggering an event.
+	 *               Default: 1.
+	 * @throws RangeError if the count or selected event ID is invalid, or if the
+	 *         selected event ID is not known to this Simulator.
+	 * @throws Error if a positive count uses the default event but the Simulator
+	 *         has no events.
 	 */
 	tick(event?: EventHandle | number, count?: number): void;
 	tick(count?: number): void;
@@ -458,19 +463,38 @@ export class Simulator<P = Record<string, unknown>> {
 
 		let eventId: number;
 		let ticks: number;
+		let hasExplicitEvent = false;
 
 		if (typeof eventOrCount === "object" && eventOrCount !== null) {
 			// tick(eventHandle, count?)
 			eventId = (eventOrCount as EventHandle).id;
 			ticks = count ?? 1;
+			hasExplicitEvent = true;
 		} else if (typeof eventOrCount === "number") {
-			// tick(count) — default event
-			eventId = this._defaultEventId;
-			ticks = eventOrCount;
+			if (count !== undefined) {
+				// tick(rawEventId, count)
+				eventId = eventOrCount;
+				ticks = count;
+				hasExplicitEvent = true;
+			} else {
+				// tick(count) — default event
+				eventId = this._defaultEventId;
+				ticks = eventOrCount;
+			}
 		} else {
-			// tick() — default event, 1 tick
+			// tick() / tick(undefined, count) — default event
 			eventId = this._defaultEventId;
-			ticks = 1;
+			ticks = count ?? 1;
+		}
+
+		assertU32(ticks, "Tick count");
+		if (hasExplicitEvent) {
+			this.assertKnownEventId(eventId);
+		} else if (ticks > 0) {
+			if (this._eventIds.size === 0) {
+				throw new Error("Simulator has no events to tick");
+			}
+			this.assertKnownEventId(eventId);
 		}
 
 		if (this._state.dirty) {
@@ -535,6 +559,16 @@ export class Simulator<P = Record<string, unknown>> {
 	private ensureAlive(): void {
 		if (this._disposed) {
 			throw new Error("Simulator has been disposed");
+		}
+	}
+
+	private assertKnownEventId(eventId: number): void {
+		assertU32(eventId, "Event ID");
+		if (!this._eventIds.has(eventId)) {
+			const available = [...this._eventIds].sort((a, b) => a - b).join(", ");
+			throw new RangeError(
+				`Unknown event ID ${eventId}. Available IDs: ${available || "(none)"}`,
+			);
 		}
 	}
 }
