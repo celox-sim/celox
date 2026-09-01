@@ -8973,10 +8973,13 @@ fn substitute_intermediate_comb_value_reads(
     // before its first write, there is no expression that can snapshot the
     // entry value without introducing hidden process state.
     if guarded[..first].iter().any(|assignment| {
-        assignment
-            .condition()
-            .is_some_and(|condition| expr_references_lvalue(condition, target))
-            || expr_references_lvalue(assignment.assignment().rhs(), target)
+        assignment.condition().is_some_and(|condition| {
+            expr_references_overlapping_lvalue(condition, target, &packed_dimensions.const_env)
+        }) || expr_references_overlapping_lvalue(
+            assignment.assignment().rhs(),
+            target,
+            &packed_dimensions.const_env,
+        )
     }) {
         return Err(AnalyzerError::Unsupported(
             "read-before-write dependency inside always_comb".to_string(),
@@ -9047,10 +9050,13 @@ fn substitute_intermediate_comb_value_reads(
                 ),
             );
         } else if !is_target_write
-            && (guarded_assignment
-                .condition()
-                .is_some_and(|condition| expr_references_lvalue(condition, target))
-                || expr_references_lvalue(guarded_assignment.assignment().rhs(), target))
+            && (guarded_assignment.condition().is_some_and(|condition| {
+                expr_references_overlapping_lvalue(condition, target, &packed_dimensions.const_env)
+            }) || expr_references_overlapping_lvalue(
+                guarded_assignment.assignment().rhs(),
+                target,
+                &packed_dimensions.const_env,
+            ))
         {
             return Err(AnalyzerError::Unsupported(
                 "read-before-write dependency inside always_comb".to_string(),
@@ -10125,39 +10131,6 @@ fn expr_matches_lvalue(expr: &Expr, target: &LValue) -> bool {
                 && lsb == target_lsb
         }
         _ => false,
-    }
-}
-
-fn expr_references_lvalue(expr: &Expr, target: &LValue) -> bool {
-    if expr_matches_lvalue(expr, target) {
-        return true;
-    }
-    match expr {
-        Expr::Ident(_) | Expr::Literal(_) => false,
-        Expr::Select { expr, msb, lsb, .. } => {
-            expr_references_lvalue(expr, target)
-                || expr_references_lvalue(&const_expr_to_expr(msb.clone()), target)
-                || expr_references_lvalue(&const_expr_to_expr(lsb.clone()), target)
-        }
-        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
-            expr_references_lvalue(expr, target)
-        }
-        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
-            .iter()
-            .any(|part| expr_references_lvalue(part, target)),
-        Expr::Binary { left, right, .. } => {
-            expr_references_lvalue(left, target) || expr_references_lvalue(right, target)
-        }
-        Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_references_lvalue(condition, target)
-                || expr_references_lvalue(then_expr, target)
-                || expr_references_lvalue(else_expr, target)
-        }
-        Expr::Call { args, .. } => args.iter().any(|arg| expr_references_lvalue(arg, target)),
     }
 }
 
@@ -11617,21 +11590,17 @@ fn case_item_duplicate_reachability(
         for label in labels {
             let duplicate = prior_labels.iter().any(|prior| {
                 let normalized_equal = selector_type.is_some_and(|selector_type| {
-                    let prior_expr: crate::ir::ConstExpr = (*prior).clone().into();
-                    let label_expr: crate::ir::ConstExpr = label.clone().into();
-                    let prior = typecheck::context_size_const_integral_literal(
-                        &prior_expr,
+                    let prior = case_label_selector_pattern(
+                        prior,
                         const_env,
                         &constant_types,
-                        selector_type.width,
-                        selector_type.signed,
+                        selector_type,
                     );
-                    let label = typecheck::context_size_const_integral_literal(
-                        &label_expr,
+                    let label = case_label_selector_pattern(
+                        label,
                         const_env,
                         &constant_types,
-                        selector_type.width,
-                        selector_type.signed,
+                        selector_type,
                     );
                     prior.zip(label).is_some_and(|(prior, label)| {
                         prior.value == label.value && prior.mask == label.mask
@@ -11654,6 +11623,40 @@ fn case_item_duplicate_reachability(
         }
     }
     (reachable, has_duplicate)
+}
+
+fn case_label_selector_pattern(
+    label: &ConstExpr,
+    const_env: &HashMap<String, i128>,
+    constant_types: &HashMap<String, (usize, bool)>,
+    selector_type: ExprType,
+) -> Option<typecheck::IntegralLiteral> {
+    let label_expr: crate::ir::ConstExpr = label.clone().into();
+    if let ConstExpr::Literal(value) = label
+        && let Some(resized) =
+            resize_unbased_fill_literal_for_cast(value, selector_type.width, selector_type.signed)
+    {
+        return typecheck::parse_integral_literal(&resized);
+    }
+    let mut literal =
+        typecheck::eval_const_integral_literal_with_types(&label_expr, const_env, constant_types)?;
+    let comparison_signed = selector_type.signed && literal.signed;
+    if literal.width > selector_type.width {
+        let extension_bit = u64::try_from(selector_type.width.checked_sub(1)?).ok()?;
+        let extension_value = comparison_signed && literal.value.bit(extension_bit);
+        let extension_mask = comparison_signed && literal.mask.bit(extension_bit);
+        for bit in selector_type.width..literal.width {
+            let bit = bit as u64;
+            if literal.value.bit(bit) != extension_value || literal.mask.bit(bit) != extension_mask
+            {
+                return None;
+            }
+        }
+    }
+    literal.signed = comparison_signed;
+    let resized =
+        resize_integral_literal_for_cast(literal, selector_type.width, selector_type.signed);
+    typecheck::parse_integral_literal(&resized)
 }
 
 fn mark_condition_context(

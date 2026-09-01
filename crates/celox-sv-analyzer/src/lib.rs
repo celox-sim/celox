@@ -726,6 +726,32 @@ mod tests {
                 .contains("read-before-write dependency inside always_comb"),
             "unexpected error: {error}"
         );
+
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic a, b, c, d, e, f,
+                    output logic y,
+                    output logic [1:0] x
+                );
+                    always_comb begin
+                        y = 1'b0;
+                        if (x) y = a;
+                        x[0] = c;
+                        if (d) x[0] = e;
+                        if (f) y = b;
+                    end
+                endmodule
+            "#,
+            Path::new("relocated_overlapping_entry_guard.sv"),
+        )
+        .expect_err("a whole-vector guard read cannot move past a selected write");
+        assert!(
+            error
+                .to_string()
+                .contains("read-before-write dependency inside always_comb"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1268,6 +1294,27 @@ mod tests {
             Path::new("selector_typed_four_state_case_labels.sv"),
         )
         .expect("labels should be normalized in the signed selector context");
+
+        let error = analyze_source(
+            r#"
+                module Top(input logic [8:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            10'h3ff: y = a;
+                            9'h1ff: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("wider_unreachable_case_label.sv"),
+        )
+        .expect_err("a wider unreachable label must not hide a reachable empty item");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
     }
 
     #[test]
