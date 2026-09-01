@@ -3091,6 +3091,25 @@ fn resolves_parameter_ranges_with_enum_constants() {
 }
 
 #[test]
+fn resolves_named_casts_in_function_return_ranges() {
+    let source = r#"
+        module Top #(parameter W = 8) (output logic [7:0] y);
+            function automatic logic [W'(7):0] f();
+                return 8'hff;
+            endfunction
+            always_comb y = f();
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("named_cast_function_return_range.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
 fn preserves_enum_dependent_parameters_in_instance_overrides() {
     let source = r#"
         module Child #(parameter Q = 0) (output logic [1:0] y);

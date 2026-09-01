@@ -350,6 +350,26 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_block_wrapped_complementary_guards_as_exhaustive() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, c, output logic y);
+                    always_comb begin
+                        if (outer) begin
+                            if (s) begin y = a; end
+                            if (!s) begin y = b; end
+                        end else begin
+                            y = c;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("block_wrapped_complementary_guards.sv"),
+        )
+        .expect("block-wrapped complementary guards should define y exhaustively");
+    }
+
+    #[test]
     fn substitutes_reads_of_selected_comb_targets() {
         let ir = analyze_source(
             r#"
@@ -1115,6 +1135,131 @@ mod tests {
             Path::new("four_state_duplicate_case_item.sv"),
         )
         .expect("an unreachable duplicate case item should not infer a latch");
+    }
+
+    #[test]
+    fn compares_normalized_four_state_case_labels_for_reachability() {
+        analyze_source(
+            r#"
+                module Top(input logic [1:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            2'd0: y = a;
+                            2'b00: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("normalized_four_state_case_labels.sv"),
+        )
+        .expect("equivalent case-label values should make the later item unreachable");
+
+        analyze_source(
+            r#"
+                module Top(input logic [8:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            9'd0: y = a;
+                            9'b000000000: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("wide_normalized_four_state_case_labels.sv"),
+        )
+        .expect("equivalent wide labels should be normalized without domain enumeration");
+    }
+
+    #[test]
+    fn recognizes_complete_four_state_cases() {
+        analyze_source(
+            r#"
+                module Top(input logic s, input logic a, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'b0: y = a;
+                            1'b1: y = a;
+                            1'bx: y = a;
+                            1'bz: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("complete_four_state_case.sv"),
+        )
+        .expect("all four states should exhaust a one-bit logic selector");
+    }
+
+    #[test]
+    fn retains_zero_iteration_loop_writes_for_latch_detection() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb
+                        for (int i = 0; i < 0; i++) y = a;
+                endmodule
+            "#,
+            Path::new("zero_iteration_comb_loop.sv"),
+        )
+        .expect_err("a zero-iteration loop must not silently discard its target");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+
+        let error = analyze_source(
+            r#"
+                module Top(input logic enable, a, output logic y);
+                    always_comb begin
+                        if (enable)
+                            for (int i = 0; i < 0; i++) y = a;
+                    end
+                endmodule
+            "#,
+            Path::new("nested_zero_iteration_comb_loop.sv"),
+        )
+        .expect_err("a nested zero-iteration loop must retain its write target");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb begin
+                        y = 1'b0;
+                        for (int i = 0; i < 0; i++) y = a;
+                    end
+                endmodule
+            "#,
+            Path::new("initialized_zero_iteration_comb_loop.sv"),
+        )
+        .expect("a preceding assignment should initialize a zero-iteration loop target");
+    }
+
+    #[test]
+    fn materializes_static_loop_indices_in_definite_write_targets() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic [1:0] x);
+                    always_comb begin
+                        if (c) begin
+                            x[0] = a;
+                            x[1] = a;
+                        end else begin
+                            for (int i = 0; i < 2; i++) x[i] = b;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("materialized_definite_loop_targets.sv"),
+        )
+        .expect("each static loop iteration should contribute its concrete target");
     }
 
     #[test]

@@ -551,10 +551,9 @@ fn static_for_loop_iterations(
     let sv_parser::LoopStatement::For(loop_statement) = loop_statement else {
         return None;
     };
-    let (initialization, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
-    let (name, initial_value) = for_loop_initialization(initialization.as_ref()?, syntax_tree)
-        .and_then(|(name, value)| Some((name, eval_ast_const_expr(&value, const_env)?)))?;
-    let initial_value = coerce_for_loop_index_value(initial_value)?;
+    let (_, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
+    let (name, initial_value) =
+        static_for_loop_initial_value(loop_statement, syntax_tree, const_env)?;
     let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
     let steps = step.as_ref()?.nodes.0.contents();
     let [step] = steps.as_slice() else {
@@ -594,6 +593,17 @@ fn static_for_loop_iterations(
         },
     );
     (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
+}
+
+fn static_for_loop_initial_value(
+    loop_statement: &sv_parser::LoopStatementFor,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Option<(String, i128)> {
+    let initialization = loop_statement.nodes.1.nodes.1.0.as_ref()?;
+    let (name, value) = for_loop_initialization(initialization, syntax_tree)?;
+    let value = eval_ast_const_expr(&value, const_env)?;
+    Some((name, coerce_for_loop_index_value(value)?))
 }
 
 fn coerce_for_loop_index_value(value: i128) -> Option<i128> {
@@ -6069,8 +6079,13 @@ fn value_type_from_data_type(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
-    let r#type = type_from_ref_node(RefNode::DataType(node), syntax_tree)
-        .or_else(|| type_alias_from_data_type(node, syntax_tree, type_aliases))?;
+    let r#type = type_from_ref_node_with_env(
+        RefNode::DataType(node),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .or_else(|| type_alias_from_data_type(node, syntax_tree, type_aliases))?;
     let width = if r#type.packed_ranges().is_empty() {
         1
     } else {
@@ -6105,7 +6120,12 @@ fn value_type_from_ref_node(
     let ranges = if let Some(alias) = &alias {
         alias.packed_ranges()
     } else {
-        direct_ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+        direct_ranges = packed_ranges_from_ref_node_with_env(
+            node.clone(),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        );
         &direct_ranges
     };
     let width = if ranges.is_empty() {
@@ -8212,6 +8232,7 @@ fn comb_process_from_always_construct(
         &always.nodes.1,
         None,
         true,
+        true,
         syntax_tree,
         &packed_dimensions.const_env,
         packed_dimensions,
@@ -8614,8 +8635,31 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             else_expr,
         } => {
             let condition = simplify_constant_mux_conditions(*condition, const_env);
-            let then_expr = simplify_constant_mux_conditions(*then_expr, const_env);
-            let else_expr = simplify_constant_mux_conditions(*else_expr, const_env);
+            let mut then_expr = simplify_constant_mux_conditions(*then_expr, const_env);
+            let mut else_expr = simplify_constant_mux_conditions(*else_expr, const_env);
+            // Repeated-condition mux folding is only valid for a condition
+            // that cannot be X/Z. Procedural guards are explicitly coerced
+            // to two state, but source-level ternaries need not be.
+            if expr_is_intrinsically_two_state(&condition, const_env) {
+                if let Expr::Mux {
+                    condition: nested_condition,
+                    then_expr: nested_then,
+                    ..
+                } = &then_expr
+                    && **nested_condition == condition
+                {
+                    then_expr = (**nested_then).clone();
+                }
+                if let Expr::Mux {
+                    condition: nested_condition,
+                    else_expr: nested_else,
+                    ..
+                } = &else_expr
+                    && **nested_condition == condition
+                {
+                    else_expr = (**nested_else).clone();
+                }
+            }
             if then_expr == else_expr {
                 return then_expr;
             }
@@ -8642,6 +8686,32 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
                 .collect(),
         },
         Expr::Ident(_) | Expr::Literal(_) => expr,
+    }
+}
+
+fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
+    match expr {
+        Expr::Ident(name) => const_env.contains_key(name),
+        Expr::Literal(value) => typecheck::parse_integral_literal(value)
+            .is_some_and(|literal| literal.mask == num_bigint::BigUint::default()),
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            ..
+        } => true,
+        Expr::Unary { expr, .. } => expr_is_intrinsically_two_state(expr, const_env),
+        Expr::Binary {
+            op: BinaryOp::EqCase | BinaryOp::NeCase,
+            ..
+        } => true,
+        Expr::Binary {
+            left,
+            op: BinaryOp::LogicAnd | BinaryOp::LogicOr,
+            right,
+        } => {
+            expr_is_intrinsically_two_state(left, const_env)
+                && expr_is_intrinsically_two_state(right, const_env)
+        }
+        _ => false,
     }
 }
 
@@ -10268,6 +10338,7 @@ fn ff_process_from_always_construct(
         body,
         None,
         false,
+        false,
         syntax_tree,
         const_env,
         packed_dimensions,
@@ -10359,6 +10430,7 @@ fn conditional_assignments_from_statement_or_null(
     stmt: &sv_parser::StatementOrNull,
     condition: Option<Expr>,
     exhaustive_fallback: bool,
+    retain_unreachable_writes: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -10369,6 +10441,7 @@ fn conditional_assignments_from_statement_or_null(
             stmt,
             condition,
             exhaustive_fallback,
+            retain_unreachable_writes,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -10382,6 +10455,7 @@ fn conditional_assignments_from_statement(
     stmt: &sv_parser::Statement,
     condition: Option<Expr>,
     exhaustive_fallback: bool,
+    retain_unreachable_writes: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -10466,6 +10540,7 @@ fn conditional_assignments_from_statement(
                     stmt,
                     condition.clone(),
                     exhaustive_fallback,
+                    retain_unreachable_writes,
                     syntax_tree,
                     const_env,
                     packed_dimensions,
@@ -10478,6 +10553,7 @@ fn conditional_assignments_from_statement(
                 stmt,
                 condition,
                 exhaustive_fallback,
+                retain_unreachable_writes,
                 syntax_tree,
                 const_env,
                 packed_dimensions,
@@ -10489,6 +10565,7 @@ fn conditional_assignments_from_statement(
                 stmt,
                 condition,
                 exhaustive_fallback,
+                retain_unreachable_writes,
                 syntax_tree,
                 const_env,
                 packed_dimensions,
@@ -10504,7 +10581,22 @@ fn conditional_assignments_from_statement(
                 sv_parser::LoopStatement::For(loop_statement) => &loop_statement.nodes.2,
                 _ => unreachable!(),
             };
-            for value in values {
+            let iterations = if values.is_empty() && retain_unreachable_writes {
+                let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
+                    unreachable!();
+                };
+                let (_, initial_value) =
+                    static_for_loop_initial_value(loop_statement, syntax_tree, const_env)
+                        .ok_or_else(|| {
+                            AnalyzerError::Unsupported(
+                                "unsupported procedural for loop".to_string(),
+                            )
+                        })?;
+                vec![(initial_value, false)]
+            } else {
+                values.into_iter().map(|value| (value, true)).collect()
+            };
+            for (value, reachable) in iterations {
                 let mut loop_env = const_env.clone();
                 loop_env.insert(name.clone(), value);
                 let mut loop_packed_dimensions = packed_dimensions.clone();
@@ -10519,10 +10611,16 @@ fn conditional_assignments_from_statement(
                 );
                 loop_packed_dimensions.const_env = loop_const_env.clone();
                 let start = assignments.len();
+                let iteration_condition = if reachable {
+                    condition.clone()
+                } else {
+                    combine_expr_conditions(condition.clone(), Expr::Literal("1'b0".to_string()))
+                };
                 conditional_assignments_from_statement_or_null(
                     body,
-                    condition.clone(),
-                    exhaustive_fallback,
+                    iteration_condition,
+                    exhaustive_fallback && reachable,
+                    retain_unreachable_writes,
                     syntax_tree,
                     &loop_const_env,
                     &loop_packed_dimensions,
@@ -10638,6 +10736,7 @@ fn conditional_assignments_from_conditional_statement(
     stmt: &sv_parser::ConditionalStatement,
     parent_condition: Option<Expr>,
     exhaustive_fallback: bool,
+    retain_unreachable_writes: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -10660,6 +10759,7 @@ fn conditional_assignments_from_conditional_statement(
         &stmt.nodes.3,
         then_condition,
         false,
+        retain_unreachable_writes,
         syntax_tree,
         const_env,
         packed_dimensions,
@@ -10687,6 +10787,7 @@ fn conditional_assignments_from_conditional_statement(
             branch,
             condition,
             false,
+            retain_unreachable_writes,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -10711,6 +10812,7 @@ fn conditional_assignments_from_conditional_statement(
             branch,
             condition.clone(),
             false,
+            retain_unreachable_writes,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -10748,6 +10850,7 @@ fn conditional_assignments_from_case_statement(
     stmt: &sv_parser::CaseStatement,
     parent_condition: Option<Expr>,
     exhaustive_fallback: bool,
+    retain_unreachable_writes: bool,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -10839,6 +10942,7 @@ fn conditional_assignments_from_case_statement(
             branch,
             condition,
             false,
+            retain_unreachable_writes,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -10878,6 +10982,7 @@ fn conditional_assignments_from_case_statement(
             branch,
             condition.clone(),
             false,
+            retain_unreachable_writes,
             syntax_tree,
             const_env,
             packed_dimensions,
@@ -10899,14 +11004,6 @@ fn conditional_assignments_from_case_statement(
         }
     }
     Ok(())
-}
-
-fn two_state_case_selector_width(
-    selector: &Expr,
-    packed_dimensions: &PackedDimensions,
-) -> Option<usize> {
-    expr_is_two_state(selector, packed_dimensions)
-        .then(|| expr_static_width(selector, packed_dimensions))?
 }
 
 fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool {
@@ -11036,18 +11133,11 @@ fn two_state_case_item_reachability(
             }
         }
     }
-    let (duplicate_reachability, has_duplicate) = case_item_duplicate_reachability(&labels_by_item);
-    let Some(width) = two_state_case_selector_width(&selector, packed_dimensions) else {
+    let (duplicate_reachability, has_duplicate) =
+        case_item_duplicate_reachability(&labels_by_item, const_env);
+    let Some(width) = expr_static_width(&selector, packed_dimensions) else {
         return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
     };
-    // Constant evaluation and the type model use i128 values. Wider dynamic
-    // selectors still lower normally, but duplicate constant items can still
-    // be excluded from definite-assignment analysis.
-    if width > 128 {
-        return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
-    }
-    let constant_selector_value = expr_to_const(selector.clone())
-        .and_then(|selector| eval_ast_const_expr(&selector, const_env));
     let mut identifiers = packed_dimensions
         .iter()
         .map(|(name, dimensions)| (name.clone(), dimensions.signed))
@@ -11061,10 +11151,33 @@ fn two_state_case_item_reachability(
         packed_dimensions
             .function_return_types
             .get(name)
-            .map(|(_, signed, _)| *signed)?
+            .map(|(_, signed, _)| *signed)
     } else {
-        expr_signedness(&selector, &identifiers, &HashMap::default())?
+        expr_signedness(&selector, &identifiers, &HashMap::default())
     };
+    let Some(selector_signed) = selector_signed else {
+        return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
+    };
+    if !expr_is_two_state(&selector, packed_dimensions) {
+        if let Some(reachability) = finite_four_state_case_item_reachability(
+            &labels_by_item,
+            default_index,
+            width,
+            selector_signed,
+            const_env,
+        ) {
+            return Some(reachability);
+        }
+        return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
+    }
+    // Constant evaluation and the type model use i128 values. Wider dynamic
+    // selectors still lower normally, but duplicate constant items can still
+    // be excluded from definite-assignment analysis.
+    if width > 128 {
+        return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
+    }
+    let constant_selector_value = expr_to_const(selector.clone())
+        .and_then(|selector| eval_ast_const_expr(&selector, const_env));
     let mut reachable = vec![false; labels_by_item.len()];
     if let Some(value) = constant_selector_value {
         let selector = ConstExpr::Literal(format_typed_parameter_literal(
@@ -11156,8 +11269,69 @@ fn two_state_case_item_reachability(
     }
 }
 
+fn finite_four_state_case_item_reachability(
+    labels_by_item: &[Option<Vec<ConstExpr>>],
+    default_index: Option<usize>,
+    width: usize,
+    selector_signed: bool,
+    const_env: &HashMap<String, i128>,
+) -> Option<(Vec<bool>, bool)> {
+    const MAX_PATTERNS: usize = 65_536;
+    let state_bits = width.checked_mul(2)?;
+    let pattern_count = 1usize.checked_shl(u32::try_from(state_bits).ok()?)?;
+    if pattern_count > MAX_PATTERNS {
+        return None;
+    }
+    let mut reachable = vec![false; labels_by_item.len()];
+    let mut covered = true;
+    for pattern in 0..pattern_count {
+        let bits = (0..width)
+            .rev()
+            .map(|bit| match (pattern >> (bit * 2)) & 3 {
+                0 => '0',
+                1 => '1',
+                2 => 'x',
+                3 => 'z',
+                _ => unreachable!(),
+            })
+            .collect::<String>();
+        let signing = if selector_signed { "s" } else { "" };
+        let selector = ConstExpr::Literal(format!("{width}'{signing}b{bits}"));
+        let mut matched = None;
+        for (index, labels) in labels_by_item.iter().enumerate() {
+            let Some(labels) = labels else {
+                continue;
+            };
+            for label in labels {
+                let equal = eval_ast_const_expr(
+                    &ConstExpr::Binary {
+                        left: Box::new(selector.clone()),
+                        op: BinaryOp::EqCase,
+                        right: Box::new(label.clone()),
+                    },
+                    const_env,
+                )?;
+                if equal != 0 {
+                    matched = Some(index);
+                    break;
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+        if let Some(index) = matched.or(default_index) {
+            reachable[index] = true;
+        } else {
+            covered = false;
+        }
+    }
+    Some((reachable, covered))
+}
+
 fn case_item_duplicate_reachability(
     labels_by_item: &[Option<Vec<ConstExpr>>],
+    const_env: &HashMap<String, i128>,
 ) -> (Vec<bool>, bool) {
     let mut reachable = vec![false; labels_by_item.len()];
     let mut prior_labels: Vec<&ConstExpr> = Vec::new();
@@ -11168,7 +11342,17 @@ fn case_item_duplicate_reachability(
             continue;
         };
         for label in labels {
-            let duplicate = prior_labels.contains(&label);
+            let duplicate = prior_labels.iter().any(|prior| {
+                *prior == label
+                    || eval_ast_const_expr(
+                        &ConstExpr::Binary {
+                            left: Box::new((*prior).clone()),
+                            op: BinaryOp::EqCase,
+                            right: Box::new(label.clone()),
+                        },
+                        const_env,
+                    ) == Some(1)
+            });
             has_duplicate |= duplicate;
             reachable[index] |= !duplicate;
             prior_labels.push(label);
@@ -11430,6 +11614,8 @@ fn definitely_assigned_comb_targets(
                     syntax_tree,
                     &iteration_dimensions,
                 ) {
+                    let target =
+                        substitute_lvalue_constants(target, &iteration_dimensions.const_env);
                     if !targets.contains(&target) {
                         targets.push(target);
                     }
@@ -11457,17 +11643,15 @@ fn guarded_comb_targets(
     }
     let condition =
         expr_from_cond_predicate(&conditional.nodes.2.nodes.1, syntax_tree, packed_dimensions)?;
-    if !statement_or_null_is_blocking_assignment(&conditional.nodes.3) {
-        return None;
-    }
     let targets = definitely_assigned_comb_targets_statement_or_null(
         &conditional.nodes.3,
         syntax_tree,
         packed_dimensions,
     );
-    if targets
-        .iter()
-        .any(|target| expr_references_lvalue(&condition, target))
+    if targets.is_empty()
+        || targets
+            .iter()
+            .any(|target| expr_references_lvalue(&condition, target))
     {
         return None;
     }
