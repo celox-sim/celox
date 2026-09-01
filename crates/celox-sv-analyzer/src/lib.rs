@@ -1318,6 +1318,45 @@ mod tests {
     }
 
     #[test]
+    fn folds_compound_four_state_constant_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic y);
+                    always_comb begin
+                        case (1'bx | 1'b0)
+                            1'bx: if (c) y = a; else y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("compound_four_state_constant_case_selector.sv"),
+        )
+        .expect("a compound constant X selector should preserve its mask for coverage");
+    }
+
+    #[test]
+    fn expands_constant_function_predicates_for_definite_assignments() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, a, b, output logic y);
+                    function automatic bit one();
+                        return 1'b1;
+                    endfunction
+                    always_comb begin
+                        if (outer) begin
+                            if (one()) y = a;
+                        end else begin
+                            y = b;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("constant_function_definite_assignment.sv"),
+        )
+        .expect("a constant-true function predicate should make the inner write definite");
+    }
+
+    #[test]
     fn recognizes_complete_four_state_cases() {
         analyze_source(
             r#"

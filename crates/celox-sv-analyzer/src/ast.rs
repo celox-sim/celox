@@ -8886,6 +8886,23 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
     }
 }
 
+fn fold_const_integral_expr_preserving_mask(expr: Expr, const_env: &HashMap<String, i128>) -> Expr {
+    let Some(constant) = expr_to_const(expr.clone()) else {
+        return expr;
+    };
+    let parameter_types = parameter_types_from_const_env(const_env)
+        .into_iter()
+        .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
+        .collect();
+    typecheck::eval_const_integral_literal_with_types(
+        &crate::ir::ConstExpr::from(constant),
+        const_env,
+        &parameter_types,
+    )
+    .map(|literal| Expr::Literal(typecheck::format_integral_literal_binary(&literal)))
+    .unwrap_or(expr)
+}
+
 fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
     match expr {
         Expr::Ident(name) => const_env.contains_key(name),
@@ -11287,6 +11304,7 @@ fn two_state_case_item_reachability(
         true,
     );
     let selector = simplify_constant_mux_conditions(selector, const_env);
+    let selector = fold_const_integral_expr_preserving_mask(selector, const_env);
     let mut labels_by_item = Vec::new();
     let mut default_index = None;
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
@@ -11922,6 +11940,18 @@ fn definitely_assigned_comb_targets(
                 )
             {
                 let condition = expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions)
+                    .map(|condition| {
+                        expand_expr_calls(
+                            condition,
+                            &packed_dimensions.functions,
+                            &packed_dimensions.expression_signedness,
+                            0,
+                            true,
+                        )
+                    })
+                    .map(|condition| {
+                        simplify_constant_mux_conditions(condition, &packed_dimensions.const_env)
+                    })
                     .map(procedural_truth_condition)
                     .and_then(expr_to_const)
                     .and_then(|condition| {
