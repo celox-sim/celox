@@ -3110,6 +3110,28 @@ fn resolves_named_casts_in_function_return_ranges() {
 }
 
 #[test]
+fn context_sizes_wide_unbased_fills_in_conditional_writes() {
+    let source = r#"
+        module Top(input logic c, output logic [63:0] y);
+            always_comb begin
+                if (c) y = '1;
+                else y = '0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("wide_conditional_unbased_fill.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.set(sim.signal("c"), 1u8);
+    assert_eq!(sim.get(sim.signal("y")), u64::MAX.into());
+    sim.set(sim.signal("c"), 0u8);
+    assert_eq!(sim.get(sim.signal("y")), 0u64.into());
+}
+
+#[test]
 fn preserves_enum_dependent_parameters_in_instance_overrides() {
     let source = r#"
         module Child #(parameter Q = 0) (output logic [1:0] y);

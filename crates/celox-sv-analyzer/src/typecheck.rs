@@ -165,6 +165,11 @@ pub fn context_size_const_integral_literal(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
+    if let Some(fill) = unbased_fill_from_const_expr(expr) {
+        let mut literal = integral_fill_literal(fill, width)?;
+        literal.signed = signed;
+        return Some(literal);
+    }
     let literal = eval_const_integral_literal_with_types(expr, constants, types)?;
     let extension = signed_extension(&literal, literal.signed);
     Some(resize_integral_literal(literal, width, signed, extension))

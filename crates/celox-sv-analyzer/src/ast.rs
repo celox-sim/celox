@@ -2866,37 +2866,17 @@ fn parameters_from_module_node(
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
-        parameters_from_ref_node(
-            parameter_port_list.clone(),
+        let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list else {
+            unreachable!();
+        };
+        parameters_from_parameter_port_list(
+            parameter_port_list,
             syntax_tree,
             &mut parameters,
-            false,
             base_const_env,
             type_aliases,
             parameter_overrides,
         )?;
-        let mut local_parameters = Vec::new();
-        for child in parameter_port_list {
-            if let RefNode::LocalParameterDeclaration(localparam) = child {
-                parameters_from_ref_node(
-                    RefNode::LocalParameterDeclaration(localparam),
-                    syntax_tree,
-                    &mut local_parameters,
-                    true,
-                    base_const_env,
-                    type_aliases,
-                    parameter_overrides,
-                )?;
-            }
-        }
-        for local in local_parameters {
-            if let Some(parameter) = parameters
-                .iter_mut()
-                .find(|parameter| parameter.name == local.name)
-            {
-                parameter.is_local = true;
-            }
-        }
     }
 
     for item in module_non_port_items(node.clone()) {
@@ -2930,6 +2910,82 @@ fn parameters_from_module_node(
     }
 
     Ok(parameters)
+}
+
+fn parameters_from_parameter_port_list(
+    list: &sv_parser::ParameterPortList,
+    syntax_tree: &SyntaxTree,
+    parameters: &mut Vec<Parameter>,
+    base_const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_overrides: &HashMap<String, ConstExpr>,
+) -> Result<(), AnalyzerError> {
+    match list {
+        sv_parser::ParameterPortList::Assignment(list) => {
+            parameters_from_ref_node(
+                RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0),
+                syntax_tree,
+                parameters,
+                false,
+                base_const_env,
+                type_aliases,
+                parameter_overrides,
+            )?;
+            for (_, declaration) in &list.nodes.1.nodes.1.1 {
+                parameters_from_parameter_port_declaration(
+                    declaration,
+                    syntax_tree,
+                    parameters,
+                    base_const_env,
+                    type_aliases,
+                    parameter_overrides,
+                )?;
+            }
+        }
+        sv_parser::ParameterPortList::Declaration(list) => {
+            for declaration in list.nodes.1.nodes.1.contents() {
+                parameters_from_parameter_port_declaration(
+                    declaration,
+                    syntax_tree,
+                    parameters,
+                    base_const_env,
+                    type_aliases,
+                    parameter_overrides,
+                )?;
+            }
+        }
+        sv_parser::ParameterPortList::Empty(_) => {}
+    }
+    Ok(())
+}
+
+fn parameters_from_parameter_port_declaration(
+    declaration: &sv_parser::ParameterPortDeclaration,
+    syntax_tree: &SyntaxTree,
+    parameters: &mut Vec<Parameter>,
+    base_const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_overrides: &HashMap<String, ConstExpr>,
+) -> Result<(), AnalyzerError> {
+    let is_local = matches!(
+        declaration,
+        sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_)
+    );
+    if matches!(
+        declaration,
+        sv_parser::ParameterPortDeclaration::TypeList(_)
+    ) {
+        return Ok(());
+    }
+    parameters_from_ref_node(
+        RefNode::ParameterPortDeclaration(declaration),
+        syntax_tree,
+        parameters,
+        is_local,
+        base_const_env,
+        type_aliases,
+        parameter_overrides,
+    )
 }
 
 fn signals_from_module_node(
@@ -3263,16 +3319,27 @@ fn type_aliases_from_module_node_with_env(
             add_type_aliases_from_parameter_port_list(
                 parameter_port_list,
                 syntax_tree,
+                const_env,
                 &mut aliases,
             );
         }
         for child in parameter_port_list {
             match child {
                 RefNode::LocalParameterDeclaration(localparam) => {
-                    add_type_aliases_from_localparam(localparam, syntax_tree, &mut aliases);
+                    add_type_aliases_from_localparam(
+                        localparam,
+                        syntax_tree,
+                        const_env,
+                        &mut aliases,
+                    );
                 }
                 RefNode::ParameterDeclaration(parameter) => {
-                    add_type_aliases_from_parameter(parameter, syntax_tree, &mut aliases);
+                    add_type_aliases_from_parameter(
+                        parameter,
+                        syntax_tree,
+                        const_env,
+                        &mut aliases,
+                    );
                 }
                 _ => {}
             }
@@ -3292,10 +3359,15 @@ fn type_aliases_from_module_node_with_env(
                 )?;
             }
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
-                add_type_aliases_from_localparam(&localparam.0, syntax_tree, &mut aliases);
+                add_type_aliases_from_localparam(
+                    &localparam.0,
+                    syntax_tree,
+                    const_env,
+                    &mut aliases,
+                );
             }
             sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                add_type_aliases_from_parameter(&parameter.0, syntax_tree, &mut aliases);
+                add_type_aliases_from_parameter(&parameter.0, syntax_tree, const_env, &mut aliases);
             }
             _ => {}
         }
@@ -3304,7 +3376,7 @@ fn type_aliases_from_module_node_with_env(
         let RefNode::TypeAssignment(assignment) = child else {
             continue;
         };
-        add_type_alias_from_type_assignment(assignment, syntax_tree, &mut aliases);
+        add_type_alias_from_type_assignment(assignment, syntax_tree, const_env, &mut aliases);
     }
     Ok(aliases)
 }
@@ -3366,17 +3438,28 @@ fn add_type_alias_from_data_declaration(
 fn add_type_aliases_from_parameter_port_list(
     list: &sv_parser::ParameterPortList,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
     match list {
         sv_parser::ParameterPortList::Assignment(list) => {
             for (_, declaration) in &list.nodes.1.nodes.1.1 {
-                add_type_aliases_from_parameter_port_declaration(declaration, syntax_tree, aliases);
+                add_type_aliases_from_parameter_port_declaration(
+                    declaration,
+                    syntax_tree,
+                    const_env,
+                    aliases,
+                );
             }
         }
         sv_parser::ParameterPortList::Declaration(list) => {
             for declaration in list.nodes.1.nodes.1.contents() {
-                add_type_aliases_from_parameter_port_declaration(declaration, syntax_tree, aliases);
+                add_type_aliases_from_parameter_port_declaration(
+                    declaration,
+                    syntax_tree,
+                    const_env,
+                    aliases,
+                );
             }
         }
         sv_parser::ParameterPortList::Empty(_) => {}
@@ -3386,18 +3469,19 @@ fn add_type_aliases_from_parameter_port_list(
 fn add_type_aliases_from_parameter_port_declaration(
     declaration: &sv_parser::ParameterPortDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
     match declaration {
         sv_parser::ParameterPortDeclaration::ParameterDeclaration(declaration) => {
-            add_type_aliases_from_parameter(declaration, syntax_tree, aliases);
+            add_type_aliases_from_parameter(declaration, syntax_tree, const_env, aliases);
         }
         sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(declaration) => {
-            add_type_aliases_from_localparam(declaration, syntax_tree, aliases);
+            add_type_aliases_from_localparam(declaration, syntax_tree, const_env, aliases);
         }
         sv_parser::ParameterPortDeclaration::TypeList(list) => {
             for assignment in list.nodes.1.nodes.0.contents() {
-                add_type_alias_from_type_assignment(assignment, syntax_tree, aliases);
+                add_type_alias_from_type_assignment(assignment, syntax_tree, const_env, aliases);
             }
         }
         sv_parser::ParameterPortDeclaration::ParamList(_) => {}
@@ -3407,32 +3491,35 @@ fn add_type_aliases_from_parameter_port_declaration(
 fn add_type_aliases_from_localparam(
     declaration: &sv_parser::LocalParameterDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
     let sv_parser::LocalParameterDeclaration::Type(declaration) = declaration else {
         return;
     };
     for assignment in declaration.nodes.2.nodes.0.contents() {
-        add_type_alias_from_type_assignment(assignment, syntax_tree, aliases);
+        add_type_alias_from_type_assignment(assignment, syntax_tree, const_env, aliases);
     }
 }
 
 fn add_type_aliases_from_parameter(
     declaration: &sv_parser::ParameterDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
     let sv_parser::ParameterDeclaration::Type(declaration) = declaration else {
         return;
     };
     for assignment in declaration.nodes.2.nodes.0.contents() {
-        add_type_alias_from_type_assignment(assignment, syntax_tree, aliases);
+        add_type_alias_from_type_assignment(assignment, syntax_tree, const_env, aliases);
     }
 }
 
 fn add_type_alias_from_type_assignment(
     assignment: &sv_parser::TypeAssignment,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
     let Some((_, data_type)) = &assignment.nodes.1 else {
@@ -3442,7 +3529,12 @@ fn add_type_alias_from_type_assignment(
     else {
         return;
     };
-    let Some(r#type) = type_from_ref_node(RefNode::DataType(data_type), syntax_tree) else {
+    let Some(r#type) = type_from_ref_node_with_env(
+        RefNode::DataType(data_type),
+        syntax_tree,
+        const_env,
+        aliases,
+    ) else {
         return;
     };
     aliases.insert(name, r#type);
@@ -7643,7 +7735,7 @@ fn expand_assignment_calls(
     apply_return_type: bool,
 ) -> Assignment {
     Assignment::new(
-        assignment.lhs,
+        expand_lvalue_calls(assignment.lhs, functions, expression_signedness),
         expand_expr_calls(
             assignment.rhs,
             functions,
@@ -7652,6 +7744,42 @@ fn expand_assignment_calls(
             apply_return_type,
         ),
     )
+}
+
+fn expand_lvalue_calls(
+    lvalue: LValue,
+    functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
+) -> LValue {
+    let expand_bound = |bound: ConstExpr| {
+        let original = bound.clone();
+        expr_to_const(expand_expr_calls(
+            const_expr_to_expr(bound),
+            functions,
+            expression_signedness,
+            0,
+            false,
+        ))
+        .unwrap_or(original)
+    };
+    match lvalue {
+        LValue::Ident(name) => LValue::Ident(name),
+        LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed,
+            array_slice_width,
+            array_slice_reversed,
+        } => LValue::Select {
+            name,
+            msb: expand_bound(msb),
+            lsb: expand_bound(lsb),
+            signed,
+            array_slice_width: array_slice_width.map(expand_bound),
+            array_slice_reversed,
+        },
+    }
 }
 
 fn expr_signedness(
@@ -8665,29 +8793,28 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             signed,
         } => {
             let expr = simplify_constant_mux_conditions(*expr, const_env);
-            if let Some(value) =
-                expr_to_const(expr.clone()).and_then(|expr| eval_ast_const_expr(&expr, const_env))
-            {
-                Expr::Literal(format_typed_parameter_literal(value, width, signed))
-            } else if let Some(expr) = expr_to_const(expr.clone())
-                && let Some(literal) = typecheck::context_size_const_integral_literal(
-                    &crate::ir::ConstExpr::from(expr),
+            if let Some(constant) = expr_to_const(expr.clone()) {
+                let parameter_types = parameter_types_from_const_env(const_env)
+                    .into_iter()
+                    .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
+                    .collect();
+                if let Some(literal) = typecheck::context_size_const_integral_literal(
+                    &crate::ir::ConstExpr::from(constant.clone()),
                     const_env,
-                    &parameter_types_from_const_env(const_env)
-                        .into_iter()
-                        .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
-                        .collect(),
+                    &parameter_types,
                     width,
                     signed,
-                )
-            {
-                Expr::Literal(typecheck::format_integral_literal_binary(&literal))
-            } else {
-                Expr::Resize {
-                    expr: Box::new(expr),
-                    width,
-                    signed,
+                ) {
+                    return Expr::Literal(typecheck::format_integral_literal_binary(&literal));
                 }
+                if let Some(value) = eval_ast_const_expr(&constant, const_env) {
+                    return Expr::Literal(format_typed_parameter_literal(value, width, signed));
+                }
+            }
+            Expr::Resize {
+                expr: Box::new(expr),
+                width,
+                signed,
             }
         }
         Expr::Unary { op, expr } => Expr::Unary {
@@ -11922,6 +12049,13 @@ fn guarded_comb_targets(
     }
     let condition =
         expr_from_cond_predicate(&conditional.nodes.2.nodes.1, syntax_tree, packed_dimensions)?;
+    let condition = expand_expr_calls(
+        condition,
+        &packed_dimensions.functions,
+        &packed_dimensions.expression_signedness,
+        0,
+        true,
+    );
     let targets = definitely_assigned_comb_targets_statement_or_null(
         &conditional.nodes.3,
         syntax_tree,
@@ -12255,7 +12389,20 @@ fn lvalue_from_select(
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
         .iter()
-        .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
+        .map(|bit_select| {
+            let expr = expr_from_expression_with_types(
+                &bit_select.nodes.1,
+                syntax_tree,
+                packed_dimensions,
+            )?;
+            expr_to_const(expand_expr_calls(
+                expr,
+                &packed_dimensions.functions,
+                &packed_dimensions.expression_signedness,
+                0,
+                false,
+            ))
+        })
         .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {

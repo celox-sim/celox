@@ -421,6 +421,34 @@ mod tests {
                 .to_string()
                 .contains("latch inference inside always_comb")
         );
+
+        let error = analyze_source(
+            r#"
+                module Top(input logic outer, q, a, b, output logic y);
+                    logic s;
+                    function automatic bit f();
+                        return s;
+                    endfunction
+                    always_comb begin
+                        s = q;
+                        if (outer) begin
+                            if (f()) y = a;
+                            s = 1'b1;
+                            if (!f()) y = b;
+                        end else begin
+                            y = a;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("function_guard_dependency_write.sv"),
+        )
+        .expect_err("a function guard's free-variable write must invalidate its proof");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
     }
 
     #[test]
@@ -1317,6 +1345,45 @@ mod tests {
     }
 
     #[test]
+    fn expands_function_calls_in_procedural_lvalue_indices() {
+        analyze_source(
+            r#"
+                module Top(input bit index, input logic data, output logic [1:0] x);
+                    function automatic bit idx();
+                        return index;
+                    endfunction
+                    always_comb begin
+                        x = '0;
+                        x[idx()] = data;
+                    end
+                endmodule
+            "#,
+            Path::new("function_lvalue_index.sv"),
+        )
+        .expect("a supported function call in an lvalue index should be expanded");
+    }
+
+    #[test]
+    fn resolves_value_dependent_type_parameter_defaults() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 8,
+                    parameter type T = logic [W'(7):0]
+                ) (output T y);
+                    always_comb y = 8'hff;
+                endmodule
+            "#,
+            Path::new("value_dependent_type_parameter.sv"),
+        )
+        .expect("a type parameter default should use preceding value parameters");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(8)
+        );
+    }
+
+    #[test]
     fn caps_dynamic_select_normalization_expansion() {
         let error = analyze_source(
             r#"
@@ -1952,7 +2019,7 @@ mod tests {
                 .iter()
                 .find(|parameter| parameter.name() == "MAX_COUNT")
                 .and_then(|parameter| parameter.resolved_value()),
-            Some(0xffff_ffff)
+            Some(3)
         );
         assert_eq!(
             counter
