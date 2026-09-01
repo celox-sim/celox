@@ -29,6 +29,7 @@ use num_traits::{ToPrimitive, Zero};
 
 use super::{
     EventHandle, MemoryLayout, RuntimeEventBuffer, SimBackend, SimulatorErrorCode, get_byte_size,
+    memory_image::MemoryImage,
 };
 use crate::backend::memory_layout::{
     RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
@@ -176,7 +177,7 @@ unsafe fn gather_strided(base: *const u8, offset: usize, array: &SignalArrayLayo
 /// Holds split borrows of the backend's storage so execution-unit slices can
 /// be borrowed immutably from the SIR program at the same time.
 struct Machine<'a> {
-    memory: &'a mut Vec<u64>,
+    memory: &'a mut [u64],
     layout: &'a MemoryLayout,
     four_state: bool,
     /// Per-site enable bytes for comb capture events.
@@ -1075,7 +1076,7 @@ fn prepare_units(
 /// Execute every unit in `units` against the split backend storage.
 #[allow(clippy::too_many_arguments)]
 fn run_units(
-    memory: &mut Vec<u64>,
+    memory: &mut [u64],
     layout: &MemoryLayout,
     four_state: bool,
     comb_capture_enabled: &mut [u8],
@@ -1162,7 +1163,7 @@ pub struct InterpBackend {
     apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>>,
     layout: MemoryLayout,
     four_state: bool,
-    memory: Vec<u64>,
+    memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     event_map: HashMap<AbsoluteAddr, InterpEventRef>,
@@ -1286,7 +1287,7 @@ impl InterpBackend {
         }
 
         let num_u64 = layout.merged_total_size.div_ceil(8);
-        let mut memory = vec![0u64; num_u64];
+        let mut memory = MemoryImage::zeroed(num_u64);
         let runtime_event_buffer =
             Arc::new(RuntimeEventBuffer::new(layout.runtime_event_buffer_size));
         let comb_capture_enabled = vec![0u8; layout.runtime_event_site_layouts.len().max(1)];
@@ -1421,7 +1422,7 @@ impl InterpBackend {
     /// promotion. The returned memory image is byte-compatible with the
     /// compiled backends (same packed layout), and the event buffer `Arc`
     /// keeps its allocation so state-header pointers stay valid.
-    pub(crate) fn tier_transfer(&mut self) -> (Vec<u64>, Arc<RuntimeEventBuffer>, Vec<u8>) {
+    pub(crate) fn tier_transfer(&mut self) -> (MemoryImage, Arc<RuntimeEventBuffer>, Vec<u8>) {
         (
             std::mem::take(&mut self.memory),
             Arc::clone(&self.runtime_event_buffer),
@@ -1431,22 +1432,19 @@ impl InterpBackend {
 
     /// Current image length in `u64` words.
     pub(crate) fn image_word_len(&self) -> usize {
-        self.memory.len()
+        self.memory.len_words()
     }
 
     /// Current image allocation capacity in `u64` words.
     pub(crate) fn image_word_capacity(&self) -> usize {
-        self.memory.capacity()
+        self.memory.capacity_words()
     }
 
     /// Reserve capacity so the image can grow to `total_words` words without
     /// reallocating. Tiered builds use this up front so a later promotion
     /// grows within the existing allocation and never moves the live image.
     pub(crate) fn reserve_image_capacity(&mut self, total_words: usize) {
-        let spare = total_words.saturating_sub(self.memory.capacity());
-        if spare > 0 {
-            self.memory.reserve(spare);
-        }
+        self.memory.reserve_total(total_words);
     }
 }
 
@@ -1455,7 +1453,7 @@ impl SimBackend for InterpBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         run_units(
-            &mut self.memory,
+            self.memory.as_mut_slice(),
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
@@ -1468,7 +1466,7 @@ impl SimBackend for InterpBackend {
 
     fn eval_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
         run_units(
-            &mut self.memory,
+            self.memory.as_mut_slice(),
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
@@ -1490,7 +1488,7 @@ impl SimBackend for InterpBackend {
             return self.eval_apply_ff_at(event);
         };
         run_units(
-            &mut self.memory,
+            self.memory.as_mut_slice(),
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
@@ -1503,7 +1501,7 @@ impl SimBackend for InterpBackend {
 
     fn eval_only_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
         run_units(
-            &mut self.memory,
+            self.memory.as_mut_slice(),
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
@@ -1520,7 +1518,7 @@ impl SimBackend for InterpBackend {
 
     fn apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
         run_units(
-            &mut self.memory,
+            self.memory.as_mut_slice(),
             &self.layout,
             self.four_state,
             &mut self.comb_capture_enabled,
@@ -1816,6 +1814,10 @@ impl SimBackend for InterpBackend {
             self.memory.as_mut_ptr() as *mut u8,
             self.layout.merged_total_size,
         )
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.memory.owner())
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {

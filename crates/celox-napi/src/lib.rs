@@ -896,6 +896,13 @@ impl HandleBackend {
         }
     }
 
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        match self {
+            Self::Default(backend) => backend.memory_owner(),
+            Self::Tiered(backend) => backend.memory_owner(),
+        }
+    }
+
     fn stable_region_size(&self) -> usize {
         match self {
             Self::Default(backend) => backend.stable_region_size(),
@@ -1399,12 +1406,15 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        let owner = b.memory_owner().ok_or_else(|| {
+            Error::from_reason("Simulator backend does not expose owned shared memory")
+        })?;
         let (ptr, _) = b.memory_as_mut_ptr();
         let stable_size = b.stable_region_size();
-        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
+        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, move |_, _| drop(owner)) })
     }
 
-    /// Invalidate this handle (no-op on the Rust side; drop happens via GC).
+    /// Invalidate this handle and release its simulator resources.
     #[napi]
     pub fn dispose(&mut self) {
         self.backend = None;
@@ -1726,9 +1736,12 @@ impl NativeSimulationHandle {
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        let owner = sim.memory_owner().ok_or_else(|| {
+            Error::from_reason("Simulation backend does not expose owned shared memory")
+        })?;
         let (ptr, _) = sim.memory_as_mut_ptr();
         let stable_size = sim.stable_region_size();
-        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
+        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, move |_, _| drop(owner)) })
     }
 
     /// Invalidate this handle.

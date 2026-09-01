@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use num_bigint::BigUint;
 
@@ -80,6 +80,17 @@ pub trait SimBackend {
     // ── memory / layout ─────────────────────────────────────────
     fn memory_as_ptr(&self) -> (*const u8, usize);
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
+    /// Return an opaque owner that keeps the memory allocation alive.
+    ///
+    /// Host integrations that expose the raw memory outside Rust can retain
+    /// this value until their external view is finalized. Backends without a
+    /// separately owned stable allocation may keep the default `None`.
+    /// When returning `Some`, the allocation and address reported by
+    /// [`Self::memory_as_ptr`] and [`Self::memory_as_mut_ptr`] must remain valid
+    /// until every clone of the owner has been dropped.
+    fn memory_owner(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize);
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         None

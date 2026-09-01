@@ -45,6 +45,7 @@ use num_bigint::BigUint;
 use super::compile_cancel::CompileCancel;
 use super::{
     EventHandle, MemoryLayout, RuntimeEventBuffer, SharedJitCode, SimBackend, SimulatorErrorCode,
+    memory_image::MemoryImage,
 };
 #[cfg(any(
     target_arch = "x86_64",
@@ -146,14 +147,13 @@ impl CompiledTier {
     /// which external views (zero-copy host buffers) may still reference.
     fn adopt(
         code: CompiledCode,
-        mut memory: Vec<u64>,
+        mut memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
-        debug_assert!(memory.capacity() >= code.required_image_words());
-        if memory.len() < code.required_image_words() {
-            // Growth within capacity never reallocates.
-            memory.resize(code.required_image_words(), 0);
+        debug_assert!(memory.capacity_words() >= code.required_image_words());
+        if memory.len_words() < code.required_image_words() {
+            memory.resize_zeroed_within_capacity(code.required_image_words());
         }
         match code {
             CompiledCode::Cranelift(shared) => {
@@ -1266,6 +1266,20 @@ impl SimBackend for TieredBackend {
                 target_arch = "aarch64"
             ))]
             Phase::Compiled(CompiledTier::Native(native)) => native.memory_as_mut_ptr(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.memory_owner(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_owner(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.memory_owner(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
