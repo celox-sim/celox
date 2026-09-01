@@ -289,6 +289,11 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.memory_as_mut_ptr()
     }
 
+    /// Returns an opaque owner that keeps the backend memory allocation alive.
+    pub fn memory_owner(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        self.simulator.memory_owner()
+    }
+
     /// Returns the stable region size in bytes.
     pub fn stable_region_size(&self) -> usize {
         self.simulator.stable_region_size()

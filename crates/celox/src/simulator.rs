@@ -1228,6 +1228,11 @@ mod host {
             self.backend.memory_as_mut_ptr()
         }
 
+        /// Returns an opaque owner that keeps the backend memory allocation alive.
+        pub fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+            self.backend.memory_owner()
+        }
+
         /// Returns the stable region size in bytes.
         pub fn stable_region_size(&self) -> usize {
             self.backend.stable_region_size()

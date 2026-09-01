@@ -27,7 +27,7 @@ use crate::{CodegenError, HashMap, HashSet, SimulatorError, SimulatorOptions};
 use super::super::RuntimeEventBuffer;
 use super::super::compile_cancel::{CompileCancel, cancelled, cancelled_error};
 use super::super::traits::SimulatorErrorCode;
-use super::super::{MemoryLayout, get_byte_size};
+use super::super::{MemoryLayout, get_byte_size, memory_image::MemoryImage};
 #[cfg(any(
     feature = "x86_64-codegen",
     all(target_arch = "x86_64", not(feature = "arm64-codegen"))
@@ -1982,7 +1982,7 @@ fn compile_program(
 
 pub struct NativeBackend {
     compiled: Arc<SharedNativeCode>,
-    memory: Vec<u64>,
+    memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     execution_timing: Option<NativeExecutionTiming>,
@@ -2170,7 +2170,7 @@ impl NativeBackend {
     /// Each instance gets its own simulation state memory.
     pub fn from_shared(shared: Arc<SharedNativeCode>) -> Self {
         let mem_size_words = shared.native_memory_size.div_ceil(8);
-        let mut memory = vec![0u64; mem_size_words + 1]; // +1 for safety
+        let mut memory = MemoryImage::zeroed(mem_size_words + 1); // +1 for safety
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
@@ -2207,7 +2207,7 @@ impl NativeBackend {
     /// is the one referenced by the state header so its pointer stays valid.
     pub(crate) fn adopt_shared_with_state(
         shared: Arc<SharedNativeCode>,
-        memory: Vec<u64>,
+        memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
@@ -2345,13 +2345,13 @@ impl NativeBackend {
 
     fn mem_bytes(&self) -> &[u8] {
         let ptr = self.mem_ptr();
-        let len = self.memory.len() * 8;
+        let len = self.memory.len_words() * 8;
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
     fn mem_bytes_mut(&mut self) -> &mut [u8] {
         let ptr = self.mem_mut_ptr();
-        let len = self.memory.len() * 8;
+        let len = self.memory.len_words() * 8;
         unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 
@@ -2421,10 +2421,10 @@ impl NativeBackend {
 
     fn call_func_timed(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let Some(_) = self.execution_timing else {
-            return Self::call_func(&mut self.memory, func);
+            return Self::call_func(self.memory.as_mut_slice(), func);
         };
         let start = Instant::now();
-        let result = Self::call_func(&mut self.memory, func);
+        let result = Self::call_func(self.memory.as_mut_slice(), func);
         let elapsed = start.elapsed();
         let timing = self
             .execution_timing
@@ -2464,10 +2464,10 @@ impl NativeBackend {
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
         if self.execution_timing.is_none() || count == 0 {
-            return Self::call_func_many(&mut self.memory, func, count);
+            return Self::call_func_many(self.memory.as_mut_slice(), func, count);
         }
         let start = Instant::now();
-        let result = Self::call_func_many(&mut self.memory, func, count);
+        let result = Self::call_func_many(self.memory.as_mut_slice(), func, count);
         let elapsed = start.elapsed();
         let timing = self
             .execution_timing
@@ -2659,11 +2659,15 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn memory_as_ptr(&self) -> (*const u8, usize) {
-        (self.mem_ptr(), self.memory.len() * 8)
+        (self.mem_ptr(), self.memory.len_words() * 8)
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        (self.mem_mut_ptr(), self.memory.len() * 8)
+        (self.mem_mut_ptr(), self.memory.len_words() * 8)
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.memory.owner())
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
