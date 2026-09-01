@@ -163,6 +163,36 @@ fn discover_libpython(python: &Path) -> Result<PathBuf, String> {
     .map(PathBuf::from)
 }
 
+fn discover_pygpi_entry_point(python: &Path) -> Result<Option<String>, String> {
+    const SUPPORTED_PREFIX: &str = "celox-pygpi-entry-point:";
+    const UNSUPPORTED: &str = "celox-pygpi-entry-point-unavailable";
+
+    // cocotb 2.1 exposes PyGPI as a separate GPI user. Older cocotb releases
+    // embed Python directly and do not provide this configuration function.
+    let output = python_output(
+        python,
+        &[
+            OsStr::new("-c"),
+            OsStr::new(
+                "from cocotb_tools import config; entry = getattr(config, 'pygpi_entry_point', None); print('celox-pygpi-entry-point:' + entry() if entry is not None else 'celox-pygpi-entry-point-unavailable')",
+            ),
+        ],
+        "cocotb's PyGPI entry point",
+    )?;
+    if output == UNSUPPORTED {
+        return Ok(None);
+    }
+    output
+        .strip_prefix(SUPPORTED_PREFIX)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| Some(entry.to_string()))
+        .ok_or_else(|| format!("Python returned an invalid PyGPI entry point: {output}"))
+}
+
+fn gpi_users_value(libpython: &Path, pygpi_entry_point: &str) -> String {
+    format!("{};{pygpi_entry_point}", libpython.display())
+}
+
 fn discover_python(python: &Path) -> Result<PathBuf, String> {
     python_output(
         python,
@@ -270,6 +300,14 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
         Some(path) => path,
         None => discover_libpython(&python)?,
     };
+    // Preserve an explicitly configured user chain. Otherwise, match cocotb
+    // 2.1's runner and load libpython before the PyGPI entry point.
+    let gpi_users = if env::var_os("GPI_USERS").is_none() {
+        discover_pygpi_entry_point(&python)?
+            .map(|pygpi_entry_point| gpi_users_value(&libpython, &pygpi_entry_point))
+    } else {
+        None
+    };
     let results_file = arguments
         .results_file
         .or_else(|| environment_path("COCOTB_RESULTS_FILE"))
@@ -288,6 +326,9 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
 
     set_environment("PYGPI_PYTHON_BIN", &python);
     set_environment("LIBPYTHON_LOC", libpython);
+    if let Some(gpi_users) = gpi_users {
+        set_environment("GPI_USERS", gpi_users);
+    }
     set_environment("COCOTB_TOPLEVEL", top);
     set_environment("COCOTB_TEST_MODULES", test_module);
     set_environment("TOPLEVEL_LANG", "verilog");
@@ -376,5 +417,18 @@ mod tests {
         remove_stale_results(&results).unwrap();
         assert!(!results.exists());
         remove_stale_results(&results).unwrap();
+    }
+
+    #[test]
+    fn gpi_users_loads_libpython_before_pygpi() {
+        let value = gpi_users_value(
+            Path::new("/opt/python/lib/libpython3.14.so"),
+            "/opt/python/lib/python3.14/site-packages/cocotb/libs/libpygpi.so:pygpi_entry_point",
+        );
+
+        assert_eq!(
+            value,
+            "/opt/python/lib/libpython3.14.so;/opt/python/lib/python3.14/site-packages/cocotb/libs/libpygpi.so:pygpi_entry_point"
+        );
     }
 }
