@@ -1563,9 +1563,9 @@ mod tests {
 
     #[test]
     fn applies_function_return_types_in_procedural_lvalue_indices() {
-        analyze_source(
+        let ir = analyze_source(
             r#"
-                module Top(input logic [1:0] index, input logic data, output logic [1:0] x);
+                module Top(input bit [1:0] index, input logic data, output logic [1:0] x);
                     function automatic bit idx();
                         return index;
                     endfunction
@@ -1578,6 +1578,59 @@ mod tests {
             Path::new("function_typed_lvalue_index.sv"),
         )
         .expect("the one-bit function return should truncate the expanded lvalue index");
+        assert!(
+            ir.modules()[0].comb_processes()[0]
+                .assignments()
+                .iter()
+                .any(|assignment| assignment.lhs() == "x"
+                    && expr_references_ident_name(assignment.rhs(), "data")),
+            "the selected write must not be dropped: {:?}",
+            ir.modules()[0].comb_processes()[0].assignments()
+        );
+    }
+
+    #[test]
+    fn expands_function_calls_in_case_labels_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, a, b, output logic y);
+                    function automatic bit zero();
+                        return 1'b0;
+                    endfunction
+                    always_comb begin
+                        if (outer) begin
+                            case (1'b0)
+                                zero(): y = a;
+                            endcase
+                        end else begin
+                            y = b;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("function_case_label_coverage.sv"),
+        )
+        .expect("a folded function case label should make the branch exhaustive");
+    }
+
+    #[test]
+    fn caps_aggregate_nested_static_loop_expansion() {
+        let error = analyze_source(
+            r#"
+                module Top(output logic y);
+                    always_comb begin
+                        y = 1'b0;
+                        for (int i = 0; i < 101; i++)
+                            for (int j = 0; j < 100; j++)
+                                y = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("nested_static_loop_budget.sv"),
+        )
+        .expect_err("nested loop expansion must have an aggregate bound")
+        .to_string();
+        assert!(error.contains("procedural loop unroll limit exceeded"));
     }
 
     #[test]

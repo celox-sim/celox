@@ -550,6 +550,8 @@ fn reject_unsupported_multidimensional_packed_bounds(
     }
 }
 
+const MAX_STATIC_PROCEDURAL_LOOP_EXPANSION: usize = 10_000;
+
 fn static_for_loop_iterations(
     loop_statement: &sv_parser::LoopStatement,
     syntax_tree: &SyntaxTree,
@@ -572,7 +574,7 @@ fn static_for_loop_iterations(
 
     let mut values = Vec::new();
     let mut value = initial_value;
-    for _ in 0..10_000 {
+    for _ in 0..MAX_STATIC_PROCEDURAL_LOOP_EXPANSION {
         let mut loop_env = const_env.clone();
         loop_env.insert(name.clone(), value);
         insert_parameter_type_markers(
@@ -654,9 +656,15 @@ fn validate_static_for_loops_in_statement_or_null(
     statement: &sv_parser::StatementOrNull,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::StatementOrNull::Statement(statement) = statement {
-        validate_static_for_loops_in_statement(statement, syntax_tree, const_env)?;
+        validate_static_for_loops_in_statement_with_budget(
+            statement,
+            syntax_tree,
+            const_env,
+            remaining_expansion,
+        )?;
     }
     Ok(())
 }
@@ -666,17 +674,38 @@ fn validate_static_for_loops_in_statement(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
+    let mut remaining_expansion = MAX_STATIC_PROCEDURAL_LOOP_EXPANSION;
+    validate_static_for_loops_in_statement_with_budget(
+        statement,
+        syntax_tree,
+        const_env,
+        &mut remaining_expansion,
+    )
+}
+
+fn validate_static_for_loops_in_statement_with_budget(
+    statement: &sv_parser::Statement,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    remaining_expansion: &mut usize,
+) -> Result<(), AnalyzerError> {
     match &statement.nodes.2 {
         sv_parser::StatementItem::ProceduralTimingControlStatement(timing) => {
             validate_static_for_loops_in_statement_or_null(
                 &timing.nodes.1,
                 syntax_tree,
                 const_env,
+                remaining_expansion,
             )?;
         }
         sv_parser::StatementItem::SeqBlock(block) => {
             for statement in &block.nodes.3 {
-                validate_static_for_loops_in_statement_or_null(statement, syntax_tree, const_env)?;
+                validate_static_for_loops_in_statement_or_null(
+                    statement,
+                    syntax_tree,
+                    const_env,
+                    remaining_expansion,
+                )?;
             }
         }
         sv_parser::StatementItem::ConditionalStatement(conditional) => {
@@ -684,12 +713,23 @@ fn validate_static_for_loops_in_statement(
                 &conditional.nodes.3,
                 syntax_tree,
                 const_env,
+                remaining_expansion,
             )?;
             for (_, _, _, branch) in &conditional.nodes.4 {
-                validate_static_for_loops_in_statement_or_null(branch, syntax_tree, const_env)?;
+                validate_static_for_loops_in_statement_or_null(
+                    branch,
+                    syntax_tree,
+                    const_env,
+                    remaining_expansion,
+                )?;
             }
             if let Some((_, branch)) = &conditional.nodes.5 {
-                validate_static_for_loops_in_statement_or_null(branch, syntax_tree, const_env)?;
+                validate_static_for_loops_in_statement_or_null(
+                    branch,
+                    syntax_tree,
+                    const_env,
+                    remaining_expansion,
+                )?;
             }
         }
         sv_parser::StatementItem::CaseStatement(case) => {
@@ -701,7 +741,12 @@ fn validate_static_for_loops_in_statement(
                     sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
                     sv_parser::CaseItem::Default(item) => &item.nodes.2,
                 };
-                validate_static_for_loops_in_statement_or_null(statement, syntax_tree, const_env)?;
+                validate_static_for_loops_in_statement_or_null(
+                    statement,
+                    syntax_tree,
+                    const_env,
+                    remaining_expansion,
+                )?;
             }
         }
         sv_parser::StatementItem::LoopStatement(loop_statement) => {
@@ -709,6 +754,14 @@ fn validate_static_for_loops_in_statement(
                 .ok_or_else(|| {
                     AnalyzerError::Unsupported("procedural loop inside always_ff".to_string())
                 })?;
+            *remaining_expansion =
+                remaining_expansion
+                    .checked_sub(values.len())
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported(
+                            "procedural loop unroll limit exceeded".to_string(),
+                        )
+                    })?;
             let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
                 unreachable!();
             };
@@ -727,6 +780,7 @@ fn validate_static_for_loops_in_statement(
                     &loop_statement.nodes.2,
                     syntax_tree,
                     &loop_env,
+                    remaining_expansion,
                 )?;
             }
         }
@@ -8029,7 +8083,7 @@ fn expand_lvalue_calls(
 ) -> LValue {
     let expand_bound = |bound: ConstExpr| {
         let original = bound.clone();
-        expr_to_const(expand_expr_calls(
+        expr_to_lvalue_const(expand_expr_calls(
             const_expr_to_expr(bound),
             functions,
             expression_signedness,
@@ -11642,6 +11696,16 @@ fn two_state_case_item_reachability(
                             syntax_tree,
                             packed_dimensions,
                         )
+                        .map(|label| {
+                            expand_expr_calls(
+                                label,
+                                &packed_dimensions.functions,
+                                &packed_dimensions.expression_signedness,
+                                0,
+                                true,
+                            )
+                        })
+                        .map(|label| simplify_constant_mux_conditions(label, const_env))
                         .and_then(expr_to_const)
                     })
                     .collect::<Option<Vec<_>>>()?;
@@ -12813,12 +12877,12 @@ fn lvalue_from_select(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            expr_to_const(expand_expr_calls(
+            expr_to_lvalue_const(expand_expr_calls(
                 expr,
                 &packed_dimensions.functions,
                 &packed_dimensions.expression_signedness,
                 0,
-                false,
+                true,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
@@ -14269,6 +14333,80 @@ fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
             None
         }
+    }
+}
+
+fn expr_to_lvalue_const(expr: Expr) -> Option<ConstExpr> {
+    match expr {
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let expr = expr_to_lvalue_const(*expr)?;
+            if width == 0 {
+                return Some(ConstExpr::Literal("0".to_string()));
+            }
+            if width == 1 && !signed {
+                return Some(ConstExpr::Select {
+                    expr: Box::new(expr),
+                    bit: Box::new(ConstExpr::Literal("0".to_string())),
+                });
+            }
+            let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
+            let truncated = ConstExpr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitAnd,
+                right: Box::new(ConstExpr::Literal(format!("{width}'h{mask:x}"))),
+            };
+            if signed {
+                Some(ConstExpr::Mux {
+                    condition: Box::new(ConstExpr::Select {
+                        expr: Box::new(truncated.clone()),
+                        bit: Box::new(ConstExpr::Literal((width - 1).to_string())),
+                    }),
+                    // Every negative packed index is out of range. A stable
+                    // positive sentinel preserves that selection behavior
+                    // without requiring a signed-resize node in ConstExpr.
+                    then_expr: Box::new(ConstExpr::Literal(i128::MAX.to_string())),
+                    else_expr: Box::new(truncated),
+                })
+            } else {
+                Some(truncated)
+            }
+        }
+        Expr::Ident(name) => Some(ConstExpr::Ident(name)),
+        Expr::Literal(value) => Some(ConstExpr::Literal(value)),
+        Expr::Unary { op, expr } => Some(ConstExpr::Unary {
+            op,
+            expr: Box::new(expr_to_lvalue_const(*expr)?),
+        }),
+        Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
+            left: Box::new(expr_to_lvalue_const(*left)?),
+            op,
+            right: Box::new(expr_to_lvalue_const(*right)?),
+        }),
+        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
+            expr: Box::new(expr_to_lvalue_const(*expr)?),
+            bit: Box::new(msb),
+        }),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(ConstExpr::Mux {
+            condition: Box::new(expr_to_lvalue_const(*condition)?),
+            then_expr: Box::new(expr_to_lvalue_const(*then_expr)?),
+            else_expr: Box::new(expr_to_lvalue_const(*else_expr)?),
+        }),
+        Expr::Call { name, args } => Some(ConstExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(expr_to_lvalue_const)
+                .collect::<Option<_>>()?,
+        }),
+        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } => None,
     }
 }
 

@@ -7753,6 +7753,47 @@ fn sign_extends_function_calls_in_conditional_assignments() {
     assert_eq!(sim.get(y), 0u8.into());
 }
 
+#[test]
+fn coerces_function_returns_in_procedural_lvalue_indices() {
+    let source = r#"
+        module Top(
+            input bit [1:0] index,
+            input logic data,
+            input logic replace,
+            output logic [1:0] x
+        );
+            function automatic bit idx();
+                return index;
+            endfunction
+            always_comb begin
+                x = '0;
+                x[idx()] = data;
+                if (replace)
+                    x = '1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("function_typed_lvalue_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let index = sim.signal("index");
+    let data = sim.signal("data");
+    let replace = sim.signal("replace");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(data, true);
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    sim.modify(|io| io.set(index, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn collapses_unknown_initializers_in_two_state_native_images() {
