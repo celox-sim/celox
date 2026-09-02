@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "veryl-metadata"
-version = "0.20.3"
+version = "0.21.0"
 authors = ["dalance@gmail.com"]
 build = "build.rs"
 autolib = false
@@ -94,13 +94,13 @@ default-features = false
 version = "0.1.1"
 
 [dependencies.veryl-parser]
-version = "0.20.3"
+version = "0.21.0"
 
 [dependencies.veryl-path]
-version = "0.20.3"
+version = "0.21.0"
 
 [dependencies.veryl-std]
-version = "0.20.3"
+version = "0.21.0"
 
 [dependencies.walkdir]
 version = "2.5.0"
@@ -112,7 +112,7 @@ version = "1.0"
 version = "3.26"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.gix]
-version = "0.86.0"
+version = "0.87.1"
 features = [
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",
@@ -120,7 +120,6 @@ features = [
     "status",
     "worktree-mutation",
     "index",
-    "tree-editor",
 ]
 optional = true
 
