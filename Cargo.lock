@@ -422,22 +422,22 @@ name = "celox"
 version = "0.3.1"
 dependencies = [
  "bit-set 0.11.1",
- "celox-analysis",
+ "celox-analysis 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-backend-arm64",
  "celox-backend-cranelift",
  "celox-backend-wasm",
  "celox-backend-x86",
- "celox-design",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-frontend-core",
  "celox-frontend-sdk",
  "celox-frontend-sv",
  "celox-frontend-veryl",
  "celox-macros",
  "celox-runtime",
- "celox-sir",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-sir-opt",
  "celox-slt",
- "celox-state-layout",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-testbench",
  "clap",
  "codspeed-criterion-compat",
@@ -479,12 +479,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "celox-analysis"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06de85f8d6b484b1e1b09131f13de60dd4df438dab7711ab5af40fe7f43214f"
+dependencies = [
+ "fxhash",
+]
+
+[[package]]
 name = "celox-backend-arm64"
 version = "0.3.1"
 dependencies = [
  "celox-backend-common",
  "celox-backend-x86",
- "celox-state-layout",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "dynasmrt",
  "fxhash",
  "libc",
@@ -501,9 +510,9 @@ dependencies = [
 name = "celox-backend-cranelift"
 version = "0.3.1"
 dependencies = [
- "celox-design",
- "celox-sir",
- "celox-state-layout",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "cranelift",
  "cranelift-frontend 0.134.2",
  "cranelift-jit",
@@ -520,9 +529,9 @@ name = "celox-backend-wasm"
 version = "0.3.1"
 dependencies = [
  "celox-backend-cranelift",
- "celox-design",
- "celox-sir",
- "celox-state-layout",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fxhash",
  "num-bigint",
  "wasm-encoder 0.256.0",
@@ -533,12 +542,12 @@ dependencies = [
 name = "celox-backend-x86"
 version = "0.3.1"
 dependencies = [
- "celox-analysis",
+ "celox-analysis 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-backend-common",
- "celox-design",
- "celox-sir",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-sir-opt",
- "celox-state-layout",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fxhash",
  "iced-x86",
  "libc",
@@ -582,6 +591,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "celox-design"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f068859df8fb29e4ed46005c781027b5229d3f78ee3e5dbe88ca0d2bed37bd0"
+dependencies = [
+ "fxhash",
+ "num-bigint",
+ "serde",
+]
+
+[[package]]
 name = "celox-example-my-frontend-napi"
 version = "0.3.1"
 dependencies = [
@@ -596,9 +616,9 @@ dependencies = [
 name = "celox-frontend-core"
 version = "0.3.1"
 dependencies = [
- "celox-design",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-frontend-sdk",
- "celox-sir",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-slt",
  "fxhash",
  "miette",
@@ -623,9 +643,9 @@ dependencies = [
 name = "celox-frontend-sv"
 version = "0.3.1"
 dependencies = [
- "celox-design",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-frontend-core",
- "celox-sir",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-slt",
  "celox-sv-analyzer",
  "fxhash",
@@ -638,9 +658,9 @@ name = "celox-frontend-veryl"
 version = "0.3.1"
 dependencies = [
  "bit-set 0.11.1",
- "celox-design",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-frontend-core",
- "celox-sir",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-slt",
  "celox-testbench",
  "fxhash",
@@ -676,7 +696,7 @@ name = "celox-napi"
 version = "0.3.1"
 dependencies = [
  "celox",
- "celox-design",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-ts-gen",
  "fxhash",
  "globset",
@@ -699,8 +719,8 @@ name = "celox-runtime"
 version = "0.3.1"
 dependencies = [
  "bit-set 0.11.1",
- "celox-design",
- "celox-state-layout",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "celox-testbench",
  "chrono",
  "fxhash",
@@ -713,8 +733,22 @@ dependencies = [
 name = "celox-sir"
 version = "0.3.1"
 dependencies = [
- "celox-analysis",
- "celox-design",
+ "celox-analysis 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fxhash",
+ "num-bigint",
+ "num-traits",
+ "serde",
+]
+
+[[package]]
+name = "celox-sir"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "994731e4f34b51ab18f004d5564f86020eef779a51444f2b79e854d9e636e967"
+dependencies = [
+ "celox-analysis 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fxhash",
  "num-bigint",
  "num-traits",
@@ -726,10 +760,10 @@ name = "celox-sir-opt"
 version = "0.3.1"
 dependencies = [
  "bit-set 0.11.1",
- "celox-analysis",
- "celox-design",
- "celox-sir",
- "celox-state-layout",
+ "celox-analysis 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-state-layout 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fxhash",
  "itertools 0.15.0",
  "num-bigint",
@@ -742,9 +776,9 @@ dependencies = [
 name = "celox-slt"
 version = "0.3.1"
 dependencies = [
- "celox-analysis",
- "celox-design",
- "celox-sir",
+ "celox-analysis 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "celox-sir 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fxhash",
  "num-bigint",
  "num-traits",
@@ -758,7 +792,18 @@ dependencies = [
 name = "celox-state-layout"
 version = "0.3.1"
 dependencies = [
- "celox-design",
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fxhash",
+ "serde",
+]
+
+[[package]]
+name = "celox-state-layout"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75552b53052aee39fd79f48260707a7473fafe592a8b1f51f44e7fb6969d0085"
+dependencies = [
+ "celox-design 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fxhash",
  "serde",
 ]
