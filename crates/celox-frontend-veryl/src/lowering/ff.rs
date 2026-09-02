@@ -2409,38 +2409,27 @@ impl<'a> FfParser<'a> {
         self.dynamic_defined_vars.clear();
         self.dynamic_write_vars.clear();
         self.local_let_values.clear();
-        self.reset = decls[0].reset.clone();
-
         let mut targets = Vec::new();
         let mut sources = Vec::new();
 
-        let mut all_true_sides = Vec::new();
-        let mut all_false_sides = Vec::new();
-        let mut other_statements = Vec::new();
-
-        for decl in decls {
-            for stmt in &decl.statements {
-                if let Statement::IfReset(if_reset) = stmt {
-                    all_true_sides.extend(if_reset.true_side.iter().collect::<Vec<_>>());
-                    all_false_sides.extend(if_reset.false_side.iter().collect::<Vec<_>>());
-                } else {
-                    other_statements.push(stmt);
-                }
+        // Reset-only declarations can share one branch, which keeps large
+        // unrolled reset groups compact. If a declaration has neighboring
+        // statements, however, moving `if_reset` changes the source-order
+        // priority of overlapping nonblocking assignments.
+        let reset_only = decls
+            .iter()
+            .all(|decl| matches!(decl.statements.as_slice(), [Statement::IfReset(_)]));
+        if reset_only {
+            self.reset = decls[0].reset.clone();
+            let mut all_true_sides = Vec::new();
+            let mut all_false_sides = Vec::new();
+            for decl in decls {
+                let Statement::IfReset(if_reset) = &decl.statements[0] else {
+                    unreachable!("reset-only declarations contain one if_reset statement");
+                };
+                all_true_sides.extend(if_reset.true_side.iter());
+                all_false_sides.extend(if_reset.false_side.iter());
             }
-        }
-
-        for stmt in other_statements {
-            self.parse_statement(
-                stmt,
-                &mut targets,
-                &Domain::Ff,
-                convert,
-                &mut sources,
-                ir_builder,
-            )?;
-        }
-
-        if !all_true_sides.is_empty() || !all_false_sides.is_empty() {
             self.parse_if_reset_internal(
                 &all_true_sides,
                 &all_false_sides,
@@ -2450,6 +2439,20 @@ impl<'a> FfParser<'a> {
                 &mut sources,
                 ir_builder,
             )?;
+        } else {
+            for decl in decls {
+                self.reset = decl.reset.clone();
+                for stmt in &decl.statements {
+                    self.parse_statement(
+                        stmt,
+                        &mut targets,
+                        &Domain::Ff,
+                        convert,
+                        &mut sources,
+                        ir_builder,
+                    )?;
+                }
+            }
         }
 
         Ok(FfGroupParseResult {
