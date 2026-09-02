@@ -93,7 +93,6 @@ assign b = a;
 
     // Test rapid clock toggling: tick many times and verify counter state.
     fn test_rapid_tick_counter(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,

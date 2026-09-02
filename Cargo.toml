@@ -68,14 +68,14 @@ celox-sv-analyzer       = { version = "=0.4.4", path = "crates/celox-sv-analyzer
 celox-testbench         = { version = "=0.4.4", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.4.4", path = "crates/celox-ts-gen" } # x-release-please-version
 
-veryl-analyzer = "0.20.3"
-veryl-emitter  = "0.20.3"
-veryl-metadata = "0.20.3"
-veryl-parser   = { version = "0.20.3", default-features = false }
-veryl-path      = "0.20.3"
-veryl-simulator = "0.20.3"
-veryl-std       = "0.20.3"
-sv-parser       = "0.13.5"
+veryl-analyzer = "0.21.0"
+veryl-emitter  = "0.21.0"
+veryl-metadata = "0.21.0"
+veryl-parser   = { version = "0.21.0", default-features = false }
+veryl-path      = "0.21.0"
+veryl-simulator = "0.21.0"
+veryl-std       = "0.21.0"
+sv-parser = "0.13.5"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }

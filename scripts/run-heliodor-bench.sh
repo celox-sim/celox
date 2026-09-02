@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HELIODOR_REPO="${HELIODOR_REPO:-https://github.com/dalance/heliodor.git}"
-HELIODOR_REF="${HELIODOR_REF:-94e9c5821c24a8941c3ddc3b76daddc7124a855a}"
+HELIODOR_REF="${HELIODOR_REF:-a78d04730cf2b37c616e039b4a5bd437c1cfd355}"
 HELIODOR_DIR="${HELIODOR_DIR:-$CELOX_ROOT/target/heliodor/source}"
 HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/results}"
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
@@ -58,10 +58,11 @@ if [[ -n "$HELIODOR_CELOX_EXECUTION_PREFIX" ]]; then
     read -r -a CELOX_EXECUTION_PREFIX <<<"$HELIODOR_CELOX_EXECUTION_PREFIX"
 fi
 
-readonly GATE_HELIODOR_REF=94e9c5821c24a8941c3ddc3b76daddc7124a855a
+readonly GATE_HELIODOR_REF=a78d04730cf2b37c616e039b4a5bd437c1cfd355
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=420
-readonly GATE_EXPECTED_CYCLE=d83790
+# The Heliodor testbench observes `pass` after 10,000-cycle chunks.
+readonly GATE_EXPECTED_CYCLE=87cda0
 readonly GATE_EXPECTED_X3=aa
 
 # Populated only while `gate` owns detached Heliodor worktrees. Keeping these
