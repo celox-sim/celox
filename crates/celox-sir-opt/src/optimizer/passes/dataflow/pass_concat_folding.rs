@@ -134,7 +134,18 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                                 if prev_info.base == run_base
                                     && prev_info.bit_offset == run_start + run_width
                                 {
-                                    let combined_width = run_width + prev_info.width;
+                                    let Some(combined_width) =
+                                        run_width.checked_add(prev_info.width)
+                                    else {
+                                        break;
+                                    };
+                                    // Leave the first operand which does not fit
+                                    // for the next outer iteration. Consuming the
+                                    // whole run and then rejecting it below drops
+                                    // every operand except `arg` from the Concat.
+                                    if combined_width > self.max_load_width {
+                                        break;
+                                    }
                                     if let BitSourceBase::Load(address) = run_base
                                         && let Some(&element_width) = self
                                             .unpacked_element_widths
@@ -396,6 +407,75 @@ mod tests {
             inst,
             SIRInstruction::Concat(RegisterId(4), args) if args.len() == 1
         )));
+    }
+
+    #[test]
+    fn splits_slice_runs_at_the_fold_width_without_dropping_operands() {
+        const SOURCE_WIDTH: usize = 129;
+        const MAX_FOLD_WIDTH: usize = 128;
+        let bit = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let register_map = HashMap::from_iter([
+            (RegisterId(0), bit(SOURCE_WIDTH)),
+            (RegisterId(1), bit(64)),
+            (RegisterId(2), bit(64)),
+            (RegisterId(3), bit(1)),
+            (RegisterId(4), bit(SOURCE_WIDTH)),
+        ]);
+        let instructions = vec![
+            SIRInstruction::Slice(RegisterId(1), RegisterId(0), 0, 64),
+            SIRInstruction::Slice(RegisterId(2), RegisterId(0), 64, 64),
+            SIRInstruction::Slice(RegisterId(3), RegisterId(0), 128, 1),
+            SIRInstruction::Concat(
+                RegisterId(4),
+                vec![RegisterId(3), RegisterId(2), RegisterId(1)],
+            ),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: vec![RegisterId(4)],
+            },
+        ];
+
+        let mut eu = make_eu(instructions, register_map);
+        eu.blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .params
+            .push(RegisterId(0));
+        eu.verify_result().unwrap();
+        ConcatFoldingPass::new(Arc::default(), MAX_FOLD_WIDTH)
+            .run(&mut eu, &PassOptions::default());
+        eu.verify_result().unwrap();
+
+        let concat_args = eu.blocks[&BlockId(0)]
+            .instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                SIRInstruction::Concat(RegisterId(4), args) => Some(args),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(concat_args.len(), 2);
+        assert_eq!(
+            concat_args
+                .iter()
+                .map(|argument| eu.register_map[argument].width())
+                .sum::<usize>(),
+            SOURCE_WIDTH,
+        );
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Slice(_, RegisterId(0), 0, MAX_FOLD_WIDTH)
+                    )
+                })
+        );
     }
 
     #[test]
