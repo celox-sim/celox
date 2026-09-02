@@ -44,6 +44,64 @@ fn test_ff_nonblocking(sim) {
     assert_eq!(sim.get(q), 0x11111111u32.into());
 }
 
+fn test_ff_statement_after_if_reset_keeps_source_order(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            rearm: input logic,
+            o_pending: output logic,
+            o_filling: output logic
+        ) {
+            var pending: logic;
+            var filling: logic;
+            always_ff (clk, rst) {
+                if_reset {
+                    pending = 1'b0;
+                    filling = 1'b0;
+                } else {
+                    if filling {
+                        filling = 1'b0;
+                    } else if pending {
+                        filling = 1'b1;
+                        pending = 1'b0;
+                    }
+                }
+                if rearm {
+                    pending = 1'b1;
+                }
+            }
+            assign o_pending = pending;
+            assign o_filling = filling;
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let rearm = sim.signal("rearm");
+    let pending = sim.signal("o_pending");
+    let filling = sim.signal("o_filling");
+
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(rearm, 0u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(rearm, 1u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(pending), 1u8.into());
+    assert_eq!(sim.get(filling), 0u8.into());
+
+    sim.tick(clk).unwrap();
+
+    assert_eq!(sim.get(pending), 1u8.into());
+    assert_eq!(sim.get(filling), 1u8.into());
+}
+
 fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
     @ignore_on(sv);
     @setup { let code = r#"
