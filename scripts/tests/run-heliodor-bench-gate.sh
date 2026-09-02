@@ -44,13 +44,13 @@ write_valid_gate_logs() {
         "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$veryl_reported" \
         >"$directory/veryl.log"
     printf '%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=87a690 x3=aa pass=1" \
+        "v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
         "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$celox_compile execute_ns=$celox_execute jit_execute_ns=$celox_jit_execute" \
         "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$celox_reported" \
         >"$directory/celox.log"
     printf '%s\n%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=87a690 x3=aa pass=1" \
+        "v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=tiered opt_level=O2 four_state=false compile_only=false" \
         "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$tiered_startup execute_ns=$tiered_execute jit_execute_ns=NA" \
         "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 promotion_elapsed_ns=12 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
@@ -246,14 +246,14 @@ fi
 
 bad_celox_cycle="$TMP/bad-celox-cycle"
 write_gate_results "$bad_celox_cycle" 200 100
-sed -i 's/cy=87a690/cy=87a691/' "$bad_celox_cycle/celox.log"
+sed -i 's/cy=87cda0/cy=87cda1/' "$bad_celox_cycle/celox.log"
 if validate_gate_results "$bad_celox_cycle/results.tsv" "$bad_celox_cycle" 2>/dev/null; then
     fail "gate accepted the wrong Celox architectural completion cycle"
 fi
 
 bad_tiered_cycle="$TMP/bad-tiered-cycle"
 write_gate_results "$bad_tiered_cycle" 200 100
-sed -i 's/cy=87a690/cy=87a691/' "$bad_tiered_cycle/celox-tiered.log"
+sed -i 's/cy=87cda0/cy=87cda1/' "$bad_tiered_cycle/celox-tiered.log"
 if validate_gate_results "$bad_tiered_cycle/results.tsv" "$bad_tiered_cycle" 2>/dev/null; then
     fail "gate accepted the wrong tiered Celox architectural completion cycle"
 fi
@@ -553,7 +553,7 @@ run_one() {
                 elapsed=NA
             fi
             printf '%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=87a690 x3=aa pass=1' \
+                'v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
                 "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=$jit_execute_elapsed" \
                 "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=$reported" >"$log"
@@ -575,7 +575,7 @@ run_one() {
                 elapsed=NA
             fi
             printf '%s\n%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=87a690 x3=aa pass=1' \
+                'v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=tiered opt_level=O2 four_state=false compile_only=false" \
                 "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=NA" \
                 "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 promotion_elapsed_ns=12 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
