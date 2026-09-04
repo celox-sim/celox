@@ -156,6 +156,1921 @@ mod tests {
     }
 
     #[test]
+    fn keeps_case_item_guards_on_nested_comb_branches() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic s, t, a, b, c, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'b0: if (t) y = a; else y = b;
+                            default: y = c;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("nested_case.sv"),
+        )
+        .expect("SV analysis should succeed");
+
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        assert_eq!(assignments.len(), 1);
+        let ir::Expr::Mux { else_expr, .. } = assignments[0].rhs() else {
+            panic!("expected a multiplexer chain");
+        };
+        // The default branch value must remain the final fallback so that
+        // `s != 0` selects `c`, not the nested else value.
+        assert_eq!(expr_bottom_else(else_expr), "c");
+    }
+
+    fn expr_bottom_else(expr: &ir::Expr) -> String {
+        match expr {
+            ir::Expr::Mux { else_expr, .. } => expr_bottom_else(else_expr),
+            ir::Expr::Ident(name) => name.clone(),
+            other => panic!("unexpected expression in mux chain: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserves_reads_between_merged_conditional_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, output logic x, y);
+                    always_comb begin
+                        x = d;
+                        y = x;
+                        if (c) x = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("intervening_read.sv"),
+        )
+        .expect("intervening read should use the value at its statement position");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            expr_references_ident_name(y.rhs(), "d"),
+            "expected y to use the preceding d assignment: {:?}",
+            y.rhs()
+        );
+        assert!(!expr_references_ident_name(y.rhs(), "x"));
+    }
+
+    #[test]
+    fn snapshots_unconditional_sources_before_relocated_conditional_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic a, b, c, d, e, output logic x, y);
+                    always_comb begin
+                        y = a;
+                        if (c) x = y;
+                        else x = b;
+                        y = d;
+                        if (e) x = b;
+                    end
+                endmodule
+            "#,
+            Path::new("relocated_cross_target_read.sv"),
+        )
+        .expect("a relocated write should retain values read at its source position");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let x = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "x")
+            .expect("x assignment");
+        assert!(expr_references_ident_name(x.rhs(), "a"));
+        assert!(
+            !expr_references_ident_name(x.rhs(), "y"),
+            "x must snapshot y before its later overwrite: {:?}",
+            x.rhs()
+        );
+    }
+
+    #[test]
+    fn preserves_fallback_guards_for_each_comb_target() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic x, y);
+                    always_comb begin
+                        x = 1'b0;
+                        y = 1'b0;
+                        if (c) x = a;
+                        else y = b;
+                    end
+                endmodule
+            "#,
+            Path::new("target_fallback.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            matches!(y.rhs(), ir::Expr::Mux { .. }),
+            "the else write must not become globally unconditional: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn keeps_writes_after_exhaustive_comb_fallbacks() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, a, b, e, output logic x);
+                    always_comb begin
+                        if (c) x = a;
+                        else x = b;
+                        if (d) x = e;
+                    end
+                endmodule
+            "#,
+            Path::new("write_after_fallback.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Mux { condition, .. } = rhs else {
+            panic!("expected the trailing write to produce a mux: {rhs:?}");
+        };
+        assert!(
+            expr_references_ident_name(condition, "d"),
+            "the trailing d write must retain priority: {rhs:?}"
+        );
+    }
+
+    #[test]
+    fn later_exhaustive_comb_chain_overrides_the_previous_chain() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, a, b, e, f, output logic x);
+                    always_comb begin
+                        if (c) x = a;
+                        else x = b;
+                        if (d) x = e;
+                        else x = f;
+                    end
+                endmodule
+            "#,
+            Path::new("consecutive_exhaustive_chains.sv"),
+        )
+        .expect("the later exhaustive chain should fully define x");
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        assert!(expr_references_ident_name(rhs, "d"));
+        assert!(expr_references_ident_name(rhs, "e"));
+        assert!(expr_references_ident_name(rhs, "f"));
+        assert!(
+            !expr_references_ident_name(rhs, "c")
+                && !expr_references_ident_name(rhs, "a")
+                && !expr_references_ident_name(rhs, "b"),
+            "the fully overriding second chain must discard the first chain: {rhs:?}"
+        );
+    }
+
+    #[test]
+    fn recognizes_complementary_equality_guards_as_exhaustive() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, c, output logic y);
+                    always_comb begin
+                        if (outer) begin
+                            if (s == 0) y = a;
+                            if (s != 0) y = b;
+                        end else begin
+                            y = c;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("complementary_equality_guards.sv"),
+        )
+        .expect("complementary two-state equality guards should define y exhaustively");
+    }
+
+    #[test]
+    fn recognizes_block_wrapped_complementary_guards_as_exhaustive() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, c, output logic y);
+                    always_comb begin
+                        if (outer) begin
+                            if (s) begin y = a; end
+                            if (!s) begin y = b; end
+                        end else begin
+                            y = c;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("block_wrapped_complementary_guards.sv"),
+        )
+        .expect("block-wrapped complementary guards should define y exhaustively");
+    }
+
+    #[test]
+    fn preserves_complementary_guards_across_harmless_blocks() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, output logic y, z);
+                    always_comb begin
+                        if (outer) begin
+                            if (s) y = a;
+                            begin z = 1'b0; end
+                            if (!s) y = b;
+                        end else begin
+                            y = a;
+                            z = 1'b1;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("harmless_block_between_complementary_guards.sv"),
+        )
+        .expect("a block that cannot change the guard should preserve its proof");
+    }
+
+    #[test]
+    fn invalidates_complementary_guards_for_overlapping_selected_writes() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic outer, q, a, b, c,
+                    input bit idx,
+                    output logic y
+                );
+                    logic [1:0] s;
+                    always_comb begin
+                        s = {q, q};
+                        if (outer) begin
+                            if (s[0]) y = a;
+                            s[idx] = b;
+                            if (!s[0]) y = c;
+                        end else begin
+                            y = a;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("overlapping_write_between_complementary_guards.sv"),
+        )
+        .expect_err("a dynamic overlapping write must invalidate the guard proof");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+
+        let error = analyze_source(
+            r#"
+                module Top(input logic outer, q, a, b, output logic y);
+                    logic s;
+                    function automatic bit f();
+                        return s;
+                    endfunction
+                    always_comb begin
+                        s = q;
+                        if (outer) begin
+                            if (f()) y = a;
+                            s = 1'b1;
+                            if (!f()) y = b;
+                        end else begin
+                            y = a;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("function_guard_dependency_write.sv"),
+        )
+        .expect_err("a function guard's free-variable write must invalidate its proof");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+    }
+
+    #[test]
+    fn substitutes_reads_of_selected_comb_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic [1:0] x, output logic y);
+                    always_comb begin
+                        x[0] = a;
+                        y = x[0];
+                        if (c) x[0] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_intervening_read.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(expr_references_ident_name(y.rhs(), "a"));
+        assert!(
+            !expr_references_ident_name(y.rhs(), "x"),
+            "y must observe the preceding selected write: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn substitutes_subselect_reads_of_selected_comb_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic c,
+                    input logic [2:0] a, b,
+                    output logic [3:0] x,
+                    output logic y
+                );
+                    always_comb begin
+                        x[3:1] = a;
+                        y = x[2];
+                        if (c) x[3:1] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_subselect_intervening_read.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(expr_references_ident_name(y.rhs(), "a"));
+        let ir::Expr::Select { msb, lsb, .. } = y.rhs() else {
+            panic!(
+                "expected the intervening bit read to select from a: {:?}",
+                y.rhs()
+            );
+        };
+        assert_eq!(msb, &ir::ConstExpr::Literal("1".to_string()));
+        assert_eq!(lsb, &ir::ConstExpr::Literal("1".to_string()));
+        assert!(
+            !expr_references_ident_name(y.rhs(), "x"),
+            "y must observe the matching bit of the preceding selected write: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn substitutes_partially_overlapping_reads_of_selected_comb_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic c,
+                    input logic [2:0] a, b,
+                    output logic [4:0] x,
+                    output logic [2:0] y
+                );
+                    always_comb begin
+                        x[3:1] = a;
+                        y = x[4:2];
+                        if (c) x[3:1] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_partial_overlap_intervening_read.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let y = assignments
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            expr_references_ident_name(y.rhs(), "a"),
+            "the overlapping bits must come from the preceding selected write: {:?}",
+            y.rhs()
+        );
+        assert!(
+            expr_references_ident_name(y.rhs(), "x"),
+            "the non-overlapping bit must retain its original source: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn coerces_always_comb_if_predicates_to_procedural_truth() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic s, output logic y);
+                    always_comb begin
+                        if (s) y = 1'b1;
+                        else y = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("always_comb_procedural_truth.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        let ir::Expr::Mux { condition, .. } = rhs else {
+            panic!("expected conditional assignment mux: {rhs:?}");
+        };
+        assert!(matches!(
+            &**condition,
+            ir::Expr::Unary {
+                op: ir::UnaryOp::RedOr,
+                expr,
+            } if matches!(
+                &**expr,
+                ir::Expr::Unary {
+                    op: ir::UnaryOp::ToTwoState,
+                    ..
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn applies_cross_target_substitutions_before_merging_comb_groups() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, d, output logic x, y);
+                    always_comb begin
+                        y = 1'b0;
+                        x = 1'b0;
+                        y = x;
+                        if (c) x = 1'b1;
+                        if (d) y = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("cross_target_substitution.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let y = ir.modules()[0].comb_processes()[0]
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(
+            !expr_references_ident_name(y.rhs(), "x"),
+            "y must use x's value at the intervening statement: {:?}",
+            y.rhs()
+        );
+    }
+
+    #[test]
+    fn uses_whole_vector_defaults_for_conditional_selected_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic c, output logic [1:0] x);
+                    always_comb begin
+                        x = '0;
+                        if (c) x[0] = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("whole_then_selected.sv"),
+        )
+        .expect("whole-vector initialization should cover the selected fallback");
+        assert_eq!(ir.modules()[0].comb_processes()[0].assignments().len(), 2);
+    }
+
+    #[test]
+    fn uses_selected_writes_before_conditional_whole_vector_writes() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, output logic [7:0] x);
+                    always_comb begin
+                        x = '0;
+                        x[0] = a;
+                        if (c) x = 8'hff;
+                    end
+                endmodule
+            "#,
+            Path::new("selected_then_conditional_whole.sv"),
+        )
+        .expect("the preceding selected write should initialize the whole-write fallback");
+    }
+
+    #[test]
+    fn permits_reads_after_assignments_on_the_same_comb_path() {
+        analyze_source(
+            r#"
+                module Top(input logic c, output logic x, y);
+                    always_comb begin
+                        if (c) begin
+                            x = 1'b1;
+                            y = x;
+                        end else begin
+                            x = 1'b0;
+                            y = x;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("path_local_comb_read.sv"),
+        )
+        .expect("each guarded read is preceded by a write on the same path");
+    }
+
+    #[test]
+    fn freezes_comb_branch_guards_before_overwriting_the_predicate() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic en, output logic t, y);
+                    always_comb begin
+                        t = en;
+                        y = 1'b0;
+                        if (t) begin
+                            t = 1'b0;
+                            y = 1'b1;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("frozen_comb_guard.sv"),
+        )
+        .expect("the branch predicate should use t's value on entry");
+        let y = ir.modules()[0].comb_processes()[0]
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.lhs() == "y")
+            .expect("y assignment");
+        assert!(expr_references_ident_name(y.rhs(), "en"));
+        assert!(!expr_references_ident_name(y.rhs(), "t"));
+    }
+
+    #[test]
+    fn rejects_entry_value_guards_relocated_past_their_first_write() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic a, b, d, e,
+                    output logic t, x
+                );
+                    always_comb begin
+                        if (t) x = a;
+                        else x = b;
+                        t = d;
+                        if (e) x = b;
+                    end
+                endmodule
+            "#,
+            Path::new("relocated_entry_guard.sv"),
+        )
+        .expect_err("the entry value of t cannot be moved past t's first write");
+        assert!(
+            error
+                .to_string()
+                .contains("read-before-write dependency inside always_comb"),
+            "unexpected error: {error}"
+        );
+
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic a, b, c, d, e, f,
+                    output logic y,
+                    output logic [1:0] x
+                );
+                    always_comb begin
+                        y = 1'b0;
+                        if (x) y = a;
+                        x[0] = c;
+                        if (d) x[0] = e;
+                        if (f) y = b;
+                    end
+                endmodule
+            "#,
+            Path::new("relocated_overlapping_entry_guard.sv"),
+        )
+        .expect_err("a whole-vector guard read cannot move past a selected write");
+        assert!(
+            error
+                .to_string()
+                .contains("read-before-write dependency inside always_comb"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn preserves_prior_partially_overlapping_selected_writes() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic c, d,
+                    input logic [2:0] a, b,
+                    output logic [3:0] x
+                );
+                    always_comb begin
+                        x = '0;
+                        if (c) x[3:1] = a;
+                        if (d) x[2:0] = b;
+                    end
+                endmodule
+            "#,
+            Path::new("overlapping_selected_fallback.sv"),
+        )
+        .expect("overlapping selected writes should preserve their procedural order");
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        let rhs = assignments.last().expect("final selected assignment").rhs();
+        assert!(
+            expr_references_ident_name(rhs, "a"),
+            "the later false path must retain the earlier selected value: {rhs:?}"
+        );
+    }
+
+    #[test]
+    fn requires_definite_assignment_before_filling_comb_fallbacks() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic c, d, a, b, output logic x);
+                    always_comb begin
+                        if (c) x = a;
+                        else if (d) x = b;
+                    end
+                endmodule
+            "#,
+            Path::new("nested_incomplete_fallback.sv"),
+        )
+        .expect_err("the incomplete nested fallback must infer a latch")
+        .to_string();
+        assert!(error.contains("latch inference inside always_comb"));
+    }
+
+    #[test]
+    fn rejects_genuine_self_reads_in_exhaustive_comb_branches() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic c, output logic [7:0] x);
+                    always_comb begin
+                        if (c) x = x + 1;
+                        else x = 0;
+                    end
+                endmodule
+            "#,
+            Path::new("genuine_self_read.sv"),
+        )
+        .expect_err("a genuine self-read must not be filled as a fallback hole")
+        .to_string();
+        assert!(error.contains("latch inference inside always_comb"));
+    }
+
+    #[test]
+    fn rejects_overlapping_selected_self_reads() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic c, output logic [1:0] x);
+                    always_comb begin
+                        if (c) x[0] = x[1:0];
+                        else x[0] = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("overlapping_selected_self_read.sv"),
+        )
+        .expect_err("an overlapping selected self-read must be rejected")
+        .to_string();
+        assert!(error.contains("latch inference inside always_comb"));
+    }
+
+    #[test]
+    fn sign_extends_negative_literals_in_widening_constant_casts() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter V = $bits(logic signed [7:0])'(4'shf)) ();
+                endmodule
+            "#,
+            Path::new("sign_extend_cast.sv"),
+        )
+        .expect("SV analysis should succeed");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-1));
+    }
+
+    #[test]
+    fn sizes_first_dimension_for_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = $size(logic [1:0][3:0])'(3'd7),
+                    parameter B = $bits(logic [1:0][3:0])'(4'd7)
+                ) ();
+                endmodule
+            "#,
+            Path::new("size_cast.sv"),
+        )
+        .expect("SV analysis should succeed");
+        // A 2-bit $size target truncates 7 to 3; an 8-bit $bits target
+        // keeps it.
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(7));
+    }
+
+    #[test]
+    fn infers_size_cast_targets_from_selected_expressions() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic [7:0] a);
+                    localparam Q = $bits(a[3:0])'(4'hf);
+                    localparam S = $size(a[3:0])'(4'hf);
+                endmodule
+            "#,
+            Path::new("selected_expression_size_cast.sv"),
+        )
+        .expect("selected expression types should determine size cast widths");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(15));
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(15));
+    }
+
+    #[test]
+    fn treats_scalar_size_cast_targets_as_one_bit() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter W = $size(logic)'(2'd3)) ();
+                endmodule
+            "#,
+            Path::new("scalar_size_cast.sv"),
+        )
+        .expect("a scalar $size cast target should resolve to one bit");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    }
+
+    #[test]
+    fn resolves_constant_cast_targets_from_module_environments() {
+        let alias_ir = analyze_source(
+            r#"
+                module Top;
+                    typedef logic [7:0] byte_t;
+                    localparam P = byte_t'(4'd3);
+                endmodule
+            "#,
+            Path::new("constant_alias_cast_env.sv"),
+        )
+        .expect("typedef cast target should resolve");
+        assert_eq!(
+            alias_ir.modules()[0].parameters()[0].resolved_value(),
+            Some(3)
+        );
+
+        let width_ir = analyze_source(
+            r#"
+                module Top;
+                    localparam W = 8;
+                    localparam Q = W'(4'd3);
+                endmodule
+            "#,
+            Path::new("constant_width_cast_env.sv"),
+        )
+        .expect("parameter-sized cast target should resolve");
+        assert_eq!(
+            width_ir.modules()[0].parameters()[1].resolved_value(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn evaluates_constant_cast_operand_expressions() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef logic [7:0] byte_t;
+                    localparam A = 3;
+                    localparam B = byte_t'(A);
+                    localparam C = byte_t'(1 + 2);
+                endmodule
+            "#,
+            Path::new("constant_cast_operands.sv"),
+        )
+        .expect("constant cast operands should be evaluated in the module environment");
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(3));
+        assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(3));
+    }
+
+    #[test]
+    fn resolves_enum_members_referencing_earlier_members() {
+        let ir = analyze_source(
+            r#"
+                module Top(input logic [1:0] sel, output logic y);
+                    typedef enum logic [1:0] { A = 2'd0, B = A + 2'd1 } E;
+                    always_comb y = (sel == B);
+                endmodule
+            "#,
+            Path::new("enum_member_ref.sv"),
+        )
+        .expect("SV analysis should succeed");
+
+        let assignments = ir.modules()[0].comb_processes()[0].assignments();
+        assert_eq!(assignments.len(), 1);
+        // `B` must resolve to its constant value even though it references
+        // the earlier member `A`.
+        assert!(
+            !expr_references_ident_name(assignments[0].rhs(), "B"),
+            "unresolved enum member in {:?}",
+            assignments[0].rhs()
+        );
+        assert!(
+            expr_contains_literal(assignments[0].rhs(), "1"),
+            "expected the folded member value in {:?}",
+            assignments[0].rhs()
+        );
+    }
+
+    #[test]
+    fn context_sizes_unbased_enum_member_initializers() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic [3:0] { A = '1 } E;
+                    logic [A:0] data;
+                endmodule
+            "#,
+            Path::new("unbased_enum_initializer.sv"),
+        )
+        .expect("an unbased fill should be sized to the enum base type");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(16));
+    }
+
+    #[test]
+    fn preserves_enum_base_types_during_constant_substitution() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [31:0] y);
+                    typedef enum logic [1:0] { A = 2'd0 } E;
+                    assign y = ~A;
+                endmodule
+            "#,
+            Path::new("typed_enum_constant.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let rhs = ir.modules()[0].assignments()[0].rhs();
+        let ir::Expr::Unary { expr, .. } = rhs else {
+            panic!("expected enum complement: {rhs:?}");
+        };
+        assert_eq!(&**expr, &ir::Expr::Literal("2'd0".to_string()));
+    }
+
+    #[test]
+    fn rejects_casez_nested_under_comb_conditionals() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic en, sel, output logic y);
+                    always_comb begin
+                        y = 1'b0;
+                        if (en) casez (sel)
+                            1'b?: y = 1'b1;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("nested_casez.sv"),
+        )
+        .expect_err("nested casez must be rejected")
+        .to_string();
+        assert!(
+            error.contains("casez or casex inside always_comb"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
+        match expr {
+            ir::Expr::Ident(ident) => ident == name,
+            ir::Expr::Select { expr, .. } => expr_references_ident_name(expr, name),
+            ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => parts
+                .iter()
+                .any(|part| expr_references_ident_name(part, name)),
+            ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
+                expr_references_ident_name(expr, name)
+            }
+            ir::Expr::Call { args, .. } => {
+                args.iter().any(|arg| expr_references_ident_name(arg, name))
+            }
+            ir::Expr::Binary { left, right, .. } => {
+                expr_references_ident_name(left, name) || expr_references_ident_name(right, name)
+            }
+            ir::Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                expr_references_ident_name(condition, name)
+                    || expr_references_ident_name(then_expr, name)
+                    || expr_references_ident_name(else_expr, name)
+            }
+            ir::Expr::Literal(_) => false,
+        }
+    }
+
+    fn expr_contains_literal(expr: &ir::Expr, needle: &str) -> bool {
+        match expr {
+            ir::Expr::Literal(value) => value == needle || value.ends_with(&format!("d{needle}")),
+            ir::Expr::Select { expr, .. } => expr_contains_literal(expr, needle),
+            ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
+                parts.iter().any(|part| expr_contains_literal(part, needle))
+            }
+            ir::Expr::Resize { expr, .. } | ir::Expr::Unary { expr, .. } => {
+                expr_contains_literal(expr, needle)
+            }
+            ir::Expr::Call { args, .. } => {
+                args.iter().any(|arg| expr_contains_literal(arg, needle))
+            }
+            ir::Expr::Binary { left, right, .. } => {
+                expr_contains_literal(left, needle) || expr_contains_literal(right, needle)
+            }
+            ir::Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                expr_contains_literal(condition, needle)
+                    || expr_contains_literal(then_expr, needle)
+                    || expr_contains_literal(else_expr, needle)
+            }
+            ir::Expr::Ident(_) => false,
+        }
+    }
+
+    #[test]
+    fn uses_enum_members_as_module_constants() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter logic [1:0] BASE = 2'd1
+                ) (input logic a, output logic y);
+                    typedef enum logic [1:0] { N = BASE + 2'd1 } E;
+                    logic [N-1:0] data;
+                    always_comb begin
+                        if (N != 0) y = a;
+                        else y = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("enum_const_env.sv"),
+        )
+        .expect("SV analysis should succeed");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .map(|signal| signal.r#type().resolved_width())
+            .unwrap();
+        assert_eq!(width, Some(2));
+    }
+
+    #[test]
+    fn resolves_parameters_that_reference_enum_members() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic [1:0] { N = 2 } E;
+                    localparam W = N;
+                    logic [W-1:0] data;
+                endmodule
+            "#,
+            Path::new("enum_parameter_dependency.sv"),
+        )
+        .expect("parameters should be re-resolved after enum collection");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(2));
+    }
+
+    #[test]
+    fn re_resolves_parameters_between_enum_declarations() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic [1:0] { A = 2 } E0;
+                    localparam W = A + 1;
+                    typedef enum logic [3:0] { B = W } E1;
+                    logic [B-1:0] data;
+                endmodule
+            "#,
+            Path::new("enum_parameter_enum_dependency.sv"),
+        )
+        .expect("parameters between enum declarations should be available to later enums");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(3));
+    }
+
+    #[test]
+    fn rebuilds_typedefs_after_preceding_enum_members() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum int { W = 3 } E;
+                    typedef logic [W'(2):0] B;
+                    typedef enum B { A = 3'b101 } F;
+                    logic [A-1:0] data;
+                endmodule
+            "#,
+            Path::new("enum_dependent_typedef.sv"),
+        )
+        .expect("later enum bases should use typedefs rebuilt from preceding members");
+        let width = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "data")
+            .and_then(|signal| signal.r#type().resolved_width());
+        assert_eq!(width, Some(5));
+    }
+
+    #[test]
+    fn treats_constant_equivalent_mux_case_selectors_as_two_state() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, output logic y);
+                    localparam logic P = 0;
+                    localparam logic Q = 0;
+                    always_comb begin
+                        case (c ? P : Q)
+                            1'b0: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_equivalent_mux_case.sv"),
+        )
+        .expect("equal constant mux arms should make the case selector exhaustive");
+    }
+
+    #[test]
+    fn skips_unreachable_sparse_case_items_with_default() {
+        analyze_source(
+            r#"
+                module Top(input bit [1:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            2'd0: y = a;
+                            2'd0: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("sparse_case_duplicate_with_default.sv"),
+        )
+        .expect("unreachable duplicate items should not prevent definite assignment");
+    }
+
+    #[test]
+    fn skips_duplicate_case_items_for_four_state_selectors() {
+        analyze_source(
+            r#"
+                module Top(input logic s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'b0: y = a;
+                            1'b0: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("four_state_duplicate_case_item.sv"),
+        )
+        .expect("an unreachable duplicate case item should not infer a latch");
+    }
+
+    #[test]
+    fn compares_normalized_four_state_case_labels_for_reachability() {
+        analyze_source(
+            r#"
+                module Top(input logic [1:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            2'd0: y = a;
+                            2'b00: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("normalized_four_state_case_labels.sv"),
+        )
+        .expect("equivalent case-label values should make the later item unreachable");
+
+        analyze_source(
+            r#"
+                module Top(input logic [8:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            9'd0: y = a;
+                            9'b000000000: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("wide_normalized_four_state_case_labels.sv"),
+        )
+        .expect("equivalent wide labels should be normalized without domain enumeration");
+
+        analyze_source(
+            r#"
+                module Top(input logic signed [8:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'sb1: y = a;
+                            9'b111111111: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("selector_typed_four_state_case_labels.sv"),
+        )
+        .expect("labels should be normalized in the signed selector context");
+
+        let error = analyze_source(
+            r#"
+                module Top(input logic [8:0] s, input logic a, b, output logic y);
+                    always_comb begin
+                        case (s)
+                            10'h3ff: y = a;
+                            9'h1ff: ;
+                            default: y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("wider_unreachable_case_label.sv"),
+        )
+        .expect_err("a wider unreachable label must not hide a reachable empty item");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+    }
+
+    #[test]
+    fn folds_compound_four_state_constant_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic y);
+                    always_comb begin
+                        case (1'bx | 1'b0)
+                            1'bx: if (c) y = a; else y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("compound_four_state_constant_case_selector.sv"),
+        )
+        .expect("a compound constant X selector should preserve its mask for coverage");
+    }
+
+    #[test]
+    fn expands_constant_function_predicates_for_definite_assignments() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, a, b, output logic y);
+                    function automatic bit one();
+                        return 1'b1;
+                    endfunction
+                    always_comb begin
+                        if (outer) begin
+                            if (one()) y = a;
+                        end else begin
+                            y = b;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("constant_function_definite_assignment.sv"),
+        )
+        .expect("a constant-true function predicate should make the inner write definite");
+    }
+
+    #[test]
+    fn folds_concatenated_four_state_constant_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb begin
+                        case ({1'bx})
+                            1'bx: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("concatenated_four_state_constant_case_selector.sv"),
+        )
+        .expect("a constant concatenation should retain its X mask for case coverage");
+    }
+
+    #[test]
+    fn recognizes_mixed_boolean_and_zero_equality_complements() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, input bit s, input logic a, b, c, output logic y);
+                    always_comb begin
+                        if (outer) begin
+                            if (s) y = a;
+                            if (s == 0) y = b;
+                        end else begin
+                            y = c;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("mixed_boolean_equality_complements.sv"),
+        )
+        .expect("a two-state predicate and its zero equality should be complementary");
+    }
+
+    #[test]
+    fn resolves_function_types_in_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [7:0] y);
+                    function automatic logic [7:0] f();
+                        return 8'h00;
+                    endfunction
+                    localparam P = $bits(f())'(16'hffff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("function_size_cast_target.sv"),
+        )
+        .expect("a size-function cast target should use the function return type");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
+
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [7:0] y);
+                    function automatic logic [$bits(g())'(7):0] f();
+                        return 8'h00;
+                    endfunction
+                    function automatic logic [7:0] g();
+                        return 8'h00;
+                    endfunction
+                    localparam P = $bits(f())'(16'hffff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("dependent_function_size_cast_target.sv"),
+        )
+        .expect("function return metadata discovery should resolve dependencies without recursion");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
+    }
+
+    #[test]
+    fn preserves_function_return_dimensions_in_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [1:0] y);
+                    function automatic logic [1:0][3:0] f();
+                        return '0;
+                    endfunction
+                    localparam P = $size(f())'(8'hff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("function_dimension_size_cast_target.sv"),
+        )
+        .expect("$size should use the first packed function return dimension");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
+
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [1:0] y);
+                    function automatic logic [$bits(g())'(1):0][3:0] f();
+                        return '0;
+                    endfunction
+                    function automatic logic [7:0] g();
+                        return '0;
+                    endfunction
+                    localparam P = $size(f())'(8'hff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("dependent_function_dimension_size_cast_target.sv"),
+        )
+        .expect("dependent function return dimensions should remain available to $size");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(3));
+    }
+
+    #[test]
+    fn substitutes_loop_indices_when_tracking_comb_writes() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, q, a, b, c, output logic y);
+                    logic [1:0] s;
+                    always_comb begin
+                        s = {q, q};
+                        if (outer) begin
+                            if (s[0] === 1'b1) y = a;
+                            for (int i = 1; i < 2; i++) s[i] = b;
+                            if (s[0] !== 1'b1) y = c;
+                        end else begin
+                            y = a;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("indexed_loop_comb_writes.sv"),
+        )
+        .expect("a concrete nonoverlapping loop write should preserve the guard proof");
+    }
+
+    #[test]
+    fn rejects_static_for_loops_that_write_their_index() {
+        let error = analyze_source(
+            r#"
+                module Top(output logic [3:0] y);
+                    always_comb begin
+                        for (int i = 0; i < 4; i++) begin
+                            y[i] = 1'b1;
+                            i = i + 1;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("loop_body_index_write.sv"),
+        )
+        .expect_err("a loop body that changes its index must not be statically unrolled")
+        .to_string();
+        assert!(error.contains("procedural loop inside always_comb"));
+    }
+
+    #[test]
+    fn analyzes_comb_processes_with_generate_local_constants() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    if (1) begin : selected
+                        localparam bit S = 1'b0;
+                        always_comb begin
+                            case (S)
+                                1'b0: y = a;
+                            endcase
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("generate_local_comb_constant.sv"),
+        )
+        .expect("generate-local constants should participate in always_comb analysis");
+    }
+
+    #[test]
+    fn folds_four_state_conditional_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb begin
+                        case (1'bx ? 1'b0 : 1'b1)
+                            1'bx: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("conditional_four_state_case_selector.sv"),
+        )
+        .expect("a constant conditional selector should retain its merged X mask");
+    }
+
+    #[test]
+    fn types_unpacked_array_elements_in_size_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top(output logic [7:0] y);
+                    logic [7:0] a[2];
+                    localparam P = $bits(a[0])'(16'hffff);
+                    always_comb y = P;
+                endmodule
+            "#,
+            Path::new("array_element_size_cast_target.sv"),
+        )
+        .expect("size-function expression typing should include module variable dimensions");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0xff));
+    }
+
+    #[test]
+    fn applies_function_return_types_in_procedural_lvalue_indices() {
+        let ir = analyze_source(
+            r#"
+                module Top(input bit [1:0] index, input logic data, output logic [1:0] x);
+                    function automatic bit idx();
+                        return index;
+                    endfunction
+                    always_comb begin
+                        x = '0;
+                        x[idx()] = data;
+                    end
+                endmodule
+            "#,
+            Path::new("function_typed_lvalue_index.sv"),
+        )
+        .expect("the one-bit function return should truncate the expanded lvalue index");
+        assert!(
+            ir.modules()[0].comb_processes()[0]
+                .assignments()
+                .iter()
+                .any(|assignment| assignment.lhs() == "x"
+                    && expr_references_ident_name(assignment.rhs(), "data")),
+            "the selected write must not be dropped: {:?}",
+            ir.modules()[0].comb_processes()[0].assignments()
+        );
+    }
+
+    #[test]
+    fn expands_function_calls_in_case_labels_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic outer, a, b, output logic y);
+                    function automatic bit zero();
+                        return 1'b0;
+                    endfunction
+                    always_comb begin
+                        if (outer) begin
+                            case (1'b0)
+                                zero(): y = a;
+                            endcase
+                        end else begin
+                            y = b;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("function_case_label_coverage.sv"),
+        )
+        .expect("a folded function case label should make the branch exhaustive");
+    }
+
+    #[test]
+    fn caps_aggregate_nested_static_loop_expansion() {
+        let error = analyze_source(
+            r#"
+                module Top(output logic y);
+                    always_comb begin
+                        y = 1'b0;
+                        for (int i = 0; i < 101; i++)
+                            for (int j = 0; j < 100; j++)
+                                y = 1'b1;
+                    end
+                endmodule
+            "#,
+            Path::new("nested_static_loop_budget.sv"),
+        )
+        .expect_err("nested loop expansion must have an aggregate bound")
+        .to_string();
+        assert!(error.contains("procedural loop unroll limit exceeded"));
+    }
+
+    #[test]
+    fn restricts_enum_alias_types_to_the_declared_base() {
+        let ir = analyze_source(
+            r#"
+                module Top(output E y);
+                    typedef enum logic { A = int'(1) } E;
+                    always_comb y = A;
+                endmodule
+            "#,
+            Path::new("enum_member_cast_type_is_not_base.sv"),
+        )
+        .expect("types in enum member initializers must not replace the enum base");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(1)
+        );
+        assert!(!ir.modules()[0].ports()[0].r#type().is_signed());
+    }
+
+    #[test]
+    fn recognizes_complete_four_state_cases() {
+        analyze_source(
+            r#"
+                module Top(input logic s, input logic a, output logic y);
+                    always_comb begin
+                        case (s)
+                            1'b0: y = a;
+                            1'b1: y = a;
+                            1'bx: y = a;
+                            1'bz: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("complete_four_state_case.sv"),
+        )
+        .expect("all four states should exhaust a one-bit logic selector");
+    }
+
+    #[test]
+    fn recognizes_exhaustive_constant_four_state_cases() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic y);
+                    always_comb begin
+                        case (1'bx)
+                            1'bx: if (c) y = a; else y = b;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_four_state_case_selector.sv"),
+        )
+        .expect("a matching X-valued constant case item should be exhaustive");
+    }
+
+    #[test]
+    fn expands_constant_function_case_selectors_for_coverage() {
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    function automatic bit f();
+                        return 1'b0;
+                    endfunction
+                    always_comb begin
+                        case (f())
+                            1'b0: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_function_case_selector.sv"),
+        )
+        .expect("a constant function selector should make its matching item exhaustive");
+
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    function automatic logic f();
+                        return 1'bx;
+                    endfunction
+                    always_comb begin
+                        case (f())
+                            1'bx: y = a;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("constant_unknown_function_case_selector.sv"),
+        )
+        .expect("an X-valued constant function selector should preserve its mask");
+    }
+
+    #[test]
+    fn expands_function_calls_in_procedural_lvalue_indices() {
+        analyze_source(
+            r#"
+                module Top(input bit index, input logic data, output logic [1:0] x);
+                    function automatic bit idx();
+                        return index;
+                    endfunction
+                    always_comb begin
+                        x = '0;
+                        x[idx()] = data;
+                    end
+                endmodule
+            "#,
+            Path::new("function_lvalue_index.sv"),
+        )
+        .expect("a supported function call in an lvalue index should be expanded");
+    }
+
+    #[test]
+    fn resolves_value_dependent_type_parameter_defaults() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 8,
+                    parameter type T = logic [W'(7):0]
+                ) (output T y);
+                    always_comb y = 8'hff;
+                endmodule
+            "#,
+            Path::new("value_dependent_type_parameter.sv"),
+        )
+        .expect("a type parameter default should use preceding value parameters");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn caps_dynamic_select_normalization_expansion() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic [16:0] index,
+                    input logic data, replace,
+                    output logic [4096:0] value
+                );
+                    always_comb begin
+                        value = '0;
+                        value[index] = data;
+                        if (replace) value = '1;
+                    end
+                endmodule
+            "#,
+            Path::new("capped_dynamic_select_expansion.sv"),
+        )
+        .expect_err("oversized dynamic-select expansion should be rejected compactly");
+        assert!(
+            error
+                .to_string()
+                .contains("dynamic selected write expansion exceeds limit")
+        );
+    }
+
+    #[test]
+    fn retains_zero_iteration_loop_writes_for_latch_detection() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb
+                        for (int i = 0; i < 0; i++) y = a;
+                endmodule
+            "#,
+            Path::new("zero_iteration_comb_loop.sv"),
+        )
+        .expect_err("a zero-iteration loop must not silently discard its target");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+
+        let error = analyze_source(
+            r#"
+                module Top(input logic enable, a, output logic y);
+                    always_comb begin
+                        if (enable)
+                            for (int i = 0; i < 0; i++) y = a;
+                    end
+                endmodule
+            "#,
+            Path::new("nested_zero_iteration_comb_loop.sv"),
+        )
+        .expect_err("a nested zero-iteration loop must retain its write target");
+        assert!(
+            error
+                .to_string()
+                .contains("latch inference inside always_comb")
+        );
+
+        analyze_source(
+            r#"
+                module Top(input logic a, output logic y);
+                    always_comb begin
+                        y = 1'b0;
+                        for (int i = 0; i < 0; i++) y = a;
+                    end
+                endmodule
+            "#,
+            Path::new("initialized_zero_iteration_comb_loop.sv"),
+        )
+        .expect("a preceding assignment should initialize a zero-iteration loop target");
+    }
+
+    #[test]
+    fn materializes_static_loop_indices_in_definite_write_targets() {
+        analyze_source(
+            r#"
+                module Top(input logic c, a, b, output logic [1:0] x);
+                    always_comb begin
+                        if (c) begin
+                            x[0] = a;
+                            x[1] = a;
+                        end else begin
+                            for (int i = 0; i < 2; i++) x[i] = b;
+                        end
+                    end
+                endmodule
+            "#,
+            Path::new("materialized_definite_loop_targets.sv"),
+        )
+        .expect("each static loop iteration should contribute its concrete target");
+    }
+
+    #[test]
+    fn preserves_named_constant_casts_in_packed_ranges() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 8
+                ) (
+                    output logic [W'(15):0] y
+                );
+                endmodule
+            "#,
+            Path::new("named_cast_packed_range.sv"),
+        )
+        .expect("named constant casts should lower with the module environment");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn resolves_named_casts_while_collecting_parameter_ranges() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 3,
+                    parameter logic [W'(2):0] P = 3'b100
+                ) ();
+                endmodule
+            "#,
+            Path::new("named_cast_parameter_range.sv"),
+        )
+        .expect("parameter ranges should use preceding parameters in named casts");
+        let parameter = &ir.modules()[0].parameters()[1];
+        assert_eq!(parameter.declared_width(), Some(3));
+        assert_eq!(parameter.resolved_value(), Some(4));
+    }
+
+    #[test]
+    fn preserves_named_constant_casts_in_unpacked_ranges() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter W = 2
+                ) (
+                    output logic y [W'(1):0]
+                );
+                endmodule
+            "#,
+            Path::new("named_cast_unpacked_range.sv"),
+        )
+        .expect("named constant casts in unpacked dimensions should use the module environment");
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn preserves_operand_signedness_for_named_numeric_size_casts() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    localparam W = 8;
+                    localparam P = W'(4'shf);
+                    localparam Q = 16'(P);
+                endmodule
+            "#,
+            Path::new("named_numeric_size_cast.sv"),
+        )
+        .expect("named numeric size casts should preserve operand signedness");
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_value(), Some(-1));
+        assert_eq!(parameters[1].resolved_signed(), Some(true));
+        assert_eq!(parameters[2].resolved_value(), Some(-1));
+    }
+
+    #[test]
+    fn applies_typedef_signedness_to_constant_primary_cast_targets() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef logic signed [7:0] S;
+                    localparam P = S'(8'hff);
+                endmodule
+            "#,
+            Path::new("constant_primary_typedef_cast.sv"),
+        )
+        .expect("a typedef cast should use the typedef signedness");
+        let parameter = &ir.modules()[0].parameters()[0];
+        assert_eq!(parameter.resolved_value(), Some(-1));
+        assert_eq!(parameter.resolved_signed(), Some(true));
+    }
+
+    #[test]
+    fn preserves_casted_ranges_while_collecting_typedefs() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter W = 8);
+                    typedef logic [W'(15):0] T;
+                    T x;
+                endmodule
+            "#,
+            Path::new("casted_typedef_range.sv"),
+        )
+        .expect("typedef ranges should use the populated module environment");
+        assert_eq!(
+            ir.modules()[0].signals()[0].r#type().resolved_width(),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn preserves_named_casts_in_constant_select_indices() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    localparam W = 1;
+                    localparam logic [1:0] A = 2'b10;
+                    localparam B = A[W'(0)];
+                endmodule
+            "#,
+            Path::new("casted_constant_select.sv"),
+        )
+        .expect("constant select indices should use the populated module environment");
+        assert_eq!(ir.modules()[0].parameters()[2].resolved_value(), Some(0));
+    }
+
+    #[test]
+    fn converts_unknowns_when_constant_casting_to_two_state_types() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef bit [1:0] two_t;
+                    localparam logic [1:0] P = two_t'(2'bx1);
+                endmodule
+            "#,
+            Path::new("two_state_constant_cast.sv"),
+        )
+        .expect("two-state constant casts should convert unknown bits to zero");
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    }
+
+    #[test]
+    fn resolves_typedef_declared_parameter_types() {
+        let ir = analyze_source(
+            r#"
+                module Top;
+                    typedef enum logic signed [1:0] { Z = 0 } E;
+                    localparam E P = '0;
+                    localparam B = $bits(P);
+                endmodule
+            "#,
+            Path::new("typedef_declared_parameter.sv"),
+        )
+        .expect("typedef-declared parameters should retain their declared type");
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[0].declared_width(), Some(2));
+        assert_eq!(parameters[0].declared_signed(), Some(true));
+        assert_eq!(parameters[1].resolved_value(), Some(2));
+    }
+
+    #[test]
+    fn preserves_enum_types_in_instance_parameter_overrides() {
+        let ir = analyze_source(
+            r#"
+                module Child #(parameter P = 0) ();
+                endmodule
+
+                module Top;
+                    typedef enum logic signed [1:0] { A = 2'b10 } E;
+                    Child #(.P(A)) child();
+                endmodule
+            "#,
+            Path::new("typed_enum_parameter_override.sv"),
+        )
+        .expect("enum parameter overrides should retain their declared type");
+        let top = ir
+            .modules()
+            .iter()
+            .find(|module| module.name() == "Top")
+            .expect("Top module should exist");
+        assert_eq!(
+            top.instances()[0].parameter_overrides()[0].value(),
+            Some(&ir::ConstExpr::Literal("2'sd2".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_conditional_predicate_conjunction_terms() {
+        let error = analyze_source(
+            r#"
+                module Top(input logic a, b, output logic y);
+                    always_comb begin
+                        if (a &&& b) y = 1'b1;
+                        else y = 1'b0;
+                    end
+                endmodule
+            "#,
+            Path::new("predicate_conjunction.sv"),
+        )
+        .expect_err("unsupported predicate conjunctions must not be partially lowered")
+        .to_string();
+        assert!(
+            error.contains("predicate lowering"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn analyzes_basic_sv_module_name() {
         let ir = analyze_source(
             r#"
@@ -486,7 +2401,7 @@ mod tests {
                 .iter()
                 .find(|parameter| parameter.name() == "MAX_COUNT")
                 .and_then(|parameter| parameter.resolved_value()),
-            Some(0xffff_ffff)
+            Some(3)
         );
         assert_eq!(
             counter
