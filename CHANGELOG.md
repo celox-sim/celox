@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.6 (2026-09-05)
+
+## What's Changed
+* chore(deps): update dependency lefthook to v2.1.12 by @renovate[bot] in https://github.com/celox-sim/celox/pull/747
+* chore(deps): update pnpm to v11.25.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/751
+* chore(deps): update rust crate toml to v1.1.5 by @renovate[bot] in https://github.com/celox-sim/celox/pull/750
+* chore(deps): update pnpm to v12 by @renovate[bot] in https://github.com/celox-sim/celox/pull/753
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.5...v0.4.6
+
 ## 0.4.5 (2026-09-04)
 
 ## What's Changed
