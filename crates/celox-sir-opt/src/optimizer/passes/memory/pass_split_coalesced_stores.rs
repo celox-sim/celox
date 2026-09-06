@@ -1,5 +1,5 @@
 //! Split wide Concat+Store into at most one native-vector-width per store,
-//! placing each store immediately after its source value computation.
+//! placing each store after its source computation and preceding memory effects.
 //! This dramatically reduces register pressure for large arrays.
 //!
 //! Complexity: O(n) per block where n = number of instructions.
@@ -52,12 +52,53 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
             insertions: Vec<(usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>)>,
         }
         let mut plans: Vec<SplitPlan> = Vec::new();
+        let mut last_access: HashMap<RegionedAbsoluteAddr, usize> = HashMap::default();
+        let mut last_observable = None;
 
         for (si, inst) in block.instructions.iter().enumerate() {
+            // A source value being ready does not make its Store movable:
+            // another Concat operand can still read the destination's old
+            // value. Preserve accesses to either side of a Commit as well.
+            // Whole-object barriers keep this scan linear and still permit
+            // early stores to independent state objects.
+            let memory_floor = match inst {
+                SIRInstruction::Store(addr, ..) => last_access.get(addr).copied(),
+                _ => None,
+            }
+            .max(last_observable);
+            match inst {
+                SIRInstruction::Load(_, addr, ..) => {
+                    last_access.insert(*addr, si);
+                }
+                SIRInstruction::Store(addr, _, _, _, triggers, sites) => {
+                    last_access.insert(*addr, si);
+                    if !triggers.is_empty() || !sites.is_empty() {
+                        last_observable = Some(si);
+                    }
+                }
+                SIRInstruction::Commit(src, dst, _, _, triggers) => {
+                    last_access.insert(*src, si);
+                    last_access.insert(*dst, si);
+                    if !triggers.is_empty() {
+                        last_observable = Some(si);
+                    }
+                }
+                SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
+                    last_observable = Some(si);
+                }
+                _ => {}
+            }
             let (addr, offset, width, src_reg, comb_capture_sites) = match inst {
-                SIRInstruction::Store(addr, SIROffset::Static(off), width, src, _, sites)
-                    if *width > 64 =>
-                {
+                SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(off),
+                    width,
+                    src,
+                    triggers,
+                    sites,
+                ) if *width > 64 && triggers.is_empty() && sites.is_empty() => {
                     (*addr, *off, *width, *src, sites.clone())
                 }
                 _ => continue,
@@ -157,7 +198,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
                     comb_capture_sites.clone(),
                 ));
 
-                insertions.push((insert_after, insts_to_insert));
+                insertions.push((insert_after.max(memory_floor.unwrap_or(0)), insts_to_insert));
                 chunk_offset += chunk_width;
             }
 
@@ -246,6 +287,140 @@ mod tests {
             instance_id: InstanceId(0),
             var_id: make_var_id(0),
         }
+    }
+
+    fn store_around(
+        access: SIRInstruction<RegionedAbsoluteAddr>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut register_map = crate::HashMap::default();
+        let mut instructions = Vec::new();
+        for index in 0..4 {
+            let register = RegisterId(index);
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Imm(register, SIRValue::new(index as u64)));
+            if index == 1 {
+                instructions.push(access.clone());
+            }
+        }
+        register_map.insert(RegisterId(4), RegisterType::Logic { width: 256 });
+        register_map.insert(
+            RegisterId(5),
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        instructions.push(SIRInstruction::Concat(
+            RegisterId(4),
+            vec![RegisterId(3), RegisterId(2), RegisterId(1), RegisterId(0)],
+        ));
+        instructions.push(SIRInstruction::Store(
+            make_addr(),
+            SIROffset::Static(0),
+            256,
+            RegisterId(4),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map,
+        }
+    }
+
+    #[test]
+    fn split_stores_preserve_old_reads_and_both_sides_of_commits() {
+        let addr = make_addr();
+        let other = RegionedAbsoluteAddr {
+            var_id: make_var_id(1),
+            ..addr
+        };
+        for access in [
+            SIRInstruction::Load(RegisterId(5), addr, SIROffset::Static(0), 64),
+            SIRInstruction::Load(RegisterId(5), addr, SIROffset::Dynamic(RegisterId(0)), 64),
+            SIRInstruction::Commit(addr, other, SIROffset::Static(0), 64, Vec::new()),
+            SIRInstruction::Commit(other, addr, SIROffset::Static(0), 64, Vec::new()),
+        ] {
+            let mut eu = store_around(access);
+            split_coalesced_stores(&mut eu, 64);
+            eu.verify_result().unwrap();
+            let instructions = &eu.blocks[&BlockId(0)].instructions;
+            let barrier = instructions
+                .iter()
+                .position(|i| matches!(i, SIRInstruction::Load(..) | SIRInstruction::Commit(..)))
+                .unwrap();
+            assert!(
+                instructions[..barrier]
+                    .iter()
+                    .all(|i| !matches!(i, SIRInstruction::Store(..)))
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|i| matches!(i, SIRInstruction::Store(..)))
+                    .count(),
+                4
+            );
+        }
+    }
+
+    #[test]
+    fn split_stores_can_still_move_across_independent_reads() {
+        let other = RegionedAbsoluteAddr {
+            var_id: make_var_id(1),
+            ..make_addr()
+        };
+        let mut eu = store_around(SIRInstruction::Load(
+            RegisterId(5),
+            other,
+            SIROffset::Static(0),
+            64,
+        ));
+        split_coalesced_stores(&mut eu, 64);
+        eu.verify_result().unwrap();
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        let load = instructions
+            .iter()
+            .position(|i| matches!(i, SIRInstruction::Load(..)))
+            .unwrap();
+        assert_eq!(
+            instructions[..load]
+                .iter()
+                .filter(|i| matches!(i, SIRInstruction::Store(..)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn split_stores_do_not_duplicate_capture_effects() {
+        let mut eu = store_around(SIRInstruction::Load(
+            RegisterId(5),
+            make_addr(),
+            SIROffset::Static(0),
+            64,
+        ));
+        let instructions = &mut eu.blocks.get_mut(&BlockId(0)).unwrap().instructions;
+        let Some(SIRInstruction::Store(_, _, _, _, _, sites)) = instructions.last_mut() else {
+            panic!("fixture ends in Store")
+        };
+        sites.push(7);
+        let original = instructions.clone();
+        split_coalesced_stores(&mut eu, 64);
+        assert_eq!(eu.blocks[&BlockId(0)].instructions, original);
     }
 
     #[test]
