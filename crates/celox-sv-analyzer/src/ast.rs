@@ -1553,7 +1553,8 @@ fn reject_silently_ignored_constructs(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
-    let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
+    let inactive_nodes =
+        inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env, type_aliases);
     let has_leaking_conditional_generate_local =
         conditional_generate_has_leaking_local(node.clone(), syntax_tree);
     reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
@@ -2000,10 +2001,17 @@ fn inactive_conditional_generate_nodes<'a>(
     node: RefNode<'a>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Vec<RefNode<'a>> {
     let mut selections = Vec::new();
     for item in module_non_port_items(node) {
-        generate_selections_from_non_port_item(item, syntax_tree, const_env, &mut selections);
+        generate_selections_from_non_port_item(
+            item,
+            syntax_tree,
+            const_env,
+            type_aliases,
+            &mut selections,
+        );
     }
     selections
         .into_iter()
@@ -2031,12 +2039,19 @@ fn generate_selections_from_non_port_item<'a>(
     item: &'a sv_parser::NonPortModuleItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
 ) {
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
             for item in &region.nodes.1 {
-                generate_selections_from_generate_item(item, syntax_tree, const_env, selections);
+                generate_selections_from_generate_item(
+                    item,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                    selections,
+                );
             }
         }
         sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
@@ -2044,6 +2059,7 @@ fn generate_selections_from_non_port_item<'a>(
                 item,
                 syntax_tree,
                 const_env,
+                type_aliases,
                 selections,
             );
         }
@@ -2055,10 +2071,17 @@ fn generate_selections_from_generate_item<'a>(
     item: &'a sv_parser::GenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
 ) {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-        generate_selections_from_module_or_generate_item(item, syntax_tree, const_env, selections);
+        generate_selections_from_module_or_generate_item(
+            item,
+            syntax_tree,
+            const_env,
+            type_aliases,
+            selections,
+        );
     }
 }
 
@@ -2066,6 +2089,7 @@ fn generate_selections_from_module_or_generate_item<'a>(
     item: &'a sv_parser::ModuleOrGenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
 ) {
     let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
@@ -2077,11 +2101,18 @@ fn generate_selections_from_module_or_generate_item<'a>(
                 generate,
                 syntax_tree,
                 const_env,
+                type_aliases,
                 selections,
             );
         }
         sv_parser::ModuleCommonItem::LoopGenerateConstruct(generate) => {
-            generate_selections_from_loop_generate(generate, syntax_tree, const_env, selections);
+            generate_selections_from_loop_generate(
+                generate,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                selections,
+            );
         }
         _ => {}
     }
@@ -2091,14 +2122,17 @@ fn generate_selections_from_conditional_generate<'a>(
     generate: &'a sv_parser::ConditionalGenerateConstruct,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
 ) {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
         return;
     };
-    let condition = const_expr_from_ref_node(
+    let condition = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
         syntax_tree,
+        const_env,
+        type_aliases,
     )
     .and_then(|condition| eval_ast_const_expr(&condition, const_env));
     let then_selected = condition.map(|condition| condition != 0).unwrap_or(true);
@@ -2108,6 +2142,7 @@ fn generate_selections_from_conditional_generate<'a>(
             &generate.nodes.2,
             syntax_tree,
             const_env,
+            type_aliases,
             selections,
         );
     }
@@ -2115,7 +2150,13 @@ fn generate_selections_from_conditional_generate<'a>(
         let else_selected = condition.map(|condition| condition == 0).unwrap_or(true);
         record_generate_block_selection(selections, block, else_selected);
         if else_selected {
-            generate_selections_from_generate_block(block, syntax_tree, const_env, selections);
+            generate_selections_from_generate_block(
+                block,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                selections,
+            );
         }
     }
 }
@@ -2124,6 +2165,7 @@ fn generate_selections_from_loop_generate<'a>(
     generate: &'a sv_parser::LoopGenerateConstruct,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
 ) {
     let Some(name) = identifier_text(
@@ -2135,13 +2177,16 @@ fn generate_selections_from_loop_generate<'a>(
             &generate.nodes.2,
             syntax_tree,
             const_env,
+            type_aliases,
             selections,
         );
         return;
     };
-    let Some(init) = const_expr_from_ref_node(
+    let Some(init) = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.0.nodes.3),
         syntax_tree,
+        const_env,
+        type_aliases,
     )
     .and_then(|init| eval_ast_const_expr(&init, const_env)) else {
         record_generate_block_selection(selections, &generate.nodes.2, true);
@@ -2149,19 +2194,23 @@ fn generate_selections_from_loop_generate<'a>(
             &generate.nodes.2,
             syntax_tree,
             const_env,
+            type_aliases,
             selections,
         );
         return;
     };
-    let Some(condition) = const_expr_from_ref_node(
+    let Some(condition) = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.2.nodes.0),
         syntax_tree,
+        const_env,
+        type_aliases,
     ) else {
         record_generate_block_selection(selections, &generate.nodes.2, true);
         generate_selections_from_generate_block(
             &generate.nodes.2,
             syntax_tree,
             const_env,
+            type_aliases,
             selections,
         );
         return;
@@ -2178,6 +2227,7 @@ fn generate_selections_from_loop_generate<'a>(
                 &generate.nodes.2,
                 syntax_tree,
                 &loop_env,
+                type_aliases,
                 selections,
             );
             return;
@@ -2190,11 +2240,16 @@ fn generate_selections_from_loop_generate<'a>(
             &generate.nodes.2,
             syntax_tree,
             &loop_env,
+            type_aliases,
             selections,
         );
-        let Some(next) =
-            next_genvar_value(value, &generate.nodes.1.nodes.1.4, syntax_tree, &loop_env)
-        else {
+        let Some(next) = next_genvar_value(
+            value,
+            &generate.nodes.1.nodes.1.4,
+            syntax_tree,
+            &loop_env,
+            type_aliases,
+        ) else {
             break;
         };
         value = next;
@@ -2206,11 +2261,18 @@ fn generate_selections_from_generate_block<'a>(
     block: &'a sv_parser::GenerateBlock,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
 ) {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
-            generate_selections_from_generate_item(item, syntax_tree, const_env, selections);
+            generate_selections_from_generate_item(
+                item,
+                syntax_tree,
+                const_env,
+                type_aliases,
+                selections,
+            );
         }
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
@@ -2218,7 +2280,13 @@ fn generate_selections_from_generate_block<'a>(
                 if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
                     continue;
                 }
-                generate_selections_from_generate_item(item, syntax_tree, &block_env, selections);
+                generate_selections_from_generate_item(
+                    item,
+                    syntax_tree,
+                    &block_env,
+                    type_aliases,
+                    selections,
+                );
             }
         }
     }
@@ -3383,9 +3451,11 @@ fn signals_from_module_common_item(
             let sv_parser::ConditionalGenerateConstruct::If(generate) = &**generate else {
                 return Ok(());
             };
-            let condition = const_expr_from_ref_node(
+            let condition = const_expr_from_ref_node_with_env(
                 RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
                 syntax_tree,
+                const_env,
+                type_aliases,
             )
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("conditional-generate condition lowering".to_string())
@@ -4937,15 +5007,22 @@ fn function_packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimensi
         .collect()
 }
 
-fn packed_dimensions_from_ref_node(
-    node: RefNode<'_>,
+fn function_param_packed_dimensions(
+    data_type: &sv_parser::DataTypeOrImplicit,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<PackedDimension> {
-    if let Some(alias) = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases) {
+    if let Some(alias) = type_alias_from_data_type_or_implicit(data_type, syntax_tree, type_aliases)
+    {
         function_packed_dimension_widths(alias.packed_ranges())
     } else {
-        function_packed_dimension_widths(&packed_ranges_from_ref_node(node, syntax_tree))
+        function_packed_dimension_widths(&packed_ranges_from_ref_node_with_env(
+            RefNode::DataTypeOrImplicit(data_type),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        ))
     }
 }
 
@@ -5313,9 +5390,11 @@ fn instances_from_conditional_generate(
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
         return Ok(());
     };
-    let Some(generate_condition) = const_expr_from_ref_node(
+    let Some(generate_condition) = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
         syntax_tree,
+        const_env,
+        &packed_dimensions.type_aliases,
     ) else {
         return Err(AnalyzerError::Unsupported(
             "conditional-generate condition lowering".to_string(),
@@ -5588,8 +5667,10 @@ fn functions_from_module_node(
     packed_dimensions: &PackedDimensions,
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
     let mut functions = HashMap::default();
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
-    let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
+    let type_aliases =
+        type_aliases_from_module_node_with_env(node.clone(), syntax_tree, const_env)?;
+    let inactive_nodes =
+        inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env, &type_aliases);
     for child in node {
         if inactive_nodes.iter().any(|inactive| inactive == &child) {
             continue;
@@ -6361,12 +6442,12 @@ fn tf_params(
             .or_else(|| type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases))
             .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
         let inferred_packed_dimensions =
-            packed_dimensions_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
+            function_param_packed_dimensions(&port.nodes.3, syntax_tree, const_env, type_aliases);
         let omitted_type = matches!(
             port.nodes.3,
             sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
         ) && is_signed_from_ref_node(type_node.clone()).is_none()
-            && packed_ranges_from_ref_node(type_node.clone(), syntax_tree).is_empty();
+            && inferred_packed_dimensions.is_empty();
         let (name, r#type, is_2state, packed_dimensions) =
             if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
                 let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
@@ -6461,9 +6542,10 @@ fn tf_item_params(
             )
         })
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
-        let packed_dimensions = packed_dimensions_from_ref_node(
-            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+        let packed_dimensions = function_param_packed_dimensions(
+            &declaration.nodes.3,
             syntax_tree,
+            const_env,
             type_aliases,
         );
         for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
@@ -7244,9 +7326,11 @@ fn comb_processes_from_conditional_generate(
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
         return Ok(());
     };
-    let Some(generate_condition) = const_expr_from_ref_node(
+    let Some(generate_condition) = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
         syntax_tree,
+        const_env,
+        &packed_dimensions.type_aliases,
     ) else {
         return Err(AnalyzerError::Unsupported(
             "conditional-generate condition lowering".to_string(),
@@ -7335,16 +7419,20 @@ fn comb_processes_from_loop_generate(
         syntax_tree,
     )
     .ok_or_else(|| AnalyzerError::Unsupported("loop-generate variable".to_string()))?;
-    let init_expr = const_expr_from_ref_node(
+    let init_expr = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.0.nodes.3),
         syntax_tree,
+        const_env,
+        &packed_dimensions.type_aliases,
     )
     .ok_or_else(|| AnalyzerError::Unsupported("loop-generate initializer".to_string()))?;
     let init = eval_ast_const_expr(&init_expr, const_env)
         .ok_or_else(|| AnalyzerError::Unsupported("loop-generate initializer".to_string()))?;
-    let condition_expr = const_expr_from_ref_node(
+    let condition_expr = const_expr_from_ref_node_with_env(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.2.nodes.0),
         syntax_tree,
+        const_env,
+        &packed_dimensions.type_aliases,
     )
     .ok_or_else(|| AnalyzerError::Unsupported("loop-generate condition".to_string()))?;
 
@@ -7370,8 +7458,14 @@ fn comb_processes_from_loop_generate(
             processes,
         )?;
         iterations += 1;
-        let next = next_genvar_value(value, &generate.nodes.1.nodes.1.4, syntax_tree, &loop_env)
-            .ok_or_else(|| AnalyzerError::Unsupported("genvar update operator".to_string()))?;
+        let next = next_genvar_value(
+            value,
+            &generate.nodes.1.nodes.1.4,
+            syntax_tree,
+            &loop_env,
+            &packed_dimensions.type_aliases,
+        )
+        .ok_or_else(|| AnalyzerError::Unsupported("genvar update operator".to_string()))?;
         value = next;
     }
     let mut loop_env = const_env.clone();
@@ -7616,10 +7710,11 @@ fn next_genvar_value(
     iteration: &sv_parser::GenvarIteration,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> Option<i128> {
     match iteration {
         sv_parser::GenvarIteration::Prefix(iteration) => {
-            let op = syntax_tree.get_str(&iteration.nodes.0.nodes.0)?;
+            let op = syntax_tree.get_str(&iteration.nodes.0.nodes.0.nodes.0)?;
             match op {
                 "++" => value.checked_add(1),
                 "--" => value.checked_sub(1),
@@ -7627,7 +7722,7 @@ fn next_genvar_value(
             }
         }
         sv_parser::GenvarIteration::Suffix(iteration) => {
-            let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0)?;
+            let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)?;
             match op {
                 "++" => value.checked_add(1),
                 "--" => value.checked_sub(1),
@@ -7635,10 +7730,12 @@ fn next_genvar_value(
             }
         }
         sv_parser::GenvarIteration::Assignment(iteration) => {
-            let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0)?;
-            let rhs = const_expr_from_ref_node(
+            let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)?;
+            let rhs = const_expr_from_ref_node_with_env(
                 RefNode::ConstantExpression(&iteration.nodes.2.nodes.0),
                 syntax_tree,
+                const_env,
+                type_aliases,
             )?;
             let rhs = eval_ast_const_expr(&rhs, const_env)?;
             match op {
@@ -10805,9 +10902,11 @@ fn ff_processes_from_module_common_item(
             let sv_parser::ConditionalGenerateConstruct::If(generate) = &**generate else {
                 return Ok(());
             };
-            let Some(condition) = const_expr_from_ref_node(
+            let Some(condition) = const_expr_from_ref_node_with_env(
                 RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
                 syntax_tree,
+                const_env,
+                &packed_dimensions.type_aliases,
             ) else {
                 return Err(AnalyzerError::Unsupported(
                     "unknown conditional-generate condition".to_string(),
@@ -14642,15 +14741,6 @@ fn is_signed_from_ref_node(node: RefNode<'_>) -> Option<bool> {
         },
         _ => None,
     }
-}
-
-fn packed_ranges_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Vec<PackedRange> {
-    packed_ranges_from_ref_node_with_env(
-        node,
-        syntax_tree,
-        &HashMap::default(),
-        &HashMap::default(),
-    )
 }
 
 fn packed_ranges_from_ref_node_with_env(

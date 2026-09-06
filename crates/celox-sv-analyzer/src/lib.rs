@@ -1614,6 +1614,47 @@ mod tests {
     }
 
     #[test]
+    fn skips_inactive_generate_blocks_with_parameter_casts() {
+        for condition in ["W'(4)", "select_t'(4)"] {
+            let source = format!(
+                r#"
+                    module Top #(parameter W = 2)(output logic y);
+                        typedef logic [W-1:0] select_t;
+                        if ({condition}) begin : disabled
+                            function automatic logic invalid(input real x);
+                                return x;
+                            endfunction
+                        end else begin : enabled
+                            assign y = 1'b1;
+                        end
+                    endmodule
+                "#
+            );
+            let ir = analyze_source(&source, Path::new("inactive_generate_cast.sv"))
+                .expect("cast truncation should select the supported generate branch");
+            assert_eq!(ir.modules()[0].comb_processes().len(), 1);
+        }
+    }
+
+    #[test]
+    fn skips_inactive_loop_generate_blocks_with_parameter_casts() {
+        let source = r#"
+            module Top #(parameter W = 2)(output logic y);
+                typedef logic [W-1:0] select_t;
+                for (genvar i = W'(0); i < select_t'(4); i += W'(1)) begin : disabled
+                    function automatic logic invalid(input real x);
+                        return x;
+                    endfunction
+                end
+                assign y = 1'b1;
+            endmodule
+        "#;
+        let ir = analyze_source(source, Path::new("inactive_loop_generate_cast.sv"))
+            .expect("a zero-iteration loop must skip unsupported declarations");
+        assert_eq!(ir.modules()[0].comb_processes().len(), 1);
+    }
+
+    #[test]
     fn caps_aggregate_nested_static_loop_expansion() {
         let error = analyze_source(
             r#"

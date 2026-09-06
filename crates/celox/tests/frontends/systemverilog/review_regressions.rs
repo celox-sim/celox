@@ -7794,6 +7794,128 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
     assert_eq!(sim.get(x), 2u8.into());
 }
 
+sv_backends! {
+    fn normalizes_function_parameter_cast_dimensions(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter W = 5)(
+                    input logic [7:0] data,
+                    output logic [5:0] y
+                );
+                    typedef logic [3:0] index_t;
+                    typedef logic [W'(8):W'(1)] byte_t;
+                    function automatic logic ansi(input logic [W'(8):W'(1)] x);
+                        return x[7];
+                    endfunction
+                    function automatic logic nonansi;
+                        input logic [W'(8):W'(1)] x;
+                        return x[7];
+                    endfunction
+                    function automatic logic ascending(input logic [W'(1):W'(8)] x);
+                        return x[2];
+                    endfunction
+                    function automatic logic inherited(input logic [W'(8):W'(1)] x, z);
+                        return z[7];
+                    endfunction
+                    function automatic logic typecast(input logic [index_t'(8):index_t'(1)] x);
+                        return x[7];
+                    endfunction
+                    function automatic logic alias_range(input byte_t x);
+                        return x[7];
+                    endfunction
+                    always_comb begin
+                        y[0] = ansi(data);
+                        y[1] = nonansi(data);
+                        y[2] = ascending(data);
+                        y[3] = inherited('0, data);
+                        y[4] = typecast(data);
+                        y[5] = alias_range(data);
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("function_parameter_cast_dimensions.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let y = sim.signal("y");
+        for value in [0x40u8, 0x80, 0, 0xff] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(y), if value & 0x40 != 0 { 0x3fu8 } else { 0 }.into());
+        }
+    }
+
+    fn lowers_parameter_casts_in_conditional_generate(sim) {
+        @setup {
+            let source = r#"
+                module Buffer(input logic a, output logic y);
+                    assign y = a;
+                endmodule
+                module Top #(parameter W = 2)(
+                    input logic clk, data,
+                    output logic comb_y, ff_y
+                );
+                    typedef logic [W-1:0] select_t;
+                    if (W'(1)) begin : enabled
+                        logic connected;
+                        Buffer u(.a(data), .y(connected));
+                        if (select_t'(4)) begin : disabled
+                            assign comb_y = 1'b0;
+                            always_ff @(posedge clk) ff_y <= 1'b0;
+                        end else begin : selected
+                            always_comb comb_y = connected;
+                            always_ff @(posedge clk) ff_y <= connected;
+                        end
+                    end else begin : disabled
+                        assign comb_y = 1'b0;
+                        always_ff @(posedge clk) ff_y <= 1'b0;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("conditional_generate_casts.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let comb_y = sim.signal("comb_y");
+        let ff_y = sim.signal("ff_y");
+        let clk = sim.event("clk");
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(comb_y), value.into());
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(ff_y), value.into());
+        }
+    }
+
+    fn lowers_parameter_casts_in_loop_generate(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter W = 3)(
+                    input logic [3:0] data,
+                    output logic [3:0] y
+                );
+                    typedef logic [W-1:0] index_t;
+                    for (genvar i = W'(8); i < index_t'(4); i += W'(1)) begin : bits
+                        if (W'(1)) begin : enabled
+                            assign y[i] = data[i];
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("loop_generate_casts.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let y = sim.signal("y");
+        for value in [1u8, 2, 4, 8, 0xf, 0] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(y), value.into());
+        }
+    }
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn collapses_unknown_initializers_in_two_state_native_images() {
