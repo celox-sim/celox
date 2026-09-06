@@ -62,49 +62,7 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
         Err(e) => exit_with_error!(&format!("Failed to gather paths: {}", e)),
     };
 
-    // Veryl CLI dependency logic
-    let mut table = fxhash::FxHashMap::default();
-    for path in &paths {
-        table.insert(path.src.clone(), path);
-    }
-
-    let mut prj_namespace = veryl_analyzer::namespace::Namespace::new();
-    prj_namespace.push(veryl_parser::resource_table::insert_str(
-        &metadata.project.name,
-    ));
-
-    let candidate_symbols: Vec<_> = veryl_analyzer::type_dag::connected_components()
-        .into_iter()
-        .filter(|symbols| symbols[0].namespace.included(&prj_namespace))
-        .flatten()
-        .collect();
-
-    let mut used_paths = fxhash::FxHashMap::default();
-    for symbol in &candidate_symbols {
-        if let veryl_parser::veryl_token::TokenSource::File { path, .. } = symbol.token.source {
-            let path = PathBuf::from(format!("{path}"));
-            if let Some(x) = table.remove(&path) {
-                used_paths.insert(path, x);
-            }
-        }
-    }
-
-    let mut sorted_paths = vec![];
-    for path in veryl_analyzer::type_dag::toposort_file() {
-        let path = PathBuf::from(format!("{path}"));
-        if let Some(x) = used_paths.remove(&path) {
-            sorted_paths.push(x.clone());
-        }
-    }
-
-    for path in used_paths.into_values() {
-        sorted_paths.push(path.clone());
-    }
-
-    // Now sorted_paths still might not include $std if we only sorted candidate_symbols from AST DAG.
-    // Actually, `metadata.paths(..., true, true)` includes stdlib.
-    // The problem in the macro was passing `false` for load_std. Let's just use `paths` if we don't care about the rigorous emit order. Wait, the first pass must populate the symbol table before sort.
-
+    // Analyze every source file so pass1 registers all declarations before pass2.
     let mut parsed_files = Vec::new();
     for path_set in paths {
         let code = match fs::read_to_string(&path_set.src) {
