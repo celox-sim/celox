@@ -556,7 +556,6 @@ impl WorkingValueKind {
 struct WorkingAddressFacts {
     endpoints: BTreeSet<usize>,
     accesses: Vec<(usize, usize)>,
-    seeds: Vec<(usize, usize)>,
     stores: Vec<(usize, usize)>,
     applies: Vec<(usize, usize)>,
     kind: Option<WorkingValueKind>,
@@ -591,10 +590,15 @@ impl WorkingAddressFacts {
         } else {
             WorkingValueKind::for_type(ty)
         };
-        if self.kind.is_some_and(|previous| previous != kind) {
-            self.invalid = true;
-        }
-        self.kind.get_or_insert(kind);
+        // A known reset constant is Bit even when another path stores Logic.
+        // Use a Logic SSA value for that join; normalization gives Bit inputs
+        // a zero unknown-mask plane instead of rejecting the entire slot.
+        self.kind = Some(match (self.kind, kind) {
+            (Some(WorkingValueKind::Logic), _) | (_, WorkingValueKind::Logic) => {
+                WorkingValueKind::Logic
+            }
+            _ => WorkingValueKind::Bit,
+        });
         self.record_range(offset, width)
     }
 }
@@ -888,9 +892,7 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
                     && source.absolute_addr() == destination.absolute_addr() =>
                 {
                     let entry = facts.entry(destination.absolute_addr()).or_default();
-                    if let Some(range) = entry.record_range(*offset, *width) {
-                        entry.seeds.push(range);
-                    }
+                    entry.record_range(*offset, *width);
                     entry.invalid |= !triggers.is_empty();
                 }
                 SIRInstruction::Commit(
@@ -954,7 +956,10 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
             if !covered(&facts.accesses) {
                 continue;
             }
-            if !covered(&facts.seeds) || !covered(&facts.stores) || !covered(&facts.applies) {
+            // Earlier DSE can remove a seed when every path defines the slot.
+            // The StateSSA preview below still rejects any remaining live-in,
+            // including a conditional store which needs the previous value.
+            if !covered(&facts.stores) || !covered(&facts.applies) {
                 complete = false;
                 break;
             }
@@ -1771,6 +1776,127 @@ mod tests {
             Some(SIRInstruction::Store(address, SIROffset::Static(0), 8, RegisterId(0), _, _))
                 if *address == stable
         ));
+    }
+
+    fn working_reset_diamond(seed: bool, mixed_types: bool) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let stable = address(0);
+        let working = RegionedAbsoluteAddr {
+            region: WORKING_REGION,
+            ..stable
+        };
+        let store = |register| {
+            SIRInstruction::Store(
+                working,
+                SIROffset::Static(0),
+                8,
+                register,
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: if seed {
+                        vec![SIRInstruction::Commit(
+                            stable,
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                            Vec::new(),
+                        )]
+                    } else {
+                        Vec::new()
+                    },
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![store(RegisterId(1))],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: vec![store(RegisterId(2))],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: Vec::new(),
+                    instructions: vec![
+                        // Another FF must still see pre-edge state at this point.
+                        SIRInstruction::Load(RegisterId(3), stable, SIROffset::Static(0), 8),
+                        SIRInstruction::Store(
+                            address_in_instance(1),
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(3),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Commit(
+                            working,
+                            stable,
+                            SIROffset::Static(0),
+                            8,
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(8)),
+                (
+                    RegisterId(2),
+                    if mixed_types {
+                        RegisterType::Logic { width: 8 }
+                    } else {
+                        bit(8)
+                    },
+                ),
+                (RegisterId(3), bit(8)),
+            ],
+        )
+    }
+
+    #[test]
+    fn promotes_fully_defined_working_joins_after_seed_dse_and_type_mixing() {
+        for (seed, mixed_types) in [(false, false), (true, true), (false, true)] {
+            let mut eu = working_reset_diamond(seed, mixed_types);
+            eu.verify_result().unwrap();
+            assert!(
+                promote_eval_apply_working_round_trips(&mut eu),
+                "seed={seed}, mixed_types={mixed_types}"
+            );
+            eu.verify_result().unwrap();
+            assert!(eu.blocks.values().flat_map(|block| &block.instructions).all(|instruction| !matches!(instruction,
+                SIRInstruction::Load(_, address, ..) | SIRInstruction::Store(address, ..) if address.region == WORKING_REGION
+            ) && !matches!(instruction, SIRInstruction::Commit(..))));
+            let join = &eu.blocks[&BlockId(3)].instructions;
+            let old_read = join.iter().position(|instruction| matches!(instruction, SIRInstruction::Load(_, address, ..) if *address == address_in_instance(0))).unwrap();
+            let publish = join.iter().position(|instruction| matches!(instruction, SIRInstruction::Store(address, ..) if *address == address_in_instance(0))).unwrap();
+            assert!(old_read < publish);
+        }
+    }
+
+    #[test]
+    fn keeps_seedless_working_storage_when_a_path_has_no_definition() {
+        let mut eu = working_reset_diamond(false, true);
+        eu.blocks.get_mut(&BlockId(2)).unwrap().instructions.clear();
+        let before = eu.clone();
+        assert!(!promote_eval_apply_working_round_trips(&mut eu));
+        assert_eq!(eu.blocks, before.blocks);
+        assert_eq!(eu.register_map, before.register_map);
     }
 
     #[test]
