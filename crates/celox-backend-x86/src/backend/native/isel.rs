@@ -6,6 +6,7 @@
 mod dynamic_load_cache;
 mod packed_bit_store;
 mod sparse;
+mod strided;
 mod target_policy;
 
 use super::mir::*;
@@ -940,6 +941,8 @@ pub fn lower_execution_unit_with_diagnostics(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
 ) -> MFunction {
+    let expanded = strided::expand_strided_accesses(eu, layout);
+    let eu = expanded.as_ref();
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         if let Err(error) = eu.verify_result() {
             panic!("before native ISel: {error}");
