@@ -45,9 +45,9 @@ pub struct FusedFfAction {
     pub runtime: FfRuntimeRelocation,
 }
 
-/// Adapter hook for source-aware FF lowering used by the optional fused
-/// comb/FF optimization. The scheduler and all identities crossing this trait
-/// remain source neutral.
+/// Adapter hook for source-aware FF lowering used by shared-clock scheduling,
+/// with or without a preceding comb phase. The scheduler and all identities
+/// crossing this trait remain source neutral.
 pub trait FusedFfLoweringFactory {
     fn create(
         &self,
@@ -665,21 +665,15 @@ pub fn schedule_symbolic_rtl(
         let mut fused_schedule_cache = HashMap::<
             Vec<usize>,
             (
+                Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
                 Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
                 Vec<VarAtomBase<RegionedAbsoluteAddr>>,
             ),
         >::default();
-        for (trigger, actions) in actions {
-            let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
-            if let Some((units, direct_ff_writes)) = fused_schedule_cache.get(&action_ids) {
-                eval_comb_apply_ffs.insert(trigger, units.clone());
-                fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
-                continue;
-            }
+        let schedule = |paths, actions| {
             let mut ff_lowering = factory.create(actions)?;
-            let fused_start = flatten_timing.then(std::time::Instant::now);
-            let fused = match scheduler::sort_clock(
-                clock_comb_blocks.clone(),
+            match scheduler::sort_clock(
+                paths,
                 &clock_arena,
                 &clock_ignored_loops,
                 &clock_true_loops,
@@ -689,21 +683,51 @@ pub fn schedule_symbolic_rtl(
                 next_runtime_error_code,
                 ff_lowering.as_mut(),
             ) {
-                Ok(schedule) => schedule,
-                Err(scheduler::ClockSortError::Lowering(error)) => return Err(error),
+                Ok(schedule) => Ok(schedule),
+                Err(scheduler::ClockSortError::Lowering(error)) => Err(error),
                 Err(scheduler::ClockSortError::Scheduler(error)) => {
                     let mut error_arena = SLTNodeArena::new();
                     let error =
                         error.map_addr(&clock_arena, &mut error_arena, &|addr| addr.to_string())?;
-                    return Err(ParserError::Scheduler(error));
+                    Err(ParserError::Scheduler(error))
                 }
+            }
+        };
+        for (trigger, actions) in actions {
+            let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
+            if let Some((ff_only, units, direct_ff_writes)) = fused_schedule_cache.get(&action_ids)
+            {
+                if let Some(ff_only) = ff_only {
+                    eval_apply_ffs.insert(trigger, ff_only.clone());
+                }
+                eval_comb_apply_ffs.insert(trigger, units.clone());
+                fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                continue;
+            }
+            let fused_start = flatten_timing.then(std::time::Instant::now);
+            // The ordinary tick already settled comb. Reuse the existing
+            // old-state dependency planner with no comb paths: acyclic readers
+            // run before writers, and only cyclic/aliased ranges need staging.
+            // Keep the merged eval-then-apply fallback for adapters without
+            // source-aware lowering and the existing single-action fast path.
+            let ff_only = if actions.len() > 1 {
+                Some(schedule(Vec::new(), actions.clone())?.execution_units)
+            } else {
+                None
             };
+            let fused = schedule(clock_comb_blocks.clone(), actions)?;
             if let Some(start) = fused_start {
                 tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
             }
             let direct_ff_writes = fused.direct_ff_writes;
             let units = fused.execution_units;
-            fused_schedule_cache.insert(action_ids, (units.clone(), direct_ff_writes.clone()));
+            fused_schedule_cache.insert(
+                action_ids,
+                (ff_only.clone(), units.clone(), direct_ff_writes.clone()),
+            );
+            if let Some(ff_only) = ff_only {
+                eval_apply_ffs.insert(trigger, ff_only);
+            }
             eval_comb_apply_ffs.insert(trigger, units);
             fused_direct_ff_writes.insert(trigger, direct_ff_writes);
         }
@@ -1764,6 +1788,32 @@ fn relocate_units(
                     ),
                 );
             }
+        }
+    }
+    // A canonical event may collect multiple reset groups or instances. The
+    // ordinary tick path must evaluate every group against pre-edge state
+    // before any group publishes its nonblocking assignments. Concatenating
+    // each module's eval+apply unit instead makes behavior depend on map order.
+    for (event, units) in &mut eval_apply_ffs {
+        if units.len() > 1 {
+            let evaluations = eval_only_ffs.get(event).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "FF event assembly",
+                    "shared event has no evaluation phase",
+                    None,
+                )
+            })?;
+            let applications = apply_ffs.get(event).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "FF event assembly",
+                    "shared event has no application phase",
+                    None,
+                )
+            })?;
+            let phases = evaluations.iter().chain(applications).collect::<Vec<_>>();
+            // Keep the staging stores and their commits in the same optimizer
+            // unit: WORKING-region stores are otherwise local dead stores.
+            *units = vec![celox_sir::merge_sir_eu_refs(&phases).0];
         }
     }
     Ok((
