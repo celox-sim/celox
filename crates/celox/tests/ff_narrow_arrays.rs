@@ -32,6 +32,9 @@ fn ff_captures_every_one_bit_array_element_without_optimization(sim) {
 
 all_backends! {
 fn ff_captures_padded_elements_and_unknown_masks(sim) {
+    // The SV frontend currently rejects four-state always_ff event signals.
+    // This limitation does not apply to the four Celox execution backends.
+    @ignore_on(sv);
     @setup {
         let source = r#"
             module Top (clk: input clock, d: input logic<24>, q: output logic<24>) {

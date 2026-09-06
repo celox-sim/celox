@@ -10,6 +10,9 @@ fn reset_constants_and_unknown_values_share_a_working_join(sim) {
     // Veryl's reference simulator disagrees on the known payload bits of the
     // mixed-X 64-bit value below. Exercise the four Celox backends directly.
     @omit_veryl;
+    // The SV frontend rejects four-state always_ff event signals, as in the
+    // existing four_state FF tests. Keep every Celox execution backend covered.
+    @ignore_on(sv);
     @setup {
         let source = r#"
             module Top (
