@@ -4581,7 +4581,10 @@ fn compile_store_at_offset(
     let store_bytes = get_byte_size(op_width);
     let num_chunks = num_i64_chunks(op_width);
 
-    if num_chunks == 1 && op_width <= 64 && (bit_shift != 0 || !op_width.is_multiple_of(8)) {
+    if num_chunks == 1
+        && bit_shift + op_width <= 64
+        && (bit_shift != 0 || !op_width.is_multiple_of(8))
+    {
         emit_partial_store_small(src, byte_offset, bit_shift, op_width, locals, instrs);
     } else if bit_shift == 0 {
         // Byte-aligned store. Break remaining bytes into power-of-2
@@ -6055,6 +6058,90 @@ mod bit_count_tests {
 
     fn read_bits(memory: &[u8], bit_offset: usize, width: usize) -> BigUint {
         read_bits_at(memory, OUTPUT_OFFSET, bit_offset, width)
+    }
+
+    #[test]
+    fn shifted_scalar_stores_preserve_spill_bits_and_neighbors() {
+        // A single source chunk can cover nine destination bytes. In particular,
+        // OptimizeBlocks coalesces four 15-bit array elements into a 60-bit store
+        // at bit 15; a u64 read-modify-write loses its final three bits.
+        for four_state in [false, true] {
+            for (offset, width) in [(0, 64), (1, 63), (1, 64), (7, 58), (7, 64), (15, 60)] {
+                for packed_elements in [false, true] {
+                    let initial = 0xa55a_3cc3_f00f_6996_9669_0ff0_c33c_5aa5u128;
+                    let initial_mask = 0x0ff0_9669_5aa5_c33c_3cc3_a55a_6996_f00fu128;
+                    let field_mask = (1u128 << width) - 1;
+                    let value = 0xd9e7_b3f5_a6c8_912fu128 & field_mask;
+                    let mask = 0xa55a_9669_3cc3_f00fu128 & field_mask;
+                    let destination =
+                        RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address());
+                    let store_offset = if packed_elements {
+                        SIROffset::PackedElements {
+                            bit_offset: offset,
+                            element_width: 15,
+                        }
+                    } else {
+                        SIROffset::Static(offset)
+                    };
+                    let block = BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                RegisterId(0),
+                                SIRValue::new_four_state(initial, initial_mask),
+                            ),
+                            SIRInstruction::Store(
+                                destination,
+                                SIROffset::Static(0),
+                                128,
+                                RegisterId(0),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                            SIRInstruction::Imm(
+                                RegisterId(1),
+                                SIRValue::new_four_state(value, mask),
+                            ),
+                            SIRInstruction::Store(
+                                destination,
+                                store_offset,
+                                width,
+                                RegisterId(1),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    };
+                    let unit = ExecutionUnit {
+                        entry_block_id: BlockId(0),
+                        blocks: [(BlockId(0), block)].into_iter().collect(),
+                        register_map: [
+                            (RegisterId(0), RegisterType::Logic { width: 128 }),
+                            (RegisterId(1), RegisterType::Logic { width }),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    };
+                    let memory = run_wasm(&unit, &layout(128, four_state), four_state);
+                    let replace =
+                        |old: u128, new: u128| (old & !(field_mask << offset)) | (new << offset);
+                    assert_eq!(
+                        read_bits(&memory, 0, 128),
+                        BigUint::from(replace(initial, value)),
+                        "offset={offset}, width={width}, four_state={four_state}, packed_elements={packed_elements}"
+                    );
+                    if four_state {
+                        assert_eq!(
+                            read_bits_at(&memory, OUTPUT_OFFSET + 16, 0, 128),
+                            BigUint::from(replace(initial_mask, mask)),
+                            "mask at offset={offset}, width={width}, packed_elements={packed_elements}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn assert_results(cases: &[CountCase], memory: &[u8]) {
