@@ -1852,7 +1852,10 @@ impl<'a> ISelContext<'a> {
     ) -> Option<OpSize> {
         if let Some(array) = self.layout.unpacked_arrays.get(&addr.absolute_addr()) {
             if width_bits == array.element_width && bit_offset.is_multiple_of(array.element_width) {
-                return Self::exact_storage_access_size(width_bits);
+                let size = Self::op_size_for_width(width_bits);
+                return ((1..=64).contains(&width_bits)
+                    && size.bytes() as usize <= array.element_stride)
+                    .then_some(size);
             }
             // A complete unpacked array is not one contiguous scalar object
             // in element-strided mode. It must be gathered/scattered element
@@ -1910,7 +1913,9 @@ impl<'a> ISelContext<'a> {
                 dynamic_bit_offset: None,
                 ..
             } if *element_width == array.element_width => {
-                Self::exact_storage_access_size(width_bits)
+                let size = Self::op_size_for_width(width_bits);
+                ((1..=64).contains(&width_bits) && size.bytes() as usize <= array.element_stride)
+                    .then_some(size)
             }
             _ => None,
         }
@@ -4552,6 +4557,111 @@ fn direct_element_byte_offset(
     }
 }
 
+/// Read a scalar array element once in its native slot, then extract a field.
+/// Using the same containing load for every field lets value numbering share
+/// tag and flag reads without loading beyond the allocated element stride.
+fn try_emit_scalar_element_load(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) -> bool {
+    let SIROffset::Element {
+        index,
+        element_width,
+        bit_offset,
+        dynamic_bit_offset,
+    } = offset
+    else {
+        return false;
+    };
+    let Some(array) = ctx.layout.unpacked_arrays.get(&addr.absolute_addr()) else {
+        return false;
+    };
+    let size = ISelContext::op_size_for_width(array.element_width);
+    let dynamic_bits = if let Some(value) = dynamic_bit_offset {
+        let Some(&bits) = ctx.consts.get(value) else {
+            return false;
+        };
+        let Ok(bits) = usize::try_from(bits) else {
+            return false;
+        };
+        bits
+    } else {
+        0
+    };
+    let Some(field_bit) = bit_offset.checked_add(dynamic_bits) else {
+        return false;
+    };
+    if !(1..=64).contains(&array.element_width)
+        || *element_width != array.element_width
+        || width == 0
+        || field_bit
+            .checked_add(width)
+            .is_none_or(|end| end > array.element_width)
+        || size.bytes() as usize > array.element_stride
+    {
+        return false;
+    }
+    let base_offset = SIROffset::Element {
+        index: *index,
+        element_width: *element_width,
+        bit_offset: 0,
+        dynamic_bit_offset: None,
+    };
+    let Some(byte_index) = direct_element_byte_offset(ctx, block, addr, &base_offset) else {
+        return false;
+    };
+    let planes = if ctx.is_4state_var(addr) { 2 } else { 1 };
+    for plane in 0..planes {
+        let base = if plane == 0 {
+            ctx.byte_offset(addr, 0)
+        } else {
+            ctx.mask_byte_offset(addr, 0)
+        };
+        let value = if plane == 0 {
+            ctx.reg_map.get(dst)
+        } else {
+            let value = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.set_mask(dst, value);
+            value
+        };
+        let raw = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: raw,
+            base: BaseReg::SimState,
+            offset: base,
+            index: byte_index,
+            scale: 1,
+            size,
+            alias_range: MemoryAliasRange::new(base, ctx.layout.plane_size(&addr.absolute_addr())),
+        });
+        let shifted = if field_bit == 0 {
+            raw
+        } else {
+            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShrImm {
+                dst: shifted,
+                src: raw,
+                imm: field_bit as u8,
+            });
+            shifted
+        };
+        ctx.emit_and_imm(block, value, shifted, mask_for_width(width));
+    }
+    if ctx.four_state && planes == 1 {
+        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        ctx.set_mask(dst, zero);
+    }
+    true
+}
+
 fn memory_offset_low_zero_bits(
     ctx: &ISelContext,
     addr: &RegionedAbsoluteAddr,
@@ -6321,6 +6431,9 @@ fn lower_instruction(
                 }
             }
             let vreg = ctx.reg_map.get(*dst);
+            if try_emit_scalar_element_load(ctx, block, *dst, addr, offset, *width_bits) {
+                return;
+            }
 
             match offset {
                 SIROffset::Static(bit_off)
@@ -6441,12 +6554,27 @@ fn lower_instruction(
                         && let Some(load_size) =
                             ctx.full_static_load_size(addr, *bit_off, *width_bits)
                     {
+                        // A padded slot is wider than its logical element.
+                        // Mask the raw load before claiming a known bit width.
+                        let padded_element = ctx
+                            .layout
+                            .unpacked_arrays
+                            .contains_key(&addr.absolute_addr())
+                            && ISelContext::access_size_has_padding(load_size, *width_bits);
+                        let raw = if padded_element {
+                            ctx.alloc_vreg(SpillDesc::transient())
+                        } else {
+                            vreg
+                        };
                         block.push(MInst::Load {
-                            dst: vreg,
+                            dst: raw,
                             base: BaseReg::SimState,
                             offset: byte_off,
                             size: load_size,
                         });
+                        if padded_element {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        }
                         ctx.known_bits.insert(vreg, *width_bits);
                     } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                         // Word-aligned, native size: single load.
@@ -15645,6 +15773,151 @@ mod tests {
     }
 
     #[test]
+    fn static_padded_element_loads_mask_padding_before_concat() {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(0),
+        };
+        let output_abs = AbsoluteAddr {
+            var_id: VarId(1),
+            ..array_abs
+        };
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let low = RegisterId(0);
+        let high = RegisterId(1);
+        let result = RegisterId(2);
+        for width in [24usize, 1, 3, 7, 9, 15, 17, 31, 33, 40, 48, 51, 57, 63] {
+            for four_state in [false, true] {
+                let stride = width.div_ceil(8).next_power_of_two();
+                let plane_size = stride * 2;
+                let result_width = width * 2;
+                let unit = ExecutionUnit {
+                    entry_block_id: SirBlockId(0),
+                    blocks: [(
+                        SirBlockId(0),
+                        BasicBlock {
+                            id: SirBlockId(0),
+                            params: vec![],
+                            instructions: vec![
+                                SIRInstruction::Load(low, array, SIROffset::Static(0), width),
+                                SIRInstruction::Load(high, array, SIROffset::Static(width), width),
+                                SIRInstruction::Concat(result, vec![high, low]),
+                                SIRInstruction::Store(
+                                    output,
+                                    SIROffset::Static(0),
+                                    result_width,
+                                    result,
+                                    vec![],
+                                    vec![],
+                                ),
+                            ],
+                            terminator: SIRTerminator::Return,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    register_map: [(low, width), (high, width), (result, result_width)]
+                        .into_iter()
+                        .map(|(register, width)| {
+                            (
+                                register,
+                                if four_state {
+                                    RegisterType::Logic { width }
+                                } else {
+                                    RegisterType::Bit {
+                                        width,
+                                        signed: false,
+                                    }
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                let mut layout = empty_layout();
+                layout.four_state = four_state;
+                layout.mode = MemoryLayoutMode::ElementStrided;
+                layout.offsets = [(array_abs, 0), (output_abs, 32)].into_iter().collect();
+                layout.widths = [(array_abs, result_width), (output_abs, result_width)]
+                    .into_iter()
+                    .collect();
+                layout.is_4states = [(array_abs, four_state), (output_abs, four_state)]
+                    .into_iter()
+                    .collect();
+                layout.unpacked_arrays.insert(
+                    array_abs,
+                    celox_state_layout::UnpackedArrayLayout {
+                        element_width: width,
+                        element_count: 2,
+                        element_stride: stride,
+                        plane_size,
+                    },
+                );
+                layout.total_size = 80;
+                layout.working_base_offset = 80;
+                layout.sparse_base_offset = 80;
+                layout.merged_total_size = 80;
+                layout.triggered_bits_offset = 80;
+                layout.scratch_base_offset = 80;
+
+                let mut function = lower_execution_unit(&unit, &layout, four_state);
+                mir_legalize::legalize(&mut function);
+                mir_opt::optimize(&mut function);
+                let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+                function.verify();
+                let emitted = emit::emit(
+                    &function,
+                    &allocation.assignment,
+                    allocation.spill_frame_size,
+                )
+                .unwrap();
+                let jit = JitCode::new(&emitted.code).unwrap();
+
+                let mut state = vec![0xa5u8; 80];
+                let element_mask = mask_for_width(width);
+                let result_mask = (BigUint::from(1u8) << result_width) - 1u8;
+                let planes = [
+                    [0x1234_5678_0012_3456u64, 0x5543_2100_0065_4321],
+                    [0x0001_0204_0008_1020, 0x0102_0400_0810_2000],
+                ];
+                for (plane, values) in
+                    planes
+                        .iter()
+                        .enumerate()
+                        .take(if four_state { 2 } else { 1 })
+                {
+                    for (element, value) in values.iter().enumerate() {
+                        let padded = value | !element_mask;
+                        let start = plane * plane_size + element * stride;
+                        state[start..start + stride]
+                            .copy_from_slice(&padded.to_le_bytes()[..stride]);
+                    }
+                }
+                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                for (plane, values) in
+                    planes
+                        .iter()
+                        .enumerate()
+                        .take(if four_state { 2 } else { 1 })
+                {
+                    let start = 32 + plane * result_width.div_ceil(8);
+                    let actual =
+                        BigUint::from_bytes_le(&state[start..start + result_width.div_ceil(8)])
+                            & &result_mask;
+                    let expected = (BigUint::from(values[1] & element_mask) << width)
+                        | BigUint::from(values[0] & element_mask);
+                    assert_eq!(
+                        actual, expected,
+                        "width={width}, four_state={four_state}, plane={plane}"
+                    );
+                }
+                assert_eq!(&state[64..], &[0xa5; 16]);
+            }
+        }
+    }
+
+    #[test]
     fn full_dynamic_padded_element_uses_native_indexed_load_and_store() {
         let array_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
@@ -15944,6 +16217,135 @@ mod tests {
         assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
         assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
         assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
+    }
+
+    #[test]
+    fn whole_sparse_zero_overwrite_clears_padded_single_chunk_arrays() {
+        const SPARSE: usize = 32;
+        const DIRTY: usize = 64;
+        const SUMMARY: usize = 72;
+        const ACTIVE: usize = 88;
+        const STATE_SIZE: usize = 104;
+        for (element_width, element_count) in [(1, 2), (1, 4), (3, 4), (7, 8)] {
+            for four_state in [false, true] {
+                let absolute = AbsoluteAddr {
+                    instance_id: InstanceId(0),
+                    var_id: VarId::default(),
+                };
+                let sparse = RegionedAbsoluteAddr::from_absolute_addr(
+                    crate::SPARSE_WORKING_REGION,
+                    absolute,
+                );
+                let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+                let width = element_width * element_count;
+                let zero = RegisterId(0);
+                let unit = ExecutionUnit {
+                    entry_block_id: SirBlockId(0),
+                    blocks: [(
+                        SirBlockId(0),
+                        BasicBlock {
+                            id: SirBlockId(0),
+                            params: vec![],
+                            instructions: vec![
+                                SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                                SIRInstruction::Store(
+                                    sparse,
+                                    SIROffset::PackedElements {
+                                        bit_offset: 0,
+                                        element_width,
+                                    },
+                                    width,
+                                    zero,
+                                    vec![],
+                                    vec![],
+                                ),
+                                SIRInstruction::Commit(
+                                    sparse,
+                                    stable,
+                                    SIROffset::Static(0),
+                                    width,
+                                    vec![],
+                                ),
+                            ],
+                            terminator: SIRTerminator::Return,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    register_map: [(zero, RegisterType::Logic { width })]
+                        .into_iter()
+                        .collect(),
+                };
+                unit.verify();
+                let mut layout = empty_layout();
+                layout.mode = MemoryLayoutMode::ElementStrided;
+                layout.four_state = four_state;
+                layout.offsets.insert(absolute, 0);
+                layout.widths.insert(absolute, width);
+                layout.is_4states.insert(absolute, four_state);
+                layout.unpacked_arrays.insert(
+                    absolute,
+                    celox_state_layout::UnpackedArrayLayout {
+                        element_width,
+                        element_count,
+                        element_stride: 1,
+                        plane_size: element_count,
+                    },
+                );
+                layout.total_size = SPARSE;
+                layout.working_base_offset = SPARSE;
+                layout.sparse_base_offset = SPARSE;
+                layout.sparse_offsets.insert(absolute, 0);
+                layout.sparse_layouts.insert(
+                    absolute,
+                    celox_state_layout::SparseWorkingLayout {
+                        active_index: 0,
+                        chunk_count: 1,
+                        dirty_words_offset: DIRTY,
+                        dirty_word_count: 1,
+                        summary_words_offset: SUMMARY,
+                        summary_word_count: 1,
+                    },
+                );
+                layout.sparse_active_bits_offset = ACTIVE;
+                layout.sparse_active_capacity = 1;
+                layout.merged_total_size = STATE_SIZE;
+                layout.triggered_bits_offset = STATE_SIZE;
+                layout.scratch_base_offset = STATE_SIZE;
+                let mut function = lower_execution_unit(&unit, &layout, four_state);
+                function.verify();
+                mir_legalize::legalize(&mut function);
+                mir_opt::optimize(&mut function);
+                let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+                function.verify();
+                let emitted = emit::emit(
+                    &function,
+                    &allocation.assignment,
+                    allocation.spill_frame_size,
+                )
+                .unwrap();
+                let jit = JitCode::new(&emitted.code).unwrap();
+                let mut state = [0xffu8; STATE_SIZE];
+                state[DIRTY..DIRTY + 8].fill(0);
+                state[SUMMARY..SUMMARY + 8].fill(0);
+                state[ACTIVE..ACTIVE + 8].fill(0);
+                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                let physical_size = element_count * if four_state { 2 } else { 1 };
+                for byte in &state[..physical_size] {
+                    assert_eq!(
+                        *byte & ((1 << element_width) - 1) as u8,
+                        0,
+                        "width={element_width}, count={element_count}, four_state={four_state}"
+                    );
+                }
+                assert_eq!(state[physical_size], 0xff);
+                assert_eq!(state[SPARSE + physical_size], 0xff);
+                assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+                assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+                assert_eq!(&state[ACTIVE..ACTIVE + 8], &[0; 8]);
+            }
+        }
     }
 
     #[test]
