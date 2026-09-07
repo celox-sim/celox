@@ -278,7 +278,8 @@ fn compile_and_run_inner(
     let emit_result = {
         use celox::native_backend::emit;
 
-        emit::emit_prepared_eu(eu, &layout, false, "native_exec", false, None).expect("emit failed")
+        emit::emit_prepared_eu(eu, &layout, false, "native_exec", false, None, || false)
+            .expect("emit failed")
     };
 
     if debug {
@@ -740,6 +741,7 @@ fn test_debug_let_bitslice_write() {
             "native_exec_debug",
             false,
             None,
+            || false,
         )
         .expect("emit failed");
         println!(

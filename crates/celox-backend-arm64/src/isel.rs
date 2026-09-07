@@ -7,6 +7,7 @@
 mod dynamic_load_cache;
 mod packed_compare;
 mod sparse;
+mod strided;
 
 use super::mir::*;
 use super::sparse_write_state::{
@@ -80,6 +81,8 @@ pub fn lower_execution_unit_with_diagnostics(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
 ) -> MFunction {
+    let expanded = strided::expand_strided_accesses(eu, layout);
+    let eu = expanded.as_ref();
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         if let Err(error) = eu.verify_result() {
             panic!("before native ISel: {error}");
@@ -5501,12 +5504,27 @@ fn lower_instruction(
                         && let Some(load_size) =
                             ctx.full_static_load_size(addr, *bit_off, *width_bits)
                     {
+                        // Padding can retain unrelated bits after partial writes.
+                        // Strip it before the element participates in a concat.
+                        let padded_element = ctx
+                            .layout
+                            .unpacked_arrays
+                            .contains_key(&addr.absolute_addr())
+                            && ISelContext::access_size_has_padding(load_size, *width_bits);
+                        let raw = if padded_element {
+                            ctx.alloc_vreg(SpillDesc::transient())
+                        } else {
+                            vreg
+                        };
                         block.push(MInst::Load {
-                            dst: vreg,
+                            dst: raw,
                             base: BaseReg::SimState,
                             offset: byte_off,
                             size: load_size,
                         });
+                        if padded_element {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        }
                         ctx.known_bits.insert(vreg, *width_bits);
                     } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                         // Word-aligned, native size: single load.
@@ -13093,6 +13111,8 @@ fn lower_wide_unary_mask(
 }
 #[cfg(test)]
 mod tests {
+    mod strided;
+
     use super::*;
     use crate::{AbsoluteAddr, SIRValue};
     use celox_design::{InstanceId, StateObjectId};
