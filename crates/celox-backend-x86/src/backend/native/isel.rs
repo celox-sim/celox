@@ -6554,12 +6554,27 @@ fn lower_instruction(
                         && let Some(load_size) =
                             ctx.full_static_load_size(addr, *bit_off, *width_bits)
                     {
+                        // A padded slot is wider than its logical element.
+                        // Mask the raw load before claiming a known bit width.
+                        let padded_element = ctx
+                            .layout
+                            .unpacked_arrays
+                            .contains_key(&addr.absolute_addr())
+                            && ISelContext::access_size_has_padding(load_size, *width_bits);
+                        let raw = if padded_element {
+                            ctx.alloc_vreg(SpillDesc::transient())
+                        } else {
+                            vreg
+                        };
                         block.push(MInst::Load {
-                            dst: vreg,
+                            dst: raw,
                             base: BaseReg::SimState,
                             offset: byte_off,
                             size: load_size,
                         });
+                        if padded_element {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        }
                         ctx.known_bits.insert(vreg, *width_bits);
                     } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                         // Word-aligned, native size: single load.
@@ -15755,6 +15770,151 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn static_padded_element_loads_mask_padding_before_concat() {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(0),
+        };
+        let output_abs = AbsoluteAddr {
+            var_id: VarId(1),
+            ..array_abs
+        };
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let low = RegisterId(0);
+        let high = RegisterId(1);
+        let result = RegisterId(2);
+        for width in [24usize, 1, 3, 7, 9, 15, 17, 31, 33, 40, 48, 51, 57, 63] {
+            for four_state in [false, true] {
+                let stride = width.div_ceil(8).next_power_of_two();
+                let plane_size = stride * 2;
+                let result_width = width * 2;
+                let unit = ExecutionUnit {
+                    entry_block_id: SirBlockId(0),
+                    blocks: [(
+                        SirBlockId(0),
+                        BasicBlock {
+                            id: SirBlockId(0),
+                            params: vec![],
+                            instructions: vec![
+                                SIRInstruction::Load(low, array, SIROffset::Static(0), width),
+                                SIRInstruction::Load(high, array, SIROffset::Static(width), width),
+                                SIRInstruction::Concat(result, vec![high, low]),
+                                SIRInstruction::Store(
+                                    output,
+                                    SIROffset::Static(0),
+                                    result_width,
+                                    result,
+                                    vec![],
+                                    vec![],
+                                ),
+                            ],
+                            terminator: SIRTerminator::Return,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    register_map: [(low, width), (high, width), (result, result_width)]
+                        .into_iter()
+                        .map(|(register, width)| {
+                            (
+                                register,
+                                if four_state {
+                                    RegisterType::Logic { width }
+                                } else {
+                                    RegisterType::Bit {
+                                        width,
+                                        signed: false,
+                                    }
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                let mut layout = empty_layout();
+                layout.four_state = four_state;
+                layout.mode = MemoryLayoutMode::ElementStrided;
+                layout.offsets = [(array_abs, 0), (output_abs, 32)].into_iter().collect();
+                layout.widths = [(array_abs, result_width), (output_abs, result_width)]
+                    .into_iter()
+                    .collect();
+                layout.is_4states = [(array_abs, four_state), (output_abs, four_state)]
+                    .into_iter()
+                    .collect();
+                layout.unpacked_arrays.insert(
+                    array_abs,
+                    celox_state_layout::UnpackedArrayLayout {
+                        element_width: width,
+                        element_count: 2,
+                        element_stride: stride,
+                        plane_size,
+                    },
+                );
+                layout.total_size = 80;
+                layout.working_base_offset = 80;
+                layout.sparse_base_offset = 80;
+                layout.merged_total_size = 80;
+                layout.triggered_bits_offset = 80;
+                layout.scratch_base_offset = 80;
+
+                let mut function = lower_execution_unit(&unit, &layout, four_state);
+                mir_legalize::legalize(&mut function);
+                mir_opt::optimize(&mut function);
+                let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+                function.verify();
+                let emitted = emit::emit(
+                    &function,
+                    &allocation.assignment,
+                    allocation.spill_frame_size,
+                )
+                .unwrap();
+                let jit = JitCode::new(&emitted.code).unwrap();
+
+                let mut state = vec![0xa5u8; 80];
+                let element_mask = mask_for_width(width);
+                let result_mask = (BigUint::from(1u8) << result_width) - 1u8;
+                let planes = [
+                    [0x1234_5678_0012_3456u64, 0x5543_2100_0065_4321],
+                    [0x0001_0204_0008_1020, 0x0102_0400_0810_2000],
+                ];
+                for (plane, values) in
+                    planes
+                        .iter()
+                        .enumerate()
+                        .take(if four_state { 2 } else { 1 })
+                {
+                    for (element, value) in values.iter().enumerate() {
+                        let padded = value | !element_mask;
+                        let start = plane * plane_size + element * stride;
+                        state[start..start + stride]
+                            .copy_from_slice(&padded.to_le_bytes()[..stride]);
+                    }
+                }
+                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                for (plane, values) in
+                    planes
+                        .iter()
+                        .enumerate()
+                        .take(if four_state { 2 } else { 1 })
+                {
+                    let start = 32 + plane * result_width.div_ceil(8);
+                    let actual =
+                        BigUint::from_bytes_le(&state[start..start + result_width.div_ceil(8)])
+                            & &result_mask;
+                    let expected = (BigUint::from(values[1] & element_mask) << width)
+                        | BigUint::from(values[0] & element_mask);
+                    assert_eq!(
+                        actual, expected,
+                        "width={width}, four_state={four_state}, plane={plane}"
+                    );
+                }
+                assert_eq!(&state[64..], &[0xa5; 16]);
+            }
+        }
     }
 
     #[test]
