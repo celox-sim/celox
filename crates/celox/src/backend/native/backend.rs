@@ -40,13 +40,11 @@ const NATIVE_FEATURE_AVX: u8 = 1 << 1;
 const NATIVE_FEATURE_FS_STATE_BASE: u8 = 1 << 2;
 const NATIVE_FEATURE_GS_STATE_BASE: u8 = 1 << 3;
 const NATIVE_FEATURE_POPCNT: u8 = 1 << 4;
-const NATIVE_FEATURE_BMI1: u8 = 1 << 5;
 const KNOWN_NATIVE_FEATURES: u8 = NATIVE_FEATURE_BMI2
     | NATIVE_FEATURE_AVX
     | NATIVE_FEATURE_FS_STATE_BASE
     | NATIVE_FEATURE_GS_STATE_BASE
-    | NATIVE_FEATURE_POPCNT
-    | NATIVE_FEATURE_BMI1;
+    | NATIVE_FEATURE_POPCNT;
 
 fn current_native_feature_bits() -> u8 {
     #[cfg(any(
@@ -67,9 +65,6 @@ fn current_native_feature_bits() -> u8 {
 
 fn format_native_feature_bits(bits: u8) -> String {
     let mut names = Vec::new();
-    if bits & NATIVE_FEATURE_BMI1 != 0 {
-        names.push("BMI1");
-    }
     if bits & NATIVE_FEATURE_BMI2 != 0 {
         names.push("BMI2");
     }

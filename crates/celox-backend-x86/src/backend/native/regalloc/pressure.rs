@@ -6,7 +6,7 @@ use std::fmt;
 use crate::native::mir::{BlockId, MFunction, VReg};
 
 use super::analysis::AnalysisResult;
-use super::assignment::{RegConstraint, use_constraints};
+use super::assignment::{RegConstraint, clobbers, use_constraints};
 
 #[derive(Debug)]
 pub(super) struct PressureError {
@@ -93,7 +93,7 @@ pub(super) fn verify(
                 )?;
             }
 
-            let clobbered = super::assignment::allocatable_clobber_count(inst, func);
+            let clobbered = clobbers(inst).len();
             if clobbered != 0 {
                 let live_through = live_before.intersection(&live_after).count();
                 check(
