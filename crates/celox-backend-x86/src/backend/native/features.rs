@@ -39,7 +39,6 @@ pub(crate) enum StateBaseStrategy {
 /// boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct X86Features {
-    bmi1: bool,
     bmi2: bool,
     avx: bool,
     popcnt: bool,
@@ -48,10 +47,6 @@ pub(crate) struct X86Features {
 
 impl X86Features {
     pub(crate) fn detect() -> Self {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        let bmi1 = std::arch::is_x86_feature_detected!("bmi1");
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        let bmi1 = false;
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         let bmi2 = std::arch::is_x86_feature_detected!("bmi2");
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -66,22 +61,11 @@ impl X86Features {
         let popcnt = false;
 
         Self {
-            bmi1,
             bmi2,
             avx,
             popcnt,
             state_base: detect_state_base_strategy(),
         }
-    }
-
-    pub(crate) const fn bmi1(self) -> bool {
-        self.bmi1
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn with_bmi1(mut self, enabled: bool) -> Self {
-        self.bmi1 = enabled;
-        self
     }
 
     pub(crate) const fn bmi2(self) -> bool {
@@ -127,7 +111,6 @@ impl X86Features {
     #[cfg(test)]
     pub(crate) const fn for_test_with_avx(bmi2: bool, avx: bool) -> Self {
         Self {
-            bmi1: false,
             bmi2,
             avx,
             popcnt: false,
@@ -141,7 +124,6 @@ impl X86Features {
         state_base: StateBaseStrategy,
     ) -> Self {
         Self {
-            bmi1: false,
             bmi2,
             avx: false,
             popcnt: false,
@@ -156,7 +138,6 @@ pub fn detected_image_feature_bits() -> u8 {
 }
 
 pub(crate) const IMAGE_FEATURE_BMI2: u8 = 1 << 0;
-pub(crate) const IMAGE_FEATURE_BMI1: u8 = 1 << 5;
 pub(crate) const IMAGE_FEATURE_AVX: u8 = 1 << 1;
 pub(crate) const IMAGE_FEATURE_POPCNT: u8 = 1 << 4;
 
@@ -166,8 +147,7 @@ pub(crate) fn emitted_image_feature_bits(
     uses_avx: bool,
     uses_popcnt: bool,
 ) -> u8 {
-    // Emission adds BMI1 only when a late NOT/AND pair actually fuses.
-    let mut bits = image_feature_bits(features) & !IMAGE_FEATURE_BMI1;
+    let mut bits = image_feature_bits(features);
     if !uses_bmi2 {
         bits &= !IMAGE_FEATURE_BMI2;
     }
@@ -187,9 +167,6 @@ fn image_feature_bits(features: X86Features) -> u8 {
     const GS_STATE_BASE: u8 = 1 << 3;
 
     let mut bits = 0;
-    if features.bmi1() {
-        bits |= IMAGE_FEATURE_BMI1;
-    }
     if features.bmi2() {
         bits |= IMAGE_FEATURE_BMI2;
     }

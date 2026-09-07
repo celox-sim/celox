@@ -10,16 +10,6 @@ use super::mir::*;
 use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
 use crate::{HashMap, HashSet};
 
-mod bitmap_worklist;
-mod boolean;
-mod branch_merge;
-mod circular_scan;
-mod counted_loop;
-mod exclusive_loop;
-mod known_bits;
-mod loop_guard;
-#[cfg(test)]
-mod memory_forward_tests;
 mod pipeline;
 pub use pipeline::{optimize, optimize_with_diagnostics};
 
@@ -263,11 +253,13 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
     folded
 }
 
-/// Fold single-use byte displacements and power-of-two indexes into x86
-/// memory operands. The offset must remain an encodable signed displacement;
-/// scaling preserves the original modulo-64-bit address arithmetic. The alias
-/// range still describes the entire original object.
-fn fold_indexed_load_addresses(func: &mut MFunction) {
+/// Fold a proven power-of-two byte index into the x86 memory operand.
+///
+/// This pass does not infer an RTL range or replace a bit-offset expression.
+/// It only rewrites an already selected 64-bit `ShlImm` whose sole use is an
+/// indexed load. x86 effective-address scaling and the original shift both
+/// use modulo-64-bit arithmetic, so the rewrite preserves wrapping exactly.
+fn fold_scaled_indexed_loads(func: &mut MFunction) {
     let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
@@ -284,35 +276,16 @@ fn fold_indexed_load_addresses(func: &mut MFunction) {
 
     for block in &mut func.blocks {
         let mut shifts = HashMap::<VReg, (VReg, u8)>::default();
-        let mut displacements = HashMap::<VReg, (VReg, i32)>::default();
         for inst in &mut block.insts {
-            if let MInst::AddImm { dst, src, imm } = inst {
-                displacements.insert(*dst, (*src, *imm));
-                continue;
-            }
             if let MInst::ShlImm { dst, src, imm } = inst {
                 if (1..=3).contains(imm) {
                     shifts.insert(*dst, (*src, *imm));
                 }
                 continue;
             }
-            let MInst::LoadIndexed {
-                offset,
-                index,
-                scale,
-                ..
-            } = inst
-            else {
+            let MInst::LoadIndexed { index, scale, .. } = inst else {
                 continue;
             };
-            if use_counts.get(index).copied() == Some(1)
-                && let Some(&(source, displacement)) = displacements.get(index)
-                && let Some(displacement) = displacement.checked_mul(i32::from(*scale))
-                && let Some(adjusted) = offset.checked_add(displacement)
-            {
-                *index = source;
-                *offset = adjusted;
-            }
             if *scale != 1 || use_counts.get(index).copied() != Some(1) {
                 continue;
             }
@@ -1232,11 +1205,9 @@ fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
             base,
             offset,
             index,
-            scale,
             size,
             ..
         } if *index == imm_vreg => sign_extended_i32(value)
-            .and_then(|index| index.checked_mul(i32::from(*scale)))
             .and_then(|index| offset.checked_add(index))
             .map(|offset| MInst::Load {
                 dst: *dst,
@@ -2110,7 +2081,7 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
 }
 
 #[derive(Clone, Copy)]
-enum ValueDefinition {
+enum PossibleOneDefinition {
     Phi { block: usize, phi: usize },
     Instruction { block: usize, instruction: usize },
 }
@@ -2123,7 +2094,7 @@ enum ValueDefinition {
 /// when a backedge fact actually improves.
 fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) -> Vec<u64> {
     let value_count = func.vregs.count() as usize;
-    let mut definitions = vec![None::<ValueDefinition>; value_count];
+    let mut definitions = vec![None::<PossibleOneDefinition>; value_count];
     let mut users = vec![Vec::<VReg>::new(); value_count];
     let mut queue = VecDeque::new();
     let mut queued = vec![false; value_count];
@@ -2131,7 +2102,7 @@ fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) ->
     for (block_index, block) in func.blocks.iter().enumerate() {
         for (phi_index, phi) in block.phis.iter().enumerate() {
             let destination = phi.dst.0 as usize;
-            definitions[destination] = Some(ValueDefinition::Phi {
+            definitions[destination] = Some(PossibleOneDefinition::Phi {
                 block: block_index,
                 phi: phi_index,
             });
@@ -2146,7 +2117,7 @@ fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) ->
                 continue;
             };
             let destination = dst.0 as usize;
-            definitions[destination] = Some(ValueDefinition::Instruction {
+            definitions[destination] = Some(PossibleOneDefinition::Instruction {
                 block: block_index,
                 instruction: instruction_index,
             });
@@ -2166,12 +2137,12 @@ fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) ->
             continue;
         };
         let computed = match definition {
-            ValueDefinition::Phi { block, phi } => func.blocks[block].phis[phi]
+            PossibleOneDefinition::Phi { block, phi } => func.blocks[block].phis[phi]
                 .sources
                 .iter()
                 .map(|(_, source)| possible_bits(*source, &possible_ones, constants))
                 .fold(0, |possible, source| possible | source),
-            ValueDefinition::Instruction { block, instruction } => compute_possible_one_bits(
+            PossibleOneDefinition::Instruction { block, instruction } => compute_possible_one_bits(
                 &func.blocks[block].insts[instruction],
                 &possible_ones,
                 constants,
@@ -6859,101 +6830,6 @@ fn emit_partial_store_overlay(
 /// the direct bytes referenced by one block. Insert recovery additionally
 /// reuses one sparse whole-function possible-bit solve.
 fn promote_partial_store_round_trips(func: &mut MFunction) {
-    promote_partial_store_round_trips_impl(func, false);
-}
-
-fn forward_live_partial_stores(func: &mut MFunction) {
-    promote_partial_store_round_trips_impl(func, true);
-}
-
-fn discover_live_partial_stores(
-    block: &MBlock,
-) -> (Vec<PartialRoundTripPlan>, Vec<Option<PartialStoreEvent>>) {
-    let mut plans = Vec::new();
-    let mut stores = vec![None; block.insts.len()];
-    for (instruction, inst) in block.insts.iter().enumerate() {
-        let MInst::Load {
-            dst,
-            base: BaseReg::SimState,
-            offset,
-            size,
-        } = *inst
-        else {
-            continue;
-        };
-        if size == OpSize::S8 {
-            continue;
-        }
-        let load_slot = MemorySlot {
-            base: BaseReg::SimState,
-            offset,
-            size,
-        };
-        let start = i64::from(offset);
-        let end = start + i64::from(size.bytes());
-        let mut selected = Vec::new();
-        let mut covered = 0u16;
-        for previous in (instruction.saturating_sub(32)..instruction).rev() {
-            let write = &block.insts[previous];
-            let effects = memory_effect::writes(write);
-            if effects.unknown_memory()
-                == Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
-            {
-                break;
-            }
-            if !effects.ranges().any(|range| {
-                range.base == BaseReg::SimState
-                    && range.offset < end
-                    && range.end().is_none_or(|limit| start < limit)
-            }) {
-                continue;
-            }
-            let MInst::Store {
-                base,
-                offset,
-                src,
-                size,
-            } = *write
-            else {
-                break;
-            };
-            let slot = MemorySlot { base, offset, size };
-            if size.bytes() >= load_slot.size.bytes() || !contained_slot(slot, load_slot) {
-                break;
-            }
-            let mask = ((1u16 << size.bytes()) - 1) << (offset - load_slot.offset);
-            if mask & covered != 0 {
-                break;
-            }
-            covered |= mask;
-            selected.push(previous);
-            stores[previous] = Some(PartialStoreEvent {
-                slot,
-                source: src,
-                insert: None,
-                prior_events: [None; 8],
-                prior_writes: [None; 8],
-            });
-            if selected.len() == 2 {
-                break;
-            }
-        }
-        if selected.is_empty() {
-            continue;
-        }
-        selected.reverse();
-        plans.push(PartialRoundTripPlan {
-            load_instruction: instruction,
-            insertion_instruction: selected[0],
-            load_slot,
-            destination: dst,
-            stores: selected,
-        });
-    }
-    (plans, stores)
-}
-
-fn promote_partial_store_round_trips_impl(func: &mut MFunction, retain_stores: bool) {
     let constants = func
         .blocks
         .iter()
@@ -6977,22 +6853,14 @@ fn promote_partial_store_round_trips_impl(func: &mut MFunction, retain_stores: b
         .collect::<HashSet<_>>();
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
-        let (plans, store_events) = if retain_stores {
-            discover_live_partial_stores(block)
-        } else {
-            discover_partial_round_trips(
-                block,
-                spill_descs,
-                &defined_values,
-                &possible_ones,
-                &constants,
-            )
-        };
-        let plans = if retain_stores {
-            plans
-        } else {
-            retain_dead_partial_store_plans(block, plans)
-        };
+        let (plans, store_events) = discover_partial_round_trips(
+            block,
+            spill_descs,
+            &defined_values,
+            &possible_ones,
+            &constants,
+        );
+        let plans = retain_dead_partial_store_plans(block, plans);
         if plans.is_empty() {
             continue;
         }
@@ -7032,9 +6900,7 @@ fn promote_partial_store_round_trips_impl(func: &mut MFunction, retain_stores: b
                 &stores,
             );
             replacements.insert(plan.load_instruction, replacement);
-            if !retain_stores {
-                removals.extend(plan.stores);
-            }
+            removals.extend(plan.stores);
             spill_descs[plan.destination.0 as usize] = SpillDesc::transient();
         }
 
@@ -7087,17 +6953,7 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     size,
                 } => {
                     if let Some(src) = available.get(base, offset, size) {
-                        emit_partial_load_forward(
-                            &mut rewritten,
-                            vregs,
-                            spill_descs,
-                            dst,
-                            src,
-                            offset,
-                            size,
-                            offset,
-                            size,
-                        );
+                        rewritten.push(MInst::Mov { dst, src });
                         continue;
                     }
                     if let Some((covering_slot, src)) =
@@ -7124,22 +6980,30 @@ fn forward_local_store_loads(func: &mut MFunction) {
                         size,
                     });
                 }
-                other => {
-                    let writes = memory_effect::writes(&other);
-                    if let Some(memory_effect::UnknownMemory::Direct(base)) =
-                        writes.unknown_memory()
-                    {
-                        available.invalidate_base(base);
-                    }
-                    for range in writes.ranges() {
-                        if let Some(end) = range.end() {
-                            available.invalidate_range(range.base, range.offset, end);
-                        } else {
-                            available.invalidate_base(range.base);
-                        }
-                    }
-                    rewritten.push(other);
+                MInst::LoadIndexed { .. }
+                | MInst::LoadPtrIndexed { .. }
+                | MInst::StoreIndexed { .. }
+                | MInst::OrStoreIndexed { .. }
+                | MInst::StorePtrIndexed { .. }
+                | MInst::ReleaseStorePtrIndexed { .. } => {
+                    available.clear();
+                    rewritten.push(inst);
                 }
+                MInst::MemCopy {
+                    src_offset,
+                    dst_offset,
+                    byte_len,
+                } => {
+                    // The source is read but unchanged. Only values cached for
+                    // the written destination range become stale.
+                    available.invalidate_byte_range(BaseReg::SimState, dst_offset, byte_len);
+                    rewritten.push(MInst::MemCopy {
+                        src_offset,
+                        dst_offset,
+                        byte_len,
+                    });
+                }
+                other => rewritten.push(other),
             }
         }
 
@@ -7156,7 +7020,6 @@ struct AvailableStores {
 }
 
 impl AvailableStores {
-    #[cfg(test)]
     fn clear(&mut self) {
         self.slots.clear();
     }
@@ -7180,7 +7043,6 @@ impl AvailableStores {
         self.invalidate_range(base, start, end);
     }
 
-    #[cfg(test)]
     fn invalidate_byte_range(&mut self, base: BaseReg, offset: i32, byte_len: usize) {
         let Some((start, end)) = byte_range(offset, byte_len) else {
             self.invalidate_base(base);
@@ -7456,58 +7318,11 @@ fn invalidate_stores_observed_by(
 pub(super) fn eliminate_redundant_local_stores(func: &mut MFunction) {
     for block in &mut func.blocks {
         let mut later_stores = LaterDirectStores::default();
-        let mut indexed_stores =
-            Vec::<(BaseReg, i32, VReg, OpSize, Option<MemoryAliasRange>)>::new();
         let mut invalidation_scratch = Vec::new();
         let mut reversed = Vec::with_capacity(block.insts.len());
 
         for inst in block.insts.drain(..).rev() {
             invalidate_stores_observed_by(&mut later_stores, &inst, &mut invalidation_scratch);
-            let reads = memory_effect::reads(&inst);
-            indexed_stores.retain(|&(base, _, _, _, envelope)| {
-                if reads.unknown_memory() == Some(memory_effect::UnknownMemory::Direct(base)) {
-                    return false;
-                }
-                !reads.ranges().any(|read| {
-                    read.base == base
-                        && envelope.is_none_or(|envelope| {
-                            read.end()
-                                .is_none_or(|end| i64::from(envelope.offset()) < end)
-                                && read.offset < envelope.end()
-                        })
-                })
-            });
-            if let MInst::StoreIndexed {
-                base,
-                offset,
-                index,
-                size,
-                alias_range,
-                ..
-            } = &inst
-            {
-                if indexed_stores.iter().any(
-                    |&(later_base, later_offset, later_index, later_size, later_envelope)| {
-                        (
-                            later_base,
-                            later_offset,
-                            later_index,
-                            later_size,
-                            later_envelope,
-                        ) == (*base, *offset, *index, *size, *alias_range)
-                    },
-                ) {
-                    continue;
-                }
-                // SSA index identity and the same semantic envelope prove an
-                // exact overwrite. Reads invalidate through that envelope;
-                // intervening writes cannot observe the discarded value.
-                // Bound compile-time work for unusually long store-only blocks.
-                if indexed_stores.len() == 64 {
-                    indexed_stores.remove(0);
-                }
-                indexed_stores.push((*base, *offset, *index, *size, *alias_range));
-            }
             if let MInst::Store {
                 base, offset, size, ..
             } = &inst
@@ -8305,91 +8120,6 @@ mod tests {
                 ..
             }
         )));
-    }
-
-    #[test]
-    fn forwards_live_partial_stores_without_losing_later_observers() {
-        use crate::native::{emit, jit_mem::JitCode, mir_legalize, regalloc};
-        fn compile(mut function: MFunction) -> (JitCode, usize) {
-            mir_legalize::legalize(&mut function);
-            let allocation = regalloc::run_regalloc(&mut function).unwrap();
-            let emitted = emit::emit(
-                &function,
-                &allocation.assignment,
-                allocation.spill_frame_size,
-            )
-            .unwrap();
-            (
-                JitCode::new(&emitted.code).unwrap(),
-                emitted.required_state_size.max(128) as usize,
-            )
-        }
-        for provenance in [false, true] {
-            for barrier in [false, true] {
-                let mut original = partial_store_round_trip(true, false);
-                if !provenance {
-                    original.spill_descs[3].state_insert = None;
-                }
-                if barrier {
-                    original.blocks[0].insts.insert(
-                        5,
-                        MInst::MemFill {
-                            dst_offset: 101,
-                            byte_len: 1,
-                            value: 0xa5,
-                        },
-                    );
-                }
-                original.blocks[0].push(MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 0,
-                    src: VReg(4),
-                    size: OpSize::S64,
-                });
-                original.blocks[0].push(MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 8,
-                    src: VReg(5),
-                    size: OpSize::S64,
-                });
-                original.blocks[0].push(MInst::Return);
-                let mut optimized = original.clone();
-                forward_live_partial_stores(&mut optimized);
-                optimized.verify();
-                assert_eq!(
-                    optimized.blocks[0]
-                        .insts
-                        .iter()
-                        .filter(|inst| matches!(
-                            inst,
-                            MInst::Store {
-                                offset: 100,
-                                size: OpSize::S8,
-                                ..
-                            }
-                        ))
-                        .count(),
-                    1
-                );
-                assert_eq!(
-                    optimized.blocks[0]
-                        .insts
-                        .iter()
-                        .any(|inst| matches!(inst, MInst::Load { dst: VReg(4), .. })),
-                    barrier
-                );
-                let (before, before_size) = compile(original);
-                let (after, after_size) = compile(optimized);
-                for value in [0u64, 1, 0x0123_4567_89ab_cdef, u64::MAX] {
-                    let mut left = vec![0u8; before_size.max(after_size)];
-                    left[100..108].copy_from_slice(&value.to_le_bytes());
-                    let mut right = left.clone();
-                    assert_eq!(unsafe { before.call(&mut left) }, 0);
-                    assert_eq!(unsafe { after.call(&mut right) }, 0);
-                    assert_eq!(&left[..128], &right[..128]);
-                }
-            }
-        }
     }
 
     #[test]
@@ -12413,115 +12143,6 @@ mod tests {
     }
 
     #[test]
-    fn folded_indexed_load_executes_the_original_address_and_keeps_its_alias_range() {
-        use crate::native::{emit, jit_mem::JitCode, regalloc};
-        let alias_range = MemoryAliasRange::new(32, 160);
-        let mut func = make_func(
-            vec![
-                MInst::Load {
-                    dst: VReg(0),
-                    base: BaseReg::SimState,
-                    offset: 0,
-                    size: OpSize::S64,
-                },
-                MInst::ShlImm {
-                    dst: VReg(1),
-                    src: VReg(0),
-                    imm: 2,
-                },
-                MInst::AddImm {
-                    dst: VReg(2),
-                    src: VReg(1),
-                    imm: 3,
-                },
-                MInst::LoadIndexed {
-                    dst: VReg(3),
-                    base: BaseReg::SimState,
-                    offset: 32,
-                    index: VReg(2),
-                    scale: 1,
-                    size: OpSize::S64,
-                    alias_range,
-                },
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 8,
-                    src: VReg(3),
-                    size: OpSize::S64,
-                },
-                MInst::Return,
-            ],
-            4,
-        );
-        fold_indexed_load_addresses(&mut func);
-        assert!(
-            matches!(func.blocks[0].insts[3], MInst::LoadIndexed { offset: 35, index: VReg(0), scale: 4, alias_range: range, .. } if range == alias_range)
-        );
-        dead_code_eliminate(&mut func);
-        let allocation = regalloc::run_regalloc(&mut func).unwrap();
-        let emitted =
-            emit::emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
-        let jit = JitCode::new(&emitted.code).unwrap();
-        for index in 0..32u64 {
-            let mut state = [0u8; 192];
-            for (offset, byte) in state.iter_mut().enumerate().skip(32) {
-                *byte = offset as u8 ^ 0x5a;
-            }
-            state[..8].copy_from_slice(&index.to_le_bytes());
-            let address = 32 + (index as usize * 4 + 3);
-            let expected = u64::from_le_bytes(state[address..address + 8].try_into().unwrap());
-            assert_eq!(unsafe { jit.call(&mut state) }, 0);
-            assert_eq!(
-                u64::from_le_bytes(state[8..16].try_into().unwrap()),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn indexed_load_displacement_overflow_keeps_the_full_width_addition() {
-        for (offset, displacement, scale) in [(i32::MAX, 1, 1), (i32::MIN, -1, 1), (0, i32::MAX, 8)]
-        {
-            let mut func = make_func(
-                vec![
-                    MInst::Load {
-                        dst: VReg(0),
-                        base: BaseReg::SimState,
-                        offset: 0,
-                        size: OpSize::S64,
-                    },
-                    MInst::AddImm {
-                        dst: VReg(1),
-                        src: VReg(0),
-                        imm: displacement,
-                    },
-                    MInst::LoadIndexed {
-                        dst: VReg(2),
-                        base: BaseReg::SimState,
-                        offset,
-                        index: VReg(1),
-                        scale,
-                        size: OpSize::S64,
-                        alias_range: None,
-                    },
-                    MInst::Store {
-                        base: BaseReg::SimState,
-                        offset: 8,
-                        src: VReg(2),
-                        size: OpSize::S64,
-                    },
-                    MInst::Return,
-                ],
-                3,
-            );
-            fold_indexed_load_addresses(&mut func);
-            assert!(
-                matches!(func.blocks[0].insts[2], MInst::LoadIndexed { index: VReg(1), offset: original, .. } if original == offset)
-            );
-        }
-    }
-
-    #[test]
     fn forwards_exact_store_to_load_in_block() {
         let mut func = make_func(
             vec![
@@ -12541,9 +12162,10 @@ mod tests {
                     offset: 16,
                     size: OpSize::S8,
                 },
-                MInst::LoadImm {
+                MInst::AddImm {
                     dst: VReg(2),
-                    value: 0x56,
+                    src: VReg(1),
+                    imm: 1,
                 },
                 MInst::Store {
                     base: BaseReg::SimState,
@@ -12560,15 +12182,22 @@ mod tests {
 
         let insts = &func.blocks[0].insts;
         assert!(
-            !insts.iter().any(|inst| matches!(inst, MInst::Load { .. })),
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::LoadImm {
+                    dst: VReg(1),
+                    value: 85,
+                }
+            )),
             "{insts:#?}"
         );
         assert!(
             insts.iter().any(|inst| matches!(
                 inst,
-                MInst::LoadImm {
+                MInst::AddImm {
                     dst: VReg(2),
-                    value: 0x56,
+                    src: VReg(1),
+                    imm: 1,
                 }
             )),
             "{insts:#?}"
@@ -12597,8 +12226,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_overlapping_store_when_forwarding_later_load() {
-        use crate::native::{emit, jit_mem::JitCode, regalloc};
+    fn does_not_forward_across_overlapping_store() {
         let mut func = make_func(
             vec![
                 MInst::LoadImm {
@@ -12640,18 +12268,31 @@ mod tests {
 
         optimize(&mut func);
 
-        let allocation = regalloc::run_regalloc(&mut func).unwrap();
-        let emitted =
-            emit::emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
-        let jit = JitCode::new(&emitted.code).unwrap();
-        let mut state = vec![0xa5u8; emitted.required_state_size.max(48) as usize];
-        assert_eq!(unsafe { jit.call(&mut state) }, 0);
-        // The later byte replaces the high byte of 0x1122. Reusing that old
-        // whole value would lose the overlapping store.
-        assert_eq!(&state[16..18], &[0x22, 0x33]);
-        assert_eq!(&state[32..34], &[0x22, 0x33]);
-        assert_eq!(state[18], 0xa5);
-        assert_eq!(state[34], 0xa5);
+        let insts = &func.blocks[0].insts;
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Load {
+                    dst: VReg(2),
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    size: OpSize::S16,
+                }
+            )),
+            "{insts:#?}"
+        );
+        assert!(
+            insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    src: VReg(2),
+                    size: OpSize::S16,
+                }
+            )),
+            "{insts:#?}"
+        );
     }
 
     #[test]
@@ -12768,11 +12409,9 @@ mod tests {
                     src: VReg(0),
                     size: OpSize::S8,
                 },
-                MInst::Load {
+                MInst::LoadImm {
                     dst: VReg(1),
-                    base: BaseReg::SimState,
-                    offset: 0,
-                    size: OpSize::S64,
+                    value: 0,
                 },
                 MInst::LoadIndexed {
                     dst: VReg(2),
@@ -13169,33 +12808,13 @@ mod tests {
         optimize(&mut func);
 
         assert!(
-            func.blocks[0].insts.iter().any(|inst| matches!(
-                inst,
-                MInst::Or { dst: VReg(9), .. } | MInst::Or32 { dst: VReg(9), .. }
-            )),
+            func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::Or { dst: VReg(9), .. })),
             "{:#?}",
             func.blocks[0].insts
         );
-    }
-
-    #[test]
-    fn constant_index_folding_preserves_scale_and_rejects_displacement_overflow() {
-        for scale in [1, 2, 4, 8] {
-            let instruction = MInst::LoadIndexed {
-                dst: VReg(1),
-                base: BaseReg::SimState,
-                offset: 64,
-                index: VReg(0),
-                scale,
-                size: OpSize::S64,
-                alias_range: MemoryAliasRange::new(0, 128),
-            };
-            for index in [-2i32, 0, 3] {
-                assert!(matches!(fold_imm_use(&instruction, VReg(0), index as u64),
-                    Some(MInst::Load { offset, .. }) if offset == 64 + index * i32::from(scale)));
-            }
-            assert!(fold_imm_use(&instruction, VReg(0), i32::MAX as u64).is_none());
-        }
     }
 
     #[test]

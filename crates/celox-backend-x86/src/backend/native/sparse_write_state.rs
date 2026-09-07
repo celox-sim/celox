@@ -180,13 +180,8 @@ fn finish_zero_fill_group(
             .get(&object)
             .is_some_and(|sparse| sparse.chunk_count > 1)
     };
-    let padded_array = layout
-        .unpacked_arrays
-        .get(&object)
-        .is_some_and(|array| array.element_stride * 8 != array.element_width);
-    // A contiguous single chunk has a cheap scalar store. A padded array
-    // would otherwise expand into a read/modify/write for every element.
-    if logical_width == 0 || (!multiple_native_chunks && !padded_array) || candidates.is_empty() {
+    // A single native chunk already has a cheaper dedicated lowering.
+    if logical_width == 0 || !multiple_native_chunks || candidates.is_empty() {
         return;
     }
 
