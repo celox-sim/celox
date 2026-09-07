@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::HashMap;
 use crate::native::mir::{BlockId, MFunction, MInst, PackedStateHome, VReg};
 
-use super::assignment::clobbers;
 use super::cfg::NormalizedCfg;
 use super::next_use::{NextUseAnalysis, NextUseDistance};
 use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis, ResolvedRecipe};
@@ -1713,7 +1712,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         future_uses: &impl FutureUses,
     ) -> Result<(), SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
-        let clobbered = clobbers(inst).len();
+        let clobbered = super::assignment::allocatable_clobber_count(inst, self.func);
         if clobbered > self.registers {
             return Err(SpillPlanError::new(
                 "SPILL_PLAN.CLOBBER_CAPACITY",
