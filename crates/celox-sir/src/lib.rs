@@ -816,6 +816,16 @@ pub fn collect_exact_zero_registers<A>(
                 continue;
             };
             if expanded {
+                // Repeated zero bits may have been lowered to a mux between
+                // all ones and all zeros. An exact-zero condition selects
+                // only the else arm, even in four-state execution.
+                if let SIRInstruction::Mux(_, condition, _, else_value) = instruction
+                    && result.get(condition) == Some(&true)
+                {
+                    result.insert(register, result.get(else_value) == Some(&true));
+                    visiting.remove(&register);
+                    continue;
+                }
                 let mut all_zero = true;
                 let count = visit_exact_zero_dependencies(instruction, |dependency| {
                     all_zero &= result.get(&dependency) == Some(&true);
@@ -846,6 +856,10 @@ pub fn collect_exact_zero_registers<A>(
                 work.pop();
                 result.insert(register, false);
                 visiting.remove(&register);
+            } else if let SIRInstruction::Mux(_, condition, ..) = instruction
+                && !result.contains_key(condition)
+            {
+                work.push((*condition, false));
             }
         }
     }
@@ -853,6 +867,51 @@ pub fn collect_exact_zero_registers<A>(
         .into_iter()
         .filter_map(|(register, zero)| zero.then_some(register))
         .collect()
+}
+
+#[cfg(test)]
+mod exact_zero_tests {
+    use super::*;
+
+    #[test]
+    fn zero_mux_condition_selects_else_without_assuming_unknown_conditions() {
+        let r = RegisterId;
+        let unit = ExecutionUnit::<()> {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(r(0), SIRValue::new(0u8)),
+                        SIRInstruction::Imm(r(1), SIRValue::new(1u8)),
+                        SIRInstruction::Imm(
+                            r(2),
+                            SIRValue {
+                                payload: 1u8.into(),
+                                mask: 1u8.into(),
+                            },
+                        ),
+                        SIRInstruction::Mux(r(3), r(0), r(1), r(0)),
+                        SIRInstruction::Mux(r(4), r(1), r(0), r(1)),
+                        SIRInstruction::Mux(r(5), r(2), r(1), r(0)),
+                        SIRInstruction::Mux(r(6), r(2), r(0), r(0)),
+                        SIRInstruction::Mux(r(7), r(3), r(1), r(0)),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..8)
+                .map(|id| (r(id), RegisterType::Logic { width: 1 }))
+                .collect(),
+        };
+        unit.verify();
+        let zeros = collect_exact_zero_registers(&unit, [r(3), r(4), r(5), r(6), r(7)]);
+        assert_eq!(zeros, [r(0), r(3), r(6), r(7)].into_iter().collect());
+    }
 }
 
 #[cfg(test)]

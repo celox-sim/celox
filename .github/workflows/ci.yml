@@ -248,7 +248,7 @@ jobs:
         run: cargo check --locked -p celox -p celox-bench
 
       - name: Test AArch64 facade integration
-        run: cargo test --locked -p celox --lib
+        run: cargo test --locked -p celox --lib --test native_exec
 
       - name: Check x86-64 cross-codegen from AArch64
         run: >-
