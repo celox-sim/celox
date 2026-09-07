@@ -793,6 +793,192 @@ fn emit_sparse_runtime_plane_copy(asm: &mut CodeAssembler) -> Result<(), IcedErr
     Ok(())
 }
 
+/// Commit small regions with fixed addresses and copy widths. Keep large
+/// regions in the runtime worklist so their bitmap scans do not inflate code
+/// size. R13 holds the captured active bits and RDI is the chunk index; all
+/// scratch registers belong to SparseCommitWorklist's existing clobber set.
+fn emit_sparse_inline_commits(
+    asm: &mut CodeAssembler,
+    descriptors: &[u64],
+    active_bits_offset: i32,
+) -> Result<(), IcedError> {
+    let Ok(active_start) = u64::try_from(active_bits_offset) else {
+        return Ok(());
+    };
+    let rows = descriptors
+        .as_chunks::<{ SparseCommitDescriptor::WORDS }>()
+        .0;
+    let is_small = |row: &[u64; SparseCommitDescriptor::WORDS]| {
+        (1..=512).contains(&row[2])
+            && row[4] == 1
+            && row[6] == 1
+            && [row[0], row[1]].into_iter().all(|offset| {
+                offset
+                    .checked_add(row[2] * if row[7] != 0 { 2 } else { 1 })
+                    .is_some_and(|end| end <= i32::MAX as u64)
+            })
+            && [row[3], row[5]].into_iter().all(|offset| {
+                offset
+                    .checked_add(8)
+                    .is_some_and(|end| end <= i32::MAX as u64)
+            })
+    };
+    // Bound the extra text independently of the size of the descriptor table.
+    let inline_count = rows.iter().filter(|row| is_small(row)).count();
+    if inline_count == 0 || inline_count > 256 {
+        return Ok(());
+    }
+    // Pulling small commits ahead of large ones is safe only when their data
+    // and metadata do not overlap. MemoryLayout normally guarantees this;
+    // retain the ordered runtime loop for hand-built or imported MIR as well.
+    let mut ranges = vec![(
+        active_start,
+        active_start + rows.len().div_ceil(64) as u64 * 8,
+    )];
+    for row in rows {
+        let Some(bytes) = row[2].checked_mul(if row[7] != 0 { 2 } else { 1 }) else {
+            return Ok(());
+        };
+        let Some(dirty_bytes) = row[4].checked_mul(8) else {
+            return Ok(());
+        };
+        let Some(summary_bytes) = row[6].checked_mul(8) else {
+            return Ok(());
+        };
+        for (start, size) in [
+            (row[0], bytes),
+            (row[1], bytes),
+            (row[3], dirty_bytes),
+            (row[5], summary_bytes),
+        ] {
+            if size == 0 {
+                continue;
+            }
+            let Some(end) = start.checked_add(size) else {
+                return Ok(());
+            };
+            ranges.push((start, end));
+        }
+    }
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Ok(());
+    }
+    for (word_index, word) in rows.chunks(64).enumerate() {
+        let small = word
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| is_small(row))
+            .collect::<Vec<_>>();
+        if small.is_empty() {
+            continue;
+        }
+        let mask = small.iter().fold(0u64, |mask, (bit, _)| mask | (1 << bit));
+        let offset = active_bits_offset + (word_index * 8) as i32;
+        let mut word_done = asm.create_label();
+        asm.mov(r13, qword_ptr(mem_operand(BaseReg::SimState, offset)))?;
+        asm.mov(rax, mask)?;
+        asm.and(r13, rax)?;
+        asm.je(word_done)?;
+        asm.not(rax)?;
+        asm.and(qword_ptr(mem_operand(BaseReg::SimState, offset)), rax)?;
+        for (position, &(bit, row)) in small.iter().enumerate() {
+            let last = position + 1 == small.len();
+            let mut next = if last { word_done } else { asm.create_label() };
+            asm.bt(r13, bit as u32)?;
+            asm.jae(next)?;
+            emit_sparse_fixed_commit(asm, row, next)?;
+            if !last {
+                asm.set_label(&mut next)?;
+            }
+        }
+        asm.set_label(&mut word_done)?;
+        // The next word (or the generic loop) starts with emitted instructions.
+        // No extra label is bound here, preserving fallthrough label sharing.
+    }
+    Ok(())
+}
+
+/// A fixed descriptor whose dirty chunks fit in one word. Bound and mask the
+/// dirty bitmap once, then copy using immediate addresses and plane widths.
+fn emit_sparse_fixed_commit(
+    asm: &mut CodeAssembler,
+    row: &[u64],
+    next: CodeLabel,
+) -> Result<(), IcedError> {
+    let bytes = row[2] as usize;
+    let planes = if row[7] != 0 { 2 } else { 1 };
+    let summary = qword_ptr(mem_operand(BaseReg::SimState, row[5] as i32));
+    let dirty = qword_ptr(mem_operand(BaseReg::SimState, row[3] as i32));
+    if bytes <= 8 {
+        // The generic single-chunk path visits any nonempty dirty word, even
+        // if restored metadata has a missing summary bit or dirty padding.
+        asm.mov(summary, 0i32)?;
+        asm.mov(rax, dirty)?;
+        asm.mov(dirty, 0i32)?;
+        asm.test(rax, rax)?;
+        asm.je(next)?;
+        asm.xor(edi, edi)?;
+        for plane in 0..planes {
+            let delta = (plane * bytes) as i32;
+            emit_sparse_chunk_copy(
+                asm,
+                row[0] as i32 + delta,
+                row[1] as i32 + delta,
+                rdi,
+                bytes,
+            )?;
+        }
+        return Ok(());
+    }
+    asm.mov(rax, summary)?;
+    asm.mov(summary, 0i32)?;
+    asm.test(al, 1u32)?;
+    asm.je(next)?;
+    asm.mov(r8, dirty)?;
+    asm.mov(dirty, 0i32)?;
+    let chunks = bytes.div_ceil(8);
+    if chunks < 64 {
+        let mask = (1u64 << chunks) - 1;
+        if mask <= i32::MAX as u64 {
+            asm.and(r8, mask as i32)?;
+        } else {
+            asm.mov(rax, mask)?;
+            asm.and(r8, rax)?;
+        }
+    }
+    let mut dirty_loop = asm.create_label();
+    asm.set_label(&mut dirty_loop)?;
+    asm.test(r8, r8)?;
+    asm.je(next)?;
+    asm.bsf(rdi, r8)?;
+    asm.btr(r8, rdi)?;
+    asm.shl(rdi, 3)?;
+    if !bytes.is_multiple_of(8) {
+        let mut full_chunk = asm.create_label();
+        asm.cmp(rdi, ((chunks - 1) * 8) as i32)?;
+        asm.jne(full_chunk)?;
+        for plane in 0..planes {
+            let delta = (plane * bytes) as i32;
+            emit_sparse_chunk_copy(
+                asm,
+                row[0] as i32 + delta,
+                row[1] as i32 + delta,
+                rdi,
+                bytes % 8,
+            )?;
+        }
+        asm.jmp(dirty_loop)?;
+        asm.set_label(&mut full_chunk)?;
+    }
+    for plane in 0..planes {
+        let delta = (plane * bytes) as i32;
+        emit_sparse_chunk_copy(asm, row[0] as i32 + delta, row[1] as i32 + delta, rdi, 8)?;
+    }
+    asm.jmp(dirty_loop)?;
+    Ok(())
+}
+
 fn emit_sparse_commit_worklist(
     asm: &mut CodeAssembler,
     descriptor_label: CodeLabel,
@@ -2159,7 +2345,7 @@ fn emit_planned(
             );
         uses_popcnt |= matches!(inst, MInst::Popcnt { .. });
     }
-    let required_image_features = super::features::emitted_image_feature_bits(
+    let mut required_image_features = super::features::emitted_image_feature_bits(
         func.target_features,
         uses_bmi2,
         uses_avx,
@@ -2441,8 +2627,22 @@ fn emit_planned(
                     emit_divrem(&mut asm, assignment, *dst, *lhs, *rhs, DivOp::SRem)?;
                 }
                 _ => {
+                    if func.target_features.bmi1()
+                        && inst_idx + 1 < block.insts.len()
+                        && try_emit_not_and_fold(
+                            &mut asm,
+                            inst,
+                            &block.insts[inst_idx + 1],
+                            &use_counts,
+                            assignment,
+                        )?
+                    {
+                        required_image_features |= super::features::IMAGE_FEATURE_BMI1;
+                        inst_idx += 2;
+                        continue;
+                    }
                     if inst_idx + 1 < block.insts.len()
-                        && try_emit_stack_reload_fold(
+                        && try_emit_load_fold(
                             &mut asm,
                             inst,
                             &block.insts[inst_idx + 1],
@@ -2697,7 +2897,51 @@ fn count_vreg_uses(func: &MFunction, plan: &SsaDestructionPlan) -> HashMap<VReg,
     counts
 }
 
-fn try_emit_stack_reload_fold(
+fn try_emit_not_and_fold(
+    asm: &mut CodeAssembler,
+    first: &MInst,
+    second: &MInst,
+    uses: &HashMap<VReg, usize>,
+    assignment: &AssignmentMap,
+) -> Result<bool, IcedError> {
+    let MInst::BitNot { dst: inverted, src } = first else {
+        return Ok(false);
+    };
+    if uses.get(inverted).copied() != Some(1) {
+        return Ok(false);
+    }
+    let (dst, lhs, rhs, word32) = match *second {
+        MInst::And { dst, lhs, rhs } => (dst, lhs, rhs, false),
+        MInst::And32 { dst, lhs, rhs } => (dst, lhs, rhs, true),
+        _ => return Ok(false),
+    };
+    let other = if lhs == *inverted {
+        rhs
+    } else if rhs == *inverted {
+        lhs
+    } else {
+        return Ok(false);
+    };
+    let destination = resolve(assignment, dst);
+    let source = resolve(assignment, *src);
+    let other = resolve(assignment, other);
+    if word32 {
+        asm.andn(
+            preg_to_reg32(destination),
+            preg_to_reg32(source),
+            preg_to_reg32(other),
+        )?;
+    } else {
+        asm.andn(
+            preg_to_reg64(destination),
+            preg_to_reg64(source),
+            preg_to_reg64(other),
+        )?;
+    }
+    Ok(true)
+}
+
+fn try_emit_load_fold(
     asm: &mut CodeAssembler,
     inst: &MInst,
     next: &MInst,
@@ -2708,42 +2952,77 @@ fn try_emit_stack_reload_fold(
 ) -> Result<bool, IcedError> {
     let MInst::Load {
         dst,
-        base: BaseReg::StackFrame,
+        base,
         offset,
-        size: OpSize::S64,
+        size,
     } = inst
     else {
         return Ok(false);
     };
-    if spill_register_cache.register(*offset).is_some() {
+    if *base == BaseReg::StackFrame && spill_register_cache.register(*offset).is_some() {
         return Ok(false);
     }
     if use_counts.get(dst).copied().unwrap_or(0) != 1 || !next.uses().contains(dst) {
         return Ok(false);
     }
-    emit_inst_with_stack_mem(asm, next, *dst, *offset, assignment, func)
+    let memory = mem_operand(*base, *offset);
+    if *size == OpSize::S64 {
+        return emit_inst_with_memory(asm, next, *dst, memory, assignment, func);
+    }
+    if let MInst::CmpImm {
+        dst: result,
+        lhs,
+        imm,
+        kind,
+    } = *next
+        && lhs == *dst
+        && imm >= 0
+        && (imm as u64) <= ((1u64 << (size.bytes() * 8)) - 1)
+    {
+        match size {
+            OpSize::S8 => asm.cmp(byte_ptr(memory), imm)?,
+            OpSize::S16 => asm.cmp(word_ptr(memory), imm)?,
+            OpSize::S32 => asm.cmp(dword_ptr(memory), imm)?,
+            OpSize::S64 => unreachable!(),
+        }
+        // The original narrow load zero-extends to 64 bits, so both operands
+        // of a signed comparison against a nonnegative immediate are positive.
+        let kind = match kind {
+            CmpKind::LtS => CmpKind::LtU,
+            CmpKind::LeS => CmpKind::LeU,
+            CmpKind::GtS => CmpKind::GtU,
+            CmpKind::GeS => CmpKind::GeU,
+            other => other,
+        };
+        let d8 = preg_to_reg8(resolve(assignment, result));
+        let d32 = preg_to_reg32(resolve(assignment, result));
+        emit_setcc(asm, d8, kind)?;
+        asm.movzx(d32, d8)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
-fn emit_inst_with_stack_mem(
+fn emit_inst_with_memory(
     asm: &mut CodeAssembler,
     inst: &MInst,
-    stack_vreg: VReg,
-    stack_offset: i32,
+    memory_vreg: VReg,
+    memory: AsmMemoryOperand,
     assignment: &AssignmentMap,
     _func: &MFunction,
 ) -> Result<bool, IcedError> {
     match inst {
-        MInst::Mov { dst, src } if *src == stack_vreg => {
+        MInst::Mov { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             Ok(true)
         }
-        MInst::Mov32 { dst, src } if *src == stack_vreg => {
+        MInst::Mov32 { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg32(resolve(assignment, *dst));
-            asm.mov(d, dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, dword_ptr(memory))?;
             Ok(true)
         }
-        MInst::Add { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Add { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Add,
@@ -2751,10 +3030,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Add32 { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Add32 { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Add,
@@ -2762,10 +3041,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Sub { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Sub { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Sub,
@@ -2773,10 +3052,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Sub32 { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Sub32 { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Sub,
@@ -2784,10 +3063,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Mul { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Mul { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Mul,
@@ -2795,10 +3074,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Mul32 { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Mul32 { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Mul,
@@ -2806,10 +3085,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::And { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::And { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::And,
@@ -2817,10 +3096,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::And32 { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::And32 { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::And,
@@ -2828,10 +3107,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Or { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Or { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Or,
@@ -2839,10 +3118,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Or32 { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Or32 { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Or,
@@ -2850,10 +3129,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Xor { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Xor { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Xor,
@@ -2861,10 +3140,10 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::Xor32 { dst, lhs, rhs } => emit_binop_stack_mem(
+        MInst::Xor32 { dst, lhs, rhs } => emit_binop_memory(
             asm,
             assignment,
             BinOp::Xor,
@@ -2872,54 +3151,54 @@ fn emit_inst_with_stack_mem(
             *dst,
             *lhs,
             *rhs,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
-        MInst::AndImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::AndImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             emit_and_imm64(asm, d, *imm)?;
             Ok(true)
         }
-        MInst::AndImm32 { dst, src, imm } if *src == stack_vreg => {
+        MInst::AndImm32 { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg32(resolve(assignment, *dst));
-            asm.mov(d, dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, dword_ptr(memory))?;
             asm.and(d, *imm as i32)?;
             Ok(true)
         }
-        MInst::OrImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::OrImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             emit_or_imm64(asm, d, *imm)?;
             Ok(true)
         }
-        MInst::AddImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::AddImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.add(d, *imm)?;
             Ok(true)
         }
-        MInst::SubImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::SubImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.sub(d, *imm)?;
             Ok(true)
         }
-        MInst::ShrImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::ShrImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.shr(d, *imm as u32)?;
             Ok(true)
         }
-        MInst::ShlImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::ShlImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.shl(d, *imm as u32)?;
             Ok(true)
         }
-        MInst::SarImm { dst, src, imm } if *src == stack_vreg => {
+        MInst::SarImm { dst, src, imm } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.sar(d, *imm as u32)?;
             Ok(true)
         }
@@ -2928,9 +3207,9 @@ fn emit_inst_with_stack_mem(
             lhs,
             rhs,
             kind,
-        } if *lhs == stack_vreg || *rhs == stack_vreg => {
-            let mem = qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
-            if *lhs == stack_vreg {
+        } if *lhs == memory_vreg || *rhs == memory_vreg => {
+            let mem = qword_ptr(memory);
+            if *lhs == memory_vreg {
                 let r = preg_to_reg64(resolve(assignment, *rhs));
                 asm.cmp(mem, r)?;
             } else {
@@ -2948,42 +3227,39 @@ fn emit_inst_with_stack_mem(
             lhs,
             imm,
             kind,
-        } if *lhs == stack_vreg => {
-            asm.cmp(
-                qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
-                *imm,
-            )?;
+        } if *lhs == memory_vreg => {
+            asm.cmp(qword_ptr(memory), *imm)?;
             let d8 = preg_to_reg8(resolve(assignment, *dst));
             let d32 = preg_to_reg32(resolve(assignment, *dst));
             emit_setcc(asm, d8, *kind)?;
             asm.movzx(d32, d8)?;
             Ok(true)
         }
-        MInst::BitNot { dst, src } if *src == stack_vreg => {
+        MInst::BitNot { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.not(d)?;
             Ok(true)
         }
-        MInst::Neg { dst, src } if *src == stack_vreg => {
+        MInst::Neg { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.mov(d, qword_ptr(memory))?;
             asm.neg(d)?;
             Ok(true)
         }
-        MInst::Popcnt { dst, src } if *src == stack_vreg => {
+        MInst::Popcnt { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.popcnt(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.popcnt(d, qword_ptr(memory))?;
             Ok(true)
         }
-        MInst::Bsf { dst, src } if *src == stack_vreg => {
+        MInst::Bsf { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.bsf(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.bsf(d, qword_ptr(memory))?;
             Ok(true)
         }
-        MInst::Bsr { dst, src } if *src == stack_vreg => {
+        MInst::Bsr { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.bsr(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+            asm.bsr(d, qword_ptr(memory))?;
             Ok(true)
         }
         MInst::Select {
@@ -2991,15 +3267,15 @@ fn emit_inst_with_stack_mem(
             cond,
             true_val,
             false_val,
-        } => emit_select_stack_mem(
+        } => emit_select_memory(
             asm,
             assignment,
             *dst,
             *cond,
             *true_val,
             *false_val,
-            stack_vreg,
-            stack_offset,
+            memory_vreg,
+            memory,
         ),
         _ => Ok(false),
     }
@@ -3698,6 +3974,12 @@ fn emit_inst(
             active_bits_offset,
             active_capacity,
         } => {
+            emit_sparse_inline_commits(
+                asm,
+                func.constant_table(*descriptor_table)
+                    .expect("verified sparse descriptor table"),
+                *active_bits_offset,
+            )?;
             bound_continuation = emit_sparse_commit_worklist(
                 asm,
                 constant_table_labels[descriptor_table.0],
@@ -4297,10 +4579,20 @@ fn emit_inst(
         MInst::ShlImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
-            if d != s {
-                asm.mov(d, s)?;
+            if d != s && (1..=3).contains(imm) {
+                // Array strides can use the scaled index without first copying
+                // a source that must remain live after the shift.
+                if *imm == 1 {
+                    asm.lea(d, ptr(s + s))?;
+                } else {
+                    asm.lea(d, ptr(s * (1u32 << imm)))?;
+                }
+            } else {
+                if d != s {
+                    asm.mov(d, s)?;
+                }
+                asm.shl(d, *imm as u32)?;
             }
-            asm.shl(d, *imm as u32)?;
         }
         MInst::SarImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -4324,10 +4616,16 @@ fn emit_inst(
         MInst::SubImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             let s = preg_to_reg64(resolve(assignment, *src));
-            if d != s {
-                asm.mov(d, s)?;
+            if d != s
+                && let Some(displacement) = imm.checked_neg()
+            {
+                asm.lea(d, ptr(s + displacement))?;
+            } else {
+                if d != s {
+                    asm.mov(d, s)?;
+                }
+                asm.sub(d, *imm)?;
             }
-            asm.sub(d, *imm)?;
         }
 
         MInst::Cmp {
@@ -4970,7 +5268,7 @@ fn emit_binop_rr(
     }
 }
 
-fn emit_binop_stack_mem(
+fn emit_binop_memory(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
     op: BinOp,
@@ -4978,10 +5276,10 @@ fn emit_binop_stack_mem(
     dst: VReg,
     lhs: VReg,
     rhs: VReg,
-    stack_vreg: VReg,
-    stack_offset: i32,
+    memory_vreg: VReg,
+    memory: AsmMemoryOperand,
 ) -> Result<bool, IcedError> {
-    if rhs == stack_vreg {
+    if rhs == memory_vreg {
         let other = lhs;
         if narrow32 {
             let d = preg_to_reg32(resolve(assignment, dst));
@@ -4989,7 +5287,7 @@ fn emit_binop_stack_mem(
             if d != o {
                 asm.mov(d, o)?;
             }
-            let mem = dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            let mem = dword_ptr(memory);
             match op {
                 BinOp::Add => asm.add(d, mem)?,
                 BinOp::Sub => asm.sub(d, mem)?,
@@ -5004,7 +5302,7 @@ fn emit_binop_stack_mem(
             if d != o {
                 asm.mov(d, o)?;
             }
-            let mem = qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            let mem = qword_ptr(memory);
             match op {
                 BinOp::Add => asm.add(d, mem)?,
                 BinOp::Sub => asm.sub(d, mem)?,
@@ -5017,7 +5315,7 @@ fn emit_binop_stack_mem(
         return Ok(true);
     }
 
-    if lhs == stack_vreg && op.is_commutative() {
+    if lhs == memory_vreg && op.is_commutative() {
         let other = rhs;
         if narrow32 {
             let d = preg_to_reg32(resolve(assignment, dst));
@@ -5025,7 +5323,7 @@ fn emit_binop_stack_mem(
             if d != o {
                 asm.mov(d, o)?;
             }
-            let mem = dword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            let mem = dword_ptr(memory);
             match op {
                 BinOp::Add => asm.add(d, mem)?,
                 BinOp::Mul => asm.imul_2(d, mem)?,
@@ -5040,7 +5338,7 @@ fn emit_binop_stack_mem(
             if d != o {
                 asm.mov(d, o)?;
             }
-            let mem = qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+            let mem = qword_ptr(memory);
             match op {
                 BinOp::Add => asm.add(d, mem)?,
                 BinOp::Mul => asm.imul_2(d, mem)?,
@@ -5067,6 +5365,11 @@ fn emit_binop_rr_64(
     let d = preg_to_reg64(resolve(assignment, dst));
     let l = preg_to_reg64(resolve(assignment, lhs));
     let r = preg_to_reg64(resolve(assignment, rhs));
+
+    if matches!(op, BinOp::Add) && d != l && d != r {
+        asm.lea(d, ptr(l + r))?;
+        return Ok(());
+    }
 
     let (eff_l, eff_r) = if d == r && d != l {
         if op.is_commutative() {
@@ -5110,6 +5413,11 @@ fn emit_binop_rr_32(
     let l = preg_to_reg32(lp);
     let r = preg_to_reg32(rp);
 
+    if matches!(op, BinOp::Add) && d != l && d != r {
+        asm.lea(d, ptr(preg_to_reg64(lp) + preg_to_reg64(rp)))?;
+        return Ok(());
+    }
+
     let (eff_l, eff_r) = if d == r && d != l {
         if op.is_commutative() {
             (r, l)
@@ -5138,19 +5446,19 @@ fn emit_binop_rr_32(
     Ok(())
 }
 
-fn emit_select_stack_mem(
+fn emit_select_memory(
     asm: &mut CodeAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     cond: VReg,
     true_val: VReg,
     false_val: VReg,
-    stack_vreg: VReg,
-    stack_offset: i32,
+    memory_vreg: VReg,
+    memory: AsmMemoryOperand,
 ) -> Result<bool, IcedError> {
     let d = preg_to_reg64(resolve(assignment, dst));
-    if cond == stack_vreg {
-        asm.cmp(qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)), 0)?;
+    if cond == memory_vreg {
+        asm.cmp(qword_ptr(memory), 0)?;
         let tv = preg_to_reg64(resolve(assignment, true_val));
         let fv = preg_to_reg64(resolve(assignment, false_val));
         if d == tv {
@@ -5166,20 +5474,20 @@ fn emit_select_stack_mem(
 
     let c = preg_to_reg64(resolve(assignment, cond));
     asm.test(c, c)?;
-    if true_val == stack_vreg {
+    if true_val == memory_vreg {
         let fv = preg_to_reg64(resolve(assignment, false_val));
         if d != fv {
             asm.mov(d, fv)?;
         }
-        asm.cmovne(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+        asm.cmovne(d, qword_ptr(memory))?;
         return Ok(true);
     }
-    if false_val == stack_vreg {
+    if false_val == memory_vreg {
         let tv = preg_to_reg64(resolve(assignment, true_val));
         if d != tv {
             asm.mov(d, tv)?;
         }
-        asm.cmove(d, qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)))?;
+        asm.cmove(d, qword_ptr(memory))?;
         return Ok(true);
     }
 
@@ -7251,7 +7559,122 @@ mod shift_encoding_tests {
     }
 
     #[test]
+    fn folded_state_load_comparisons_preserve_zero_extension_and_signedness() {
+        for size in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64] {
+            for kind in [
+                CmpKind::Eq,
+                CmpKind::Ne,
+                CmpKind::LtU,
+                CmpKind::LeU,
+                CmpKind::GtU,
+                CmpKind::GeU,
+                CmpKind::LtS,
+                CmpKind::LeS,
+                CmpKind::GtS,
+                CmpKind::GeS,
+            ] {
+                for imm in [-1, 0, 1, 127, 128, 255, 32767, 65535, i32::MAX] {
+                    let mut vregs = VRegAllocator::new();
+                    let input = vregs.alloc();
+                    let result = vregs.alloc();
+                    let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+                    let mut block = MBlock::new(BlockId(0));
+                    block.push(MInst::Load {
+                        dst: input,
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        size,
+                    });
+                    block.push(MInst::CmpImm {
+                        dst: result,
+                        lhs: input,
+                        imm,
+                        kind,
+                    });
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 8,
+                        src: result,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Return);
+                    function.push_block(block);
+                    let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                    let emitted = emit(
+                        &function,
+                        &allocation.assignment,
+                        allocation.spill_frame_size,
+                    )
+                    .unwrap();
+                    let jit = JitCode::new(&emitted.code).unwrap();
+                    for value in [
+                        0,
+                        1,
+                        127,
+                        128,
+                        255,
+                        256,
+                        32767,
+                        32768,
+                        65535,
+                        65536,
+                        u32::MAX as u64,
+                        1 << 63,
+                        u64::MAX,
+                    ] {
+                        let mut state = [0xa5u8; 16];
+                        state[..8].copy_from_slice(&value.to_le_bytes());
+                        let lhs = value & (u64::MAX >> (64 - size.bytes() * 8));
+                        let rhs = imm as u64;
+                        let expected = match kind {
+                            CmpKind::Eq => lhs == rhs,
+                            CmpKind::Ne => lhs != rhs,
+                            CmpKind::LtU => lhs < rhs,
+                            CmpKind::LeU => lhs <= rhs,
+                            CmpKind::GtU => lhs > rhs,
+                            CmpKind::GeU => lhs >= rhs,
+                            CmpKind::LtS => (lhs as i64) < (rhs as i64),
+                            CmpKind::LeS => (lhs as i64) <= (rhs as i64),
+                            CmpKind::GtS => (lhs as i64) > (rhs as i64),
+                            CmpKind::GeS => (lhs as i64) >= (rhs as i64),
+                        };
+                        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                        assert_eq!(
+                            u64::from_le_bytes(state[8..].try_into().unwrap()),
+                            u64::from(expected),
+                            "{size:?} {kind:?}: {value:#x} vs {imm}"
+                        );
+                    }
+                    if size == OpSize::S64
+                        || (imm >= 0 && (imm as u64) <= u64::MAX >> (64 - size.bytes() * 8))
+                    {
+                        let decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+                        assert!(
+                            decoder
+                                .into_iter()
+                                .any(|inst| inst.mnemonic() == Mnemonic::Cmp
+                                    && inst.op0_kind() == iced_x86::OpKind::Memory)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sparse_worklist_clobbers_are_allocated_and_saved_once_per_function() {
+        check_sparse_worklist_clobbers(X86Features::detect());
+    }
+
+    #[test]
+    fn sparse_worklist_clobbers_exclude_the_reserved_state_base() {
+        check_sparse_worklist_clobbers(X86Features::for_test_with_state_base(
+            false,
+            StateBaseStrategy::R15,
+        ));
+    }
+
+    fn check_sparse_worklist_clobbers(features: X86Features) {
         const INPUT: usize = 0;
         const OUTPUT: usize = 8;
         const ACTIVE_BITS: usize = 16;
@@ -7259,6 +7682,7 @@ mod shift_encoding_tests {
         let mut vregs = VRegAllocator::new();
         let live_through = vregs.alloc();
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        func.target_features = features;
         let descriptor = func.intern_constant_table(vec![0; SparseCommitDescriptor::WORDS]);
         let mut entry = MBlock::new(BlockId(0));
         entry.push(MInst::Load {
@@ -7315,6 +7739,202 @@ mod shift_encoding_tests {
             u64::from_le_bytes(state[OUTPUT..OUTPUT + 8].try_into().unwrap()),
             0x0123_4567_89ab_cdef
         );
+    }
+
+    #[test]
+    fn sparse_worklist_mixed_regions_preserve_dirty_chunks_and_inactive_values() {
+        // Cross active-word boundaries and the specialization budget, with
+        // every scalar copy width, two/four-state planes, and larger regions.
+        for capacity in [1usize, 66, 130, 300] {
+            let active_offset = capacity * 128;
+            let mut state = vec![0xa5u8; active_offset + capacity.div_ceil(64) * 8];
+            state[active_offset..].fill(0);
+            let mut table = Vec::new();
+            let mut expected = state.clone();
+            for index in 0..capacity {
+                let base = index * 128;
+                let width = if index % 9 == 8 { 13 } else { index % 9 + 1 };
+                let planes = if index % 2 == 0 { 2 } else { 1 };
+                let active = index % 3 != 1;
+                let dirty = if index % 11 == 0 {
+                    0u64
+                } else {
+                    2 | u64::from(index % 5 != 0)
+                };
+                let summary = u64::from(index % 7 != 0);
+                table.extend(
+                    SparseCommitDescriptor {
+                        src_offset: (base + 32) as u64,
+                        dst_offset: base as u64,
+                        byte_size: width as u64,
+                        dirty_words_offset: (base + 64) as u64,
+                        dirty_word_count: 1,
+                        summary_words_offset: (base + 72) as u64,
+                        summary_word_count: 1,
+                        four_state: (planes - 1) as u64,
+                    }
+                    .words(),
+                );
+                for byte in 0..width * planes {
+                    state[base + 32 + byte] = (index ^ byte) as u8;
+                }
+                state[base + 64..base + 72].copy_from_slice(&dirty.to_le_bytes());
+                state[base + 72..base + 80].copy_from_slice(&summary.to_le_bytes());
+                if active {
+                    state[active_offset + index / 8] |= 1 << (index % 8);
+                }
+                expected[base..base + 128].copy_from_slice(&state[base..base + 128]);
+                if !active {
+                    continue;
+                }
+                expected[base + 72..base + 80].fill(0);
+                if width <= 8 || summary != 0 {
+                    expected[base + 64..base + 72].fill(0);
+                    for plane in 0..planes {
+                        for byte in 0..width {
+                            if (width <= 8 && dirty != 0)
+                                || (width > 8 && dirty & (1 << (byte / 8)) != 0)
+                            {
+                                expected[base + plane * width + byte] =
+                                    state[base + 32 + plane * width + byte];
+                            }
+                        }
+                    }
+                }
+            }
+            // A checkpoint may contain set padding bits; they cannot visit a
+            // descriptor beyond the table, and must still be cleared.
+            if !capacity.is_multiple_of(64) {
+                *state.last_mut().unwrap() |= 0x80;
+            }
+            let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+            let descriptor_table = func.intern_constant_table(table);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::SparseCommitWorklist {
+                descriptor_table,
+                active_bits_offset: active_offset as i32,
+                active_capacity: capacity,
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+            let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(state, expected, "capacity {capacity}");
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                state, expected,
+                "inactive second commit, capacity {capacity}"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_worklist_keeps_order_when_regions_alias() {
+        // The large region produces the small region's source. Reordering the
+        // small copy ahead of the large one would observe the old value.
+        let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut table = SparseCommitDescriptor {
+            src_offset: 0,
+            dst_offset: 16,
+            byte_size: 16,
+            dirty_words_offset: 64,
+            dirty_word_count: 1,
+            summary_words_offset: 72,
+            summary_word_count: 1,
+            four_state: 0,
+        }
+        .words()
+        .to_vec();
+        table.extend(
+            SparseCommitDescriptor {
+                src_offset: 16,
+                dst_offset: 32,
+                byte_size: 8,
+                dirty_words_offset: 80,
+                dirty_word_count: 1,
+                summary_words_offset: 88,
+                summary_word_count: 1,
+                four_state: 0,
+            }
+            .words(),
+        );
+        let descriptor_table = func.intern_constant_table(table);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::SparseCommitWorklist {
+            descriptor_table,
+            active_bits_offset: 96,
+            active_capacity: 2,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0u8; 104];
+        state[..8].copy_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+        for offset in [64, 72, 80, 88] {
+            state[offset] = 1;
+        }
+        state[96] = 3;
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[32..40], &state[..8]);
+        assert!(state[64..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn sparse_worklist_fixed_dirty_word_handles_bit_63_and_partial_planes() {
+        for bytes in [9usize, 13, 63, 64, 65, 504, 511, 512, 513] {
+            for four_state in [false, true] {
+                let planes = if four_state { 2 } else { 1 };
+                let dirty_word_count = bytes.div_ceil(512);
+                let mut state = vec![0xa5u8; 4144];
+                for byte in 0..bytes * planes {
+                    state[2048 + byte] = (byte ^ (byte >> 8)) as u8;
+                }
+                let dirty = 1u64 | (1 << 31) | (1 << 63);
+                state[4096..4104].copy_from_slice(&dirty.to_le_bytes());
+                state[4104..4112].copy_from_slice(&1u64.to_le_bytes());
+                state[4120..4128].copy_from_slice(&3u64.to_le_bytes());
+                state[4128..4136].copy_from_slice(&1u64.to_le_bytes());
+                let mut expected = state.clone();
+                for plane in 0..planes {
+                    for byte in 0..bytes {
+                        if [0, 31, 63, 64].contains(&(byte / 8)) {
+                            expected[plane * bytes + byte] = state[2048 + plane * bytes + byte];
+                        }
+                    }
+                }
+                expected[4096..4096 + dirty_word_count * 8].fill(0);
+                expected[4120..4136].fill(0);
+                let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
+                let descriptor_table = func.intern_constant_table(
+                    SparseCommitDescriptor {
+                        src_offset: 2048,
+                        dst_offset: 0,
+                        byte_size: bytes as u64,
+                        dirty_words_offset: 4096,
+                        dirty_word_count: dirty_word_count as u64,
+                        summary_words_offset: 4120,
+                        summary_word_count: 1,
+                        four_state: u64::from(four_state),
+                    }
+                    .words()
+                    .to_vec(),
+                );
+                let mut block = MBlock::new(BlockId(0));
+                block.push(MInst::SparseCommitWorklist {
+                    descriptor_table,
+                    active_bits_offset: 4128,
+                    active_capacity: 1,
+                });
+                block.push(MInst::Return);
+                func.push_block(block);
+                let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+                let jit = JitCode::new(&emitted.code).unwrap();
+                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                assert_eq!(state, expected, "bytes {bytes}, four_state {four_state}");
+            }
+        }
     }
 
     #[test]
@@ -7705,8 +8325,8 @@ mod shift_encoding_tests {
         let mut table_leas = 0;
         while decoder.can_decode() {
             let instruction = decoder.decode();
-            if instruction.mnemonic() == Mnemonic::Lea {
-                assert_eq!(instruction.memory_base(), Register::RIP);
+            if instruction.mnemonic() == Mnemonic::Lea && instruction.memory_base() == Register::RIP
+            {
                 table_leas += 1;
             }
             if instruction.mnemonic() == Mnemonic::Ret {
@@ -8074,6 +8694,289 @@ mod shift_encoding_tests {
                     actual, expected,
                     "kind={kind:?} base={base_value} rhs={rhs_value}"
                 );
+            }
+        }
+    }
+    #[test]
+    fn scaled_lea_preserves_shift_overflow_and_register_aliases() {
+        use crate::native::{features::X86Features, jit_mem::JitCode};
+        for source in [PhysReg::RAX, PhysReg::R12] {
+            for destination in [source, PhysReg::RCX] {
+                for imm in 0..64u8 {
+                    let mut vregs = VRegAllocator::new();
+                    let input = vregs.alloc();
+                    let output = vregs.alloc();
+                    let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+                    function.target_features = X86Features::for_test(false);
+                    let mut block = MBlock::new(BlockId(0));
+                    block.push(MInst::Load {
+                        dst: input,
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        size: OpSize::S64,
+                    });
+                    // Keep the load separate from the shift's memory fold.
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 16,
+                        src: input,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::ShlImm {
+                        dst: output,
+                        src: input,
+                        imm,
+                    });
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 8,
+                        src: output,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Return);
+                    function.push_block(block);
+                    let mut assignment = AssignmentMap::default();
+                    assignment.set(input, source);
+                    assignment.set(output, destination);
+                    let emitted = emit(&function, &assignment, 0).unwrap();
+                    let jit = JitCode::new(&emitted.code).unwrap();
+                    for value in [0u64, 1, 0xffff_ffff, 1 << 32, 1 << 63, u64::MAX] {
+                        let mut state = vec![0u8; emitted.required_state_size.max(24) as usize];
+                        state[..8].copy_from_slice(&value.to_le_bytes());
+                        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                        assert_eq!(
+                            u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                            value << imm
+                        );
+                        assert_eq!(u64::from_le_bytes(state[16..24].try_into().unwrap()), value);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lea_arithmetic_preserves_register_aliases_and_word_widths() {
+        use crate::native::{features::X86Features, jit_mem::JitCode};
+        for word32 in [false, true] {
+            for destination in [PhysReg::RAX, PhysReg::RCX, PhysReg::RDX] {
+                for immediate in [
+                    None,
+                    Some(i32::MIN),
+                    Some(-1),
+                    Some(0),
+                    Some(1),
+                    Some(i32::MAX),
+                ] {
+                    if word32 && immediate.is_some() {
+                        continue;
+                    }
+                    let mut vregs = VRegAllocator::new();
+                    for _ in 0..3 {
+                        vregs.alloc();
+                    }
+                    let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+                    function.target_features = X86Features::for_test(false);
+                    let mut block = MBlock::new(BlockId(0));
+                    block.push(MInst::Load {
+                        dst: VReg(0),
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Load {
+                        dst: VReg(1),
+                        base: BaseReg::SimState,
+                        offset: 8,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 24,
+                        src: VReg(1),
+                        size: OpSize::S64,
+                    });
+                    block.push(if let Some(imm) = immediate {
+                        MInst::SubImm {
+                            dst: VReg(2),
+                            src: VReg(0),
+                            imm,
+                        }
+                    } else if word32 {
+                        MInst::Add32 {
+                            dst: VReg(2),
+                            lhs: VReg(0),
+                            rhs: VReg(1),
+                        }
+                    } else {
+                        MInst::Add {
+                            dst: VReg(2),
+                            lhs: VReg(0),
+                            rhs: VReg(1),
+                        }
+                    });
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 16,
+                        src: VReg(2),
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Return);
+                    function.push_block(block);
+                    let mut assignment = AssignmentMap::default();
+                    assignment.set(VReg(0), PhysReg::RAX);
+                    assignment.set(VReg(1), PhysReg::RCX);
+                    assignment.set(VReg(2), destination);
+                    let emitted = emit(&function, &assignment, 0).unwrap();
+                    let jit = JitCode::new(&emitted.code).unwrap();
+                    let values = [
+                        0u64,
+                        1,
+                        0x7fff_ffff,
+                        0x8000_0000,
+                        0xffff_ffff,
+                        1 << 32,
+                        1 << 63,
+                        u64::MAX,
+                    ];
+                    for a in values {
+                        for b in values {
+                            let mut state = vec![0u8; emitted.required_state_size.max(24) as usize];
+                            state[..8].copy_from_slice(&a.to_le_bytes());
+                            state[8..16].copy_from_slice(&b.to_le_bytes());
+                            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                            let expected = if let Some(imm) = immediate {
+                                a.wrapping_sub(imm as u64)
+                            } else if word32 {
+                                u64::from((a as u32).wrapping_add(b as u32))
+                            } else {
+                                a.wrapping_add(b)
+                            };
+                            assert_eq!(
+                                u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bmi1_not_and_fusion_preserves_aliases_widths_and_image_requirements() {
+        use crate::native::features::{IMAGE_FEATURE_AVX, IMAGE_FEATURE_BMI1};
+        for bmi1 in [false, true] {
+            for word32 in [false, true] {
+                for shared in [false, true] {
+                    for destination in [PhysReg::RAX, PhysReg::RCX, PhysReg::RDX] {
+                        let mut vregs = VRegAllocator::new();
+                        for _ in 0..4 {
+                            vregs.alloc();
+                        }
+                        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+                        function.target_features = X86Features::for_test(false).with_bmi1(bmi1);
+                        let mut block = MBlock::new(BlockId(0));
+                        block.push(MInst::Load {
+                            dst: VReg(0),
+                            base: BaseReg::SimState,
+                            offset: 0,
+                            size: OpSize::S64,
+                        });
+                        block.push(MInst::Load {
+                            dst: VReg(1),
+                            base: BaseReg::SimState,
+                            offset: 8,
+                            size: OpSize::S64,
+                        });
+                        block.push(MInst::BitNot {
+                            dst: VReg(2),
+                            src: VReg(0),
+                        });
+                        block.push(if word32 {
+                            MInst::And32 {
+                                dst: VReg(3),
+                                lhs: VReg(2),
+                                rhs: VReg(1),
+                            }
+                        } else {
+                            MInst::And {
+                                dst: VReg(3),
+                                lhs: VReg(2),
+                                rhs: VReg(1),
+                            }
+                        });
+                        block.push(MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: 16,
+                            src: VReg(3),
+                            size: OpSize::S64,
+                        });
+                        if shared {
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: 24,
+                                src: VReg(2),
+                                size: OpSize::S64,
+                            });
+                        }
+                        block.push(MInst::Return);
+                        function.push_block(block);
+                        let mut assignment = AssignmentMap::default();
+                        for (value, register) in
+                            [PhysReg::RAX, PhysReg::RCX, PhysReg::R8, destination]
+                                .into_iter()
+                                .enumerate()
+                        {
+                            assignment.set(VReg(value as u32), register);
+                        }
+                        let emitted = emit(&function, &assignment, 0).unwrap();
+                        let instructions = Decoder::new(64, &emitted.code, DecoderOptions::NONE)
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        let fused = bmi1 && !shared;
+                        assert_eq!(
+                            instructions
+                                .iter()
+                                .any(|inst| inst.mnemonic() == Mnemonic::Andn),
+                            fused
+                        );
+                        assert_eq!(
+                            emitted.required_image_features & IMAGE_FEATURE_BMI1 != 0,
+                            fused
+                        );
+                        assert_eq!(emitted.required_image_features & IMAGE_FEATURE_AVX, 0);
+                        if bmi1 && !std::arch::is_x86_feature_detected!("bmi1") {
+                            continue;
+                        }
+                        let jit = JitCode::new(&emitted.code).unwrap();
+                        let values = [0u64, 1, 2, 1 << 31, 1 << 32, 1 << 63, u64::MAX];
+                        for lhs in values {
+                            for rhs in values {
+                                let mut state =
+                                    vec![0u8; emitted.required_state_size.max(32) as usize];
+                                state[..8].copy_from_slice(&lhs.to_le_bytes());
+                                state[8..16].copy_from_slice(&rhs.to_le_bytes());
+                                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                                let mask = if word32 {
+                                    u64::from(u32::MAX)
+                                } else {
+                                    u64::MAX
+                                };
+                                assert_eq!(
+                                    u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                                    !lhs & rhs & mask
+                                );
+                                if shared {
+                                    assert_eq!(
+                                        u64::from_le_bytes(state[24..32].try_into().unwrap()),
+                                        !lhs
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
