@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.7 (2026-09-07)
+
+## What's Changed
+* chore(deps): update rust toolchain to v1.98.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/759
+* fix(sir-opt): preserve memory order when splitting wide stores by @tignear in https://github.com/celox-sim/celox/pull/762
+* perf(x86): accelerate Heliodor native execution by @tignear in https://github.com/celox-sim/celox/pull/764
+* Revert "perf(x86): accelerate Heliodor native execution" by @tignear in https://github.com/celox-sim/celox/pull/766
+* perf(x86): restore Heliodor speedups with padded array fixes by @tignear in https://github.com/celox-sim/celox/pull/767
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.6...v0.4.7
+
 ## 0.4.6 (2026-09-06)
 
 ## What's Changed
