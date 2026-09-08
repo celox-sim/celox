@@ -289,12 +289,13 @@ pub(crate) fn run(function: &mut MFunction) {
         let Some(plan) = find_plan(function) else {
             break;
         };
-        while (function.vregs.count() as usize) < function.value_count() {
+        let value_count = function.value_count();
+        while (function.vregs.count() as usize) < value_count {
             function.vregs.alloc();
         }
         function
             .spill_descs
-            .resize_with(function.value_count(), SpillDesc::transient);
+            .resize_with(value_count, SpillDesc::transient);
         let mut values = BTreeMap::new();
         let mut setup = Vec::new();
         for &value in &plan.order {

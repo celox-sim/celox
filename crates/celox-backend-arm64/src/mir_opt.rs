@@ -7,6 +7,7 @@ use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 pub(crate) mod bit_projection;
 mod bitfield;
+pub(crate) mod bitmap_worklist;
 pub(crate) mod byte_predicates;
 pub(crate) mod circular_scan;
 mod copies;
@@ -63,6 +64,9 @@ pub(crate) fn optimize(function: &mut MFunction) {
     memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
     copies::fold(function);
+    bitmap_worklist::merge_header_tails(function);
+    bitmap_worklist::run(function);
+    dead_code_eliminate(function);
     exclusive_loop::run(function);
     if_select::run(function);
     fold_branch_predicates(function);

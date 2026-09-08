@@ -7,7 +7,7 @@ use super::*;
 use crate::HashSet;
 use crate::mir::{BaseReg, BlockId, MBlock, PhiNode, SpillDesc};
 
-fn movable(inst: &MInst) -> bool {
+pub(super) fn movable(inst: &MInst) -> bool {
     matches!(
         inst,
         MInst::LoadImm { .. }
