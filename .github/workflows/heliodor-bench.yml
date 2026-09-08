@@ -331,7 +331,10 @@ jobs:
           trap cleanup_heliodor_fallback EXIT
           prepare
           baseline_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/celox-heliodor"
+          veryl_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/veryl-heliodor"
+          veryl_cache="$GITHUB_WORKSPACE/target/heliodor-arm64/compare-veryl-cache"
           chmod +x "$baseline_runner" "$CELOX_RUNNER_BIN"
+          if [[ -f "$veryl_runner" ]]; then chmod +x "$veryl_runner"; fi
           collect_test_source_files test_soc_linux_boot sources
           args=()
           for source in "${sources[@]}"; do args+=(--source-file "$source"); done
@@ -339,12 +342,25 @@ jobs:
           for comparison_round in 1 2 3; do
             order=(baseline candidate)
             if (( comparison_round % 2 == 0 )); then order=(candidate baseline); fi
+            if [[ -x "$veryl_runner" ]]; then
+              case "$comparison_round" in
+                1) order=(baseline candidate veryl) ;;
+                2) order=(veryl candidate baseline) ;;
+                3) order=(baseline veryl candidate) ;;
+              esac
+            fi
             for label in "${order[@]}"; do
               runner="$CELOX_RUNNER_BIN"
               if [[ "$label" == baseline ]]; then runner="$baseline_runner"; fi
               log="$HELIODOR_RESULTS_DIR/compare-$label-$comparison_round.log"
-              "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
-                --backend native --opt-level o2 "${args[@]}" > "$log" 2>&1
+              if [[ "$label" == veryl ]]; then
+                env VERYL_AOT_CACHE_DIR="$veryl_cache" \
+                  "$veryl_runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                  "${args[@]}" > "$log" 2>&1
+              else
+                "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                  --backend native --opt-level o2 "${args[@]}" > "$log" 2>&1
+              fi
               echo "comparison=$label round=$comparison_round"
               tail -n 4 "$log"
             done
