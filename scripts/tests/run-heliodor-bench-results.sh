@@ -470,4 +470,39 @@ assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "interpreter target runne
 HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
 CELOX_EXECUTION_PREFIX=()
 
+previous_cache="$FIXTURE_AOT_CACHE_DIR"
+FIXTURE_RESULT_LINE=$'VERYL_TEST_CONFIG test=integration_veryl_tiered backend=cc aot_c_async=true compile_only=false\nVERYL_TEST_TIMING test=integration_veryl_tiered compile_ns=8 execute_ns=50\nVERYL_TIERED_STATS test=integration_veryl_tiered compiled_dispatches=100 fallback_dispatches=200\nVERYL_TEST_RESULT test=integration_veryl_tiered status=pass elapsed_ns=59'
+run_one veryl-cc-tiered integration_veryl_tiered >/dev/null \
+    || fail "run_one rejected a tiered Veryl pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --aot-c-async "* ]] \
+    || fail "tiered Veryl did not enable background C compilation"
+[[ "$FIXTURE_AOT_CACHE_DIR" != "$previous_cache" && ! -e "$FIXTURE_AOT_CACHE_DIR" ]] \
+    || fail "tiered Veryl did not isolate and remove its AOT cache"
+assert_eq "$(awk -F '\t' '$1 == "veryl-cc-tiered" { print $9, $10, $11, $12 }' "$integration_results/results.tsv")" \
+    "59 8 50 NA" "tiered Veryl total/startup/concurrent intervals"
+
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/aot_c_async=true/aot_c_async=false}"
+if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
+    fail "run_one accepted a synchronous result as tiered Veryl"
+fi
+assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4,6)" $'NA\tinvalid' \
+    "wrong Veryl mode must not expose a speed elapsed value"
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/aot_c_async=false/aot_c_async=true}"
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/compiled_dispatches=100/compiled_dispatches=0}"
+if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
+    fail "run_one accepted tiered Veryl without executed AOT-C code"
+fi
+
+HELIODOR_RUNNERS=veryl-cc-tiered
+if any_veryl_runner_enabled; then
+    fail "tiered Veryl requested an unrelated Veryl CLI install"
+fi
+HELIODOR_COMPILE_ONLY=1
+if validate_compile_only_runners 2>/dev/null; then
+    fail "tiered Veryl accepted compile-only mode"
+fi
+if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
+    fail "run_one accepted compile-only tiered Veryl"
+fi
+
 echo "run-heliodor-bench result fixture tests: PASS"
