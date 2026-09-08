@@ -352,7 +352,7 @@ fn instruction_bits(inst: &MInst, facts: &[KnownBits]) -> KnownBits {
 /// Start with unknown bits and refine along SSA uses, revisiting a loop only
 /// when one of its inputs improves. Phi joins retain facts shared by every
 /// incoming edge; they never assume a constant from just the entry edge.
-pub(super) fn known_zeros(func: &MFunction) -> Vec<u64> {
+pub(crate) fn known_zeros(func: &MFunction) -> Vec<u64> {
     analyze(func).into_iter().map(|bits| bits.zero).collect()
 }
 

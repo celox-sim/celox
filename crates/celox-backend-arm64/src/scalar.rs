@@ -3189,6 +3189,10 @@ fn emit_logical_immediate(
     true
 }
 
+pub(crate) fn is_logical_immediate(value: u64, width: u32) -> bool {
+    logical_immediate_encoding(value, width, 1, 2, true).is_some()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MoveWidePlan {
     inverted: bool,
