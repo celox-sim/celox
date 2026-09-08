@@ -7,26 +7,29 @@
     {
       "label": "baseline",
       "file": "baseline.native-image.gz",
-      "source": "26c91cfcc",
-      "experiment": "bit-facts-allocated",
-      "sha256": "670fb2689231d68c544633f6934151dbb1d73060875a3f2e78293e14943005f7",
-      "compressed_sha256": "856f986abacec9f985aef298f2166c519aaf94e4989d46cd2987dfd74791873a"
+      "source": "f0716eb1e",
+      "experiment": "sparse-addresses",
+      "perf_map": false,
+      "sha256": "bf6510f3a63593e256d33848c28c6b4212c365fb1f1ec166f2779e85a74ab0a7",
+      "compressed_sha256": "91b1178e82b342ca10a68de63cfb25447d5e566491ee5999ce09293e5203c23c"
     },
     {
       "label": "exclusive",
       "file": "exclusive.native-image.gz",
-      "source": "e896d07af",
-      "experiment": "loop-spill-cost",
-      "sha256": "609a1a735fcfcc2702840fd8743aba2fcb31cdb8956d30bed0c4f64013c64fc3",
-      "compressed_sha256": "30a4c8fdadd222bd38afd52bc4ee7079085863c4fff7f6257217188ac7e1b758"
+      "source": "5a3ac07c9",
+      "experiment": "byte-predicates-live",
+      "perf_map": false,
+      "sha256": "77cab7e407e705cdc290c2a78605c8c7d5242454b66c1169c0d4bb293e974327",
+      "compressed_sha256": "b62edb6660a5f595acb5bf53211eba98ed5ea3390c49b1d319d4682a0ac10856"
     },
     {
       "label": "candidate",
       "file": "candidate.native-image.gz",
-      "source": "f0716eb1e",
-      "experiment": "sparse-addresses",
-      "sha256": "bf6510f3a63593e256d33848c28c6b4212c365fb1f1ec166f2779e85a74ab0a7",
-      "compressed_sha256": "91b1178e82b342ca10a68de63cfb25447d5e566491ee5999ce09293e5203c23c"
+      "source": "05995edab",
+      "experiment": "sparse-groups",
+      "perf_map": true,
+      "sha256": "206b609b60cc96190721231a3411087506310780a26f77ec520ebc6b587ba63e",
+      "compressed_sha256": "8e0f5df45a98fcee2d1431d71c21c1b785308afe54538b730ce5bdbbdcc615e2"
     }
   ]
 }

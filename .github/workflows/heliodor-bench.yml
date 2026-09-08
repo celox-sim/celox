@@ -41,6 +41,8 @@ jobs:
       - name: Profile the candidate image
         shell: bash
         run: |
+          # Diagnostic options are serialized at image compilation time.
+          python3 -c 'import json; m=json.load(open("scripts/arm64-images/manifest.json")); assert next(r for r in m["images"] if r["label"] == "candidate")["perf_map"]'
           sudo apt-get update
           sudo apt-get install -y linux-tools-common linux-tools-generic
           sudo sysctl kernel.perf_event_paranoid=-1
@@ -50,7 +52,7 @@ jobs:
           done
           test -n "$perf_bin"
           cd "$HELIODOR_DIR"
-          CELOX_PERF_MAP=1 "$perf_bin" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
+          "$perf_bin" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
             "$GITHUB_WORKSPACE/target/release/celox-heliodor" \
             --project "$HELIODOR_DIR" --test test_soc_linux_boot --backend native --opt-level o2 \
             --native-image-input "$GITHUB_WORKSPACE/scripts/arm64-images/candidate.native-image" \
