@@ -66,6 +66,9 @@ pub(crate) fn optimize(function: &mut MFunction) {
     copies::fold(function);
     bitmap_worklist::merge_header_tails(function);
     bitmap_worklist::run(function);
+    lower_immediate_uses(function);
+    remove_redundant_low_masks(function);
+    propagate_exact_copies(function);
     dead_code_eliminate(function);
     exclusive_loop::run(function);
     if_select::run(function);

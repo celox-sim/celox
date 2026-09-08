@@ -213,6 +213,77 @@ fn bitmap_worklists_keep_observable_skips_and_exported_iteration_indices() {
     assert_eq!(format!("{function:?}"), original);
 }
 
+#[test]
+fn bitmap_worklists_fold_active_bits_without_truncating_shared_shifted_words() {
+    for extract in [false, true] {
+        let mut original = shared_condition_fixture(32);
+        let bit = original.vregs.alloc();
+        original.spill_descs.push(SpillDesc::transient());
+        let header = &mut original.blocks[1];
+        let at = header
+            .insts
+            .iter()
+            .position(|inst| inst.def() == Some(VReg(13)))
+            .unwrap();
+        header.insts[at].rewrite_use(VReg(10), bit);
+        header.insts.insert(
+            at,
+            if extract {
+                MInst::BitExtract {
+                    dst: bit,
+                    src: VReg(10),
+                    lsb: 0,
+                    width: 1,
+                }
+            } else {
+                MInst::AndImm32 {
+                    dst: bit,
+                    src: VReg(10),
+                    imm: 1,
+                }
+            },
+        );
+        original
+            .blocks
+            .iter_mut()
+            .find(|block| block.id == BlockId(8))
+            .unwrap()
+            .insts[0] = MInst::Mov {
+            dst: VReg(29),
+            src: VReg(10),
+        };
+        let mut optimized = original.clone();
+        run(&mut optimized);
+        assert!(
+            optimized
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| matches!(inst, MInst::LoadImm { dst, value: 1 } if *dst == bit))
+        );
+        crate::regalloc::build_facts(&optimized).unwrap();
+        let (before, before_size) = compile(original);
+        let (after, after_size) = compile(optimized);
+        for input in [0u64, 1, 0xaacc_aa55_5533_5588, u64::MAX] {
+            for origin in 0..32u64 {
+                let mut left = vec![0u8; before_size.max(after_size)];
+                for (offset, value) in [(0, input), (8, u64::MAX), (24, 1), (32, origin)] {
+                    left[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                let mut right = left.clone();
+                assert_eq!(unsafe { (before.fn_ptr)(left.as_mut_ptr()) }, 0);
+                assert_eq!(unsafe { (after.fn_ptr)(right.as_mut_ptr()) }, 0);
+                assert_eq!(&left[..768], &right[..768]);
+                let expected = (0..32)
+                    .filter(|&index| input >> index & 1 != 0)
+                    .min_by_key(|&index| (index as u64).wrapping_sub(origin) & 31)
+                    .map_or(0, |index| input >> index);
+                assert_eq!(&right[56..64], &expected.to_le_bytes());
+            }
+        }
+    }
+}
+
 // Match SIR's layout: selections execute in the header, then a private block
 // branches to either the payload load or a skip path.
 fn make_predicated_header(function: &mut MFunction) {

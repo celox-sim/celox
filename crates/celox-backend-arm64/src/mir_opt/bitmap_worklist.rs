@@ -82,6 +82,7 @@ struct Plan {
     index: VReg,
     width: u32,
     words: Vec<VReg>,
+    active_bits: HashSet<VReg>,
     blocks: HashSet<BlockId>,
     outputs: HashMap<VReg, VReg>,
 }
@@ -121,6 +122,9 @@ impl Analysis<'_> {
                 }
                 Some(MInst::AndImm { src, imm, .. }) if imm & 1 != 0 => pending.push(*src),
                 Some(MInst::AndImm32 { src, imm, .. }) if imm & 1 != 0 => pending.push(*src),
+                Some(MInst::BitExtract {
+                    src, lsb: 0, width, ..
+                }) if *width != 0 => pending.push(*src),
                 Some(MInst::Mov { src, .. } | MInst::Mov32 { src, .. }) => pending.push(*src),
                 Some(MInst::Shr { lhs, rhs, .. })
                     if *rhs == index
@@ -282,6 +286,27 @@ impl Analysis<'_> {
         if words.is_empty() {
             return None;
         }
+        let active_bits = region
+            .blocks
+            .iter()
+            .flat_map(|&at| &self.func.blocks[at].insts)
+            .filter_map(|inst| {
+                let (dst, src) = match *inst {
+                    MInst::AndImm { dst, src, imm: 1 }
+                    | MInst::AndImm32 { dst, src, imm: 1 }
+                    | MInst::BitExtract {
+                        dst,
+                        src,
+                        lsb: 0,
+                        width: 1,
+                    } => (dst, src),
+                    _ => return None,
+                };
+                matches!(self.definition(src), Some(MInst::Shr { lhs, rhs, .. })
+                    if *rhs == index_phi.dst && words.contains(lhs))
+                .then_some(dst)
+            })
+            .collect();
         let aliases = self.skip_aliases(header.id, skip, latch, predicate, &blocks)?;
         let mut outputs = HashMap::default();
         for phi in &header.phis {
@@ -335,6 +360,7 @@ impl Analysis<'_> {
             index: index_phi.dst,
             width: imm as u32,
             words,
+            active_bits,
             blocks,
             outputs,
         })
@@ -519,6 +545,16 @@ pub(crate) fn run(func: &mut MFunction) {
         latch.push(MInst::Jump { target: id });
         for block in &mut func.blocks {
             if plan.blocks.contains(&block.id) {
+                // The nonempty worklist chooses a bit present in every input
+                // word. Fold only its one-bit extraction: other consumers of
+                // the shifted word must still see all of its remaining bits.
+                for inst in &mut block.insts {
+                    if let Some(dst) = inst.def()
+                        && plan.active_bits.contains(&dst)
+                    {
+                        *inst = MInst::LoadImm { dst, value: 1 };
+                    }
+                }
                 continue;
             }
             for inst in &mut block.insts {
