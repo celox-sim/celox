@@ -279,7 +279,6 @@ jobs:
           echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
           lscpu | tee heliodor-arm64-host.txt
           mkdir -p "$HELIODOR_RESULTS_DIR"
-          echo "HELIODOR_CELOX_EXECUTION_PREFIX=$perf_bin record -e cpu-clock:u -F 997 -o $HELIODOR_RESULTS_DIR/perf.data --" >> "$GITHUB_ENV"
           echo "CELOX_PERF_MAP=1" >> "$GITHUB_ENV"
 
       - name: Boot Linux with Veryl-CC and the native backend on ARM64
@@ -289,13 +288,38 @@ jobs:
           HELIODOR_TIMEOUT_SEC: "1200"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
 
+      - name: Capture ARM64 profile
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          collect_test_source_files test_soc_linux_boot sources
+          args=()
+          for source in "${sources[@]}"; do args+=(--source-file "$source"); done
+          cd "$HELIODOR_DIR"
+          "$PERF_BIN" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
+            "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+            --backend native --opt-level o2 "${args[@]}" \
+            --dump-ir-dir "$HELIODOR_RESULTS_DIR/profile-ir" --dump-ir-and-run \
+            > "$HELIODOR_RESULTS_DIR/profile-linux.log" 2>&1
+
       - name: Summarize ARM64 profile
         if: inputs.arm64_profile
         shell: bash
         run: |
+          cp /tmp/perf-*.map "$HELIODOR_RESULTS_DIR/"
           "$PERF_BIN" report --stdio --no-children --percent-limit 0.2 -i "$HELIODOR_RESULTS_DIR/perf.data" | tee "$HELIODOR_RESULTS_DIR/perf-report.txt"
           "$PERF_BIN" script -i "$HELIODOR_RESULTS_DIR/perf.data" -F ip,sym,dso > "$HELIODOR_RESULTS_DIR/perf-samples.txt"
-          cp /tmp/perf-*.map "$HELIODOR_RESULTS_DIR/"
+
+      - name: Upload ARM64 profiling runners
+        if: inputs.arm64_profile && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-arm64-profiling-runners
+          retention-days: 7
+          path: |
+            target/release/celox-heliodor
+            target/release/veryl-heliodor
 
       - name: Upload nightly ARM64 Linux boot results
         if: always()
@@ -307,6 +331,8 @@ jobs:
             target/heliodor-arm64/results/results.tsv
             target/heliodor-arm64/results/*.log
             target/heliodor-arm64/results/perf*
+            target/heliodor-arm64/results/profile-ir/mir.txt
+            target/heliodor-arm64/results/profile-ir/native_optimized.sir
             heliodor-arm64-host.txt
 
   publish-linux-boot:

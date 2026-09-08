@@ -21,6 +21,9 @@ use crate::mir::{
 use crate::{Arm64Reg, HashMap};
 
 const STATE_REG: u8 = 0;
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod tests;
 const SCRATCH0: u8 = 16;
 const SCRATCH1: u8 = 17;
 // x28 is reserved as the base of the target-owned spill frame.  Keeping the
@@ -440,7 +443,8 @@ fn emit_function(
     for &(register, page) in state_pages.secondary.iter().flatten() {
         emit_address_to(&mut ops, register, STATE_REG, page);
     }
-    for block in &function.blocks {
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        let next_block = function.blocks.get(block_index + 1).map(|block| block.id);
         let label = block_labels[&block.id];
         block_offsets.push((block.id, ops.offset().0 as u64));
         dynasm!(ops
@@ -452,6 +456,7 @@ fn emit_function(
                 &mut ops,
                 instruction,
                 block.id,
+                next_block,
                 assignment,
                 spill_base,
                 temporary_offset,
@@ -537,6 +542,7 @@ fn emit_instruction(
     ops: &mut VecAssembler<Aarch64Relocation>,
     instruction: &MInst,
     block: BlockId,
+    next_block: Option<BlockId>,
     assignment: &Assignment<VReg>,
     spill_base: usize,
     temporary_offset: usize,
@@ -1004,15 +1010,30 @@ fn emit_instruction(
             true_bb,
             false_bb,
         } => {
+            // Put the physically adjacent successor last so its copies can
+            // fall through. The conditional branch still targets a nearby
+            // copy stub, preserving its range even in very large functions.
+            let invert = next_block == Some(*false_bb);
+            let (true_bb, false_bb) = if invert {
+                (false_bb, true_bb)
+            } else {
+                (true_bb, false_bb)
+            };
             let true_path = ops.new_dynamic_label();
             let cond = resolve(assignment, *cond)?;
-            dynasm!(ops ; .arch aarch64 ; cbnz X(cond), =>true_path);
+            if invert {
+                dynasm!(ops ; .arch aarch64 ; cbz X(cond), =>true_path);
+            } else {
+                dynasm!(ops ; .arch aarch64 ; cbnz X(cond), =>true_path);
+            }
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
             let false_label = labels[false_bb];
             dynasm!(ops ; .arch aarch64 ; b =>false_label ; =>true_path);
             emit_edge_copies(ops, plan, block, *true_bb, spill_base, temporary_offset)?;
             let true_label = labels[true_bb];
-            dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            if next_block != Some(*true_bb) {
+                dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            }
         }
         MInst::BranchPred {
             predicate,
@@ -1020,19 +1041,38 @@ fn emit_instruction(
             false_bb,
         } => {
             emit_branch_predicate(ops, *predicate, assignment, state_pages)?;
+            let invert = next_block == Some(*false_bb);
+            let (true_bb, false_bb) = if invert {
+                (false_bb, true_bb)
+            } else {
+                (true_bb, false_bb)
+            };
             let true_path = ops.new_dynamic_label();
-            emit_conditional_branch(ops, true_path, predicate_kind(*predicate));
+            let kind = predicate_kind(*predicate);
+            emit_conditional_branch(
+                ops,
+                true_path,
+                if invert {
+                    inverse_condition(kind)
+                } else {
+                    kind
+                },
+            );
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
             let false_label = labels[false_bb];
             dynasm!(ops ; .arch aarch64 ; b =>false_label ; =>true_path);
             emit_edge_copies(ops, plan, block, *true_bb, spill_base, temporary_offset)?;
             let true_label = labels[true_bb];
-            dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            if next_block != Some(*true_bb) {
+                dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            }
         }
         MInst::Jump { target } => {
             emit_edge_copies(ops, plan, block, *target, spill_base, temporary_offset)?;
             let label = labels[target];
-            dynasm!(ops ; .arch aarch64 ; b =>label);
+            if next_block != Some(*target) {
+                dynasm!(ops ; .arch aarch64 ; b =>label);
+            }
         }
         MInst::Return => {
             if let (Some(entry), Some(success)) = (tick_entry, tick_success) {
@@ -2421,13 +2461,7 @@ fn state_page_baseline_cost(access: StatePageAccess) -> usize {
             offset,
             size,
             store,
-        } => {
-            if memory_access_encoding(SCRATCH0, STATE_REG, offset, size, store).is_some() {
-                0
-            } else {
-                address_materialization_cost(offset)
-            }
-        }
+        } => scalar_memory_offset_cost(offset, size, store),
         StatePageAccess::Indexed {
             offset,
             size,
@@ -2441,7 +2475,7 @@ fn state_page_cost(access: StatePageAccess, page: i64) -> Option<usize> {
     let offset = access.offset() - page;
     match access {
         StatePageAccess::Direct { size, store, .. } => {
-            memory_access_encoding(SCRATCH0, STATE_PAGE_REG, offset, size, store).map(|_| 0)
+            Some(scalar_memory_offset_cost(offset, size, store))
         }
         StatePageAccess::Indexed { size, store, .. } => indexed_offset_cost(offset, size, store),
         StatePageAccess::Vector { .. } => Some(address_materialization_cost(offset)),
@@ -2455,7 +2489,9 @@ fn indexed_access_cost(offset: i64, size: OpSize, store: bool) -> usize {
 fn indexed_offset_cost(offset: i64, size: OpSize, store: bool) -> Option<usize> {
     if memory_access_encoding(SCRATCH0, SCRATCH0, offset, size, store).is_some() {
         Some(0)
-    } else if add_sub_immediate(offset).is_some() {
+    } else if split_memory_offset(offset, size, store).is_some()
+        || add_sub_immediate(offset).is_some()
+    {
         Some(1)
     } else if add_sub_immediate_pair(offset).is_some() {
         Some(2)
@@ -2467,7 +2503,7 @@ fn indexed_offset_cost(offset: i64, size: OpSize, store: bool) -> Option<usize> 
 fn select_memory_base(
     base: BaseReg,
     offset: i64,
-    register: u8,
+    _register: u8,
     size: OpSize,
     store: bool,
     state_pages: StatePageBases,
@@ -2476,19 +2512,22 @@ fn select_memory_base(
     if base != BaseReg::SimState {
         return normal;
     }
-    if let Some(page) = state_pages.primary {
-        let relative = offset - page;
-        if memory_access_encoding(register, STATE_PAGE_REG, relative, size, store).is_some() {
-            return (STATE_PAGE_REG, relative);
-        }
-    }
-    for &(page_register, page) in state_pages.secondary.iter().flatten() {
-        let relative = offset - page;
-        if memory_access_encoding(register, page_register, relative, size, store).is_some() {
-            return (page_register, relative);
-        }
-    }
-    normal
+    std::iter::once(normal)
+        .chain(
+            state_pages
+                .primary
+                .into_iter()
+                .map(|page| (STATE_PAGE_REG, offset - page)),
+        )
+        .chain(
+            state_pages
+                .secondary
+                .iter()
+                .flatten()
+                .map(|&(register, page)| (register, offset - page)),
+        )
+        .min_by_key(|&(_, offset)| scalar_memory_offset_cost(offset, size, store))
+        .unwrap_or(normal)
 }
 
 fn select_indexed_memory_base(
@@ -2627,6 +2666,30 @@ fn memory_access_encoding(
     None
 }
 
+/// Use the load/store immediate for the low page offset, leaving only one
+/// ADD/SUB of the high part. A cached state page can then serve nearby pages
+/// without rebuilding a full state address from its absolute displacement.
+fn split_memory_offset(offset: i64, size: OpSize, store: bool) -> Option<(i64, i64)> {
+    let low = offset.rem_euclid(STATE_PAGE_BYTES);
+    let high = offset.checked_sub(low)?;
+    if high == 0 {
+        return None;
+    }
+    add_sub_immediate(high)?;
+    memory_access_encoding(SCRATCH0, SCRATCH0, low, size, store)?;
+    Some((high, low))
+}
+
+fn scalar_memory_offset_cost(offset: i64, size: OpSize, store: bool) -> usize {
+    if memory_access_encoding(SCRATCH0, SCRATCH0, offset, size, store).is_some() {
+        0
+    } else if split_memory_offset(offset, size, store).is_some() {
+        1
+    } else {
+        address_materialization_cost(offset)
+    }
+}
+
 fn emit_load_at(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: u8,
@@ -2636,6 +2699,9 @@ fn emit_load_at(
 ) {
     if let Some(instruction) = memory_access_encoding(destination, base, offset, size, false) {
         ops.push_u32(instruction);
+    } else if let Some((high, low)) = split_memory_offset(offset, size, false) {
+        let _ = emit_add_sub_immediate(ops, SCRATCH0, base, high);
+        ops.push_u32(memory_access_encoding(destination, SCRATCH0, low, size, false).unwrap());
     } else {
         emit_address(ops, base, offset);
         emit_load(ops, destination, SCRATCH0, size);
@@ -2684,6 +2750,9 @@ fn emit_store_at(
 ) {
     if let Some(instruction) = memory_access_encoding(source, base, offset, size, true) {
         ops.push_u32(instruction);
+    } else if let Some((high, low)) = split_memory_offset(offset, size, true) {
+        let _ = emit_add_sub_immediate(ops, SCRATCH0, base, high);
+        ops.push_u32(memory_access_encoding(source, SCRATCH0, low, size, true).unwrap());
     } else {
         emit_address(ops, base, offset);
         emit_store(ops, source, SCRATCH0, size);
@@ -3130,6 +3199,21 @@ fn emit_branch_predicate(
         }
     }
     Ok(())
+}
+
+fn inverse_condition(kind: CmpKind) -> CmpKind {
+    match kind {
+        CmpKind::Eq => CmpKind::Ne,
+        CmpKind::Ne => CmpKind::Eq,
+        CmpKind::LtU => CmpKind::GeU,
+        CmpKind::LeU => CmpKind::GtU,
+        CmpKind::GtU => CmpKind::LeU,
+        CmpKind::GeU => CmpKind::LtU,
+        CmpKind::LtS => CmpKind::GeS,
+        CmpKind::LeS => CmpKind::GtS,
+        CmpKind::GtS => CmpKind::LeS,
+        CmpKind::GeS => CmpKind::LtS,
+    }
 }
 
 fn predicate_kind(predicate: BranchPredicate) -> CmpKind {

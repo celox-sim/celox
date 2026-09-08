@@ -192,6 +192,14 @@ pub(crate) struct MemoryAliasRange {
 }
 
 impl MemoryAliasRange {
+    pub(crate) fn offset(self) -> i32 {
+        self.offset
+    }
+
+    pub(crate) fn byte_len(self) -> usize {
+        self.byte_len
+    }
+
     pub(crate) fn new(offset: i32, byte_len: usize) -> Option<Self> {
         if byte_len == 0 {
             return None;
