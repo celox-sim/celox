@@ -192,6 +192,14 @@ pub(crate) struct MemoryAliasRange {
 }
 
 impl MemoryAliasRange {
+    pub(crate) fn offset(self) -> i32 {
+        self.offset
+    }
+
+    pub(crate) fn byte_len(self) -> usize {
+        self.byte_len
+    }
+
     pub(crate) fn new(offset: i32, byte_len: usize) -> Option<Self> {
         if byte_len == 0 {
             return None;
@@ -288,6 +296,27 @@ pub(crate) enum MInst {
     LoadImm {
         dst: VReg,
         value: u64,
+    },
+    /// Zero-extended slice of a 64-bit scalar.
+    BitExtract {
+        dst: VReg,
+        src: VReg,
+        lsb: u8,
+        width: u8,
+    },
+    /// Replace a contiguous field in `base` with the low bits of `src`.
+    BitInsert {
+        dst: VReg,
+        base: VReg,
+        src: VReg,
+        lsb: u8,
+        width: u8,
+    },
+    OrShifted {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        shift: u8,
     },
     /// Allocation-only edge use. Emission intentionally produces no code.
     KeepAlive {
@@ -652,6 +681,9 @@ impl MInst {
             Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
+            | Self::BitExtract { dst, .. }
+            | Self::BitInsert { dst, .. }
+            | Self::OrShifted { dst, .. }
             | Self::LoadConstantTableAddr { dst, .. }
             | Self::Load { dst, .. }
             | Self::LoadPtr { dst, .. }
@@ -725,6 +757,9 @@ impl MInst {
             Self::Mov { dst, .. }
             | Self::Mov32 { dst, .. }
             | Self::LoadImm { dst, .. }
+            | Self::BitExtract { dst, .. }
+            | Self::BitInsert { dst, .. }
+            | Self::OrShifted { dst, .. }
             | Self::LoadConstantTableAddr { dst, .. }
             | Self::Load { dst, .. }
             | Self::LoadPtr { dst, .. }
@@ -819,6 +854,7 @@ impl MInst {
                 ..
             } => Vec::new(),
             Self::PackedByteAffineCompare { base, rhs, .. } => vec![*base, *rhs],
+            Self::BitInsert { base, src, .. } => vec![*base, *src],
             Self::StoreIndexed { index, src, .. } | Self::OrStoreIndexed { index, src, .. } => {
                 vec![*index, *src]
             }
@@ -839,6 +875,7 @@ impl MInst {
             | Self::And { lhs, rhs, .. }
             | Self::And32 { lhs, rhs, .. }
             | Self::Or { lhs, rhs, .. }
+            | Self::OrShifted { lhs, rhs, .. }
             | Self::Or32 { lhs, rhs, .. }
             | Self::Xor { lhs, rhs, .. }
             | Self::Xor32 { lhs, rhs, .. }
@@ -850,7 +887,8 @@ impl MInst {
             | Self::URem { lhs, rhs, .. }
             | Self::SDiv { lhs, rhs, .. }
             | Self::SRem { lhs, rhs, .. } => vec![*lhs, *rhs],
-            Self::AndImm { src, .. }
+            Self::BitExtract { src, .. }
+            | Self::AndImm { src, .. }
             | Self::AndImm32 { src, .. }
             | Self::OrImm { src, .. }
             | Self::ShrImm { src, .. }
@@ -923,6 +961,10 @@ impl MInst {
                 rewrite(src);
             }
             Self::LoadPtr { ptr, .. } => rewrite(ptr),
+            Self::BitInsert { base, src, .. } => {
+                rewrite(base);
+                rewrite(src);
+            }
             Self::StorePtr { ptr, src, .. } | Self::ReleaseStorePtr { ptr, src, .. } => {
                 rewrite(ptr);
                 rewrite(src);
@@ -964,6 +1006,7 @@ impl MInst {
             | Self::And { lhs, rhs, .. }
             | Self::And32 { lhs, rhs, .. }
             | Self::Or { lhs, rhs, .. }
+            | Self::OrShifted { lhs, rhs, .. }
             | Self::Or32 { lhs, rhs, .. }
             | Self::Xor { lhs, rhs, .. }
             | Self::Xor32 { lhs, rhs, .. }
@@ -978,7 +1021,8 @@ impl MInst {
                 rewrite(lhs);
                 rewrite(rhs);
             }
-            Self::AndImm { src, .. }
+            Self::BitExtract { src, .. }
+            | Self::AndImm { src, .. }
             | Self::AndImm32 { src, .. }
             | Self::OrImm { src, .. }
             | Self::ShrImm { src, .. }

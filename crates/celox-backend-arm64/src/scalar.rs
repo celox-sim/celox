@@ -21,6 +21,9 @@ use crate::mir::{
 use crate::{Arm64Reg, HashMap};
 
 const STATE_REG: u8 = 0;
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod tests;
 const SCRATCH0: u8 = 16;
 const SCRATCH1: u8 = 17;
 // x28 is reserved as the base of the target-owned spill frame.  Keeping the
@@ -440,7 +443,8 @@ fn emit_function(
     for &(register, page) in state_pages.secondary.iter().flatten() {
         emit_address_to(&mut ops, register, STATE_REG, page);
     }
-    for block in &function.blocks {
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        let next_block = function.blocks.get(block_index + 1).map(|block| block.id);
         let label = block_labels[&block.id];
         block_offsets.push((block.id, ops.offset().0 as u64));
         dynasm!(ops
@@ -452,6 +456,7 @@ fn emit_function(
                 &mut ops,
                 instruction,
                 block.id,
+                next_block,
                 assignment,
                 spill_base,
                 temporary_offset,
@@ -537,6 +542,7 @@ fn emit_instruction(
     ops: &mut VecAssembler<Aarch64Relocation>,
     instruction: &MInst,
     block: BlockId,
+    next_block: Option<BlockId>,
     assignment: &Assignment<VReg>,
     spill_base: usize,
     temporary_offset: usize,
@@ -561,6 +567,44 @@ fn emit_instruction(
             dynasm!(ops ; .arch aarch64 ; mov W(dst), W(src));
         }
         MInst::LoadImm { dst, value } => emit_load_imm(ops, resolve(assignment, *dst)?, *value),
+        MInst::BitExtract {
+            dst,
+            src,
+            lsb,
+            width,
+        } => {
+            let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
+            let (lsb, width) = (u32::from(*lsb), u32::from(*width));
+            dynasm!(ops ; .arch aarch64 ; ubfx X(dst), X(src), lsb, width);
+        }
+        MInst::BitInsert {
+            dst,
+            base,
+            src,
+            lsb,
+            width,
+        } => {
+            let (dst, base, src) = (
+                resolve(assignment, *dst)?,
+                resolve(assignment, *base)?,
+                resolve(assignment, *src)?,
+            );
+            emit_bit_insert(ops, dst, base, src, *lsb, *width);
+        }
+        MInst::OrShifted {
+            dst,
+            lhs,
+            rhs,
+            shift,
+        } => {
+            let (dst, lhs, rhs) = (
+                resolve(assignment, *dst)?,
+                resolve(assignment, *lhs)?,
+                resolve(assignment, *rhs)?,
+            );
+            let shift = u32::from(*shift);
+            dynasm!(ops ; .arch aarch64 ; orr X(dst), X(lhs), X(rhs), LSL #shift);
+        }
         MInst::KeepAlive { .. } => {}
         MInst::LoadConstantTableAddr { dst, table } => {
             let dst = resolve(assignment, *dst)?;
@@ -1004,15 +1048,30 @@ fn emit_instruction(
             true_bb,
             false_bb,
         } => {
+            // Put the physically adjacent successor last so its copies can
+            // fall through. The conditional branch still targets a nearby
+            // copy stub, preserving its range even in very large functions.
+            let invert = next_block == Some(*false_bb);
+            let (true_bb, false_bb) = if invert {
+                (false_bb, true_bb)
+            } else {
+                (true_bb, false_bb)
+            };
             let true_path = ops.new_dynamic_label();
             let cond = resolve(assignment, *cond)?;
-            dynasm!(ops ; .arch aarch64 ; cbnz X(cond), =>true_path);
+            if invert {
+                dynasm!(ops ; .arch aarch64 ; cbz X(cond), =>true_path);
+            } else {
+                dynasm!(ops ; .arch aarch64 ; cbnz X(cond), =>true_path);
+            }
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
             let false_label = labels[false_bb];
             dynasm!(ops ; .arch aarch64 ; b =>false_label ; =>true_path);
             emit_edge_copies(ops, plan, block, *true_bb, spill_base, temporary_offset)?;
             let true_label = labels[true_bb];
-            dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            if next_block != Some(*true_bb) {
+                dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            }
         }
         MInst::BranchPred {
             predicate,
@@ -1020,19 +1079,38 @@ fn emit_instruction(
             false_bb,
         } => {
             emit_branch_predicate(ops, *predicate, assignment, state_pages)?;
+            let invert = next_block == Some(*false_bb);
+            let (true_bb, false_bb) = if invert {
+                (false_bb, true_bb)
+            } else {
+                (true_bb, false_bb)
+            };
             let true_path = ops.new_dynamic_label();
-            emit_conditional_branch(ops, true_path, predicate_kind(*predicate));
+            let kind = predicate_kind(*predicate);
+            emit_conditional_branch(
+                ops,
+                true_path,
+                if invert {
+                    inverse_condition(kind)
+                } else {
+                    kind
+                },
+            );
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
             let false_label = labels[false_bb];
             dynasm!(ops ; .arch aarch64 ; b =>false_label ; =>true_path);
             emit_edge_copies(ops, plan, block, *true_bb, spill_base, temporary_offset)?;
             let true_label = labels[true_bb];
-            dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            if next_block != Some(*true_bb) {
+                dynasm!(ops ; .arch aarch64 ; b =>true_label);
+            }
         }
         MInst::Jump { target } => {
             emit_edge_copies(ops, plan, block, *target, spill_base, temporary_offset)?;
             let label = labels[target];
-            dynasm!(ops ; .arch aarch64 ; b =>label);
+            if next_block != Some(*target) {
+                dynasm!(ops ; .arch aarch64 ; b =>label);
+            }
         }
         MInst::Return => {
             if let (Some(entry), Some(success)) = (tick_entry, tick_success) {
@@ -1232,6 +1310,25 @@ fn emit_instruction(
         }
     }
     Ok(())
+}
+
+fn emit_bit_insert(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    dst: u8,
+    base: u8,
+    mut src: u8,
+    lsb: u8,
+    width: u8,
+) {
+    if dst != base {
+        if dst == src {
+            dynasm!(ops ; .arch aarch64 ; mov x16, X(src));
+            src = SCRATCH0;
+        }
+        dynasm!(ops ; .arch aarch64 ; mov X(dst), X(base));
+    }
+    let (lsb, width) = (u32::from(lsb), u32::from(width));
+    dynasm!(ops ; .arch aarch64 ; bfi X(dst), X(src), lsb, width);
 }
 
 fn emit_mem_copy(
@@ -1911,14 +2008,22 @@ fn emit_sparse_commit_worklist(
                 .get(row_start..row_start + SPARSE_COMMIT_DESCRIPTOR_WORDS)
                 .ok_or(EmitError::Range("sparse descriptor row is missing"))?;
             let skip = ops.new_dynamic_label();
-            let mask = 1_u64 << (active_index % 64);
-            emit_load_imm(ops, SCRATCH0, mask);
-            dynasm!(ops
-                ; .arch aarch64
-                ; and x16, x17, x16
-                ; cbz x16, =>skip
-                ; fmov d5, x17
-            );
+            let bit = (active_index % 64) as u32;
+            if row[6] <= 1 {
+                // One summary word has a bounded, small body that fits
+                // TBZ's +/-32 KiB displacement. Large arrays use B.cond.
+                dynasm!(ops ; .arch aarch64 ; tbz x17, bit, =>skip);
+            } else {
+                let mask = 1_u64 << bit;
+                // Logical-immediate opc=0b11 selects ANDS, whose xzr
+                // destination encodes TST. The non-flag-setting opcodes
+                // interpret destination 31 as SP instead.
+                ops.push_u32(
+                    logical_immediate_encoding(mask, 64, 31, SCRATCH1, true).unwrap() | (3 << 29),
+                );
+                dynasm!(ops ; .arch aarch64 ; b.eq =>skip);
+            }
+            dynasm!(ops ; .arch aarch64 ; fmov d5, x17);
             emit_sparse_commit(
                 ops,
                 i32::try_from(row[0])
@@ -1956,6 +2061,38 @@ fn emit_sparse_commit(
     summary_word_count: usize,
     four_state: bool,
 ) {
+    if (1..=8).contains(&byte_size) && dirty_word_count == 1 && summary_word_count == 1 {
+        // A single chunk needs only bit zero of each bitmap. Preserve the
+        // general path's clearing and invalid-bit behavior, without either
+        // bit-scan loop or its saved loop indices.
+        let done = ops.new_dynamic_label();
+        emit_address(ops, STATE_REG, i64::from(summary_words_offset));
+        dynasm!(ops
+            ; .arch aarch64
+            ; ldr x17, [x16]
+            ; str xzr, [x16]
+            ; tbz x17, #0, =>done
+        );
+        emit_address(ops, STATE_REG, i64::from(dirty_words_offset));
+        dynasm!(ops
+            ; .arch aarch64
+            ; ldr x17, [x16]
+            ; str xzr, [x16]
+            ; tbz x17, #0, =>done
+        );
+        for plane in 0..if four_state { 2 } else { 1 } {
+            let delta = (plane * byte_size) as i32;
+            emit_mem_copy_forward_vectors(
+                ops,
+                src_offset + delta,
+                dst_offset + delta,
+                byte_size,
+                StatePageBases::default(),
+            );
+        }
+        dynasm!(ops ; .arch aarch64 ; =>done);
+        return;
+    }
     let chunk_count = byte_size.div_ceil(8);
     let last_chunk = chunk_count.saturating_sub(1);
     let last_len = byte_size.saturating_sub(last_chunk * 8);
@@ -2421,13 +2558,7 @@ fn state_page_baseline_cost(access: StatePageAccess) -> usize {
             offset,
             size,
             store,
-        } => {
-            if memory_access_encoding(SCRATCH0, STATE_REG, offset, size, store).is_some() {
-                0
-            } else {
-                address_materialization_cost(offset)
-            }
-        }
+        } => scalar_memory_offset_cost(offset, size, store),
         StatePageAccess::Indexed {
             offset,
             size,
@@ -2441,7 +2572,7 @@ fn state_page_cost(access: StatePageAccess, page: i64) -> Option<usize> {
     let offset = access.offset() - page;
     match access {
         StatePageAccess::Direct { size, store, .. } => {
-            memory_access_encoding(SCRATCH0, STATE_PAGE_REG, offset, size, store).map(|_| 0)
+            Some(scalar_memory_offset_cost(offset, size, store))
         }
         StatePageAccess::Indexed { size, store, .. } => indexed_offset_cost(offset, size, store),
         StatePageAccess::Vector { .. } => Some(address_materialization_cost(offset)),
@@ -2455,7 +2586,9 @@ fn indexed_access_cost(offset: i64, size: OpSize, store: bool) -> usize {
 fn indexed_offset_cost(offset: i64, size: OpSize, store: bool) -> Option<usize> {
     if memory_access_encoding(SCRATCH0, SCRATCH0, offset, size, store).is_some() {
         Some(0)
-    } else if add_sub_immediate(offset).is_some() {
+    } else if split_memory_offset(offset, size, store).is_some()
+        || add_sub_immediate(offset).is_some()
+    {
         Some(1)
     } else if add_sub_immediate_pair(offset).is_some() {
         Some(2)
@@ -2467,7 +2600,7 @@ fn indexed_offset_cost(offset: i64, size: OpSize, store: bool) -> Option<usize> 
 fn select_memory_base(
     base: BaseReg,
     offset: i64,
-    register: u8,
+    _register: u8,
     size: OpSize,
     store: bool,
     state_pages: StatePageBases,
@@ -2476,19 +2609,22 @@ fn select_memory_base(
     if base != BaseReg::SimState {
         return normal;
     }
-    if let Some(page) = state_pages.primary {
-        let relative = offset - page;
-        if memory_access_encoding(register, STATE_PAGE_REG, relative, size, store).is_some() {
-            return (STATE_PAGE_REG, relative);
-        }
-    }
-    for &(page_register, page) in state_pages.secondary.iter().flatten() {
-        let relative = offset - page;
-        if memory_access_encoding(register, page_register, relative, size, store).is_some() {
-            return (page_register, relative);
-        }
-    }
-    normal
+    std::iter::once(normal)
+        .chain(
+            state_pages
+                .primary
+                .into_iter()
+                .map(|page| (STATE_PAGE_REG, offset - page)),
+        )
+        .chain(
+            state_pages
+                .secondary
+                .iter()
+                .flatten()
+                .map(|&(register, page)| (register, offset - page)),
+        )
+        .min_by_key(|&(_, offset)| scalar_memory_offset_cost(offset, size, store))
+        .unwrap_or(normal)
 }
 
 fn select_indexed_memory_base(
@@ -2627,6 +2763,30 @@ fn memory_access_encoding(
     None
 }
 
+/// Use the load/store immediate for the low page offset, leaving only one
+/// ADD/SUB of the high part. A cached state page can then serve nearby pages
+/// without rebuilding a full state address from its absolute displacement.
+fn split_memory_offset(offset: i64, size: OpSize, store: bool) -> Option<(i64, i64)> {
+    let low = offset.rem_euclid(STATE_PAGE_BYTES);
+    let high = offset.checked_sub(low)?;
+    if high == 0 {
+        return None;
+    }
+    add_sub_immediate(high)?;
+    memory_access_encoding(SCRATCH0, SCRATCH0, low, size, store)?;
+    Some((high, low))
+}
+
+fn scalar_memory_offset_cost(offset: i64, size: OpSize, store: bool) -> usize {
+    if memory_access_encoding(SCRATCH0, SCRATCH0, offset, size, store).is_some() {
+        0
+    } else if split_memory_offset(offset, size, store).is_some() {
+        1
+    } else {
+        address_materialization_cost(offset)
+    }
+}
+
 fn emit_load_at(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: u8,
@@ -2636,6 +2796,9 @@ fn emit_load_at(
 ) {
     if let Some(instruction) = memory_access_encoding(destination, base, offset, size, false) {
         ops.push_u32(instruction);
+    } else if let Some((high, low)) = split_memory_offset(offset, size, false) {
+        let _ = emit_add_sub_immediate(ops, SCRATCH0, base, high);
+        ops.push_u32(memory_access_encoding(destination, SCRATCH0, low, size, false).unwrap());
     } else {
         emit_address(ops, base, offset);
         emit_load(ops, destination, SCRATCH0, size);
@@ -2684,6 +2847,9 @@ fn emit_store_at(
 ) {
     if let Some(instruction) = memory_access_encoding(source, base, offset, size, true) {
         ops.push_u32(instruction);
+    } else if let Some((high, low)) = split_memory_offset(offset, size, true) {
+        let _ = emit_add_sub_immediate(ops, SCRATCH0, base, high);
+        ops.push_u32(memory_access_encoding(source, SCRATCH0, low, size, true).unwrap());
     } else {
         emit_address(ops, base, offset);
         emit_store(ops, source, SCRATCH0, size);
@@ -2969,14 +3135,25 @@ fn move_wide_plan(value: u64) -> MoveWidePlan {
     }
 }
 
+pub(crate) fn is_single_instruction_constant(value: u64) -> bool {
+    move_wide_plan(value).instruction_count == 1
+        || logical_immediate_encoding(value, 64, 1, 31, false).is_some()
+}
+
 fn emit_load_imm(ops: &mut VecAssembler<Aarch64Relocation>, register: u8, value: u64) {
+    let plan = move_wide_plan(value);
+    if plan.instruction_count > 1
+        && let Some(instruction) = logical_immediate_encoding(value, 64, register, 31, false)
+    {
+        ops.push_u32(instruction);
+        return;
+    }
     let halves = [
         value as u16,
         (value >> 16) as u16,
         (value >> 32) as u16,
         (value >> 48) as u16,
     ];
-    let plan = move_wide_plan(value);
     let first = plan.first;
     let fill = if plan.inverted { u16::MAX } else { 0 };
     let half = if plan.inverted {
@@ -3130,6 +3307,21 @@ fn emit_branch_predicate(
         }
     }
     Ok(())
+}
+
+fn inverse_condition(kind: CmpKind) -> CmpKind {
+    match kind {
+        CmpKind::Eq => CmpKind::Ne,
+        CmpKind::Ne => CmpKind::Eq,
+        CmpKind::LtU => CmpKind::GeU,
+        CmpKind::LeU => CmpKind::GtU,
+        CmpKind::GtU => CmpKind::LeU,
+        CmpKind::GeU => CmpKind::LtU,
+        CmpKind::LtS => CmpKind::GeS,
+        CmpKind::LeS => CmpKind::GtS,
+        CmpKind::GtS => CmpKind::LeS,
+        CmpKind::GeS => CmpKind::LtS,
+    }
 }
 
 fn predicate_kind(predicate: BranchPredicate) -> CmpKind {
