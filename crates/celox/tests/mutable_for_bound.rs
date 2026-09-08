@@ -106,6 +106,27 @@ module Top {
 }
 
 #[test]
+fn readmemh_write_to_the_bound_is_an_error() {
+    expect_mutable_bound_error(
+        r#"
+#[test(t)]
+module t {
+    #[allow(initial_assign)]
+    var limit: logic<8>[2];
+
+    initial {
+        for _i in 0..limit[0] {
+            $readmemh("unused.hex", limit);
+        }
+        $finish();
+    }
+}
+"#,
+        "t",
+    );
+}
+
+#[test]
 fn effects_in_the_bound_itself_are_errors() {
     expect_mutable_bound_error(
         r#"

@@ -35,7 +35,8 @@ use celox_slt::{
 use num_bigint::BigUint;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, Component, Declaration, Expression, Factor,
-    InstDeclaration, Module, Statement, SystemFunctionInput, SystemFunctionKind, VarId,
+    InstDeclaration, Module, Statement, SystemFunctionInput, SystemFunctionKind,
+    SystemFunctionOutput, VarId,
 };
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
@@ -2142,8 +2143,19 @@ impl<'a> ModuleParser<'a> {
         match stmt {
             Statement::SystemFunctionCall(call) => {
                 if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
-                    let value =
-                        self.parse_readmem_file(filename, output.0.as_slice(), 16, context)?;
+                    let destinations = match output {
+                        SystemFunctionOutput::Local(destinations) => destinations,
+                        SystemFunctionOutput::Hier(reference) => {
+                            return Err(ParserError::unsupported(
+                                111,
+                                LoweringPhase::SimulatorParser,
+                                "$readmemh destination",
+                                "hierarchical destinations are not supported",
+                                Some(&reference.comptime.token),
+                            ));
+                        }
+                    };
+                    let value = self.parse_readmem_file(filename, destinations, 16, context)?;
                     self.initial_memory_values.push(value);
                 }
                 Ok(())

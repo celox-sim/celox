@@ -62,7 +62,7 @@ use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, CasePattern, Component, Declaration, Expression, Factor,
     ForBound, ForRange, ForStatement, FunctionCall, Ir, Module, Statement, SystemFunctionCall,
-    SystemFunctionKind, TbMethod, VarId, VarIndex, VarSelect,
+    SystemFunctionKind, SystemFunctionOutput, TbMethod, VarId, VarIndex, VarSelect,
 };
 use veryl_analyzer::symbol::Affiliation;
 use veryl_parser::resource_table::{self, StrId};
@@ -1592,8 +1592,21 @@ fn collect_system_function_effects(
                 module,
                 active_functions,
             ));
-            for destination in &output.0 {
-                collect_destination_effects(destination, module, active_functions, effects, false);
+            match output {
+                SystemFunctionOutput::Local(destinations) => {
+                    for destination in destinations {
+                        collect_destination_effects(
+                            destination,
+                            module,
+                            active_functions,
+                            effects,
+                            false,
+                        );
+                    }
+                }
+                SystemFunctionOutput::Hier(_) => {
+                    effects.mark_unknown("hierarchical $readmemh destination has unknown effects");
+                }
             }
         }
         SystemFunctionKind::Display(arguments) | SystemFunctionKind::Write(arguments) => {
@@ -1847,6 +1860,35 @@ mod tests {
 
     #[test]
     fn unknown_body_effect_ir_is_reported_for_a_hierarchical_bound() {
+        check_unknown_body_effect_with_hierarchical_bound(Statement::Unsupported(
+            TokenRange::default(),
+        ));
+    }
+
+    #[test]
+    fn hierarchical_readmemh_write_is_reported_for_a_hierarchical_bound() {
+        let destination = veryl_analyzer::ir::HierVarRef {
+            inst_path: vec![StrId::default()],
+            var_path: VarPath(vec![StrId::default()]),
+            index: VarIndex::default(),
+            select: VarSelect::default(),
+            comptime: Comptime::default(),
+        };
+        let filename = veryl_analyzer::ir::SystemFunctionInput(Expression::Term(Box::new(
+            Factor::Value(Comptime::default()),
+        )));
+        check_unknown_body_effect_with_hierarchical_bound(Statement::SystemFunctionCall(Box::new(
+            SystemFunctionCall {
+                kind: SystemFunctionKind::Readmemh(
+                    filename,
+                    SystemFunctionOutput::Hier(Box::new(destination)),
+                ),
+                comptime: Comptime::default(),
+            },
+        )));
+    }
+
+    fn check_unknown_body_effect_with_hierarchical_bound(body: Statement) {
         let token = TokenRange::default();
         let bound = Expression::Term(Box::new(Factor::HierVariable(Box::new(
             veryl_analyzer::ir::HierVarRef {
@@ -1867,7 +1909,7 @@ mod tests {
                 inclusive: false,
                 step: 1,
             },
-            body: vec![Statement::Unsupported(token)],
+            body: vec![body],
             token,
         }));
         let module = Module {
