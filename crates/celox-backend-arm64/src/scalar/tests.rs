@@ -100,6 +100,210 @@ fn far_conditional_branches_fall_back_to_copy_stubs() {
     }
 }
 
+#[test]
+fn simd_spill_slots_preserve_frame_values_across_calls() {
+    let mut block = MBlock::new(BlockId(0));
+    let mut assignment = Assignment::default();
+    for index in 0..8 {
+        block.push(MInst::Load {
+            dst: VReg(index),
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: (index * 8) as i32,
+            src: VReg(index),
+            size: OpSize::S64,
+        });
+        assignment.set(VReg(index), Arm64Reg::new(1));
+    }
+    block.push(MInst::Return);
+    let function = MFunction::new(vec![block], vec![]);
+    let plan = EdgeCopyPlan::default();
+    assert!(SpillRegisters::select(&function, &plan, 8).get(0).is_some());
+    let emitted = emit_function(&function, &assignment, 8, 64, &plan, false, false).unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0; emitted.required_state_size as usize];
+    for seed in [0, 0x9e37_79b9_7f4a_7c15_u64, u64::MAX] {
+        state.fill(0x5a);
+        state[64..72].copy_from_slice(&seed.to_le_bytes());
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        for offset in (0..=64).step_by(8) {
+            assert_eq!(
+                u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap()),
+                seed
+            );
+        }
+    }
+}
+
+#[test]
+fn simd_spill_slots_preserve_stack_phi_cycles() {
+    let mut entry = MBlock::new(BlockId(0));
+    for index in 0..2 {
+        entry.push(MInst::Load {
+            dst: VReg(index),
+            base: BaseReg::SimState,
+            offset: (index * 8) as i32,
+            size: OpSize::S64,
+        });
+        entry.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: (index * 8) as i32,
+            src: VReg(index),
+            size: OpSize::S64,
+        });
+    }
+    entry.push(MInst::Jump { target: BlockId(1) });
+    let mut body = MBlock::new(BlockId(1));
+    for index in 0..2 {
+        body.push(MInst::Load {
+            dst: VReg(2 + index),
+            base: BaseReg::StackFrame,
+            offset: (index * 8) as i32,
+            size: OpSize::S64,
+        });
+        body.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: ((3 + index) * 8) as i32,
+            src: VReg(2 + index),
+            size: OpSize::S64,
+        });
+    }
+    body.push(MInst::Load {
+        dst: VReg(4),
+        base: BaseReg::SimState,
+        offset: 16,
+        size: OpSize::S64,
+    });
+    body.push(MInst::SubImm {
+        dst: VReg(5),
+        src: VReg(4),
+        imm: 1,
+    });
+    body.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 16,
+        src: VReg(5),
+        size: OpSize::S64,
+    });
+    body.push(MInst::Branch {
+        cond: VReg(5),
+        true_bb: BlockId(1),
+        false_bb: BlockId(2),
+    });
+    let mut exit = MBlock::new(BlockId(2));
+    exit.push(MInst::Return);
+    let function = MFunction::new(vec![entry, body, exit], vec![]);
+    let mut assignment = Assignment::default();
+    for (value, register) in [(0, 1), (1, 2), (2, 1), (3, 2), (4, 3), (5, 3)] {
+        assignment.set(VReg(value), Arm64Reg::new(register));
+    }
+    let mut plan = EdgeCopyPlan::default();
+    plan.insert(
+        BlockId(1),
+        BlockId(1),
+        vec![
+            CopyOperation::SaveTemporary(CopyDestination::Stack(0)),
+            CopyOperation::Move {
+                destination: CopyDestination::Stack(0),
+                source: CopySource::Stack(8),
+            },
+            CopyOperation::RestoreTemporary(CopyDestination::Stack(8)),
+        ],
+    );
+    let selected = SpillRegisters::select(&function, &plan, 16);
+    assert!(selected.get(0).is_some());
+    assert!(selected.get(8).is_some());
+    let emitted = emit_function(&function, &assignment, 16, 64, &plan, false, false).unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0; emitted.required_state_size as usize];
+    for count in 1u64..=5 {
+        let (left, right) = (0x9e37_79b9_7f4a_7c15u64, u64::MAX - count);
+        state.fill(0x5a);
+        state[..8].copy_from_slice(&left.to_le_bytes());
+        state[8..16].copy_from_slice(&right.to_le_bytes());
+        state[16..24].copy_from_slice(&count.to_le_bytes());
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        let expected = if count % 2 == 1 {
+            [left, right]
+        } else {
+            [right, left]
+        };
+        for (index, value) in expected.into_iter().enumerate() {
+            for base in [24, 64] {
+                let offset = base + index * 8;
+                assert_eq!(
+                    u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap()),
+                    value
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn partial_frame_writes_remain_visible_to_spill_reads() {
+    let mut block = MBlock::new(BlockId(0));
+    block.push(MInst::LoadImm {
+        dst: VReg(8),
+        value: 0xa5,
+    });
+    let mut assignment = Assignment::default();
+    assignment.set(VReg(8), Arm64Reg::new(2));
+    for index in 0..8 {
+        if index == 4 {
+            block.push(MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 3,
+                src: VReg(8),
+                size: OpSize::S8,
+            });
+        }
+        block.push(MInst::Load {
+            dst: VReg(index),
+            base: BaseReg::StackFrame,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: (index * 8) as i32,
+            src: VReg(index),
+            size: OpSize::S64,
+        });
+        assignment.set(VReg(index), Arm64Reg::new(1));
+    }
+    block.push(MInst::Return);
+    let emitted = emit_function(
+        &MFunction::new(vec![block], vec![]),
+        &assignment,
+        8,
+        64,
+        &EdgeCopyPlan::default(),
+        false,
+        false,
+    )
+    .unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0; emitted.required_state_size as usize];
+    for seed in [0, 0x9e37_79b9_7f4a_7c15_u64, u64::MAX] {
+        state[64..72].copy_from_slice(&seed.to_le_bytes());
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        for index in 0..=8 {
+            let actual = u64::from_le_bytes(state[index * 8..index * 8 + 8].try_into().unwrap());
+            let expected = if index < 4 {
+                seed
+            } else {
+                (seed & !(0xff << 24)) | (0xa5 << 24)
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
 fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
     crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);

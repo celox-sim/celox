@@ -24,6 +24,9 @@ const STATE_REG: u8 = 0;
 
 #[cfg(all(test, target_arch = "aarch64"))]
 mod tests;
+
+mod spill_registers;
+use spill_registers::SpillRegisters;
 const SCRATCH0: u8 = 16;
 const SCRATCH1: u8 = 17;
 // x28 is reserved as the base of the target-owned spill frame.  Keeping the
@@ -375,6 +378,7 @@ fn emit_function_with_branches(
             .any(|(_, value)| value.number() == *register)
     });
     let state_pages = select_state_base_pages(function, secondary_page_registers);
+    let spill_registers = SpillRegisters::select(function, plan, spill_frame_size);
     let tick_counter_in_fp = tick_loop && state_pages.primary.is_some();
     let table_labels = function
         .constant_tables()
@@ -474,6 +478,7 @@ fn emit_function_with_branches(
     for &(register, page) in state_pages.secondary.iter().flatten() {
         emit_address_to(&mut ops, register, STATE_REG, page);
     }
+    spill_registers.enter(&mut ops);
     for (block_index, block) in function.blocks.iter().enumerate() {
         let next_block = function.blocks.get(block_index + 1).map(|block| block.id);
         let label = block_labels[&block.id];
@@ -502,6 +507,7 @@ fn emit_function_with_branches(
                 state_pages,
                 tick_counter_in_fp,
                 direct_branches,
+                &spill_registers,
             )?;
         }
     }
@@ -526,6 +532,7 @@ fn emit_function_with_branches(
         );
         dynasm!(ops ; .arch aarch64 ; add x17, x17, x30 ; str x16, [x17]);
     }
+    spill_registers.leave(&mut ops);
     if callee_saved.is_empty() {
         dynasm!(ops ; .arch aarch64 ; ldr x30, [sp], #16);
     } else {
@@ -589,6 +596,7 @@ fn emit_instruction(
     state_pages: StatePageBases,
     tick_counter_in_fp: bool,
     direct_branches: bool,
+    spill_registers: &SpillRegisters,
 ) -> Result<(), EmitError> {
     match instruction {
         MInst::Mov { dst, src } => {
@@ -652,6 +660,10 @@ fn emit_instruction(
             offset,
             size,
         } => {
+            if *base == BaseReg::StackFrame && *size == OpSize::S64 {
+                spill_registers.load(ops, resolve(assignment, *dst)?, *offset);
+                return Ok(());
+            }
             let offset = base_offset(*base, *offset);
             let destination = resolve(assignment, *dst)?;
             let (base_register, offset) =
@@ -664,6 +676,14 @@ fn emit_instruction(
             src,
             size,
         } => {
+            if *base == BaseReg::StackFrame
+                && *size == OpSize::S64
+                && let Some(register) = spill_registers.get(*offset)
+            {
+                let source = resolve(assignment, *src)?;
+                dynasm!(ops ; .arch aarch64 ; fmov D(register), X(source));
+                return Ok(());
+            }
             let offset = base_offset(*base, *offset);
             let source = resolve(assignment, *src)?;
             let (base_register, offset) =
@@ -1066,12 +1086,21 @@ fn emit_instruction(
                 default_target,
                 spill_base,
                 temporary_offset,
+                spill_registers,
             )?;
             let default_label = labels[&default_target];
             dynasm!(ops ; .arch aarch64 ; b =>default_label);
             for (&target, path) in compared_targets.iter().zip(paths) {
                 dynasm!(ops ; .arch aarch64 ; =>path);
-                emit_edge_copies(ops, plan, block, target, spill_base, temporary_offset)?;
+                emit_edge_copies(
+                    ops,
+                    plan,
+                    block,
+                    target,
+                    spill_base,
+                    temporary_offset,
+                    spill_registers,
+                )?;
                 let target_label = labels[&target];
                 dynasm!(ops ; .arch aarch64 ; b =>target_label);
             }
@@ -1097,7 +1126,15 @@ fn emit_instruction(
                 } else {
                     dynasm!(ops ; .arch aarch64 ; cbz X(cond), =>target_label);
                 }
-                emit_edge_copies(ops, plan, block, fallthrough, spill_base, temporary_offset)?;
+                emit_edge_copies(
+                    ops,
+                    plan,
+                    block,
+                    fallthrough,
+                    spill_base,
+                    temporary_offset,
+                    spill_registers,
+                )?;
                 if next_block != Some(fallthrough) {
                     let label = labels[&fallthrough];
                     dynasm!(ops ; .arch aarch64 ; b =>label);
@@ -1120,10 +1157,26 @@ fn emit_instruction(
             } else {
                 dynasm!(ops ; .arch aarch64 ; cbnz X(cond), =>true_path);
             }
-            emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
+            emit_edge_copies(
+                ops,
+                plan,
+                block,
+                *false_bb,
+                spill_base,
+                temporary_offset,
+                spill_registers,
+            )?;
             let false_label = labels[false_bb];
             dynasm!(ops ; .arch aarch64 ; b =>false_label ; =>true_path);
-            emit_edge_copies(ops, plan, block, *true_bb, spill_base, temporary_offset)?;
+            emit_edge_copies(
+                ops,
+                plan,
+                block,
+                *true_bb,
+                spill_base,
+                temporary_offset,
+                spill_registers,
+            )?;
             let true_label = labels[true_bb];
             if next_block != Some(*true_bb) {
                 dynasm!(ops ; .arch aarch64 ; b =>true_label);
@@ -1154,7 +1207,15 @@ fn emit_instruction(
                         inverse_condition(kind)
                     },
                 );
-                emit_edge_copies(ops, plan, block, fallthrough, spill_base, temporary_offset)?;
+                emit_edge_copies(
+                    ops,
+                    plan,
+                    block,
+                    fallthrough,
+                    spill_base,
+                    temporary_offset,
+                    spill_registers,
+                )?;
                 if next_block != Some(fallthrough) {
                     let label = labels[&fallthrough];
                     dynasm!(ops ; .arch aarch64 ; b =>label);
@@ -1178,17 +1239,41 @@ fn emit_instruction(
                     kind
                 },
             );
-            emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
+            emit_edge_copies(
+                ops,
+                plan,
+                block,
+                *false_bb,
+                spill_base,
+                temporary_offset,
+                spill_registers,
+            )?;
             let false_label = labels[false_bb];
             dynasm!(ops ; .arch aarch64 ; b =>false_label ; =>true_path);
-            emit_edge_copies(ops, plan, block, *true_bb, spill_base, temporary_offset)?;
+            emit_edge_copies(
+                ops,
+                plan,
+                block,
+                *true_bb,
+                spill_base,
+                temporary_offset,
+                spill_registers,
+            )?;
             let true_label = labels[true_bb];
             if next_block != Some(*true_bb) {
                 dynasm!(ops ; .arch aarch64 ; b =>true_label);
             }
         }
         MInst::Jump { target } => {
-            emit_edge_copies(ops, plan, block, *target, spill_base, temporary_offset)?;
+            emit_edge_copies(
+                ops,
+                plan,
+                block,
+                *target,
+                spill_base,
+                temporary_offset,
+                spill_registers,
+            )?;
             let label = labels[target];
             if next_block != Some(*target) {
                 dynasm!(ops ; .arch aarch64 ; b =>label);
@@ -3454,6 +3539,7 @@ fn emit_edge_copies(
     successor: BlockId,
     spill_base: usize,
     temporary_offset: usize,
+    spill_registers: &SpillRegisters,
 ) -> Result<(), EmitError> {
     let Some(operations) = plan.edge(predecessor, successor) else {
         return Ok(());
@@ -3463,7 +3549,7 @@ fn emit_edge_copies(
             CopyOperation::Move {
                 destination,
                 source,
-            } => emit_copy(ops, destination, source)?,
+            } => emit_copy(ops, destination, source, spill_registers)?,
             CopyOperation::SwapRegisters { left, right } => {
                 let (left, right) = (left.number(), right.number());
                 dynasm!(ops
@@ -3474,7 +3560,7 @@ fn emit_edge_copies(
                 );
             }
             CopyOperation::SaveTemporary(destination) => {
-                read_copy_destination(ops, destination, SCRATCH1)?;
+                read_copy_destination(ops, destination, SCRATCH1, spill_registers)?;
                 // Address materialization uses x17 for the offset. Preserve
                 // the value being saved before computing the temporary slot.
                 dynasm!(ops ; .arch aarch64 ; mov x30, x17);
@@ -3502,7 +3588,7 @@ fn emit_edge_copies(
                         .map_err(|_| EmitError::Range("temporary spill offset overflow"))?,
                     OpSize::S64,
                 );
-                write_copy_destination(ops, destination, SCRATCH1)?;
+                write_copy_destination(ops, destination, SCRATCH1, spill_registers)?;
             }
         }
     }
@@ -3513,18 +3599,28 @@ fn emit_copy(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: CopyDestination,
     source: CopySource,
+    spill_registers: &SpillRegisters,
 ) -> Result<(), EmitError> {
+    if let (CopyDestination::Stack(destination), CopySource::Stack(source)) = (destination, source)
+        && let (Some(destination), Some(source)) = (
+            spill_registers.get(destination),
+            spill_registers.get(source),
+        )
+    {
+        dynasm!(ops ; .arch aarch64 ; fmov D(destination), D(source));
+        return Ok(());
+    }
     match source {
         CopySource::Register(register) => {
-            write_copy_destination(ops, destination, register.number())
+            write_copy_destination(ops, destination, register.number(), spill_registers)
         }
         CopySource::Stack(offset) => {
-            emit_load_at(ops, SCRATCH1, SPILL_REG, i64::from(offset), OpSize::S64);
-            write_copy_destination(ops, destination, SCRATCH1)
+            spill_registers.load(ops, SCRATCH1, offset);
+            write_copy_destination(ops, destination, SCRATCH1, spill_registers)
         }
         CopySource::Immediate(value) => {
             emit_load_imm(ops, SCRATCH1, value);
-            write_copy_destination(ops, destination, SCRATCH1)
+            write_copy_destination(ops, destination, SCRATCH1, spill_registers)
         }
     }
 }
@@ -3533,6 +3629,7 @@ fn read_copy_destination(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: CopyDestination,
     output: u8,
+    spill_registers: &SpillRegisters,
 ) -> Result<(), EmitError> {
     match destination {
         CopyDestination::Register(register) => {
@@ -3540,7 +3637,7 @@ fn read_copy_destination(
             dynasm!(ops ; .arch aarch64 ; mov X(output), X(register));
         }
         CopyDestination::Stack(offset) => {
-            emit_load_at(ops, output, SPILL_REG, i64::from(offset), OpSize::S64);
+            spill_registers.load(ops, output, offset);
         }
     }
     Ok(())
@@ -3550,6 +3647,7 @@ fn write_copy_destination(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: CopyDestination,
     source: u8,
+    spill_registers: &SpillRegisters,
 ) -> Result<(), EmitError> {
     match destination {
         CopyDestination::Register(register) => {
@@ -3557,6 +3655,10 @@ fn write_copy_destination(
             dynasm!(ops ; .arch aarch64 ; mov X(register), X(source));
         }
         CopyDestination::Stack(offset) => {
+            if let Some(register) = spill_registers.get(offset) {
+                dynasm!(ops ; .arch aarch64 ; fmov D(register), X(source));
+                return Ok(());
+            }
             let source = if source == SCRATCH1 {
                 // emit_address reserves x17 for large/immediate offsets.
                 // Stack-to-stack and temporary restores arrive in x17, so
