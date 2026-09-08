@@ -101,6 +101,84 @@ fn far_conditional_branches_fall_back_to_copy_stubs() {
 }
 
 #[test]
+fn forwarded_jump_chains_preserve_incoming_and_outgoing_edge_copies() {
+    for predicate in [false, true] {
+        for outgoing_copies in [false, true] {
+            let (source, _) = branch_range_function(predicate, 1);
+            let mut entry = source.blocks[0].clone();
+            match entry.insts.last_mut().unwrap() {
+                MInst::Branch {
+                    true_bb, false_bb, ..
+                }
+                | MInst::BranchPred {
+                    true_bb, false_bb, ..
+                } => {
+                    *true_bb = BlockId(1);
+                    *false_bb = BlockId(2);
+                }
+                _ => unreachable!(),
+            }
+            let mut blocks = vec![entry];
+            for (id, target) in [(1, 3), (2, 4), (3, 5), (4, 5)] {
+                let mut block = MBlock::new(BlockId(id));
+                block.push(MInst::KeepAlive { src: VReg(0) });
+                block.push(MInst::Jump {
+                    target: BlockId(target),
+                });
+                blocks.push(block);
+            }
+            let mut exit = MBlock::new(BlockId(5));
+            exit.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(1),
+                size: OpSize::S64,
+            });
+            exit.push(MInst::Return);
+            blocks.push(exit);
+            let function = MFunction::new(blocks, vec![]);
+            let mut assignment = Assignment::default();
+            assignment.set(VReg(0), Arm64Reg::new(1));
+            assignment.set(VReg(1), Arm64Reg::new(2));
+            let mut plan = EdgeCopyPlan::default();
+            let edges = if outgoing_copies {
+                [(3, 5, 29), (4, 5, 11)]
+            } else {
+                [(0, 1, 29), (0, 2, 11)]
+            };
+            for (predecessor, successor, value) in edges {
+                plan.insert(
+                    BlockId(predecessor),
+                    BlockId(successor),
+                    vec![CopyOperation::Move {
+                        destination: CopyDestination::Register(Arm64Reg::new(2)),
+                        source: CopySource::Immediate(value),
+                    }],
+                );
+            }
+            for direct in [false, true] {
+                let emitted = emit_function_with_branches(
+                    &function,
+                    &assignment,
+                    0,
+                    16,
+                    &plan,
+                    false,
+                    false,
+                    direct,
+                )
+                .unwrap();
+                assert_eq!(
+                    emitted.block_offsets.len(),
+                    if outgoing_copies { 4 } else { 2 }
+                );
+                check_branch_outcomes(&emitted);
+            }
+        }
+    }
+}
+
+#[test]
 fn simd_spill_slots_preserve_frame_values_across_calls() {
     let mut block = MBlock::new(BlockId(0));
     let mut assignment = Assignment::default();

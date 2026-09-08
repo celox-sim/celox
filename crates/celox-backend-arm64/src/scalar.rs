@@ -25,6 +25,7 @@ const STATE_REG: u8 = 0;
 #[cfg(all(test, target_arch = "aarch64"))]
 mod tests;
 
+mod blocks;
 mod spill_registers;
 use spill_registers::SpillRegisters;
 const SCRATCH0: u8 = 16;
@@ -360,11 +361,19 @@ fn emit_function_with_branches(
         .map_err(|_| EmitError::Range("native arena exceeds u32"))?;
 
     let mut ops = VecAssembler::<Aarch64Relocation>::new(0);
-    let block_labels = function
+    let forwarded = blocks::forwarded_blocks(function, plan);
+    let emission_blocks = function
         .blocks
+        .iter()
+        .filter(|block| !forwarded.contains_key(&block.id))
+        .collect::<Vec<_>>();
+    let mut block_labels = emission_blocks
         .iter()
         .map(|block| (block.id, ops.new_dynamic_label()))
         .collect::<HashMap<_, _>>();
+    for (&block, &target) in &forwarded {
+        block_labels.insert(block, block_labels[&target]);
+    }
     // Use x29 for the most frequently accessed state page so large state
     // offsets can use ordinary AArch64 memory immediates without reducing the
     // allocator's general-purpose register file.  If a preserved register is
@@ -479,8 +488,8 @@ fn emit_function_with_branches(
         emit_address_to(&mut ops, register, STATE_REG, page);
     }
     spill_registers.enter(&mut ops);
-    for (block_index, block) in function.blocks.iter().enumerate() {
-        let next_block = function.blocks.get(block_index + 1).map(|block| block.id);
+    for (block_index, block) in emission_blocks.iter().enumerate() {
+        let next_block = emission_blocks.get(block_index + 1).map(|block| block.id);
         let label = block_labels[&block.id];
         block_offsets.push((block.id, ops.offset().0 as u64));
         dynasm!(ops
@@ -598,6 +607,7 @@ fn emit_instruction(
     direct_branches: bool,
     spill_registers: &SpillRegisters,
 ) -> Result<(), EmitError> {
+    let is_next = |target| next_block.is_some_and(|next| labels[&next] == labels[&target]);
     match instruction {
         MInst::Mov { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
@@ -1112,7 +1122,7 @@ fn emit_instruction(
         } => {
             if direct_branches
                 && let Some(branch_on_true) =
-                    direct_branch_side(plan, block, *true_bb, *false_bb, next_block)
+                    direct_branch_side(plan, block, *true_bb, *false_bb, is_next(*true_bb))
             {
                 let (target, fallthrough) = if branch_on_true {
                     (*true_bb, *false_bb)
@@ -1135,7 +1145,7 @@ fn emit_instruction(
                     temporary_offset,
                     spill_registers,
                 )?;
-                if next_block != Some(fallthrough) {
+                if !is_next(fallthrough) {
                     let label = labels[&fallthrough];
                     dynasm!(ops ; .arch aarch64 ; b =>label);
                 }
@@ -1144,7 +1154,7 @@ fn emit_instruction(
             // Put the physically adjacent successor last so its copies can
             // fall through. The conditional branch still targets a nearby
             // copy stub, preserving its range even in very large functions.
-            let invert = next_block == Some(*false_bb);
+            let invert = is_next(*false_bb);
             let (true_bb, false_bb) = if invert {
                 (false_bb, true_bb)
             } else {
@@ -1178,7 +1188,7 @@ fn emit_instruction(
                 spill_registers,
             )?;
             let true_label = labels[true_bb];
-            if next_block != Some(*true_bb) {
+            if !is_next(*true_bb) {
                 dynasm!(ops ; .arch aarch64 ; b =>true_label);
             }
         }
@@ -1190,7 +1200,7 @@ fn emit_instruction(
             emit_branch_predicate(ops, *predicate, assignment, state_pages)?;
             if direct_branches
                 && let Some(branch_on_true) =
-                    direct_branch_side(plan, block, *true_bb, *false_bb, next_block)
+                    direct_branch_side(plan, block, *true_bb, *false_bb, is_next(*true_bb))
             {
                 let (target, fallthrough) = if branch_on_true {
                     (*true_bb, *false_bb)
@@ -1216,13 +1226,13 @@ fn emit_instruction(
                     temporary_offset,
                     spill_registers,
                 )?;
-                if next_block != Some(fallthrough) {
+                if !is_next(fallthrough) {
                     let label = labels[&fallthrough];
                     dynasm!(ops ; .arch aarch64 ; b =>label);
                 }
                 return Ok(());
             }
-            let invert = next_block == Some(*false_bb);
+            let invert = is_next(*false_bb);
             let (true_bb, false_bb) = if invert {
                 (false_bb, true_bb)
             } else {
@@ -1260,7 +1270,7 @@ fn emit_instruction(
                 spill_registers,
             )?;
             let true_label = labels[true_bb];
-            if next_block != Some(*true_bb) {
+            if !is_next(*true_bb) {
                 dynasm!(ops ; .arch aarch64 ; b =>true_label);
             }
         }
@@ -1275,7 +1285,7 @@ fn emit_instruction(
                 spill_registers,
             )?;
             let label = labels[target];
-            if next_block != Some(*target) {
+            if !is_next(*target) {
                 dynasm!(ops ; .arch aarch64 ; b =>label);
             }
         }
@@ -3503,9 +3513,9 @@ fn direct_branch_side(
     block: BlockId,
     true_bb: BlockId,
     false_bb: BlockId,
-    next_block: Option<BlockId>,
+    true_is_next: bool,
 ) -> Option<bool> {
-    let prefer_true = next_block != Some(true_bb);
+    let prefer_true = !true_is_next;
     [prefer_true, !prefer_true].into_iter().find(|&on_true| {
         let target = if on_true { true_bb } else { false_bb };
         plan.edge(block, target)
