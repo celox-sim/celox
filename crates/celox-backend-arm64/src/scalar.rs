@@ -2231,6 +2231,34 @@ fn emit_sparse_commit(
                 .unwrap(),
             );
         }
+        let storage_size = byte_size as i64 * if four_state { 2 } else { 1 };
+        if byte_size >= 16
+            && (i64::from(src_offset) + storage_size <= i64::from(dst_offset)
+                || i64::from(dst_offset) + storage_size <= i64::from(src_offset))
+        {
+            // Whole-array updates are common even when the array also has
+            // sparse indexed writes. Copy them with vectors after taking the
+            // bitmaps, preserving the chunk order for overlapping storage.
+            let sparse = ops.new_dynamic_label();
+            let mask = u64::MAX >> (64 - chunk_count);
+            if !i32::try_from(mask as i64).is_ok_and(|mask| emit_cmp_immediate(ops, SCRATCH1, mask))
+            {
+                emit_load_imm(ops, 30, mask);
+                dynasm!(ops ; .arch aarch64 ; cmp x17, x30);
+            }
+            dynasm!(ops ; .arch aarch64 ; b.ne =>sparse);
+            for plane in 0..if four_state { 2 } else { 1 } {
+                let delta = (plane * byte_size) as i32;
+                emit_mem_copy_forward_vectors(
+                    ops,
+                    src_offset + delta,
+                    dst_offset + delta,
+                    byte_size,
+                    state_pages,
+                );
+            }
+            dynasm!(ops ; .arch aarch64 ; b =>done ; =>sparse);
+        }
         dynasm!(ops
             ; .arch aarch64
             ; cbz x17, =>done
