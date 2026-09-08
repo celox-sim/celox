@@ -62,10 +62,10 @@ Importing an ordinary, non-test Veryl module instead returns a typed
 `Simulator` or `Simulation`, and the same import mechanism can be used by other
 Vite-based tools.
 
-### Loading an Instantiated Memory (Veryl HEAD)
+### Loading an Instantiated Memory
 
-The `develop` lane with Veryl HEAD supports `$readmemh` destinations inside an
-instance, including nested instances and parameterized memories:
+`$readmemh` supports destinations inside an instance, including nested instances
+and parameterized memories:
 
 ```veryl
 module Memory {

@@ -59,10 +59,10 @@ Verylのassertionはソース位置付きでVitestのレポートに現れます
 手書きのTypeScriptテストから `Simulator` または `Simulation` で操作でき、同じimport機構を
 その他のViteベースのツールからも利用できます。
 
-### インスタンス内のメモリへの読み込み（Veryl HEAD）
+### インスタンス内のメモリへの読み込み
 
-Veryl HEAD を使う `develop` レーンでは、インスタンス内の配列を `$readmemh` の
-読み込み先にできます。多段の階層や、パラメーター付きのメモリにも対応しています。
+インスタンス内の配列を `$readmemh` の読み込み先にできます。
+多段の階層や、パラメーター付きのメモリにも対応しています。
 
 ```veryl
 module Memory {
