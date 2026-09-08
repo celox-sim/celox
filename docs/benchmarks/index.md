@@ -20,7 +20,7 @@ The complete benchmark matrix and raw history are available on the
 | Standard library | A mix of combinational, sequential, and structured datapaths |
 | TypeScript testbench | N-API calls, typed signal access, and scheduler overhead |
 | Verilator comparison | Equivalent generated simulators for a reference baseline |
-| Heliodor Linux | Whole-design generated-code throughput on a large external design |
+| Heliodor Linux | Whole-design compilation, generated-code throughput, and tiered startup/total time |
 
 Compilation and execution are reported separately. A faster compile does not
 imply faster generated code, and a microbenchmark result does not establish
@@ -36,8 +36,10 @@ whole-design performance.
 
 Heliodor uses an additional fixed-input acceptance workload. Its methodology is
 described in [Heliodor Linux Benchmark](./heliodor.md). The dashboard compares
-the native backend with Veryl-CC; Cranelift boot results are excluded because
-their much longer runtime makes this chart ineffective for that comparison.
+the native backend with synchronous Veryl-CC, and shows startup and end-to-end
+time separately for Celox and Veryl-CC tiered execution. Standalone Cranelift boot
+results are excluded because their much longer runtime makes this chart
+ineffective for that comparison.
 Heliodor charts are separated by CPU architecture because results from different
 runner types are not directly comparable. Every chart uses a zero baseline.
 

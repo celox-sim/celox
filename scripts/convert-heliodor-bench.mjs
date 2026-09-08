@@ -6,15 +6,19 @@ import { readFileSync, writeFileSync } from "node:fs";
 const [inputPath, outputPath, ...options] = process.argv.slice(2);
 if (!inputPath || !outputPath) {
   console.error(
-    "Usage: node convert-heliodor-bench.mjs <results.tsv> <output.json> [--jit-only | --arm64-results <results.tsv>]",
+    "Usage: node convert-heliodor-bench.mjs <results.tsv> <output.json> [--jit-only | --arm64-results <results.tsv>] [--require-tiered]",
   );
   process.exit(1);
 }
 
 let jitOnly = false;
+let requireTiered = false;
 let arm64ResultsPath;
 for (let index = 0; index < options.length; index += 1) {
   switch (options[index]) {
+    case "--require-tiered":
+      requireTiered = true;
+      break;
     case "--jit-only":
       jitOnly = true;
       break;
@@ -106,7 +110,9 @@ function milliseconds(name, nanoseconds) {
 }
 
 const celox = requirePassedRunner(rows, "celox", inputPath);
-const tiered = optionalPassedRunner(rows, "celox-tiered", inputPath);
+const readTieredRunner = requireTiered ? requirePassedRunner : optionalPassedRunner;
+const tiered = readTieredRunner(rows, "celox-tiered", inputPath);
+const verylTiered = readTieredRunner(rows, "veryl-cc-tiered", inputPath);
 const veryl = requirePassedRunner(rows, "veryl-cc-sync", inputPath);
 if (celox.test !== veryl.test || (tiered && tiered.test !== celox.test)) {
   throw new Error(
@@ -137,25 +143,42 @@ const results = [
   ),
 ];
 
-if (tiered) {
+function addTieredMetrics(platform, row) {
+  if (!row) return;
+  if (row.test !== celox.test) {
+    throw new Error(
+      `runner tests differ: Celox=${celox.test}, ${platform}=${row.test}`,
+    );
+  }
+  const startup = ns(row, "compile_elapsed_ns");
+  const execution = ns(row, "execute_elapsed_ns");
+  const total = ns(row, "reported_elapsed_ns");
+  if (startup + execution > total) {
+    throw new Error(`${platform} startup and execution exceed end-to-end time`);
+  }
   results.push(
+    milliseconds(`heliodor-${platform}/heliodor_linux_boot_end_to_end`, total),
+    milliseconds(`heliodor-${platform}/heliodor_linux_boot_startup`, startup),
     milliseconds(
-      "heliodor-celox-tiered/heliodor_linux_boot_end_to_end",
-      ns(tiered, "reported_elapsed_ns"),
-    ),
-    milliseconds(
-      "heliodor-celox-tiered/heliodor_linux_boot_startup",
-      ns(tiered, "compile_elapsed_ns"),
-    ),
-    milliseconds(
-      "heliodor-celox-tiered/heliodor_linux_boot_execution",
-      ns(tiered, "execute_elapsed_ns"),
+      `heliodor-${platform}/heliodor_linux_boot_execution`,
+      execution,
     ),
   );
 }
 
+addTieredMetrics("celox-tiered", tiered);
+addTieredMetrics("veryl-tiered-x86_64", verylTiered);
+
 if (arm64ResultsPath) {
   const arm64Rows = readResults(arm64ResultsPath);
+  addTieredMetrics(
+    "celox-tiered-aarch64",
+    readTieredRunner(arm64Rows, "celox-tiered", arm64ResultsPath),
+  );
+  addTieredMetrics(
+    "veryl-tiered-aarch64",
+    readTieredRunner(arm64Rows, "veryl-cc-tiered", arm64ResultsPath),
+  );
   const arm64 = requirePassedRunner(arm64Rows, "celox", arm64ResultsPath);
   const verylArm64 = requirePassedRunner(
     arm64Rows,
