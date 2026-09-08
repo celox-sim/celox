@@ -127,6 +127,7 @@ pub(crate) fn value_upper_bounds(function: &MFunction) -> BTreeMap<VReg, u64> {
             }
             for instruction in &block.insts {
                 let bounded = match instruction {
+                    MInst::BitExtract { dst, width, .. } => Some((*dst, u64::MAX >> (64 - width))),
                     MInst::LoadImm { dst, value } => Some((*dst, *value)),
                     MInst::Mov { dst, src } => bounds.get(src).copied().map(|bound| (*dst, bound)),
                     MInst::Mov32 { dst, src } => Some((
