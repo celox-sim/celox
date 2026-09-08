@@ -330,101 +330,114 @@ fn spilled_constants_survive_both_phi_edges_and_repeated_calls() {
 }
 
 #[test]
-fn a_spilled_shared_constant_does_not_spill_the_loop_induction() {
-    let mut entry = MBlock::new(BlockId(0));
-    entry.push(MInst::LoadImm {
-        dst: VReg(0),
-        value: 0,
-    });
-    for index in 1..=32 {
-        entry.push(MInst::Load {
-            dst: VReg(index),
+fn spilled_shared_values_do_not_spill_the_loop_induction() {
+    for constant in [true, false] {
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(if constant {
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0,
+            }
+        } else {
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 280,
+                size: OpSize::S64,
+            }
+        });
+        for index in 1..=32 {
+            entry.push(MInst::Load {
+                dst: VReg(index),
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                size: OpSize::S64,
+            });
+        }
+        entry.push(MInst::KeepAlive { src: VReg(0) });
+        for index in 1..=32 {
+            entry.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                src: VReg(index),
+                size: OpSize::S64,
+            });
+        }
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut preheader = MBlock::new(BlockId(1));
+        preheader.push(MInst::Load {
+            dst: VReg(36),
             base: BaseReg::SimState,
-            offset: (index * 8) as i32,
+            offset: 0,
             size: OpSize::S64,
         });
-    }
-    entry.push(MInst::KeepAlive { src: VReg(0) });
-    for index in 1..=32 {
-        entry.push(MInst::Store {
+        preheader.push(MInst::Jump { target: BlockId(2) });
+        let mut body = MBlock::new(BlockId(2));
+        body.phis.push(PhiNode {
+            dst: VReg(33),
+            sources: vec![(BlockId(1), VReg(0)), (BlockId(2), VReg(34))],
+        });
+        body.push(MInst::AddImm {
+            dst: VReg(34),
+            src: VReg(33),
+            imm: 1,
+        });
+        body.push(MInst::Store {
             base: BaseReg::SimState,
-            offset: (index * 8) as i32,
-            src: VReg(index),
+            offset: 264,
+            src: VReg(34),
             size: OpSize::S64,
         });
-    }
-    entry.push(MInst::Jump { target: BlockId(1) });
-    let mut preheader = MBlock::new(BlockId(1));
-    preheader.push(MInst::Load {
-        dst: VReg(36),
-        base: BaseReg::SimState,
-        offset: 0,
-        size: OpSize::S64,
-    });
-    preheader.push(MInst::Jump { target: BlockId(2) });
-    let mut body = MBlock::new(BlockId(2));
-    body.phis.push(PhiNode {
-        dst: VReg(33),
-        sources: vec![(BlockId(1), VReg(0)), (BlockId(2), VReg(34))],
-    });
-    body.push(MInst::AddImm {
-        dst: VReg(34),
-        src: VReg(33),
-        imm: 1,
-    });
-    body.push(MInst::Store {
-        base: BaseReg::SimState,
-        offset: 264,
-        src: VReg(34),
-        size: OpSize::S64,
-    });
-    body.push(MInst::Cmp {
-        dst: VReg(35),
-        lhs: VReg(34),
-        rhs: VReg(36),
-        kind: CmpKind::LtU,
-    });
-    body.push(MInst::Branch {
-        cond: VReg(35),
-        true_bb: BlockId(2),
-        false_bb: BlockId(3),
-    });
-    let mut exit = MBlock::new(BlockId(3));
-    exit.push(MInst::Store {
-        base: BaseReg::SimState,
-        offset: 272,
-        src: VReg(0),
-        size: OpSize::S64,
-    });
-    exit.push(MInst::Return);
-    let allocation = crate::regalloc::allocate_with_spills(
-        MFunction::new(vec![entry, preheader, body, exit], vec![]),
-        || false,
-    )
-    .unwrap();
-    let allocated = allocation.allocated;
-    assert!(allocated.function.spill_homes.contains_key(&VReg(0)));
-    assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
-    let emitted = emit_function(
-        &allocated.function,
-        &allocated.assignment,
-        allocation.spill_frame_size,
-        280,
-        &allocated.edge_copies,
-        false,
-        false,
-    )
-    .unwrap();
-    let jit = JitCode::new(&emitted.code).unwrap();
-    let mut state = vec![0; emitted.required_state_size as usize];
-    for count in [1u64, 2, 33, 1] {
-        state.fill(0xa5);
-        state[..8].copy_from_slice(&count.to_le_bytes());
-        let mut expected = state[..280].to_vec();
-        expected[264..272].copy_from_slice(&count.to_le_bytes());
-        expected[272..280].fill(0);
-        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
-        assert_eq!(&state[..280], expected);
+        body.push(MInst::Cmp {
+            dst: VReg(35),
+            lhs: VReg(34),
+            rhs: VReg(36),
+            kind: CmpKind::LtU,
+        });
+        body.push(MInst::Branch {
+            cond: VReg(35),
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 272,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        exit.push(MInst::Return);
+        let allocation = crate::regalloc::allocate_with_spills(
+            MFunction::new(vec![entry, preheader, body, exit], vec![]),
+            || false,
+        )
+        .unwrap();
+        let allocated = allocation.allocated;
+        assert!(allocated.function.spill_homes.contains_key(&VReg(0)));
+        assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
+        let emitted = emit_function(
+            &allocated.function,
+            &allocated.assignment,
+            allocation.spill_frame_size,
+            288,
+            &allocated.edge_copies,
+            false,
+            false,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0; emitted.required_state_size as usize];
+        for (start, count) in [(0u64, 1u64), (5, 7), (31, 64), (0, 1)] {
+            let start = if constant { 0 } else { start };
+            state.fill(0xa5);
+            state[..8].copy_from_slice(&count.to_le_bytes());
+            state[280..288].copy_from_slice(&start.to_le_bytes());
+            let mut expected = state[..288].to_vec();
+            expected[264..272].copy_from_slice(&count.to_le_bytes());
+            expected[272..280].copy_from_slice(&start.to_le_bytes());
+            assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+            assert_eq!(&state[..288], expected);
+        }
     }
 }
 

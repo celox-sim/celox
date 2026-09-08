@@ -298,10 +298,10 @@ pub(crate) fn allocate_with_spills(
         .map(|value| value.0)
         .max()
         .map_or(0, |value| value.saturating_add(1));
-    // Spilling a shared constant must not force every loop phi fed by that
-    // constant into memory. Short edge materializations remain ordinary,
-    // spillable SSA values and participate in the same pressure checks.
-    rematerialize::phi_constants(&mut function, &mut next_value)?;
+    // Spilling a shared value must not force every phi fed by it into memory.
+    // Short edge copies/materializations remain ordinary, spillable SSA
+    // values and participate in the same pressure checks.
+    rematerialize::localize_phi_inputs(&mut function, &mut next_value)?;
     let initial_facts = build_facts(&function)?;
     let mut candidates = initial_facts
         .blocks
@@ -809,6 +809,12 @@ fn color_intervals(
             for &(_, source) in &phi.sources {
                 affinities.entry(phi.dst).or_default().insert(source);
                 affinities.entry(source).or_default().insert(phi.dst);
+            }
+        }
+        for instruction in &block.insts {
+            if let MInst::Mov { dst, src } = *instruction {
+                affinities.entry(dst).or_default().insert(src);
+                affinities.entry(src).or_default().insert(dst);
             }
         }
     }

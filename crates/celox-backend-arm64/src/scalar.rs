@@ -604,7 +604,9 @@ fn emit_instruction(
     match instruction {
         MInst::Mov { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
-            dynasm!(ops ; .arch aarch64 ; mov X(dst), X(src));
+            if dst != src {
+                dynasm!(ops ; .arch aarch64 ; mov X(dst), X(src));
+            }
         }
         MInst::Mov32 { dst, src } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
