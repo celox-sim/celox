@@ -489,9 +489,18 @@ assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4,6)" $'NA\ti
     "wrong Veryl mode must not expose a speed elapsed value"
 FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/aot_c_async=false/aot_c_async=true}"
 FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/compiled_dispatches=100/compiled_dispatches=0}"
+run_one veryl-cc-tiered integration_veryl_tiered >/dev/null \
+    || fail "run_one rejected tiered Veryl that finished on the fallback path"
+assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 6,9-12)" $'pass\t59\t8\t50\tNA' \
+    "fallback-only Veryl preserves semantic success and measured intervals"
+[[ "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4)" =~ ^[1-9][0-9]*$ ]] \
+    || fail "fallback-only Veryl did not expose its measured process elapsed value"
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/fallback_dispatches=200/fallback_dispatches=0}"
 if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
-    fail "run_one accepted tiered Veryl without executed AOT-C code"
+    fail "run_one accepted tiered Veryl without any executed dispatches"
 fi
+assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4,6)" $'NA\tinvalid' \
+    "zero-dispatch Veryl must not expose a speed elapsed value"
 
 HELIODOR_RUNNERS=veryl-cc-tiered
 if any_veryl_runner_enabled; then
