@@ -8,6 +8,7 @@ mod counted_loop;
 mod exclusive_loop;
 mod if_select;
 mod memory;
+mod sparse;
 
 fn branch_range_function(predicate: bool, stores: usize) -> (MFunction, Assignment<VReg>) {
     let mut entry = MBlock::new(BlockId(0));

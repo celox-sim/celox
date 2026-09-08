@@ -1329,6 +1329,7 @@ fn emit_instruction(
             *summary_words_offset,
             *summary_word_count,
             *four_state,
+            state_pages,
         ),
         MInst::SparseMarkActive {
             active_index,
@@ -1350,8 +1351,10 @@ fn emit_instruction(
                 state_pages,
             );
             emit_load_at(ops, SCRATCH1, base, offset, OpSize::S64);
-            emit_load_imm(ops, SCRATCH0, 1_u64 << (*active_index % 64));
-            dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
+            ops.push_u32(
+                logical_immediate_encoding(1_u64 << (*active_index % 64), 64, 30, SCRATCH1, false)
+                    .unwrap(),
+            );
             let (base, offset) = select_memory_base(
                 BaseReg::SimState,
                 i64::from(*active_bits_offset) + i64::from(word_offset),
@@ -1373,6 +1376,7 @@ fn emit_instruction(
                 .ok_or(EmitError::Range("sparse descriptor table is missing"))?,
             *active_bits_offset,
             *active_capacity,
+            state_pages,
         )?,
         MInst::GuardedCmpSelect {
             dst,
@@ -2078,6 +2082,7 @@ fn emit_sparse_commit_worklist(
     descriptors: &[u64],
     active_bits_offset: i32,
     active_capacity: usize,
+    state_pages: StatePageBases,
 ) -> Result<(), EmitError> {
     for word_index in 0..active_capacity.div_ceil(64) {
         let word_offset = i32::try_from(word_index * 8)
@@ -2086,11 +2091,9 @@ fn emit_sparse_commit_worklist(
             .checked_add(word_offset)
             .ok_or(EmitError::Range("sparse active bitmap offset overflow"))?;
         let word_done = ops.new_dynamic_label();
-        emit_address(ops, STATE_REG, i64::from(offset));
+        emit_sparse_bitmap_take(ops, i64::from(offset), state_pages);
         dynasm!(ops
             ; .arch aarch64
-            ; ldr x17, [x16]
-            ; str xzr, [x16]
             ; cbz x17, =>word_done
         );
         let first_index = word_index * 64;
@@ -2118,6 +2121,11 @@ fn emit_sparse_commit_worklist(
                 );
                 dynasm!(ops ; .arch aarch64 ; b.eq =>skip);
             }
+            // Remove the entry before saving the remaining work. Once its
+            // commit returns, an empty word can skip the rest of the tests.
+            ops.push_u32(
+                logical_immediate_encoding(!(1_u64 << bit), 64, SCRATCH1, SCRATCH1, true).unwrap(),
+            );
             dynasm!(ops ; .arch aarch64 ; fmov d5, x17);
             emit_sparse_commit(
                 ops,
@@ -2136,8 +2144,9 @@ fn emit_sparse_commit_worklist(
                 usize::try_from(row[6])
                     .map_err(|_| EmitError::Range("sparse summary count exceeds usize"))?,
                 row[7] != 0,
+                state_pages,
             );
-            dynasm!(ops ; .arch aarch64 ; fmov x17, d5 ; =>skip);
+            dynasm!(ops ; .arch aarch64 ; fmov x17, d5 ; cbz x17, =>word_done ; =>skip);
         }
         dynasm!(ops ; .arch aarch64 ; =>word_done);
     }
@@ -2155,24 +2164,21 @@ fn emit_sparse_commit(
     summary_words_offset: i32,
     summary_word_count: usize,
     four_state: bool,
+    state_pages: StatePageBases,
 ) {
     if (1..=8).contains(&byte_size) && dirty_word_count == 1 && summary_word_count == 1 {
         // A single chunk needs only bit zero of each bitmap. Preserve the
         // general path's clearing and invalid-bit behavior, without either
         // bit-scan loop or its saved loop indices.
         let done = ops.new_dynamic_label();
-        emit_address(ops, STATE_REG, i64::from(summary_words_offset));
+        emit_sparse_bitmap_take(ops, i64::from(summary_words_offset), state_pages);
         dynasm!(ops
             ; .arch aarch64
-            ; ldr x17, [x16]
-            ; str xzr, [x16]
             ; tbz x17, #0, =>done
         );
-        emit_address(ops, STATE_REG, i64::from(dirty_words_offset));
+        emit_sparse_bitmap_take(ops, i64::from(dirty_words_offset), state_pages);
         dynasm!(ops
             ; .arch aarch64
-            ; ldr x17, [x16]
-            ; str xzr, [x16]
             ; tbz x17, #0, =>done
         );
         for plane in 0..if four_state { 2 } else { 1 } {
@@ -2182,7 +2188,7 @@ fn emit_sparse_commit(
                 src_offset + delta,
                 dst_offset + delta,
                 byte_size,
-                StatePageBases::default(),
+                state_pages,
             );
         }
         dynasm!(ops ; .arch aarch64 ; =>done);
@@ -2200,11 +2206,9 @@ fn emit_sparse_commit(
         let dirty_loop = ops.new_dynamic_label();
         let dirty_restore = ops.new_dynamic_label();
         let summary_offset = i64::from(summary_words_offset) + (summary_index * 8) as i64;
-        emit_address(ops, STATE_REG, summary_offset);
+        emit_sparse_bitmap_take(ops, summary_offset, state_pages);
         dynasm!(ops
             ; .arch aarch64
-            ; ldr x17, [x16]
-            ; str xzr, [x16]
             ; mov x16, x17
             ; =>summary_loop
             ; cbz x16, =>summary_done
@@ -2226,11 +2230,9 @@ fn emit_sparse_commit(
             ; fmov d1, x17
             ; lsl x17, x17, #3
         );
-        emit_load_imm(ops, SCRATCH0, dirty_words_offset as i64 as u64);
+        emit_sparse_indexed_address(ops, SCRATCH0, dirty_words_offset, state_pages);
         dynasm!(ops
             ; .arch aarch64
-            ; add x16, x0, x16
-            ; add x16, x16, x17
             ; ldr x30, [x16]
             ; str xzr, [x16]
             ; =>dirty_loop
@@ -2260,18 +2262,24 @@ fn emit_sparse_commit(
             dynasm!(ops ; .arch aarch64 ; cmp x17, x16 ; b.ne =>full_chunk);
             for plane in 0..plane_count {
                 let delta = (plane * byte_size) as i32;
-                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, last_len);
+                emit_sparse_chunk_copy(
+                    ops,
+                    src_offset + delta,
+                    dst_offset + delta,
+                    last_len,
+                    state_pages,
+                );
             }
             dynasm!(ops ; .arch aarch64 ; b =>copy_done ; =>full_chunk);
             for plane in 0..plane_count {
                 let delta = (plane * byte_size) as i32;
-                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8);
+                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8, state_pages);
             }
             dynasm!(ops ; .arch aarch64 ; =>copy_done);
         } else {
             for plane in 0..plane_count {
                 let delta = (plane * byte_size) as i32;
-                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8);
+                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8, state_pages);
             }
         }
         dynasm!(ops
@@ -2292,12 +2300,11 @@ fn emit_sparse_chunk_copy(
     src_offset: i32,
     dst_offset: i32,
     byte_len: usize,
+    state_pages: StatePageBases,
 ) {
     dynasm!(ops ; .arch aarch64 ; fmov x17, d4);
-    emit_load_imm(ops, SCRATCH0, src_offset as i64 as u64);
-    dynasm!(ops ; .arch aarch64 ; add x16, x0, x16 ; add x16, x16, x17);
-    emit_load_imm(ops, 30, dst_offset as i64 as u64);
-    dynasm!(ops ; .arch aarch64 ; add x30, x0, x30 ; add x30, x30, x17);
+    emit_sparse_indexed_address(ops, SCRATCH0, src_offset, state_pages);
+    emit_sparse_indexed_address(ops, 30, dst_offset, state_pages);
     if byte_len == 8 {
         dynasm!(ops ; .arch aarch64 ; ldr d3, [x16] ; str d3, [x30]);
         return;
@@ -2311,6 +2318,60 @@ fn emit_sparse_chunk_copy(
     if byte_len % 2 == 1 {
         dynasm!(ops ; .arch aarch64 ; ldrb w17, [x16] ; strb w17, [x30]);
     }
+}
+
+/// Load and clear a work bitmap without clobbering its loaded value while
+/// materializing the store address. x17 holds the result; x16 is scratch.
+fn emit_sparse_bitmap_take(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    offset: i64,
+    state_pages: StatePageBases,
+) {
+    let (base, relative) = select_memory_base(
+        BaseReg::SimState,
+        offset,
+        SCRATCH1,
+        OpSize::S64,
+        false,
+        state_pages,
+    );
+    if let Some(load) = memory_access_encoding(SCRATCH1, base, relative, OpSize::S64, false)
+        && let Some(clear) = memory_access_encoding(31, base, relative, OpSize::S64, true)
+    {
+        ops.push_u32(load);
+        ops.push_u32(clear);
+    } else {
+        let (base, relative) = select_vector_memory_base(BaseReg::SimState, offset, state_pages);
+        emit_address(ops, base, relative);
+        dynasm!(ops ; .arch aarch64 ; ldr x17, [x16] ; str xzr, [x16]);
+    }
+}
+
+/// Form state + offset + x17, preserving both x17 and the other scratch
+/// address. The general address helper may use x17 for a large immediate.
+fn emit_sparse_indexed_address(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    offset: i32,
+    state_pages: StatePageBases,
+) {
+    debug_assert!(matches!(destination, 16 | 30));
+    let (base, relative) =
+        select_vector_memory_base(BaseReg::SimState, i64::from(offset), state_pages);
+    if relative == 0 {
+        dynasm!(ops ; .arch aarch64 ; add X(destination), X(base), x17);
+        return;
+    }
+    if !emit_add_sub_immediate(ops, destination, base, relative) {
+        if let Some((high, low)) = add_sub_immediate_pair(relative) {
+            let _ = emit_add_sub_immediate(ops, destination, base, high);
+            let _ = emit_add_sub_immediate(ops, destination, destination, low);
+        } else {
+            emit_load_imm(ops, destination, relative as u64);
+            dynasm!(ops ; .arch aarch64 ; add X(destination), X(base), X(destination));
+        }
+    }
+    dynasm!(ops ; .arch aarch64 ; add X(destination), X(destination), x17);
 }
 
 fn emit_mem_fill(
