@@ -2098,7 +2098,19 @@ fn emit_sparse_commit_worklist(
         );
         let first_index = word_index * 64;
         let end_index = active_capacity.min(first_index + 64);
+        let mut group_done = None;
         for active_index in first_index..end_index {
+            if active_index % 8 == 0 {
+                let done = ops.new_dynamic_label();
+                let mask = 0xff_u64 << (active_index % 64);
+                // Sparse words commonly contain only one or two entries.
+                // Skip eight absent entries with one test and branch.
+                ops.push_u32(
+                    logical_immediate_encoding(mask, 64, 31, SCRATCH1, true).unwrap() | (3 << 29),
+                );
+                dynasm!(ops ; .arch aarch64 ; b.eq =>done);
+                group_done = Some(done);
+            }
             let row_start = active_index
                 .checked_mul(SPARSE_COMMIT_DESCRIPTOR_WORDS)
                 .ok_or(EmitError::Range("sparse descriptor index overflow"))?;
@@ -2147,6 +2159,10 @@ fn emit_sparse_commit_worklist(
                 state_pages,
             );
             dynasm!(ops ; .arch aarch64 ; fmov x17, d5 ; cbz x17, =>word_done ; =>skip);
+            if (active_index + 1) % 8 == 0 || active_index + 1 == end_index {
+                let done = group_done.take().expect("each group has a skip label");
+                dynasm!(ops ; .arch aarch64 ; =>done);
+            }
         }
         dynasm!(ops ; .arch aarch64 ; =>word_done);
     }
