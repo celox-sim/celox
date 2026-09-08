@@ -2,21 +2,31 @@
 
 Heliodor は Celox の大規模な外部 Veryl ワークロードです。固定した Linux イメージを
 起動し、同じ設計リビジョンと入力を使って Celox のネイティブバックエンド、tiered JIT、
-同期実行の `veryl-cc` を比較します。tiered ランナーはインタプリタで即座に実行を始め、
-バックグラウンドでネイティブコードを生成し、スケジューラの安全点で実行中のシミュレーションを
-生成コードへ昇格させます。Cranelift の Linux 起動時間はこの比較の有効な尺度を大幅に
+Veryl-CC の同期版と tiered 版を CPU アーキテクチャごとに比較します。
+Celox の tiered 版はインタプリタで実行を始め、バックグラウンドでネイティブコードを生成します。
+Veryl-CC の tiered 版は Cranelift で実行を始め、C の非同期コンパイルが完了すると切り替えます。
+これは通常の `veryl test --backend cc` と同じ `aot_c_async=true` の設定です。
+同期版は明示的に `aot_c_async=false` とし、C のコンパイル完了を待ってから実行します。
+Cranelift 単独の Linux 起動時間はこの比較の有効な尺度を大幅に
 超えるため、計測・公開しません。
 
 ## 測定するもの
 
-次の 2 つを分けて計測します。
+次の 3 つを分けて計測します。
 
-1. Celox が設計をコンパイルする時間。
+1. 同期バックエンドが設計をコンパイルする時間。
 2. 生成されたシミュレータがワークロード全体を実行する時間。
 3. コンパイルとシミュレーションを並行させる tiered 実行の起動から Linux 完了までの時間。
 
-生成コードの速度比較に使うのは 2 つ目だけです。途中までの起動、完了時間の推定、
-コンパイルだけの結果は、実行成功として扱いません。
+生成コードの速度比較に使うのは 2 つ目だけです。tiered 版は「実行開始まで」「コンパイルと
+並行した実行」「Linux 起動完了までの総時間」を別のグラフで表示します。tiered の実行区間には
+切り替え前のバックエンドも含まれるため、生成コードだけの速度としては比較しません。
+起動時間と総時間は設計の解析前から測り、ソースファイルの読み込みと Cargo によるランナーの
+ビルド時間は含みません。TSV の `compile_elapsed_ns` は tiered 版では実行開始までの時間を表し、
+バックグラウンドのコンパイル全体の時間ではありません。Veryl-CC の同期版・tiered 版はそれぞれ
+独立した空の AOT-C キャッシュを使います。過去の同期版の測定値は同じ系列に保持します。
+
+途中までの起動、完了時間の推定、コンパイルだけの結果は、実行成功として扱いません。
 
 ## 有効な結果
 
@@ -38,11 +48,15 @@ Heliodor は Celox の大規模な外部 Veryl ワークロードです。固定
 bash scripts/run-heliodor-bench.sh run
 ```
 
-tiered JIT だけを実行する場合:
+両方の tiered バックエンドを比較する場合:
 
 ```bash
-HELIODOR_RUNNERS=celox-tiered bash scripts/run-heliodor-bench.sh run
+HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.sh run
 ```
+
+CI の固定 `gate` は x86-64 で `veryl-cc-sync`、`celox`、`celox-tiered`、
+`veryl-cc-tiered` を実行します。夜間の AArch64 ジョブも同じ 4 種類を測定し、
+各アーキテクチャで両方の tiered 結果が揃った場合に公開します。
 
 初回は固定した Heliodor checkout の取得にネットワークアクセスが必要です。スクリプトは
 使用リビジョン、ビルド構成、完了状態、計測時間を表示します。変更前後の比較には同じ

@@ -16,6 +16,8 @@ on:
       - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
       - "scripts/tests/convert-heliodor-bench.sh"
+      - "scripts/tests/run-heliodor-bench-results.sh"
+      - "scripts/tests/run-heliodor-bench-gate.sh"
   schedule:
     - cron: "37 2 * * *"
   workflow_dispatch:
@@ -71,7 +73,10 @@ jobs:
 
       - name: Test benchmark conversion fixtures
         shell: bash
-        run: bash scripts/tests/convert-heliodor-bench.sh
+        run: |
+          bash scripts/tests/convert-heliodor-bench.sh
+          bash scripts/tests/run-heliodor-bench-results.sh
+          bash scripts/tests/run-heliodor-bench-gate.sh
 
   heliodor:
     # Keep the x86_64 gate on every workflow trigger. Only the ARM64 PR lane is
@@ -155,7 +160,7 @@ jobs:
 
       - name: Convert dashboard metrics
         run: |
-          node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json
+          node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json --require-tiered
           node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-jit.json --jit-only
 
       - name: Compare generated-JIT benchmark
@@ -258,10 +263,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
-      - name: Boot Linux with Veryl-CC and the native backend on ARM64
+      - name: Boot Linux with synchronous and tiered backends on ARM64
         shell: bash
         env:
-          HELIODOR_RUNNERS: veryl-cc-sync celox
+          HELIODOR_RUNNERS: veryl-cc-sync celox celox-tiered veryl-cc-tiered
           HELIODOR_TIMEOUT_SEC: "1200"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
 
@@ -312,7 +317,7 @@ jobs:
           fi
           node scripts/convert-heliodor-bench.mjs \
             "$native_results" heliodor-published.json \
-            --arm64-results "$arm64_results"
+            --arm64-results "$arm64_results" --require-tiered
 
       - name: Store Heliodor benchmark history
         uses: benchmark-action/github-action-benchmark@v1

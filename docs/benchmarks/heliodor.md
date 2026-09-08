@@ -1,23 +1,34 @@
 # Heliodor Linux Benchmark
 
 Heliodor is Celox's large external Veryl workload. It boots a pinned Linux image
-and compares Celox's native and tiered JIT backends with synchronous `veryl-cc`
-execution using the same design revision and input workload. The tiered runner
-starts on the interpreter while native code is generated in the background, then
-promotes the live simulation at a scheduler safe point. Cranelift Linux boot
-measurements are not collected or published because their runtime is outside the
-useful scale of this comparison.
+and compares Celox's native and tiered JIT backends with synchronous and tiered
+Veryl-CC using the same design revision and input workload on each architecture.
+Celox tiered starts on the interpreter while native code is generated in the
+background. Veryl-CC tiered starts on Cranelift and switches to C code as its
+background compilation completes, matching `veryl test --backend cc`'s default
+`aot_c_async=true` setting. The synchronous Veryl-CC runner explicitly sets
+`aot_c_async=false` and waits for C compilation before simulation. Standalone
+Cranelift Linux boot measurements are not collected or published because their
+runtime is outside the useful scale of this comparison.
 
 ## What the benchmark answers
 
-The benchmark separates two questions:
+The benchmark separates three questions:
 
-1. How long does Celox take to compile the design?
+1. How long do the synchronous backends take to compile the design?
 2. How quickly does the generated simulator execute the complete workload?
 3. How long does tiered execution take from startup through Linux completion
    while compilation overlaps simulation?
 
 Only the second measurement is used for generated-code throughput comparisons.
+Tiered results have separate charts for startup until simulation begins, execution
+with background compilation, and total time through Linux completion. The tiered
+execution interval includes time on the initial backend and must not be read as
+compiled-code throughput. Startup and total time begin before design analysis;
+source-file loading and building the benchmark executables with Cargo are excluded.
+The TSV retains `compile_elapsed_ns` for tiered startup, not the total background
+compiler time. Each synchronous and tiered Veryl-CC run uses its own empty AOT-C
+cache. Historical synchronous Veryl-CC measurements keep their original series.
 A partial boot, projected completion time, or compile-only result is not a
 successful execution result.
 
@@ -29,7 +40,7 @@ A run is accepted only when it:
 - reaches the configured Linux completion marker;
 - records compilation and execution separately;
 - compares runners built from the intended Celox and Veryl revisions;
-- preserves the logs needed to diagnose a timeout or semantic mismatch.
+- preserves the logs needed to diagnose a timeout or semantic mismatch;
 - proves that the tiered run promoted and executed at least one generated-code
   evaluation before Linux completed.
 
@@ -42,11 +53,15 @@ being reported as performance improvements.
 bash scripts/run-heliodor-bench.sh run
 ```
 
-To run only the tiered JIT benchmark:
+To compare both tiered backends:
 
 ```bash
-HELIODOR_RUNNERS=celox-tiered bash scripts/run-heliodor-bench.sh run
+HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.sh run
 ```
+
+The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
+`veryl-cc-tiered` on x86-64. The nightly AArch64 job measures the same four
+backends. Publishing requires both tiered results for each architecture.
 
 The first run needs network access to obtain the pinned Heliodor checkout. The
 script prints the selected revisions, build configuration, completion status,

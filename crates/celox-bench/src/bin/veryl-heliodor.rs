@@ -18,7 +18,7 @@ use veryl_simulator::testbench::{
 };
 
 #[derive(ClapParser)]
-#[command(about = "Run a Heliodor test with synchronous Veryl AOT-C")]
+#[command(about = "Run a Heliodor test with synchronous or tiered Veryl AOT-C")]
 struct Options {
     #[arg(long)]
     project: PathBuf,
@@ -29,6 +29,9 @@ struct Options {
     /// Build the complete AOT-C simulator without running the testbench.
     #[arg(long)]
     compile_only: bool,
+    /// Run on Cranelift while C compiles in the background, as in `veryl test --backend cc`.
+    #[arg(long, conflicts_with = "compile_only")]
+    aot_c_async: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,8 +79,8 @@ fn run() -> Result<(), VerylHeliodorError> {
         .collect::<Result<Vec<_>, _>>()?;
 
     println!(
-        "VERYL_TEST_CONFIG test={} backend=cc aot_c_async=false compile_only={}",
-        options.test, options.compile_only
+        "VERYL_TEST_CONFIG test={} backend=cc aot_c_async={} compile_only={}",
+        options.test, options.aot_c_async, options.compile_only
     );
 
     let total_start = Instant::now();
@@ -116,7 +119,7 @@ fn run() -> Result<(), VerylHeliodorError> {
         use_jit: true,
         aot_c: true,
         aot_c_event: true,
-        aot_c_async: false,
+        aot_c_async: options.aot_c_async,
         aot_c_validate: false,
         aot_c_min_stmts: 0,
         ..Config::default()
@@ -135,6 +138,8 @@ fn run() -> Result<(), VerylHeliodorError> {
             module: module_name.clone(),
         })?;
     let testbench = convert_initial_to_testbench(initial_stmts, &event_map, &clock_periods, 3);
+    // In async mode this is startup until simulation can begin. C compilation
+    // can continue during run_testbench, so it is not the full compile cost.
     let compile_elapsed = compile_start.elapsed();
 
     if options.compile_only {
@@ -174,6 +179,22 @@ fn run() -> Result<(), VerylHeliodorError> {
             options.test,
             compile_elapsed.as_nanos(),
             execute_elapsed.as_nanos()
+        );
+    }
+
+    if options.aot_c_async {
+        // Veryl publishes whole-module dispatch counts when the IR is dropped.
+        // Drop and reporting stay outside both timed intervals.
+        drop(sim);
+        let (compiled, fallback) = veryl_simulator::residency::dispatch_counts()
+            .into_iter()
+            .fold(
+                (0_u64, 0_u64),
+                |(compiled, fallback), (_, ran, fell_back)| (compiled + ran, fallback + fell_back),
+            );
+        println!(
+            "VERYL_TIERED_STATS test={} compiled_dispatches={} fallback_dispatches={}",
+            options.test, compiled, fallback
         );
     }
 
