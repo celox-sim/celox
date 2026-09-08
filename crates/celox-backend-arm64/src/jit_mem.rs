@@ -2,6 +2,9 @@
 
 use dynasmrt::mmap::MutableBuffer;
 use dynasmrt::{AssemblyOffset, ExecutableBuffer};
+use std::{io::Write, sync::Mutex};
+
+static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 /// Optional subrange symbol retained for parity with the native runtime API.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,15 +32,24 @@ impl JitCode {
     pub fn new_named_profiled(
         code: &[u8],
         name: &str,
-        _perf_map: bool,
+        perf_map: bool,
     ) -> Result<Self, std::io::Error> {
-        Self::new_named(code, name)
+        Self::new_named_with_symbols_profiled(code, name, &[], perf_map)
     }
 
     pub fn new_named_with_symbols(
         code: &[u8],
-        _name: &str,
-        _symbols: &[JitSymbol],
+        name: &str,
+        symbols: &[JitSymbol],
+    ) -> Result<Self, std::io::Error> {
+        Self::new_named_with_symbols_profiled(code, name, symbols, false)
+    }
+
+    pub fn new_named_with_symbols_profiled(
+        code: &[u8],
+        name: &str,
+        symbols: &[JitSymbol],
+        perf_map: bool,
     ) -> Result<Self, std::io::Error> {
         let mut mutable = MutableBuffer::new(code.len().max(1))?;
         mutable.set_len(code.len().max(1));
@@ -49,16 +61,10 @@ impl JitCode {
                 buffer.ptr(AssemblyOffset(0)),
             )
         };
+        if perf_map {
+            write_perf_map_entries(buffer.as_ptr() as usize, buffer.len(), name, symbols)?;
+        }
         Ok(Self { buffer, fn_ptr })
-    }
-
-    pub fn new_named_with_symbols_profiled(
-        code: &[u8],
-        name: &str,
-        symbols: &[JitSymbol],
-        _perf_map: bool,
-    ) -> Result<Self, std::io::Error> {
-        Self::new_named_with_symbols(code, name, symbols)
     }
 
     /// Execute standalone code with a private spill arena following state.
@@ -100,5 +106,94 @@ impl JitCode {
     /// container.
     pub fn image(&self) -> &[u8] {
         &self.buffer
+    }
+}
+
+fn write_perf_map_entries(
+    addr: usize,
+    size: usize,
+    name: &str,
+    symbols: &[JitSymbol],
+) -> Result<(), std::io::Error> {
+    let path = format!("/tmp/perf-{}.map", std::process::id());
+    // A container may reuse a PID while its previous perf map is still in /tmp.
+    // Replace that map once, then append subsequent functions under the lock.
+    let mut initialized = PERF_MAP_INITIALIZED
+        .lock()
+        .map_err(|_| std::io::Error::other("perf map initialization lock was poisoned"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if *initialized {
+        options.append(true);
+    } else {
+        options.truncate(true);
+    }
+    let mut file = options.open(path)?;
+    *initialized = true;
+    let sanitize = |name: &str| name.replace(['\n', '\r', '\t'], "_");
+    if symbols.is_empty() {
+        writeln!(file, "{addr:x} {size:x} {}", sanitize(name))?;
+    } else {
+        for symbol in symbols {
+            if symbol.size == 0 || symbol.offset >= size {
+                continue;
+            }
+            let symbol_addr = addr + symbol.offset;
+            let symbol_size = symbol.size.min(size - symbol.offset);
+            writeln!(
+                file,
+                "{symbol_addr:x} {symbol_size:x} {}",
+                sanitize(&symbol.name)
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiles_loaded_images_and_clips_block_symbols() {
+        // Loading AArch64 code is also safe on a cross-codegen host; this test
+        // checks its address map without executing the instructions.
+        let code = [0xc0, 0x03, 0x5f, 0xd6]; // ret
+        let first = JitCode::new_named_profiled(&code, "arm64\tfirst", true).unwrap();
+        let second = JitCode::new_named_with_symbols_profiled(
+            &code,
+            "unused_function_name",
+            &[
+                JitSymbol {
+                    offset: 0,
+                    size: 16,
+                    name: "arm64\nblock".into(),
+                },
+                JitSymbol {
+                    offset: 4,
+                    size: 4,
+                    name: "outside_image".into(),
+                },
+                JitSymbol {
+                    offset: 0,
+                    size: 0,
+                    name: "empty_symbol".into(),
+                },
+            ],
+            true,
+        )
+        .unwrap();
+        let map = std::fs::read_to_string(format!("/tmp/perf-{}.map", std::process::id())).unwrap();
+        assert!(
+            map.lines()
+                .any(|line| line == format!("{:x} 4 arm64_first", first.buffer.as_ptr() as usize))
+        );
+        assert!(
+            map.lines()
+                .any(|line| line == format!("{:x} 4 arm64_block", second.buffer.as_ptr() as usize))
+        );
+        assert!(!map.contains("outside_image"));
+        assert!(!map.contains("empty_symbol"));
+        assert!(!map.contains("unused_function_name"));
     }
 }
