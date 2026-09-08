@@ -303,6 +303,9 @@ pub(crate) fn allocate_with_spills(
     // values and participate in the same pressure checks.
     rematerialize::phi_constants(&mut function, &mut next_value)?;
     let initial_facts = build_facts(&function)?;
+    // Spill rewriting preserves the CFG, so compute loop frequencies once,
+    // rather than repeating dominance analysis for every allocation attempt.
+    let frequencies = spill_frequencies(&function, &initial_facts);
     let mut candidates = initial_facts
         .blocks
         .iter()
@@ -326,7 +329,7 @@ pub(crate) fn allocate_with_spills(
             .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
         let proactive = close_phi_spill_set(
             &function,
-            select_spill_batch(&function, &intervals, &candidates, false),
+            select_spill_batch(&function, &intervals, &candidates, &frequencies, false),
         );
         if !proactive.is_empty() {
             insert_spill_batch(
@@ -349,7 +352,7 @@ pub(crate) fn allocate_with_spills(
             Err(TargetRegallocError::RegisterPressure { value }) => {
                 let spilled = close_phi_spill_set(
                     &function,
-                    select_spill_batch(&function, &intervals, &candidates, true),
+                    select_spill_batch(&function, &intervals, &candidates, &frequencies, true),
                 );
                 if spilled.is_empty() {
                     return Err(TargetRegallocError::UnspillablePressure { value });
@@ -398,10 +401,37 @@ fn close_phi_spill_set(function: &MFunction, spilled: Vec<VReg>) -> Vec<VReg> {
     newly_spilled.into_iter().collect()
 }
 
+fn spill_frequencies(function: &MFunction, facts: &AllocationFacts) -> BTreeMap<BlockId, u64> {
+    let mut weights = vec![1_u64; function.blocks.len()];
+    let successors = facts
+        .blocks
+        .iter()
+        .map(|block| block.successors.clone())
+        .collect();
+    if let Ok(cfg) =
+        celox_analysis::cfg::ForwardControlFlowGraph::analyze_structure(successors, facts.entry)
+    {
+        for region in cfg.loops {
+            for block in region.blocks {
+                // This estimates relative frequency, not a trip-count proof.
+                // Cap nested loops so cold uses still contribute to the cost.
+                weights[block] = (weights[block] * 8).min(4096);
+            }
+        }
+    }
+    function
+        .blocks
+        .iter()
+        .zip(weights)
+        .map(|(block, weight)| (block.id, weight))
+        .collect()
+}
+
 fn select_spill_batch(
     function: &MFunction,
     intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
     candidates: &BTreeSet<VReg>,
+    frequencies: &BTreeMap<BlockId, u64>,
     force: bool,
 ) -> Vec<VReg> {
     let live_lengths = intervals
@@ -417,31 +447,34 @@ fn select_spill_batch(
         .collect::<BTreeMap<_, _>>();
     let mut use_counts = BTreeMap::<VReg, u64>::new();
     for block in &function.blocks {
+        let weight = frequencies.get(&block.id).copied().unwrap_or(1);
         for phi in &block.phis {
-            *use_counts.entry(phi.dst).or_default() += 1;
-            for &(_, source) in &phi.sources {
-                *use_counts.entry(source).or_default() += 1;
+            *use_counts.entry(phi.dst).or_default() += weight;
+            for &(predecessor, source) in &phi.sources {
+                *use_counts.entry(source).or_default() +=
+                    frequencies.get(&predecessor).copied().unwrap_or(1);
             }
         }
         for instruction in &block.insts {
             if !matches!(instruction, MInst::KeepAlive { .. }) {
                 for value in instruction.uses() {
-                    *use_counts.entry(value).or_default() += 1;
+                    *use_counts.entry(value).or_default() += weight;
                 }
             }
             if let Some(value) = instruction.def() {
-                *use_counts.entry(value).or_default() += 1;
+                *use_counts.entry(value).or_default() += weight;
             }
         }
     }
     let live_length = |value: VReg| live_lengths.get(&value).copied().unwrap_or(0);
-    let spill_priority = |value: VReg| {
-        let cost = use_counts.get(&value).copied().unwrap_or(1);
-        (
-            live_length(value) / cost,
-            live_length(value),
-            Reverse(value),
-        )
+    let compare_priority = |left: VReg, right: VReg| {
+        let cost = |value| use_counts.get(&value).copied().unwrap_or(1);
+        // Compare length/cost without truncating every hot value's score to
+        // zero. u128 keeps the product exact even for large live intervals.
+        (u128::from(live_length(left)) * u128::from(cost(right)))
+            .cmp(&(u128::from(live_length(right)) * u128::from(cost(left))))
+            .then_with(|| live_length(left).cmp(&live_length(right)))
+            .then_with(|| right.cmp(&left))
     };
     // Reserve reload space for the common three-input operations and their
     // result. Wider pseudos are accounted for by the next allocation round,
@@ -472,7 +505,7 @@ fn select_spill_batch(
                 let Some(spilled) = active
                     .iter()
                     .filter(|(_, value)| candidates.contains(value))
-                    .max_by_key(|(_, value)| spill_priority(*value))
+                    .max_by(|(_, left), (_, right)| compare_priority(*left, *right))
                     .map(|&(_, value)| value)
                 else {
                     break;
@@ -491,7 +524,7 @@ fn select_spill_batch(
     }
     peak.into_iter()
         .filter(|value| candidates.contains(value))
-        .max_by_key(|value| spill_priority(*value))
+        .max_by(|left, right| compare_priority(*left, *right))
         .into_iter()
         .collect()
 }
@@ -1286,8 +1319,102 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(
-            select_spill_batch(&function, &intervals, &candidates, false),
+            select_spill_batch(&function, &intervals, &candidates, &BTreeMap::new(), false),
             vec![VReg(0)]
+        );
+    }
+
+    #[test]
+    fn spill_cost_keeps_repeated_loop_uses_in_registers() {
+        let mut entry = MBlock::new(BlockId(10));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 9,
+        });
+        // Both values span a long entry block, but only v0 is read on every
+        // loop iteration. The eight exit stores execute just once.
+        entry
+            .insts
+            .extend((0..100).map(|_| MInst::KeepAlive { src: VReg(0) }));
+        entry.push(MInst::Jump {
+            target: BlockId(20),
+        });
+        let mut header = MBlock::new(BlockId(20));
+        header.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        header.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(20),
+            false_bb: BlockId(30),
+        });
+        let mut exit = MBlock::new(BlockId(30));
+        exit.insts.extend((0..8).map(|index| MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8 + index * 8,
+            src: VReg(1),
+            size: OpSize::S64,
+        }));
+        exit.push(MInst::Return);
+        let function = MFunction::new(vec![entry, header, exit], Vec::new());
+        let facts = build_facts(&function).unwrap();
+        let frequencies = spill_frequencies(&function, &facts);
+        assert_eq!(
+            frequencies,
+            BTreeMap::from([(BlockId(10), 1), (BlockId(20), 8), (BlockId(30), 1)])
+        );
+        let intervals = analyze_live_intervals(&facts).unwrap();
+        let candidates = BTreeSet::from([VReg(0), VReg(1)]);
+        assert_eq!(
+            select_spill_batch(&function, &intervals, &candidates, &BTreeMap::new(), true),
+            vec![VReg(0)]
+        );
+        assert_eq!(
+            select_spill_batch(&function, &intervals, &candidates, &frequencies, true),
+            vec![VReg(1)]
+        );
+    }
+
+    #[test]
+    fn spill_frequencies_distinguish_nested_loops_and_exits() {
+        let mut blocks = (0..6)
+            .map(|index| MBlock::new(BlockId(index * 10)))
+            .collect::<Vec<_>>();
+        blocks[0].push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 0,
+        });
+        for (index, target) in [(0, 10), (1, 20), (2, 30)] {
+            blocks[index].push(MInst::Jump {
+                target: BlockId(target),
+            });
+        }
+        blocks[3].push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(20),
+            false_bb: BlockId(40),
+        });
+        blocks[4].push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(10),
+            false_bb: BlockId(50),
+        });
+        blocks[5].push(MInst::Return);
+        let function = MFunction::new(blocks, Vec::new());
+        let facts = build_facts(&function).unwrap();
+        assert_eq!(
+            spill_frequencies(&function, &facts)
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 8, 64, 64, 8, 1]
         );
     }
 
