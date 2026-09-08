@@ -150,7 +150,7 @@ fn write_perf_map_entries(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
