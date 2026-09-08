@@ -567,6 +567,44 @@ fn emit_instruction(
             dynasm!(ops ; .arch aarch64 ; mov W(dst), W(src));
         }
         MInst::LoadImm { dst, value } => emit_load_imm(ops, resolve(assignment, *dst)?, *value),
+        MInst::BitExtract {
+            dst,
+            src,
+            lsb,
+            width,
+        } => {
+            let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
+            let (lsb, width) = (u32::from(*lsb), u32::from(*width));
+            dynasm!(ops ; .arch aarch64 ; ubfx X(dst), X(src), lsb, width);
+        }
+        MInst::BitInsert {
+            dst,
+            base,
+            src,
+            lsb,
+            width,
+        } => {
+            let (dst, base, src) = (
+                resolve(assignment, *dst)?,
+                resolve(assignment, *base)?,
+                resolve(assignment, *src)?,
+            );
+            emit_bit_insert(ops, dst, base, src, *lsb, *width);
+        }
+        MInst::OrShifted {
+            dst,
+            lhs,
+            rhs,
+            shift,
+        } => {
+            let (dst, lhs, rhs) = (
+                resolve(assignment, *dst)?,
+                resolve(assignment, *lhs)?,
+                resolve(assignment, *rhs)?,
+            );
+            let shift = u32::from(*shift);
+            dynasm!(ops ; .arch aarch64 ; orr X(dst), X(lhs), X(rhs), LSL #shift);
+        }
         MInst::KeepAlive { .. } => {}
         MInst::LoadConstantTableAddr { dst, table } => {
             let dst = resolve(assignment, *dst)?;
@@ -1274,6 +1312,25 @@ fn emit_instruction(
     Ok(())
 }
 
+fn emit_bit_insert(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    dst: u8,
+    base: u8,
+    mut src: u8,
+    lsb: u8,
+    width: u8,
+) {
+    if dst != base {
+        if dst == src {
+            dynasm!(ops ; .arch aarch64 ; mov x16, X(src));
+            src = SCRATCH0;
+        }
+        dynasm!(ops ; .arch aarch64 ; mov X(dst), X(base));
+    }
+    let (lsb, width) = (u32::from(lsb), u32::from(width));
+    dynasm!(ops ; .arch aarch64 ; bfi X(dst), X(src), lsb, width);
+}
+
 fn emit_mem_copy(
     ops: &mut VecAssembler<Aarch64Relocation>,
     src_offset: i32,
@@ -1951,14 +2008,22 @@ fn emit_sparse_commit_worklist(
                 .get(row_start..row_start + SPARSE_COMMIT_DESCRIPTOR_WORDS)
                 .ok_or(EmitError::Range("sparse descriptor row is missing"))?;
             let skip = ops.new_dynamic_label();
-            let mask = 1_u64 << (active_index % 64);
-            emit_load_imm(ops, SCRATCH0, mask);
-            dynasm!(ops
-                ; .arch aarch64
-                ; and x16, x17, x16
-                ; cbz x16, =>skip
-                ; fmov d5, x17
-            );
+            let bit = (active_index % 64) as u32;
+            if row[6] <= 1 {
+                // One summary word has a bounded, small body that fits
+                // TBZ's +/-32 KiB displacement. Large arrays use B.cond.
+                dynasm!(ops ; .arch aarch64 ; tbz x17, bit, =>skip);
+            } else {
+                let mask = 1_u64 << bit;
+                // Logical-immediate opc=0b11 selects ANDS, whose xzr
+                // destination encodes TST. The non-flag-setting opcodes
+                // interpret destination 31 as SP instead.
+                ops.push_u32(
+                    logical_immediate_encoding(mask, 64, 31, SCRATCH1, true).unwrap() | (3 << 29),
+                );
+                dynasm!(ops ; .arch aarch64 ; b.eq =>skip);
+            }
+            dynasm!(ops ; .arch aarch64 ; fmov d5, x17);
             emit_sparse_commit(
                 ops,
                 i32::try_from(row[0])
@@ -1996,6 +2061,38 @@ fn emit_sparse_commit(
     summary_word_count: usize,
     four_state: bool,
 ) {
+    if (1..=8).contains(&byte_size) && dirty_word_count == 1 && summary_word_count == 1 {
+        // A single chunk needs only bit zero of each bitmap. Preserve the
+        // general path's clearing and invalid-bit behavior, without either
+        // bit-scan loop or its saved loop indices.
+        let done = ops.new_dynamic_label();
+        emit_address(ops, STATE_REG, i64::from(summary_words_offset));
+        dynasm!(ops
+            ; .arch aarch64
+            ; ldr x17, [x16]
+            ; str xzr, [x16]
+            ; tbz x17, #0, =>done
+        );
+        emit_address(ops, STATE_REG, i64::from(dirty_words_offset));
+        dynasm!(ops
+            ; .arch aarch64
+            ; ldr x17, [x16]
+            ; str xzr, [x16]
+            ; tbz x17, #0, =>done
+        );
+        for plane in 0..if four_state { 2 } else { 1 } {
+            let delta = (plane * byte_size) as i32;
+            emit_mem_copy_forward_vectors(
+                ops,
+                src_offset + delta,
+                dst_offset + delta,
+                byte_size,
+                StatePageBases::default(),
+            );
+        }
+        dynasm!(ops ; .arch aarch64 ; =>done);
+        return;
+    }
     let chunk_count = byte_size.div_ceil(8);
     let last_chunk = chunk_count.saturating_sub(1);
     let last_len = byte_size.saturating_sub(last_chunk * 8);
@@ -3039,13 +3136,19 @@ fn move_wide_plan(value: u64) -> MoveWidePlan {
 }
 
 fn emit_load_imm(ops: &mut VecAssembler<Aarch64Relocation>, register: u8, value: u64) {
+    let plan = move_wide_plan(value);
+    if plan.instruction_count > 1
+        && let Some(instruction) = logical_immediate_encoding(value, 64, register, 31, false)
+    {
+        ops.push_u32(instruction);
+        return;
+    }
     let halves = [
         value as u16,
         (value >> 16) as u16,
         (value >> 32) as u16,
         (value >> 48) as u16,
     ];
-    let plan = move_wide_plan(value);
     let first = plan.first;
     let fill = if plan.inverted { u16::MAX } else { 0 };
     let half = if plan.inverted {

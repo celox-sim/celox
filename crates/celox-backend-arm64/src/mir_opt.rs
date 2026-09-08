@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::HashMap;
 use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
+mod bitfield;
 mod known_bits;
 
 /// Recover the compact immediate and copy forms expected by AArch64 emission.
@@ -33,6 +34,8 @@ pub(crate) fn optimize(function: &mut MFunction) {
     propagate_exact_copies(function);
     dead_code_eliminate(function);
     known_bits::fold_packed_bit_loads(function);
+    dead_code_eliminate(function);
+    bitfield::run(function);
     dead_code_eliminate(function);
     fold_branch_predicates(function);
 }

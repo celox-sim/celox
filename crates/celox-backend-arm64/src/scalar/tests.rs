@@ -23,6 +23,211 @@ fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
 }
 
 #[test]
+fn bitfield_insert_preserves_inputs_when_registers_overlap() {
+    for (lsb, width) in [(0, 64), (0, 1), (3, 5), (7, 32), (31, 33), (63, 1)] {
+        for (dst, src) in [(1, 2), (2, 2), (3, 2), (1, 1), (3, 1)] {
+            let mut ops = VecAssembler::<Aarch64Relocation>::new(0);
+            dynasm!(ops ; .arch aarch64 ; ldr x1, [x0] ; ldr x2, [x0, #8]);
+            emit_bit_insert(&mut ops, dst, 1, src, lsb, width);
+            dynasm!(ops ; .arch aarch64 ; str X(dst), [x0, #16] ; mov x0, #0 ; ret);
+            let jit = JitCode::new(&ops.finalize().unwrap()).unwrap();
+            let mut state = [0_u64; 3];
+            for base in [0, u64::MAX, 0x0123_4567_89ab_cdef] {
+                for source in [0, u64::MAX, 0xfedc_ba98_7654_3210] {
+                    state[0] = base;
+                    state[1] = source;
+                    assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr().cast()) }, 0);
+                    let source = if src == 1 { base } else { source };
+                    let field = (u64::MAX >> (64 - width)) << lsb;
+                    assert_eq!(
+                        state[2],
+                        (base & !field) | ((source << lsb) & field),
+                        "lsb={lsb} width={width} dst=x{dst} src=x{src}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn packed_bitfields_preserve_surrounding_bits_and_full_width_sources() {
+    for lsb in [0, 1, 3, 7, 8, 15, 31, 32, 48, 63] {
+        for width in [1, 2, 5, 8, 16, 31, 32, 64 - lsb] {
+            if width + lsb > 64 {
+                continue;
+            }
+            let low_mask = u64::MAX >> (64 - width);
+            let field_mask = low_mask << lsb;
+            // Unmasked input can set bits outside the insertion field. It
+            // must keep OR semantics even when the surrounding bits match
+            // the usual bitfield pattern.
+            for truncate_source in [false, true] {
+                let mut block = MBlock::new(BlockId(0));
+                block.insts = vec![
+                    MInst::Load {
+                        dst: VReg(0),
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        size: OpSize::S64,
+                    },
+                    MInst::Load {
+                        dst: VReg(1),
+                        base: BaseReg::SimState,
+                        offset: 8,
+                        size: OpSize::S64,
+                    },
+                    MInst::AndImm {
+                        dst: VReg(2),
+                        src: VReg(0),
+                        imm: !field_mask,
+                    },
+                    MInst::AndImm {
+                        dst: VReg(3),
+                        src: VReg(1),
+                        imm: if truncate_source { low_mask } else { u64::MAX },
+                    },
+                    MInst::ShlImm {
+                        dst: VReg(4),
+                        src: VReg(3),
+                        imm: lsb,
+                    },
+                    MInst::Or {
+                        dst: VReg(5),
+                        lhs: VReg(2),
+                        rhs: VReg(4),
+                    },
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 16,
+                        src: VReg(5),
+                        size: OpSize::S64,
+                    },
+                    MInst::ShrImm {
+                        dst: VReg(6),
+                        src: VReg(1),
+                        imm: lsb,
+                    },
+                    MInst::AndImm {
+                        dst: VReg(7),
+                        src: VReg(6),
+                        imm: low_mask,
+                    },
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 24,
+                        src: VReg(7),
+                        size: OpSize::S64,
+                    },
+                    MInst::Return,
+                ];
+                let (jit, mut state) = compile(MFunction::new(vec![block], vec![]), 32);
+                let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+                for input in [0, 1, u64::MAX, 0xaaaa_aaaa_aaaa_aaaa, 1 << 63] {
+                    for _ in 0..8 {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        state[..8].copy_from_slice(&random.to_le_bytes());
+                        state[8..16].copy_from_slice(&input.to_le_bytes());
+                        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+                        let inserted = if truncate_source {
+                            input & low_mask
+                        } else {
+                            input
+                        };
+                        assert_eq!(
+                            u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                            (random & !field_mask) | (inserted << lsb),
+                            "insert lsb={lsb} width={width} truncate={truncate_source}"
+                        );
+                        assert_eq!(
+                            u64::from_le_bytes(state[24..32].try_into().unwrap()),
+                            (input >> lsb) & low_mask,
+                            "extract lsb={lsb} width={width}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn single_chunk_sparse_commits_clear_bitmaps_and_preserve_other_bytes() {
+    for byte_size in 1..=8 {
+        for four_state in [false, true] {
+            for (worklist, summary_words) in [(false, 1), (true, 1), (true, 2)] {
+                let mut block = MBlock::new(BlockId(0));
+                block.push(if worklist {
+                    MInst::SparseCommitWorklist {
+                        descriptor_table: crate::mir::ConstantTableId(0),
+                        active_bits_offset: 112,
+                        active_capacity: 1,
+                    }
+                } else {
+                    MInst::SparseCommit {
+                        src_offset: 3,
+                        dst_offset: 43,
+                        byte_size,
+                        dirty_words_offset: 80,
+                        dirty_word_count: 1,
+                        summary_words_offset: 96,
+                        summary_word_count: summary_words,
+                        four_state,
+                    }
+                });
+                block.push(MInst::Return);
+                let table = vec![
+                    3,
+                    43,
+                    byte_size as u64,
+                    80,
+                    1,
+                    96,
+                    summary_words as u64,
+                    u64::from(four_state),
+                ];
+                let (jit, mut state) = compile(MFunction::new(vec![block], vec![table]), 128);
+                for active in [0_u64, 1, 2, u64::MAX] {
+                    for summary in [0_u64, 1, 2, u64::MAX] {
+                        for dirty in [0_u64, 1, 2, u64::MAX] {
+                            for (index, byte) in state.iter_mut().enumerate() {
+                                *byte = (index as u8).wrapping_mul(73).wrapping_add(17);
+                            }
+                            state[80..88].copy_from_slice(&dirty.to_le_bytes());
+                            state[96..104].copy_from_slice(&summary.to_le_bytes());
+                            state[104..112].fill(0);
+                            state[112..120].copy_from_slice(&active.to_le_bytes());
+                            let mut expected = state[..128].to_vec();
+                            if worklist {
+                                expected[112..120].fill(0);
+                            }
+                            if !worklist || active & 1 != 0 {
+                                expected[96..104].fill(0);
+                                if summary & 1 != 0 {
+                                    expected[80..88].fill(0);
+                                    if dirty & 1 != 0 {
+                                        let bytes = byte_size * if four_state { 2 } else { 1 };
+                                        expected.copy_within(3..3 + bytes, 43);
+                                    }
+                                }
+                            }
+                            assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+                            assert_eq!(
+                                &state[..128],
+                                expected,
+                                "bytes={byte_size} four_state={four_state} worklist={worklist} active={active} summary={summary} dirty={dirty}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn optimized_bit_addresses_preserve_wrapping_and_input_width() {
     for size in [OpSize::S32, OpSize::S64] {
         for stride in [8, 32, 288, 512, 1_u64 << 63] {
