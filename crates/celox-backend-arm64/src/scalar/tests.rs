@@ -335,7 +335,7 @@ fn spilled_constants_survive_both_phi_edges_and_repeated_calls() {
 }
 
 #[test]
-fn spilled_shared_values_do_not_spill_the_loop_induction() {
+fn shared_phi_inputs_preserve_values_and_localize_loop_constants() {
     for constant in [true, false] {
         let mut entry = MBlock::new(BlockId(0));
         entry.push(if constant {
@@ -419,7 +419,9 @@ fn spilled_shared_values_do_not_spill_the_loop_induction() {
         .unwrap();
         let allocated = allocation.allocated;
         assert!(allocated.function.spill_homes.contains_key(&VReg(0)));
-        assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
+        if constant {
+            assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
+        }
         let emitted = emit_function(
             &allocated.function,
             &allocated.assignment,

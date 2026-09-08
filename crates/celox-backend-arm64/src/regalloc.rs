@@ -298,10 +298,10 @@ pub(crate) fn allocate_with_spills(
         .map(|value| value.0)
         .max()
         .map_or(0, |value| value.saturating_add(1));
-    // Spilling a shared value must not force every phi fed by it into memory.
-    // Short edge copies/materializations remain ordinary, spillable SSA
+    // Spilling a shared constant must not force every phi fed by it into memory.
+    // Short edge materializations remain ordinary, spillable SSA
     // values and participate in the same pressure checks.
-    rematerialize::localize_phi_inputs(&mut function, &mut next_value)?;
+    rematerialize::phi_constants(&mut function, &mut next_value)?;
     let initial_facts = build_facts(&function)?;
     let mut candidates = initial_facts
         .blocks
@@ -443,10 +443,10 @@ fn select_spill_batch(
             Reverse(value),
         )
     };
-    // The widest target instruction has five uses and one definition. Keep
-    // that many registers free so a spilled row's local reload/definition
-    // temporaries do not immediately create a second pressure wave.
-    let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(6);
+    // Reserve reload space for the common three-input operations and their
+    // result. Wider pseudos are accounted for by the next allocation round,
+    // instead of reducing every block's capacity for their worst case.
+    let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(4);
     let mut selected = BTreeSet::new();
     let mut peak = Vec::new();
     let mut block_segments = vec![Vec::new(); function.blocks.len()];
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn prefers_long_lived_values_with_fewer_uses_for_spilling() {
-        let mut instructions = (0..19_u32)
+        let mut instructions = (0..21_u32)
             .map(|value| MInst::LoadImm {
                 dst: VReg(value),
                 value: u64::from(value),
@@ -1262,7 +1262,7 @@ mod tests {
             src: VReg(0),
             size: OpSize::S64,
         });
-        instructions.extend((2..19_u32).map(|value| MInst::Store {
+        instructions.extend((2..21_u32).map(|value| MInst::Store {
             base: BaseReg::SimState,
             offset: 800 + (value as i32) * 8,
             src: VReg(value),
