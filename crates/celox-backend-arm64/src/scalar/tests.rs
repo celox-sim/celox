@@ -607,6 +607,105 @@ fn spilled_constants_survive_both_phi_edges_and_repeated_calls() {
 }
 
 #[test]
+fn a_spilled_shared_constant_does_not_spill_the_loop_induction() {
+    let mut entry = MBlock::new(BlockId(0));
+    entry.push(MInst::LoadImm {
+        dst: VReg(0),
+        value: 0,
+    });
+    for index in 1..=32 {
+        entry.push(MInst::Load {
+            dst: VReg(index),
+            base: BaseReg::SimState,
+            offset: (index * 8) as i32,
+            size: OpSize::S64,
+        });
+    }
+    entry.push(MInst::KeepAlive { src: VReg(0) });
+    for index in 1..=32 {
+        entry.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: (index * 8) as i32,
+            src: VReg(index),
+            size: OpSize::S64,
+        });
+    }
+    entry.push(MInst::Jump { target: BlockId(1) });
+    let mut preheader = MBlock::new(BlockId(1));
+    preheader.push(MInst::Load {
+        dst: VReg(36),
+        base: BaseReg::SimState,
+        offset: 0,
+        size: OpSize::S64,
+    });
+    preheader.push(MInst::Jump { target: BlockId(2) });
+    let mut body = MBlock::new(BlockId(2));
+    body.phis.push(PhiNode {
+        dst: VReg(33),
+        sources: vec![(BlockId(1), VReg(0)), (BlockId(2), VReg(34))],
+    });
+    body.push(MInst::AddImm {
+        dst: VReg(34),
+        src: VReg(33),
+        imm: 1,
+    });
+    body.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 264,
+        src: VReg(34),
+        size: OpSize::S64,
+    });
+    body.push(MInst::Cmp {
+        dst: VReg(35),
+        lhs: VReg(34),
+        rhs: VReg(36),
+        kind: CmpKind::LtU,
+    });
+    body.push(MInst::Branch {
+        cond: VReg(35),
+        true_bb: BlockId(2),
+        false_bb: BlockId(3),
+    });
+    let mut exit = MBlock::new(BlockId(3));
+    exit.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 272,
+        src: VReg(0),
+        size: OpSize::S64,
+    });
+    exit.push(MInst::Return);
+    let allocation = crate::regalloc::allocate_with_spills(
+        MFunction::new(vec![entry, preheader, body, exit], vec![]),
+        || false,
+    )
+    .unwrap();
+    let allocated = allocation.allocated;
+    assert!(allocated.function.spill_homes.contains_key(&VReg(0)));
+    assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
+    let emitted = emit_function(
+        &allocated.function,
+        &allocated.assignment,
+        allocation.spill_frame_size,
+        280,
+        &allocated.edge_copies,
+        false,
+        false,
+    )
+    .unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0; emitted.required_state_size as usize];
+    for count in [1u64, 2, 33, 1] {
+        state.fill(0xa5);
+        state[..8].copy_from_slice(&count.to_le_bytes());
+        let mut expected = state[..280].to_vec();
+        expected[264..272].copy_from_slice(&count.to_le_bytes());
+        expected[272..280].fill(0);
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        assert_eq!(&state[..280], expected);
+    }
+}
+
+#[test]
 fn bitfield_insert_preserves_inputs_when_registers_overlap() {
     for (lsb, width) in [(0, 64), (0, 1), (3, 5), (7, 32), (31, 33), (63, 1)] {
         for (dst, src) in [(1, 2), (2, 2), (3, 2), (1, 1), (3, 1)] {

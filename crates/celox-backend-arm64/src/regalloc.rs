@@ -18,6 +18,7 @@ use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, 
 use crate::mir::{AllocatedFunction, BlockId, MFunction, MInst, VReg};
 use crate::{Arm64Reg, HashMap};
 
+mod rematerialize;
 mod schedule;
 
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
@@ -280,10 +281,29 @@ pub(crate) fn allocate_with_spills(
     // Observed once per spill-retry round so a cancelled compile unwinds at
     // the next round instead of finishing the remaining iterations. Callers
     // without cancellation pass `|| false`, which folds away after inlining.
-    let initial_facts = build_facts(&function)?;
     if is_cancelled() {
         return Err(TargetRegallocError::Cancelled);
     }
+    let mut next_value = function
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .phis
+                .iter()
+                .flat_map(|phi| std::iter::once(phi.dst).chain(phi.sources.iter().map(|row| row.1)))
+                .chain(block.insts.iter().flat_map(|instruction| {
+                    instruction.uses().into_iter().chain(instruction.def())
+                }))
+        })
+        .map(|value| value.0)
+        .max()
+        .map_or(0, |value| value.saturating_add(1));
+    // Spilling a shared constant must not force every loop phi fed by that
+    // constant into memory. Short edge materializations remain ordinary,
+    // spillable SSA values and participate in the same pressure checks.
+    rematerialize::phi_constants(&mut function, &mut next_value)?;
+    let initial_facts = build_facts(&function)?;
     let initial_intervals = analyze_live_intervals(&initial_facts)
         .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
     schedule::run(
@@ -303,21 +323,6 @@ pub(crate) fn allocate_with_spills(
             )
         })
         .collect::<BTreeSet<_>>();
-    let mut next_value = function
-        .blocks
-        .iter()
-        .flat_map(|block| {
-            block
-                .phis
-                .iter()
-                .flat_map(|phi| std::iter::once(phi.dst).chain(phi.sources.iter().map(|row| row.1)))
-                .chain(block.insts.iter().flat_map(|instruction| {
-                    instruction.uses().into_iter().chain(instruction.def())
-                }))
-        })
-        .map(|value| value.0)
-        .max()
-        .map_or(0, |value| value.saturating_add(1));
     let mut spill_frame_size = 0_u32;
 
     loop {
@@ -579,7 +584,6 @@ fn spill_values(
         .collect::<BTreeMap<_, _>>();
     let all_homes = function.spill_homes.clone();
     let mut external_phis = Vec::new();
-    let mut edge_keep_alives = BTreeMap::<BlockId, BTreeSet<VReg>>::new();
     for block in &mut function.blocks {
         let mut retained = Vec::with_capacity(block.phis.len());
         for phi in std::mem::take(&mut block.phis) {
@@ -595,10 +599,6 @@ fn spill_values(
                             let source = if let Some(&offset) = all_homes.get(&source) {
                                 crate::mir::SpilledPhiSource::Stack(offset)
                             } else {
-                                edge_keep_alives
-                                    .entry(predecessor)
-                                    .or_default()
-                                    .insert(source);
                                 crate::mir::SpilledPhiSource::Value(source)
                             };
                             (predecessor, source)
@@ -628,8 +628,23 @@ fn spill_values(
         }
     }
     function.spilled_phis.extend(external_phis);
+    let mut edge_keep_alives = BTreeMap::<BlockId, BTreeSet<VReg>>::new();
+    for phi in &function.spilled_phis {
+        for &(predecessor, source) in &phi.sources {
+            if let crate::mir::SpilledPhiSource::Value(value) = source {
+                edge_keep_alives
+                    .entry(predecessor)
+                    .or_default()
+                    .insert(value);
+            }
+        }
+    }
     for block in &mut function.blocks {
-        let original = std::mem::take(&mut block.insts);
+        let edge_uses = edge_keep_alives.remove(&block.id).unwrap_or_default();
+        let original = std::mem::take(&mut block.insts)
+            .into_iter()
+            .filter(|inst| !matches!(inst, MInst::KeepAlive { src } if edge_uses.contains(src)))
+            .collect::<Vec<_>>();
         let spill_uses = original
             .iter()
             .map(|instruction| {
@@ -645,32 +660,11 @@ fn spill_values(
             })
             .collect::<Vec<BTreeSet<_>>>();
         let mut reload_cache = BTreeMap::<VReg, VReg>::new();
-        let existing_keep_alives = original
-            .iter()
-            .filter_map(|instruction| match instruction {
-                MInst::KeepAlive { src } if !homes.contains_key(src) => Some(*src),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let new_keep_alives = edge_keep_alives
-            .remove(&block.id)
-            .unwrap_or_default()
-            .difference(&existing_keep_alives)
-            .copied()
-            .collect::<Vec<_>>();
         let terminator_index = original.len().saturating_sub(1);
-        let mut rewritten = Vec::with_capacity(original.len() + new_keep_alives.len());
+        let mut rewritten = Vec::with_capacity(original.len() + edge_uses.len());
         for (index, mut instruction) in original.into_iter().enumerate() {
             if matches!(instruction, MInst::KeepAlive { src } if homes.contains_key(&src)) {
                 continue;
-            }
-            if index == terminator_index {
-                rewritten.extend(
-                    new_keep_alives
-                        .iter()
-                        .copied()
-                        .map(|src| MInst::KeepAlive { src }),
-                );
             }
             for spilled in spill_uses[index].iter().copied() {
                 let reload = if let Some(&reload) = reload_cache.get(&spilled) {
@@ -693,6 +687,17 @@ fn spill_values(
                     reload
                 };
                 instruction.rewrite_use(spilled, reload);
+            }
+            if index == terminator_index {
+                // Edge copies execute after the branch decision. Keep their
+                // register inputs live across every terminator reload,
+                // including reloads inserted by later spill rounds.
+                rewritten.extend(
+                    edge_uses
+                        .iter()
+                        .copied()
+                        .map(|src| MInst::KeepAlive { src }),
+                );
             }
             let mut definition_cache = None;
             if let Some(spilled) = instruction.def().filter(|value| homes.contains_key(value)) {
@@ -1571,6 +1576,77 @@ mod tests {
                 .as_slice()
             )
         );
+    }
+
+    #[test]
+    fn external_phi_sources_interfere_with_reloaded_branch_conditions() {
+        for separate_rounds in [false, true] {
+            let mut entry = MBlock::new(BlockId(0));
+            entry.push(MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            });
+            entry.push(MInst::LoadImm {
+                dst: VReg(1),
+                value: 11,
+            });
+            for _ in 0..10 {
+                entry.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                });
+            }
+            entry.push(MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(2),
+                false_bb: BlockId(1),
+            });
+            let mut other = MBlock::new(BlockId(1));
+            other.push(MInst::LoadImm {
+                dst: VReg(3),
+                value: 29,
+            });
+            other.push(MInst::Jump { target: BlockId(2) });
+            let mut join = MBlock::new(BlockId(2));
+            join.phis.push(PhiNode {
+                dst: VReg(4),
+                sources: vec![(BlockId(0), VReg(1)), (BlockId(1), VReg(3))],
+            });
+            join.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(4),
+                size: OpSize::S64,
+            });
+            join.push(MInst::Return);
+            let mut function = MFunction::new(vec![entry, other, join], vec![]);
+            let mut next = 5;
+            if separate_rounds {
+                let homes = BTreeMap::from([(VReg(4), 8)]);
+                function.spill_homes.extend(homes.clone());
+                spill_values(&mut function, &homes, &mut next).unwrap();
+            }
+            let homes = if separate_rounds {
+                BTreeMap::from([(VReg(0), 0)])
+            } else {
+                BTreeMap::from([(VReg(0), 0), (VReg(4), 8)])
+            };
+            function.spill_homes.extend(homes.clone());
+            spill_values(&mut function, &homes, &mut next).unwrap();
+            let MInst::Branch { cond, .. } = *function.blocks[0].insts.last().unwrap() else {
+                unreachable!()
+            };
+            let allocated = allocate_without_spills(function).unwrap();
+            assert_ne!(
+                allocated.assignment.get(&VReg(1)),
+                allocated.assignment.get(&cond),
+                "separate_rounds={separate_rounds}: the edge value must survive the branch-condition reload"
+            );
+        }
     }
 
     #[test]
