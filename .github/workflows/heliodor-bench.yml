@@ -355,10 +355,10 @@ jobs:
               log="$HELIODOR_RESULTS_DIR/compare-$label-$comparison_round.log"
               if [[ "$label" == veryl ]]; then
                 env VERYL_AOT_CACHE_DIR="$veryl_cache" \
-                  "$veryl_runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                  timeout 1200 "$veryl_runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
                   "${args[@]}" > "$log" 2>&1
               else
-                "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                timeout 1200 "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
                   --backend native --opt-level o2 "${args[@]}" > "$log" 2>&1
               fi
               echo "comparison=$label round=$comparison_round"
@@ -379,7 +379,7 @@ jobs:
           for source in "${sources[@]}"; do args+=(--source-file "$source"); done
           cd "$HELIODOR_DIR"
           "$PERF_BIN" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
-            "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+            timeout 1200 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
             --backend native --opt-level o2 "${args[@]}" \
             --dump-ir-dir "$HELIODOR_RESULTS_DIR/profile-ir" --dump-ir-and-run \
             > "$HELIODOR_RESULTS_DIR/profile-linux.log" 2>&1
