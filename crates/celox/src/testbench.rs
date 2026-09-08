@@ -1549,6 +1549,13 @@ fn exec_one_detailed<B: SimBackend>(
             sim_set_target(sim, dst, val);
             ExecResult::Continue
         }
+        GenericTestbenchStatement::WriteMemory { signal, writes } => {
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            sim.apply_testbench_memory_writes(*signal, writes);
+            ExecResult::Continue
+        }
         GenericTestbenchStatement::RandomSeed { handle, value } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));

@@ -49,7 +49,7 @@ pub fn schedule_symbolic_rtl(
         .unwrap_or_default();
     let fused_ff_factory =
         super::lowering::global_ff::VerylFusedFfFactory::new(&module_ir, &source_id_maps, *config);
-    let output = assembly::schedule_symbolic_rtl(
+    let mut output = assembly::schedule_symbolic_rtl(
         symbolic,
         Some(&fused_ff_factory),
         ignored_loops,
@@ -58,6 +58,7 @@ pub fn schedule_symbolic_rtl(
         trace_options,
         trace,
     )?;
+    super::readmem::elaborate_hierarchical_initial_memories(&module_ir, &mut output.scheduled)?;
     let lookup = &output.scheduled.frontend_lookup;
     let mut components = Vec::new();
     let mut component_bindings = Vec::new();

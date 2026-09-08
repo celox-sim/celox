@@ -62,7 +62,7 @@ use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, CasePattern, Component, Declaration, Expression, Factor,
     ForBound, ForRange, ForStatement, FunctionCall, Ir, Module, Statement, SystemFunctionCall,
-    SystemFunctionKind, TbMethod, VarId, VarIndex, VarSelect,
+    SystemFunctionKind, SystemFunctionOutput, TbMethod, VarId, VarIndex, VarSelect,
 };
 use veryl_analyzer::symbol::Affiliation;
 use veryl_parser::resource_table::{self, StrId};
@@ -104,6 +104,7 @@ enum StateChange {
 struct Effects {
     reads: Vec<Access>,
     hierarchical_reads: Vec<veryl_analyzer::ir::HierVarRef>,
+    hierarchical_writes: Vec<veryl_analyzer::ir::HierVarRef>,
     writes: Vec<Access>,
     state_changes: Vec<StateChange>,
     observable: bool,
@@ -121,6 +122,8 @@ impl Effects {
         self.reads.append(&mut other.reads);
         self.hierarchical_reads
             .append(&mut other.hierarchical_reads);
+        self.hierarchical_writes
+            .append(&mut other.hierarchical_writes);
         self.writes.append(&mut other.writes);
         self.state_changes.append(&mut other.state_changes);
         self.observable |= other.observable;
@@ -303,14 +306,27 @@ fn check_elaborated_for(
         .unknown
         .clone()
         .or(body_effects.unknown.clone());
-    let immediate_writes =
-        collect_immediate_state_writes(&body_effects.writes, scheduled, source, &mut unknown);
+    let immediate_writes = collect_immediate_state_writes(
+        &body_effects.writes,
+        &body_effects.hierarchical_writes,
+        scheduled,
+        source,
+        &mut unknown,
+    );
     if hierarchical_reads_conflict(
         &bound_effects.hierarchical_reads,
         &immediate_writes,
         scheduled,
         &mut unknown,
-    ) {
+    ) || (!body_effects.hierarchical_writes.is_empty()
+        && local_reads_conflict(
+            &bound_effects.reads,
+            &immediate_writes,
+            scheduled,
+            source,
+            &mut unknown,
+        ))
+    {
         diagnostics.push(FrontendDiagnostic::mutable_for_bound(
             &statement.token,
             "the loop body may immediately modify state read by the continuation bound",
@@ -318,6 +334,14 @@ fn check_elaborated_for(
         return;
     }
     if body_effects.state_changes.is_empty() {
+        if !body_effects.hierarchical_writes.is_empty()
+            && let Some(detail) = unknown
+        {
+            diagnostics.push(FrontendDiagnostic::unknown_for_bound_effect(
+                &statement.token,
+                detail,
+            ));
+        }
         return;
     }
 
@@ -330,6 +354,7 @@ fn check_elaborated_for(
     });
     let bound_has_visible_effect = bound_effects.observable
         || !bound_effects.state_changes.is_empty()
+        || !bound_effects.hierarchical_writes.is_empty()
         || bound_effects.writes.iter().any(|write| !write.deferred);
     if immediate_conflict || bound_has_visible_effect {
         return;
@@ -398,6 +423,7 @@ struct StateWrite {
 
 fn collect_immediate_state_writes(
     accesses: &[Access],
+    hierarchical: &[veryl_analyzer::ir::HierVarRef],
     scheduled: &ScheduledRtl,
     source: &VerylTestbenchSource,
     unknown: &mut Option<String>,
@@ -430,8 +456,62 @@ fn collect_immediate_state_writes(
             },
         );
     }
+    for reference in hierarchical {
+        match super::testbench::resolve_hierarchical_reference(
+            &scheduled.frontend_lookup,
+            reference,
+        ) {
+            Ok((address, info)) => {
+                match super::testbench::hierarchical_reference_bits(info, reference) {
+                    Ok(bits) => {
+                        add_state_write(
+                            &mut writes,
+                            StateWrite {
+                                address,
+                                bits: Some(bits),
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        unknown.get_or_insert_with(|| error.to_string());
+                    }
+                }
+            }
+            Err(error) => {
+                unknown.get_or_insert_with(|| error.to_string());
+            }
+        }
+    }
     propagate_comb_writes(&scheduled.sir.eval_comb, &mut writes);
     writes
+}
+
+fn local_reads_conflict(
+    reads: &[Access],
+    writes: &[StateWrite],
+    scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
+    unknown: &mut Option<String>,
+) -> bool {
+    for read in reads {
+        let resolved = root_source_var(scheduled, source, read.id)
+            .and_then(|id| scheduled.frontend_lookup.root_variable(id));
+        let Some((address, _)) = resolved else {
+            unknown.get_or_insert_with(|| {
+                format!(
+                    "bound variable `{}` could not be projected after elaboration",
+                    read.id
+                )
+            });
+            continue;
+        };
+        if writes.iter().any(|write| {
+            write.address == address && write.bits.is_none_or(|bits| bits.overlaps(&read.bits))
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 fn hierarchical_reads_conflict(
@@ -1165,6 +1245,7 @@ fn check_for(
     });
     let bound_has_visible_effect = bound_effects.observable
         || !bound_effects.state_changes.is_empty()
+        || !bound_effects.hierarchical_writes.is_empty()
         || bound_effects.writes.iter().any(|write| !write.deferred);
 
     if body_conflict || bound_has_visible_effect {
@@ -1179,11 +1260,11 @@ fn check_for(
         return;
     }
 
-    // Known testbench state transitions are classified after elaboration,
+    // Testbench state transitions and hierarchical writes are classified after elaboration,
     // where event and state identities can be compared exactly. Defer any
     // accompanying unknown effect as well so an exact conflict wins over a
     // provisional warning.
-    if !body_effects.state_changes.is_empty() {
+    if !body_effects.state_changes.is_empty() || !body_effects.hierarchical_writes.is_empty() {
         return;
     }
 
@@ -1592,8 +1673,21 @@ fn collect_system_function_effects(
                 module,
                 active_functions,
             ));
-            for destination in &output.0 {
-                collect_destination_effects(destination, module, active_functions, effects, false);
+            match output {
+                SystemFunctionOutput::Local(destinations) => {
+                    for destination in destinations {
+                        collect_destination_effects(
+                            destination,
+                            module,
+                            active_functions,
+                            effects,
+                            false,
+                        );
+                    }
+                }
+                SystemFunctionOutput::Hier(reference) => {
+                    effects.hierarchical_writes.push((**reference).clone());
+                }
             }
         }
         SystemFunctionKind::Display(arguments) | SystemFunctionKind::Write(arguments) => {
@@ -1847,6 +1941,12 @@ mod tests {
 
     #[test]
     fn unknown_body_effect_ir_is_reported_for_a_hierarchical_bound() {
+        check_unknown_body_effect_with_hierarchical_bound(Statement::Unsupported(
+            TokenRange::default(),
+        ));
+    }
+
+    fn check_unknown_body_effect_with_hierarchical_bound(body: Statement) {
         let token = TokenRange::default();
         let bound = Expression::Term(Box::new(Factor::HierVariable(Box::new(
             veryl_analyzer::ir::HierVarRef {
@@ -1867,7 +1967,7 @@ mod tests {
                 inclusive: false,
                 step: 1,
             },
-            body: vec![Statement::Unsupported(token)],
+            body: vec![body],
             token,
         }));
         let module = Module {

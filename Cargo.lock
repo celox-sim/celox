@@ -784,6 +784,7 @@ dependencies = [
 name = "celox-testbench"
 version = "0.4.7"
 dependencies = [
+ "celox-design",
  "num-bigint",
  "num-traits",
  "serde",
@@ -4381,7 +4382,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "veryl-aligner"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "veryl-parser",
 ]
@@ -4389,7 +4390,7 @@ dependencies = [
 [[package]]
 name = "veryl-analyzer"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "bimap",
  "daggy",
@@ -4412,7 +4413,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 1.1.5+spec-1.1.0",
  "vcd",
- "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578)",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615)",
  "veryl-metadata",
  "veryl-parser",
 ]
@@ -4426,12 +4427,12 @@ checksum = "6b79b55aefeb953c53c719399b6bd185f9a2f5a196af6bb08586d22568449b5e"
 [[package]]
 name = "veryl-component-sys"
 version = "0.1.1"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 
 [[package]]
 name = "veryl-emitter"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "serde",
  "veryl-aligner",
@@ -4445,7 +4446,7 @@ dependencies = [
 [[package]]
 name = "veryl-metadata"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "log",
  "miette",
@@ -4461,7 +4462,7 @@ dependencies = [
  "toml 1.1.5+spec-1.1.0",
  "url",
  "uuid",
- "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578)",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615)",
  "veryl-parser",
  "veryl-path",
  "veryl-std",
@@ -4472,7 +4473,7 @@ dependencies = [
 [[package]]
 name = "veryl-parser"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "anyhow",
  "bimap",
@@ -4490,7 +4491,7 @@ dependencies = [
 [[package]]
 name = "veryl-path"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "directories",
  "fs4",
@@ -4504,12 +4505,12 @@ dependencies = [
 [[package]]
 name = "veryl-pretty"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 
 [[package]]
 name = "veryl-simulator"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "clap",
  "cranelift",
@@ -4534,7 +4535,7 @@ dependencies = [
  "twox-hash",
  "vcd",
  "veryl-analyzer",
- "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578)",
+ "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615)",
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",
@@ -4544,7 +4545,7 @@ dependencies = [
 [[package]]
 name = "veryl-sourcemap"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "miette",
  "relative-path",
@@ -4555,7 +4556,7 @@ dependencies = [
 [[package]]
 name = "veryl-std"
 version = "0.21.0"
-source = "git+https://github.com/veryl-lang/veryl.git?rev=4d821887fcd19eed65eff27b0592f9592e636578#4d821887fcd19eed65eff27b0592f9592e636578"
+source = "git+https://github.com/veryl-lang/veryl.git?rev=a82a0c0a7570b0fde1e633385309090e90ef3615#a82a0c0a7570b0fde1e633385309090e90ef3615"
 dependencies = [
  "merkle_hash",
  "miette",
