@@ -19,7 +19,6 @@ use crate::mir::{AllocatedFunction, BlockId, MFunction, MInst, VReg};
 use crate::{Arm64Reg, HashMap};
 
 mod rematerialize;
-mod schedule;
 
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
 
@@ -304,13 +303,6 @@ pub(crate) fn allocate_with_spills(
     // spillable SSA values and participate in the same pressure checks.
     rematerialize::phi_constants(&mut function, &mut next_value)?;
     let initial_facts = build_facts(&function)?;
-    let initial_intervals = analyze_live_intervals(&initial_facts)
-        .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
-    schedule::run(
-        &mut function,
-        &initial_intervals,
-        ALLOCATABLE_REGISTERS.len().saturating_sub(6),
-    );
     let mut candidates = initial_facts
         .blocks
         .iter()
