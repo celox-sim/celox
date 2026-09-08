@@ -2,6 +2,8 @@ use super::*;
 use crate::jit_mem::JitCode;
 use crate::mir::{MBlock, MemoryAliasRange, PhiNode};
 
+mod memory;
+
 fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
     crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);

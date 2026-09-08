@@ -254,6 +254,24 @@ fn instruction_bits(inst: &MInst, facts: &[KnownBits]) -> KnownBits {
         }
         MInst::Mov { src, .. } => bits(*src),
         MInst::Mov32 { src, .. } => bits(*src).truncate(low32),
+        MInst::BitExtract {
+            src, lsb, width, ..
+        } => bits(*src).shr(*lsb).truncate(u64::MAX >> (64 - width)),
+        MInst::BitInsert {
+            base,
+            src,
+            lsb,
+            width,
+            ..
+        } => {
+            let low_mask = u64::MAX >> (64 - width);
+            bits(*base)
+                .and(KnownBits::constant(!(low_mask << lsb)))
+                .or(bits(*src).truncate(low_mask).shl(*lsb))
+        }
+        MInst::OrShifted {
+            lhs, rhs, shift, ..
+        } => bits(*lhs).or(bits(*rhs).shl(*shift)),
         MInst::BitNot { src, .. } => bits(*src).not(),
         MInst::And { lhs, rhs, .. } => bits(*lhs).and(bits(*rhs)),
         MInst::And32 { lhs, rhs, .. } => bits(*lhs).and(bits(*rhs)).truncate(low32),
@@ -453,6 +471,15 @@ pub(super) fn fold(func: &mut MFunction) {
                     dst: inst.def().unwrap(),
                     src,
                 };
+            } else if let MInst::BitExtract {
+                dst,
+                src,
+                lsb: 0,
+                width,
+            } = inst
+                && !facts[src.0 as usize].zero & !(u64::MAX >> (64 - width)) == 0
+            {
+                inst = MInst::Mov { dst, src };
             } else if let MInst::CmpImm {
                 dst,
                 lhs,

@@ -7,6 +7,7 @@ use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 mod bitfield;
 mod known_bits;
+mod memory;
 
 /// Recover the compact immediate and copy forms expected by AArch64 emission.
 ///
@@ -36,6 +37,14 @@ pub(crate) fn optimize(function: &mut MFunction) {
     known_bits::fold_packed_bit_loads(function);
     dead_code_eliminate(function);
     bitfield::run(function);
+    dead_code_eliminate(function);
+    memory::run(function);
+    known_bits::fold(function);
+    fold_constants(function);
+    lower_immediate_uses(function);
+    canonicalize_identity_operations(function);
+    propagate_exact_copies(function);
+    memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
     fold_branch_predicates(function);
 }
