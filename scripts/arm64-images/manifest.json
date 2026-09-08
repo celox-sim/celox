@@ -7,26 +7,26 @@
     {
       "label": "baseline",
       "file": "baseline.native-image.gz",
-      "source": "4b0b32172",
-      "experiment": "exclusive-select",
-      "sha256": "155f1abc9eced9adda49f336d372fb4026459404251dbda5162454c8b688dfd6",
-      "compressed_sha256": "49b21aad19fd4778b963faba0947e0a4d5e4ae1e814174803d3b48dcbd2eae69"
-    },
-    {
-      "label": "exclusive",
-      "file": "exclusive.native-image.gz",
-      "source": "0c874c879",
-      "experiment": "bit-facts",
-      "sha256": "678cfa7266e3463719e12cbcf16e84a1f50e683dc0a2b42aae64552e81e37e13",
-      "compressed_sha256": "3ced7b2ed2f054b7add77f3c65bc79d70b625dde9f0f3355e092ff37501f2c83"
-    },
-    {
-      "label": "candidate",
-      "file": "candidate.native-image.gz",
       "source": "26c91cfcc",
       "experiment": "bit-facts-allocated",
       "sha256": "670fb2689231d68c544633f6934151dbb1d73060875a3f2e78293e14943005f7",
       "compressed_sha256": "856f986abacec9f985aef298f2166c519aaf94e4989d46cd2987dfd74791873a"
+    },
+    {
+      "label": "exclusive",
+      "file": "exclusive.native-image.gz",
+      "source": "e896d07af",
+      "experiment": "loop-spill-cost",
+      "sha256": "609a1a735fcfcc2702840fd8743aba2fcb31cdb8956d30bed0c4f64013c64fc3",
+      "compressed_sha256": "30a4c8fdadd222bd38afd52bc4ee7079085863c4fff7f6257217188ac7e1b758"
+    },
+    {
+      "label": "candidate",
+      "file": "candidate.native-image.gz",
+      "source": "f0716eb1e",
+      "experiment": "sparse-addresses",
+      "sha256": "bf6510f3a63593e256d33848c28c6b4212c365fb1f1ec166f2779e85a74ab0a7",
+      "compressed_sha256": "91b1178e82b342ca10a68de63cfb25447d5e566491ee5999ce09293e5203c23c"
     }
   ]
 }
