@@ -704,13 +704,29 @@ fn spill_values(
                 rewritten.push(instruction);
             }
             let next_uses = spill_uses.get(index + 1);
-            reload_cache
-                .retain(|value, _| next_uses.is_some_and(|next_uses| next_uses.contains(value)));
-            if let Some((spilled, temporary)) = definition_cache
-                && next_uses.is_some_and(|next_uses| next_uses.contains(&spilled))
-            {
+            if let Some((spilled, temporary)) = definition_cache {
                 reload_cache.insert(spilled, temporary);
             }
+            // An induction value can feed several addresses separated by
+            // loads and masks. Keep one such reload across a short gap, in
+            // addition to operands used by the very next instruction. The
+            // bounds limit the extra pressure from unspillable reloads.
+            let lookahead_end = spill_uses.len().min(index + 9);
+            let reuse_after_gap = reload_cache
+                .keys()
+                .filter(|value| !next_uses.is_some_and(|uses| uses.contains(value)))
+                .filter_map(|&value| {
+                    spill_uses[index + 1..lookahead_end]
+                        .iter()
+                        .position(|uses| uses.contains(&value))
+                        .map(|distance| (distance, value))
+                })
+                .min()
+                .map(|(_, value)| value);
+            reload_cache.retain(|value, _| {
+                next_uses.is_some_and(|uses| uses.contains(value))
+                    || reuse_after_gap == Some(*value)
+            });
         }
         block.insts = rewritten;
     }
@@ -755,15 +771,20 @@ fn color_intervals(
         .iter()
         .map(|(&value, _)| (value, BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    for block in 0..function.blocks.len() {
-        let mut segments = intervals
-            .iter()
-            .filter_map(|(&value, interval)| {
-                interval
-                    .segment_in_block(block)
-                    .map(|segment| (segment.start, segment.end, value))
-            })
-            .collect::<Vec<_>>();
+    // Index intervals by block once; large kernels have many values that
+    // are live in only a small fraction of their basic blocks.
+    let mut block_segments = vec![Vec::new(); function.blocks.len()];
+    for (&value, interval) in intervals.iter() {
+        for segment in &interval.segments {
+            let segments = &mut block_segments[segment.block];
+            // Match segment_in_block's first-segment semantics if an
+            // interval ever carries more than one segment for a block.
+            if !segments.last().is_some_and(|&(_, _, last)| last == value) {
+                segments.push((segment.start, segment.end, value));
+            }
+        }
+    }
+    for mut segments in block_segments {
         segments.sort_unstable();
         let mut active = Vec::<(u64, VReg)>::new();
         for (start, end, value) in segments {
@@ -1369,6 +1390,61 @@ mod tests {
                 ))
                 .count(),
             0
+        );
+        allocate_without_spills(function).unwrap();
+    }
+
+    #[test]
+    fn reuses_a_spilled_index_across_address_calculations() {
+        let mut instructions = vec![MInst::Load {
+            dst: VReg(0),
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        }];
+        // Move the first use beyond the reuse window, so it must reload.
+        instructions.extend((1..=10).map(|value| MInst::LoadImm {
+            dst: VReg(value),
+            value: u64::from(value),
+        }));
+        for index in 0..3 {
+            instructions.push(MInst::AddImm {
+                dst: VReg(11 + index),
+                src: VReg(0),
+                imm: index as i32,
+            });
+            instructions.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                src: VReg(11 + index),
+                size: OpSize::S64,
+            });
+        }
+        instructions.push(MInst::Return);
+        let mut function = MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: vec![],
+                insts: instructions,
+            }],
+            vec![],
+        );
+        let homes = [(VReg(0), 0)].into_iter().collect();
+        function.spill_homes.insert(VReg(0), 0);
+        spill_values(&mut function, &homes, &mut 14).unwrap();
+        assert_eq!(
+            function.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
         );
         allocate_without_spills(function).unwrap();
     }

@@ -30,6 +30,10 @@ on:
         description: Reuse profiling runners from this run ID (requires arm64_profile)
         type: string
         default: ""
+      arm64_compare_run_id:
+        description: Compare with runners from this run on the same ARM64 host (requires arm64_profile)
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -306,9 +310,45 @@ jobs:
         if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
         shell: bash
         env:
-          HELIODOR_RUNNERS: veryl-cc-sync celox celox-tiered veryl-cc-tiered
+          HELIODOR_RUNNERS: ${{ inputs.arm64_profile && 'celox' || 'veryl-cc-sync celox celox-tiered veryl-cc-tiered' }}
           HELIODOR_TIMEOUT_SEC: "1200"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
+
+      - name: Download ARM64 comparison runner
+        if: inputs.arm64_profile && inputs.arm64_compare_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: heliodor-arm64-profiling-runners
+          path: target/heliodor-arm64/baseline-runners
+          run-id: ${{ inputs.arm64_compare_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare ARM64 compilation and execution
+        if: inputs.arm64_profile && inputs.arm64_compare_run_id != ''
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          trap cleanup_heliodor_fallback EXIT
+          prepare
+          baseline_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/celox-heliodor"
+          chmod +x "$baseline_runner" "$CELOX_RUNNER_BIN"
+          collect_test_source_files test_soc_linux_boot sources
+          args=()
+          for source in "${sources[@]}"; do args+=(--source-file "$source"); done
+          cd "$HELIODOR_DIR"
+          for comparison_round in 1 2 3; do
+            order=(baseline candidate)
+            if (( comparison_round % 2 == 0 )); then order=(candidate baseline); fi
+            for label in "${order[@]}"; do
+              runner="$CELOX_RUNNER_BIN"
+              if [[ "$label" == baseline ]]; then runner="$baseline_runner"; fi
+              log="$HELIODOR_RESULTS_DIR/compare-$label-$comparison_round.log"
+              "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                --backend native --opt-level o2 "${args[@]}" > "$log" 2>&1
+              echo "comparison=$label round=$comparison_round"
+              tail -n 4 "$log"
+            done
+          done
 
       - name: Capture ARM64 profile
         if: inputs.arm64_profile

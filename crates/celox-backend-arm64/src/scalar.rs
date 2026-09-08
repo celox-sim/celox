@@ -313,6 +313,37 @@ fn emit_function(
     tick_loop: bool,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
+    let emit = |direct_branches| {
+        emit_function_with_branches(
+            function,
+            assignment,
+            spill_frame_size,
+            state_size,
+            plan,
+            tick_loop,
+            check_runtime_events,
+            direct_branches,
+        )
+    };
+    // Conditional branches span +/- 1 MiB. Assemble compact branches first;
+    // oversized kernels retain the nearby copy stubs and long jumps.
+    match emit(true) {
+        Err(EmitError::Assembly(DynasmError::ImpossibleRelocation(_))) => emit(false),
+        result => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_function_with_branches(
+    function: &MFunction,
+    assignment: &Assignment<VReg>,
+    spill_frame_size: u32,
+    state_size: usize,
+    plan: &EdgeCopyPlan<BlockId>,
+    tick_loop: bool,
+    check_runtime_events: bool,
+    direct_branches: bool,
+) -> Result<EmitResult, EmitError> {
     let spill_base = align16(state_size)?;
     let temporary_offset = spill_base
         .checked_add(spill_frame_size as usize)
@@ -470,6 +501,7 @@ fn emit_function(
                 check_runtime_events,
                 state_pages,
                 tick_counter_in_fp,
+                direct_branches,
             )?;
         }
     }
@@ -556,6 +588,7 @@ fn emit_instruction(
     check_runtime_events: bool,
     state_pages: StatePageBases,
     tick_counter_in_fp: bool,
+    direct_branches: bool,
 ) -> Result<(), EmitError> {
     match instruction {
         MInst::Mov { dst, src } => {
@@ -1048,6 +1081,29 @@ fn emit_instruction(
             true_bb,
             false_bb,
         } => {
+            if direct_branches
+                && let Some(branch_on_true) =
+                    direct_branch_side(plan, block, *true_bb, *false_bb, next_block)
+            {
+                let (target, fallthrough) = if branch_on_true {
+                    (*true_bb, *false_bb)
+                } else {
+                    (*false_bb, *true_bb)
+                };
+                let cond = resolve(assignment, *cond)?;
+                let target_label = labels[&target];
+                if branch_on_true {
+                    dynasm!(ops ; .arch aarch64 ; cbnz X(cond), =>target_label);
+                } else {
+                    dynasm!(ops ; .arch aarch64 ; cbz X(cond), =>target_label);
+                }
+                emit_edge_copies(ops, plan, block, fallthrough, spill_base, temporary_offset)?;
+                if next_block != Some(fallthrough) {
+                    let label = labels[&fallthrough];
+                    dynasm!(ops ; .arch aarch64 ; b =>label);
+                }
+                return Ok(());
+            }
             // Put the physically adjacent successor last so its copies can
             // fall through. The conditional branch still targets a nearby
             // copy stub, preserving its range even in very large functions.
@@ -1079,6 +1135,32 @@ fn emit_instruction(
             false_bb,
         } => {
             emit_branch_predicate(ops, *predicate, assignment, state_pages)?;
+            if direct_branches
+                && let Some(branch_on_true) =
+                    direct_branch_side(plan, block, *true_bb, *false_bb, next_block)
+            {
+                let (target, fallthrough) = if branch_on_true {
+                    (*true_bb, *false_bb)
+                } else {
+                    (*false_bb, *true_bb)
+                };
+                let kind = predicate_kind(*predicate);
+                emit_conditional_branch(
+                    ops,
+                    labels[&target],
+                    if branch_on_true {
+                        kind
+                    } else {
+                        inverse_condition(kind)
+                    },
+                );
+                emit_edge_copies(ops, plan, block, fallthrough, spill_base, temporary_offset)?;
+                if next_block != Some(fallthrough) {
+                    let label = labels[&fallthrough];
+                    dynasm!(ops ; .arch aarch64 ; b =>label);
+                }
+                return Ok(());
+            }
             let invert = next_block == Some(*false_bb);
             let (true_bb, false_bb) = if invert {
                 (false_bb, true_bb)
@@ -3329,6 +3411,21 @@ fn predicate_kind(predicate: BranchPredicate) -> CmpKind {
         BranchPredicate::Compare { kind, .. } | BranchPredicate::CompareImm { kind, .. } => kind,
         BranchPredicate::MemoryNonZero { .. } => CmpKind::Ne,
     }
+}
+
+fn direct_branch_side(
+    plan: &EdgeCopyPlan<BlockId>,
+    block: BlockId,
+    true_bb: BlockId,
+    false_bb: BlockId,
+    next_block: Option<BlockId>,
+) -> Option<bool> {
+    let prefer_true = next_block != Some(true_bb);
+    [prefer_true, !prefer_true].into_iter().find(|&on_true| {
+        let target = if on_true { true_bb } else { false_bb };
+        plan.edge(block, target)
+            .is_none_or(|copies| copies.is_empty())
+    })
 }
 
 fn emit_conditional_branch(

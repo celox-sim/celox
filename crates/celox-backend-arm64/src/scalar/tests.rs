@@ -4,6 +4,102 @@ use crate::mir::{MBlock, MemoryAliasRange, PhiNode};
 
 mod memory;
 
+fn branch_range_function(predicate: bool, stores: usize) -> (MFunction, Assignment<VReg>) {
+    let mut entry = MBlock::new(BlockId(0));
+    entry.push(MInst::Load {
+        dst: VReg(0),
+        base: BaseReg::SimState,
+        offset: 0,
+        size: OpSize::S64,
+    });
+    entry.push(if predicate {
+        MInst::BranchPred {
+            predicate: BranchPredicate::CompareImm {
+                lhs: VReg(0),
+                imm: 0,
+                kind: CmpKind::Ne,
+            },
+            true_bb: BlockId(2),
+            false_bb: BlockId(1),
+        }
+    } else {
+        MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(2),
+            false_bb: BlockId(1),
+        }
+    });
+    let mut blocks = vec![entry];
+    for (id, value, count) in [(1, 11, stores), (2, 29, 1)] {
+        let mut block = MBlock::new(BlockId(id));
+        block.push(MInst::LoadImm {
+            dst: VReg(id),
+            value,
+        });
+        block.insts.extend(std::iter::repeat_n(
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(id),
+                size: OpSize::S64,
+            },
+            count,
+        ));
+        block.push(MInst::Jump { target: BlockId(3) });
+        blocks.push(block);
+    }
+    let mut exit = MBlock::new(BlockId(3));
+    exit.push(MInst::Return);
+    blocks.push(exit);
+    let mut assignment = Assignment::default();
+    assignment.set(VReg(0), Arm64Reg::new(1));
+    assignment.set(VReg(1), Arm64Reg::new(2));
+    assignment.set(VReg(2), Arm64Reg::new(2));
+    (MFunction::new(blocks, vec![]), assignment)
+}
+
+fn check_branch_outcomes(emitted: &EmitResult) {
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0; emitted.required_state_size as usize];
+    for condition in [0, 1, u64::MAX] {
+        state[..8].copy_from_slice(&condition.to_le_bytes());
+        state[8..16].fill(0);
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[8..16].try_into().unwrap()),
+            if condition == 0 { 11 } else { 29 },
+        );
+    }
+}
+
+#[test]
+fn direct_conditional_branches_preserve_both_outcomes() {
+    for predicate in [false, true] {
+        let (function, assignment) = branch_range_function(predicate, 1);
+        let plan = EdgeCopyPlan::default();
+        let compact = emit_function(&function, &assignment, 0, 16, &plan, false, false).unwrap();
+        let stubs =
+            emit_function_with_branches(&function, &assignment, 0, 16, &plan, false, false, false)
+                .unwrap();
+        assert!(compact.text_size < stubs.text_size);
+        check_branch_outcomes(&compact);
+    }
+}
+
+#[test]
+fn far_conditional_branches_fall_back_to_copy_stubs() {
+    for predicate in [false, true] {
+        let (function, assignment) = branch_range_function(predicate, 262_144);
+        let plan = EdgeCopyPlan::default();
+        assert!(matches!(
+            emit_function_with_branches(&function, &assignment, 0, 16, &plan, false, false, true,),
+            Err(EmitError::Assembly(DynasmError::ImpossibleRelocation(_))),
+        ));
+        let emitted = emit_function(&function, &assignment, 0, 16, &plan, false, false).unwrap();
+        check_branch_outcomes(&emitted);
+    }
+}
+
 fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
     crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);
@@ -22,6 +118,63 @@ fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
         JitCode::new(&emitted.code).unwrap(),
         vec![0; emitted.required_state_size as usize],
     )
+}
+
+#[test]
+fn nearby_spill_uses_preserve_snapshots_under_register_pressure() {
+    let mut block = MBlock::new(BlockId(0));
+    for index in 0..32 {
+        block.push(MInst::Load {
+            dst: VReg(index),
+            base: BaseReg::SimState,
+            offset: (index * 8) as i32,
+            size: OpSize::S64,
+        });
+    }
+    for index in 0..32 {
+        for step in 0..3 {
+            let dst = VReg(32 + index * 3 + step);
+            block.push(MInst::AddImm {
+                dst,
+                src: VReg(index),
+                imm: (step + 1) as i32,
+            });
+            // Overwrite the original state while its snapshot is still live.
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                src: dst,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: ((32 + index * 3 + step) * 8) as i32,
+                src: dst,
+                size: OpSize::S64,
+            });
+        }
+    }
+    block.push(MInst::Return);
+    let (jit, mut state) = compile(MFunction::new(vec![block], vec![]), 128 * 8);
+    for seed in [0, 0x9e37_79b9_7f4a_7c15u64, u64::MAX - 31] {
+        let values = (0..32)
+            .map(|index| seed.wrapping_add(index))
+            .collect::<Vec<_>>();
+        state[..128 * 8].fill(0xa5);
+        for (index, value) in values.iter().enumerate() {
+            state[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        for (index, value) in values.iter().enumerate() {
+            for step in 0..3 {
+                let offset = (32 + index * 3 + step) * 8;
+                assert_eq!(
+                    u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap()),
+                    value.wrapping_add(step as u64 + 1),
+                );
+            }
+        }
+    }
 }
 
 #[test]
