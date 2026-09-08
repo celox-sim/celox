@@ -2115,14 +2115,6 @@ impl<'a> ModuleParser<'a> {
         Ok(())
     }
 
-    fn static_string_expr(expr: &Expression) -> Option<String> {
-        if !expr.comptime().r#type.is_string() {
-            return None;
-        }
-        let value = expr.comptime().get_value().ok()?;
-        byte_value_to_string(value)
-    }
-
     fn parse_initial_declaration(
         &mut self,
         decl: &veryl_analyzer::ir::InitialDeclaration,
@@ -2140,70 +2132,14 @@ impl<'a> ModuleParser<'a> {
         stmt: &Statement,
         context: &mut veryl_analyzer::Context,
     ) -> Result<(), ParserError> {
-        match stmt {
-            Statement::SystemFunctionCall(call) => {
-                if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
-                    let destinations = match output {
-                        SystemFunctionOutput::Local(destinations) => destinations,
-                        SystemFunctionOutput::Hier(reference) => {
-                            return Err(ParserError::unsupported(
-                                111,
-                                LoweringPhase::SimulatorParser,
-                                "$readmemh destination",
-                                "hierarchical destinations are not supported",
-                                Some(&reference.comptime.token),
-                            ));
-                        }
-                    };
-                    let value = self.parse_readmem_file(filename, destinations, 16, context)?;
-                    self.initial_memory_values.push(value);
-                }
-                Ok(())
+        visit_initial_statement(stmt, context, &mut |filename, output, context| {
+            if let SystemFunctionOutput::Local(destinations) = output {
+                let value = self.parse_readmem_file(filename, destinations, 16, context)?;
+                self.initial_memory_values.push(value);
             }
-            Statement::If(if_stmt) => {
-                let cond = if_stmt
-                    .cond
-                    .clone()
-                    .eval_value(context)
-                    .and_then(|value| value.to_usize());
-                let Some(cond) = cond else {
-                    return Ok(());
-                };
-                let branch = if cond != 0 {
-                    &if_stmt.true_side
-                } else {
-                    &if_stmt.false_side
-                };
-                for stmt in branch {
-                    self.parse_initial_statement(stmt, context)?;
-                }
-                Ok(())
-            }
-            Statement::For(for_stmt) => {
-                let Some(iter) = for_stmt.range.eval_iter(context) else {
-                    return Ok(());
-                };
-                for i in iter {
-                    if let Some(var) = context.variables.get_mut(&for_stmt.var_id)
-                        && let Some(total_width) = for_stmt.var_type.total_width()
-                    {
-                        let val = Value::new(i as u64, total_width, for_stmt.var_type.signed);
-                        var.set_value(&[], val, None);
-                    }
-                    for stmt in &for_stmt.body {
-                        self.parse_initial_statement(stmt, context)?;
-                    }
-                }
-                Ok(())
-            }
-            Statement::Null => Ok(()),
-            Statement::Unsupported(token) => Err(ParserError::illegal_context(
-                "initial statement",
-                "only direct $readmemh calls are valid in simulator-lowered initial blocks",
-                Some(token),
-            )),
-            _ => Ok(()),
-        }
+            // Hierarchical destinations are resolved after instance elaboration.
+            Ok(())
+        })
     }
 
     fn parse_readmem_file(
@@ -2213,15 +2149,6 @@ impl<'a> ModuleParser<'a> {
         radix: u32,
         context: &mut veryl_analyzer::Context,
     ) -> Result<ModuleInitialMemoryValue, ParserError> {
-        let Some(filename) = Self::static_string_expr(&filename_arg.0) else {
-            return Err(ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
-                "$readmemh filename expression",
-                "filename must be a compile-time string",
-                Some(&filename_arg.0.comptime().token),
-            ));
-        };
         let dst = match output {
             [dst] if dst.select.is_empty() && dst.select.1.is_none() => dst,
             [dst] => {
@@ -2291,80 +2218,17 @@ impl<'a> ModuleParser<'a> {
             ));
         }
 
-        let path = self.resolve_readmem_path(&filename, &filename_arg.0.comptime().token);
-        let timing = readmem_timing_enabled();
-        let total_start = timing.then(Instant::now);
-        if timing {
-            tracing::debug!(
-                "[readmem-timing] start file={} depth={} element_width={} start_addr={} radix={}",
-                path.display(),
-                depth,
-                element_width,
-                start_addr,
-                radix
-            );
-        }
-
-        let read_start = timing.then(Instant::now);
-        let content = std::fs::read_to_string(&path).map_err(|err| {
-            ParserError::unsupported(
-                111,
-                LoweringPhase::SimulatorParser,
-                "$readmemh file",
-                format!("failed to read {}: {err}", path.display()),
-                Some(&filename_arg.0.comptime().token),
-            )
-        })?;
-        if let Some(start) = read_start {
-            tracing::debug!(
-                "[readmem-timing] read file={} bytes={} elapsed={:?}",
-                path.display(),
-                content.len(),
-                start.elapsed()
-            );
-        }
-
-        let parse_start = timing.then(Instant::now);
-        let writes = parse_memory_write_runs(
-            &content,
-            radix,
-            element_width,
-            start_addr,
-            depth,
-            &dst.token,
-        )?;
-        if let Some(start) = parse_start {
-            tracing::debug!(
-                "[readmem-timing] parse file={} words={} runs={} elapsed={:?}",
-                path.display(),
-                writes.words,
-                writes.runs.len(),
-                start.elapsed()
-            );
-        }
-        if let Some(start) = total_start {
-            tracing::debug!(
-                "[readmem-timing] done file={} elapsed={:?}",
-                path.display(),
-                start.elapsed()
-            );
-        }
-
         Ok(ModuleInitialMemoryValue {
             address: dst.id,
-            data: InitialMemoryData::Writes(writes.runs),
+            data: read_memory_file(
+                filename_arg,
+                radix,
+                element_width,
+                start_addr,
+                depth,
+                &dst.token,
+            )?,
         })
-    }
-
-    fn resolve_readmem_path(
-        &self,
-        filename: &str,
-        token: &veryl_parser::token_range::TokenRange,
-    ) -> std::path::PathBuf {
-        let source_path = token.beg.source.to_string();
-        let source_path = (!source_path.is_empty()).then(|| std::path::Path::new(&source_path));
-        let cwd = std::env::current_dir().ok();
-        resolve_readmem_path_with_fallback(filename, source_path, cwd.as_deref())
     }
 
     fn parse_inner(mut self) -> Result<SimModule, ParserError> {
@@ -2756,6 +2620,165 @@ fn collect_glue_sources(
     let mut set = HashSet::default();
     collect_glue_sources_with_window(expr, None, arena, &mut set);
     set
+}
+
+pub(crate) fn visit_initial_statement(
+    stmt: &Statement,
+    context: &mut veryl_analyzer::Context,
+    visit: &mut impl FnMut(
+        &SystemFunctionInput,
+        &SystemFunctionOutput,
+        &mut veryl_analyzer::Context,
+    ) -> Result<(), ParserError>,
+) -> Result<(), ParserError> {
+    match stmt {
+        Statement::SystemFunctionCall(call) => {
+            if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
+                visit(filename, output, context)?;
+            }
+            Ok(())
+        }
+        Statement::If(if_stmt) => {
+            let cond = if_stmt
+                .cond
+                .clone()
+                .eval_value(context)
+                .and_then(|value| value.to_usize());
+            let Some(cond) = cond else {
+                return Ok(());
+            };
+            let branch = if cond != 0 {
+                &if_stmt.true_side
+            } else {
+                &if_stmt.false_side
+            };
+            for stmt in branch {
+                visit_initial_statement(stmt, context, visit)?;
+            }
+            Ok(())
+        }
+        Statement::For(for_stmt) => {
+            let Some(iter) = for_stmt.range.eval_iter(context) else {
+                return Ok(());
+            };
+            for i in iter {
+                if let Some(var) = context.variables.get_mut(&for_stmt.var_id)
+                    && let Some(total_width) = for_stmt.var_type.total_width()
+                {
+                    let val = Value::new(i as u64, total_width, for_stmt.var_type.signed);
+                    var.set_value(&[], val, None);
+                }
+                for stmt in &for_stmt.body {
+                    visit_initial_statement(stmt, context, visit)?;
+                }
+            }
+            Ok(())
+        }
+        Statement::Null => Ok(()),
+        Statement::Unsupported(token) => Err(ParserError::illegal_context(
+            "initial statement",
+            "only direct $readmemh calls are valid in simulator-lowered initial blocks",
+            Some(token),
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn read_memory_file(
+    filename_arg: &SystemFunctionInput,
+    radix: u32,
+    element_width: usize,
+    start_addr: usize,
+    depth: usize,
+    destination_token: &veryl_parser::token_range::TokenRange,
+) -> Result<InitialMemoryData, ParserError> {
+    let Some(filename) = static_string_expr(&filename_arg.0) else {
+        return Err(ParserError::unsupported(
+            111,
+            LoweringPhase::SimulatorParser,
+            "$readmemh filename expression",
+            "filename must be a compile-time string",
+            Some(&filename_arg.0.comptime().token),
+        ));
+    };
+    let path = resolve_readmem_path(&filename, &filename_arg.0.comptime().token);
+    let timing = readmem_timing_enabled();
+    let total_start = timing.then(Instant::now);
+    if timing {
+        tracing::debug!(
+            "[readmem-timing] start file={} depth={} element_width={} start_addr={} radix={}",
+            path.display(),
+            depth,
+            element_width,
+            start_addr,
+            radix
+        );
+    }
+
+    let read_start = timing.then(Instant::now);
+    let content = std::fs::read_to_string(&path).map_err(|err| {
+        ParserError::unsupported(
+            111,
+            LoweringPhase::SimulatorParser,
+            "$readmemh file",
+            format!("failed to read {}: {err}", path.display()),
+            Some(&filename_arg.0.comptime().token),
+        )
+    })?;
+    if let Some(start) = read_start {
+        tracing::debug!(
+            "[readmem-timing] read file={} bytes={} elapsed={:?}",
+            path.display(),
+            content.len(),
+            start.elapsed()
+        );
+    }
+
+    let parse_start = timing.then(Instant::now);
+    let writes = parse_memory_write_runs(
+        &content,
+        radix,
+        element_width,
+        start_addr,
+        depth,
+        destination_token,
+    )?;
+    if let Some(start) = parse_start {
+        tracing::debug!(
+            "[readmem-timing] parse file={} words={} runs={} elapsed={:?}",
+            path.display(),
+            writes.words,
+            writes.runs.len(),
+            start.elapsed()
+        );
+    }
+    if let Some(start) = total_start {
+        tracing::debug!(
+            "[readmem-timing] done file={} elapsed={:?}",
+            path.display(),
+            start.elapsed()
+        );
+    }
+
+    Ok(InitialMemoryData::Writes(writes.runs))
+}
+
+fn resolve_readmem_path(
+    filename: &str,
+    token: &veryl_parser::token_range::TokenRange,
+) -> std::path::PathBuf {
+    let source_path = token.beg.source.to_string();
+    let source_path = (!source_path.is_empty()).then(|| std::path::Path::new(&source_path));
+    let cwd = std::env::current_dir().ok();
+    resolve_readmem_path_with_fallback(filename, source_path, cwd.as_deref())
+}
+
+fn static_string_expr(expr: &Expression) -> Option<String> {
+    if !expr.comptime().r#type.is_string() {
+        return None;
+    }
+    let value = expr.comptime().get_value().ok()?;
+    byte_value_to_string(value)
 }
 
 fn readmem_timing_enabled() -> bool {

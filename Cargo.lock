@@ -784,6 +784,7 @@ dependencies = [
 name = "celox-testbench"
 version = "0.4.7"
 dependencies = [
+ "celox-design",
  "num-bigint",
  "num-traits",
  "serde",

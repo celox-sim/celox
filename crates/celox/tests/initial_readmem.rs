@@ -201,38 +201,6 @@ fn test_initial_readmemh_multiple_files_merge_in_order(sim) {
 }
 
 #[test]
-fn test_initial_readmemh_reports_unsupported_hierarchical_destination() {
-    let code = r#"
-        module Memory {
-            #[allow(unassign_variable)]
-            var mem: logic<8>[4];
-        }
-
-        #[test(Top)]
-        module Top {
-            inst dut: Memory;
-            initial {
-                $readmemh("unused.hex", dut.mem);
-                $finish();
-            }
-        }
-    "#;
-
-    let err = Simulator::builder(code, "Top")
-        .build()
-        .expect_err("hierarchical $readmemh must not silently discard the destination");
-    match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            feature, detail, ..
-        }) => {
-            assert_eq!(*feature, "$readmemh destination");
-            assert!(detail.contains("hierarchical destinations"));
-        }
-        other => panic!("expected unsupported hierarchical destination error, got {other:?}"),
-    }
-}
-
-#[test]
 fn test_initial_readmemb_reports_illegal_context() {
     let mem_path = temp_mem_file("readmemb", "00010010\n00110100\n01010110\n01111000\n");
     let code = format!(

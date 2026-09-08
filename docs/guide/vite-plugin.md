@@ -62,6 +62,36 @@ Importing an ordinary, non-test Veryl module instead returns a typed
 `Simulator` or `Simulation`, and the same import mechanism can be used by other
 Vite-based tools.
 
+### Loading an Instantiated Memory (Veryl HEAD)
+
+The `develop` lane with Veryl HEAD supports `$readmemh` destinations inside an
+instance, including nested instances and parameterized memories:
+
+```veryl
+module Memory {
+    #[allow(unassign_variable)]
+    var mem: logic<8>[256];
+}
+
+#[test(memory_test)]
+module memory_test {
+    inst dut: Memory;
+    initial {
+        $readmemh("program.hex", dut.mem);
+        $assert(dut.mem[0] == 8'h2a);
+        $finish();
+    }
+}
+```
+
+Hex files are read when the simulator is compiled. In the root testbench, each
+memory write executes at its statement position, so conditions, repeated calls,
+and clock edges retain their order. The destination must be a whole unpacked
+array. Address directives and X/Z values use the same parsing as local memory
+initialization; X/Z masks are retained when 4-state simulation is enabled.
+Relative paths are resolved from the Veryl source file, with the working
+directory as a fallback.
+
 ### Custom Project Root
 
 If `Veryl.toml` is not in the Vite root or a parent directory, specify the path explicitly:
