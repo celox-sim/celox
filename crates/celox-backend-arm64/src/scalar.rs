@@ -3135,6 +3135,11 @@ fn move_wide_plan(value: u64) -> MoveWidePlan {
     }
 }
 
+pub(crate) fn is_single_instruction_constant(value: u64) -> bool {
+    move_wide_plan(value).instruction_count == 1
+        || logical_immediate_encoding(value, 64, 1, 31, false).is_some()
+}
+
 fn emit_load_imm(ops: &mut VecAssembler<Aarch64Relocation>, register: u8, value: u64) {
     let plan = move_wide_plan(value);
     if plan.instruction_count > 1

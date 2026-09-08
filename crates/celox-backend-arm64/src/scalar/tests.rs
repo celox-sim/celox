@@ -23,6 +23,80 @@ fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
 }
 
 #[test]
+fn spilled_constants_survive_both_phi_edges_and_repeated_calls() {
+    let values = (0..32)
+        .map(|index| match index % 4 {
+            0 => index as u64,
+            1 => 1_u64 << index,
+            2 => 0x00ff_00ff_00ff_00ff,
+            _ => 0x0123_4567_89ab_cdef_u64.wrapping_add(index as u64),
+        })
+        .collect::<Vec<_>>();
+    let mut entry = MBlock::new(BlockId(0));
+    for (index, &value) in values.iter().enumerate() {
+        entry.push(MInst::LoadImm {
+            dst: VReg(index as u32),
+            value,
+        });
+    }
+    entry.push(MInst::Load {
+        dst: VReg(32),
+        base: BaseReg::SimState,
+        offset: 0,
+        size: OpSize::S64,
+    });
+    entry.push(MInst::Branch {
+        cond: VReg(32),
+        true_bb: BlockId(1),
+        false_bb: BlockId(2),
+    });
+    let mut blocks = vec![entry];
+    for id in 1..=2 {
+        let mut block = MBlock::new(BlockId(id));
+        for index in 0..32 {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: (index + 1) * 8,
+                src: VReg(index as u32),
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Jump { target: BlockId(3) });
+        blocks.push(block);
+    }
+    let mut join = MBlock::new(BlockId(3));
+    join.phis.push(PhiNode {
+        dst: VReg(33),
+        sources: vec![(BlockId(1), VReg(1)), (BlockId(2), VReg(3))],
+    });
+    join.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 264,
+        src: VReg(33),
+        size: OpSize::S64,
+    });
+    join.push(MInst::Return);
+    blocks.push(join);
+    let (jit, mut state) = compile(MFunction::new(blocks, vec![]), 272);
+    for taken in [true, false, true, false] {
+        state[..272].fill(0xa5);
+        state[..8].copy_from_slice(&u64::from(taken).to_le_bytes());
+        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+        for (index, &value) in values.iter().enumerate() {
+            let offset = (index + 1) * 8;
+            assert_eq!(
+                u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap()),
+                value
+            );
+        }
+        assert_eq!(
+            u64::from_le_bytes(state[264..272].try_into().unwrap()),
+            values[if taken { 1 } else { 3 }]
+        );
+    }
+}
+
+#[test]
 fn bitfield_insert_preserves_inputs_when_registers_overlap() {
     for (lsb, width) in [(0, 64), (0, 1), (3, 5), (7, 32), (31, 33), (63, 1)] {
         for (dst, src) in [(1, 2), (2, 2), (3, 2), (1, 1), (3, 1)] {
