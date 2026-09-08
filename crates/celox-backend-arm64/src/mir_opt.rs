@@ -9,6 +9,8 @@ mod bitfield;
 pub(crate) mod circular_scan;
 mod copies;
 pub(crate) mod counted_loop;
+pub(crate) mod exclusive_loop;
+pub(crate) mod if_select;
 mod known_bits;
 mod memory;
 
@@ -55,6 +57,8 @@ pub(crate) fn optimize(function: &mut MFunction) {
     memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
     copies::fold(function);
+    exclusive_loop::run(function);
+    if_select::run(function);
     fold_branch_predicates(function);
 }
 

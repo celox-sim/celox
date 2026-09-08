@@ -4,6 +4,8 @@ use crate::mir::{MBlock, MemoryAliasRange, PhiNode};
 
 mod circular_scan;
 mod counted_loop;
+mod exclusive_loop;
+mod if_select;
 mod memory;
 
 fn branch_range_function(predicate: bool, stores: usize) -> (MFunction, Assignment<VReg>) {
