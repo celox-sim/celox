@@ -111,13 +111,32 @@ assert_eq "$GATE_VERYL_TIERED_STARTUP_NS" 8 "Veryl tiered startup interval"
 assert_eq "$GATE_VERYL_TIERED_EXECUTE_NS" 50 "Veryl tiered execute interval"
 assert_eq "$GATE_VERYL_TIERED_TOTAL_NS" 59 "Veryl tiered end-to-end interval"
 
-for failure in missing sync no-compiled duplicate-stats wrong-test wrong-time; do
+# Tiered execution may finish before C compilation, or start after it is
+# ready. Both are valid end-to-end measurements with the same timing fields.
+for dispatches in '0 17800008' '100 0'; do
+    read -r compiled fallback <<<"$dispatches"
+    valid="$TMP/veryl-tiered-$compiled-$fallback"
+    write_gate_results "$valid" 200 100
+    sed -i "s/compiled_dispatches=100 fallback_dispatches=200/compiled_dispatches=$compiled fallback_dispatches=$fallback/" \
+        "$valid/veryl-cc-tiered.log"
+    validate_gate_results "$valid/results.tsv" "$valid" \
+        || fail "Veryl tiered dispatches $dispatches were rejected by the gate"
+    assert_eq "$GATE_VERYL_TIERED_STARTUP_NS" 8 "Veryl tiered startup with dispatches $dispatches"
+    assert_eq "$GATE_VERYL_TIERED_EXECUTE_NS" 50 "Veryl tiered execution with dispatches $dispatches"
+    assert_eq "$GATE_VERYL_TIERED_TOTAL_NS" 59 "Veryl tiered end-to-end with dispatches $dispatches"
+    node "$ROOT/scripts/convert-heliodor-bench.mjs" "$valid/results.tsv" "$valid/converted.json" --require-tiered >/dev/null \
+        || fail "Veryl tiered dispatches $dispatches could not be converted for the dashboard"
+done
+
+for failure in missing sync no-dispatches missing-stats malformed-stats duplicate-stats wrong-test wrong-time; do
     invalid="$TMP/veryl-tiered-$failure"
     write_gate_results "$invalid" 200 100
     case "$failure" in
         missing) sed -i '/^veryl-cc-tiered/d' "$invalid/results.tsv" ;;
         sync) sed -i 's/aot_c_async=true/aot_c_async=false/' "$invalid/veryl-cc-tiered.log" ;;
-        no-compiled) sed -i 's/compiled_dispatches=100/compiled_dispatches=0/' "$invalid/veryl-cc-tiered.log" ;;
+        no-dispatches) sed -i 's/compiled_dispatches=100 fallback_dispatches=200/compiled_dispatches=0 fallback_dispatches=0/' "$invalid/veryl-cc-tiered.log" ;;
+        missing-stats) sed -i '/^VERYL_TIERED_STATS/d' "$invalid/veryl-cc-tiered.log" ;;
+        malformed-stats) sed -i 's/fallback_dispatches=200/fallback_dispatches=-1/' "$invalid/veryl-cc-tiered.log" ;;
         duplicate-stats) sed -n '/^VERYL_TIERED_STATS/p' "$unit/veryl-cc-tiered.log" >>"$invalid/veryl-cc-tiered.log" ;;
         wrong-test) sed -i '/^VERYL_TIERED_STATS/s/test_soc_linux_boot/other_test/' "$invalid/veryl-cc-tiered.log" ;;
         wrong-time) sed -i 's/compile_ns=8/compile_ns=9/' "$invalid/veryl-cc-tiered.log" ;;
