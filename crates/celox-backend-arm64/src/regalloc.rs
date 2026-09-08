@@ -845,7 +845,11 @@ fn color_intervals(
             }
         }
         for instruction in &block.insts {
-            if let MInst::Mov { dst, src } = *instruction {
+            if let MInst::Mov { dst, src } | MInst::BitInsert { dst, base: src, .. } = *instruction
+            {
+                // BFI updates its base operand. Reusing that register avoids
+                // a move when the base dies here; interference still protects
+                // both operands if either value remains live afterwards.
                 affinities.entry(dst).or_default().insert(src);
                 affinities.entry(src).or_default().insert(dst);
             }
