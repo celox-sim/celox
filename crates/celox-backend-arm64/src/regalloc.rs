@@ -259,6 +259,28 @@ const ALLOCATABLE_REGISTERS: [Arm64Reg; 24] = [
     Arm64Reg::new(27),
 ];
 
+// Temporary experiment controls, confined to perf/heliodor-arm64-tuning.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "temporary measurement branch controls, excluded from the production PR"
+)]
+pub(crate) fn tuning_value(name: &str, default: usize, maximum: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+        .min(maximum)
+}
+
+fn allocatable_registers() -> &'static [Arm64Reg] {
+    let pages = tuning_value("CELOX_ARM64_TUNE_PAGES", 0, 4);
+    &ALLOCATABLE_REGISTERS[..ALLOCATABLE_REGISTERS.len() - pages]
+}
+
+fn spill_target_capacity() -> usize {
+    allocatable_registers().len() - tuning_value("CELOX_ARM64_TUNE_RESERVE", 6, 6)
+}
+
 pub(crate) struct TargetAllocation {
     pub(crate) allocated: AllocatedFunction,
     pub(crate) spill_frame_size: u32,
@@ -446,7 +468,7 @@ fn select_spill_batch(
     // The widest target instruction has five uses and one definition. Keep
     // that many registers free so a spilled row's local reload/definition
     // temporaries do not immediately create a second pressure wave.
-    let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(6);
+    let target_capacity = spill_target_capacity();
     let mut selected = BTreeSet::new();
     let mut peak = Vec::new();
     let mut block_segments = vec![Vec::new(); function.blocks.len()];
@@ -838,7 +860,7 @@ fn color_intervals(
             .find(|register| !used.contains(register));
         let register = preferred
             .or_else(|| {
-                ALLOCATABLE_REGISTERS
+                allocatable_registers()
                     .iter()
                     .copied()
                     .find(|register| !used.contains(register))
@@ -1244,7 +1266,8 @@ mod tests {
 
     #[test]
     fn prefers_long_lived_values_with_fewer_uses_for_spilling() {
-        let mut instructions = (0..19_u32)
+        let count = spill_target_capacity() as u32 + 1;
+        let mut instructions = (0..count)
             .map(|value| MInst::LoadImm {
                 dst: VReg(value),
                 value: u64::from(value),
@@ -1262,7 +1285,7 @@ mod tests {
             src: VReg(0),
             size: OpSize::S64,
         });
-        instructions.extend((2..19_u32).map(|value| MInst::Store {
+        instructions.extend((2..count).map(|value| MInst::Store {
             base: BaseReg::SimState,
             offset: 800 + (value as i32) * 8,
             src: VReg(value),

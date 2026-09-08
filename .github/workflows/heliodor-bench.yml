@@ -366,6 +366,11 @@ jobs:
             done
           done
 
+      - name: Measure ARM64 register policies
+        if: inputs.arm64_profile && github.ref == 'refs/heads/perf/heliodor-arm64-tuning'
+        shell: bash
+        run: bash scripts/tune-heliodor-arm64.sh
+
       - name: Capture ARM64 profile
         if: inputs.arm64_profile
         shell: bash

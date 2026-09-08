@@ -12,6 +12,7 @@ pub(super) fn localize_phi_inputs(
     function: &mut MFunction,
     next_value: &mut u32,
 ) -> Result<(), TargetRegallocError> {
+    let localize_values = tuning_value("CELOX_ARM64_TUNE_PHI_VALUES", 1, 1) != 0;
     let definitions = function
         .blocks
         .iter()
@@ -46,6 +47,9 @@ pub(super) fn localize_phi_inputs(
                 let Some(&(value, definition, distance)) = definitions.get(source) else {
                     continue;
                 };
+                if matches!(value, EdgeInput::Value(_)) && !localize_values {
+                    continue;
+                }
                 if definition == *predecessor && distance <= 8 {
                     continue;
                 }

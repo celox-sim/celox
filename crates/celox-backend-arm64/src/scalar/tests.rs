@@ -416,7 +416,9 @@ fn spilled_shared_values_do_not_spill_the_loop_induction() {
         .unwrap();
         let allocated = allocation.allocated;
         assert!(allocated.function.spill_homes.contains_key(&VReg(0)));
-        assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
+        if constant || crate::regalloc::tuning_value("CELOX_ARM64_TUNE_PHI_VALUES", 1, 1) != 0 {
+            assert!(!allocated.function.spill_homes.contains_key(&VReg(33)));
+        }
         let emitted = emit_function(
             &allocated.function,
             &allocated.assignment,
