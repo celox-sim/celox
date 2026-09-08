@@ -2,6 +2,8 @@ use super::*;
 use crate::jit_mem::JitCode;
 use crate::mir::{MBlock, MemoryAliasRange, PhiNode};
 
+mod circular_scan;
+mod counted_loop;
 mod memory;
 
 fn branch_range_function(predicate: bool, stores: usize) -> (MFunction, Assignment<VReg>) {

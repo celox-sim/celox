@@ -109,7 +109,10 @@ pub(crate) fn legalize_variable_shift_counts(function: &mut MFunction) {
 }
 
 pub(crate) fn value_upper_bounds(function: &MFunction) -> BTreeMap<VReg, u64> {
-    let mut bounds = BTreeMap::new();
+    let mut bounds = crate::mir_opt::counted_loop::index_zeros(function)
+        .into_iter()
+        .map(|(value, zero)| (value, !zero))
+        .collect::<BTreeMap<_, _>>();
     let mut changed = true;
     while changed {
         changed = false;

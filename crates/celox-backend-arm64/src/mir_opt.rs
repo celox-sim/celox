@@ -6,7 +6,9 @@ use crate::HashMap;
 use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 mod bitfield;
+pub(crate) mod circular_scan;
 mod copies;
+pub(crate) mod counted_loop;
 mod known_bits;
 mod memory;
 
@@ -28,6 +30,7 @@ pub(crate) fn optimize(function: &mut MFunction) {
         propagate_exact_copies(function);
         dead_code_eliminate(function);
     }
+    counted_loop::run(function);
     canonicalize_identity_operations(function);
     fuse_compare_selects(function);
     eliminate_nearby_common_expressions(function);
@@ -37,6 +40,9 @@ pub(crate) fn optimize(function: &mut MFunction) {
     propagate_exact_copies(function);
     dead_code_eliminate(function);
     known_bits::fold_packed_bit_loads(function);
+    dead_code_eliminate(function);
+    counted_loop::hoist_invariant_loads(function);
+    circular_scan::run(function);
     dead_code_eliminate(function);
     bitfield::run(function);
     dead_code_eliminate(function);
