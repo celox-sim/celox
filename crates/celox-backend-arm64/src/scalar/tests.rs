@@ -178,6 +178,79 @@ fn nearby_spill_uses_preserve_snapshots_under_register_pressure() {
 }
 
 #[test]
+fn scheduling_preserves_snapshots_across_partial_and_indexed_writes() {
+    for alias_range in [None, MemoryAliasRange::new(0, 32 * 8)] {
+        let mut block = MBlock::new(BlockId(0));
+        for index in 0..32 {
+            block.push(MInst::Load {
+                dst: VReg(index),
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::LoadImm {
+            dst: VReg(32),
+            value: 0xa5,
+        });
+        for index in 0..32 {
+            block.push(MInst::Load {
+                dst: VReg(33 + index),
+                base: BaseReg::SimState,
+                offset: ((96 + index) * 8) as i32,
+                size: OpSize::S64,
+            });
+            block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 0,
+                index: VReg(33 + index),
+                src: VReg(32),
+                size: OpSize::S8,
+                alias_range,
+            });
+            block.push(MInst::Load {
+                dst: VReg(65 + index),
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: ((32 + index) * 8) as i32,
+                src: VReg(index),
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: ((64 + index) * 8) as i32,
+                src: VReg(65 + index),
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Return);
+        let (jit, mut state) = compile(MFunction::new(vec![block], vec![]), 128 * 8);
+        for seed in [0, 0x9e37_79b9_7f4a_7c15_u64, u64::MAX - 31] {
+            let values = (0..32)
+                .map(|index| seed.wrapping_add(index))
+                .collect::<Vec<_>>();
+            state[..128 * 8].fill(0);
+            for (index, value) in values.iter().enumerate() {
+                state[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+                state[(96 + index) * 8..(97 + index) * 8]
+                    .copy_from_slice(&(index as u64 * 8 + 3).to_le_bytes());
+            }
+            assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+            for (index, &value) in values.iter().enumerate() {
+                let read =
+                    |word| u64::from_le_bytes(state[word * 8..word * 8 + 8].try_into().unwrap());
+                assert_eq!(read(32 + index), value);
+                assert_eq!(read(64 + index), (value & !(0xff << 24)) | (0xa5 << 24));
+            }
+        }
+    }
+}
+
+#[test]
 fn spilled_constants_survive_both_phi_edges_and_repeated_calls() {
     let values = (0..32)
         .map(|index| match index % 4 {

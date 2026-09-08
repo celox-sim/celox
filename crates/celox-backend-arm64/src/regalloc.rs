@@ -18,6 +18,8 @@ use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, 
 use crate::mir::{AllocatedFunction, BlockId, MFunction, MInst, VReg};
 use crate::{Arm64Reg, HashMap};
 
+mod schedule;
+
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +284,13 @@ pub(crate) fn allocate_with_spills(
     if is_cancelled() {
         return Err(TargetRegallocError::Cancelled);
     }
+    let initial_intervals = analyze_live_intervals(&initial_facts)
+        .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
+    schedule::run(
+        &mut function,
+        &initial_intervals,
+        ALLOCATABLE_REGISTERS.len().saturating_sub(6),
+    );
     let mut candidates = initial_facts
         .blocks
         .iter()
@@ -1289,6 +1298,9 @@ mod tests {
                 size: OpSize::S64,
             })
             .collect::<Vec<_>>();
+        // Keep a pressure boundary: scheduling independent loads and stores
+        // together would otherwise remove the need for spill reconstruction.
+        instructions.push(MInst::KeepAlive { src: VReg(0) });
         instructions.extend((0..26).map(|value| MInst::Store {
             base: BaseReg::SimState,
             offset: value * 8,
@@ -1458,6 +1470,7 @@ mod tests {
                 dst: VReg(first + value),
                 value: u64::from(first + value),
             }));
+            instructions.push(MInst::KeepAlive { src: VReg(first) });
             instructions.extend((0..26).map(|value| MInst::Store {
                 base: BaseReg::SimState,
                 offset: i32::try_from((first + value) * 8).unwrap(),
