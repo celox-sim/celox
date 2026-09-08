@@ -21,6 +21,15 @@ on:
   schedule:
     - cron: "37 2 * * *"
   workflow_dispatch:
+    inputs:
+      arm64_profile:
+        description: Capture an ARM64 Linux boot profile without publishing history
+        type: boolean
+        default: false
+      arm64_profile_run_id:
+        description: Reuse profiling runners from this run ID (requires arm64_profile)
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -32,7 +41,7 @@ env:
 # benchmark runs. Serialize master publishers with bench.yml, while develop uses
 # a separate group so its dispatch cannot replace a pending master nightly run.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
+  group: ${{ inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -79,6 +88,7 @@ jobs:
           bash scripts/tests/run-heliodor-bench-gate.sh
 
   heliodor:
+    if: ${{ !inputs.arm64_profile }}
     # Keep the x86_64 gate on every workflow trigger. Only the ARM64 PR lane is
     # change-gated by arm64-changes below.
     runs-on: ubuntu-latest
@@ -246,6 +256,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     env:
@@ -261,14 +272,79 @@ jobs:
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
+
+      - name: Reuse ARM64 profiling runners
+        if: inputs.arm64_profile && inputs.arm64_profile_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: heliodor-arm64-profiling-runners
+          path: target/release
+          run-id: ${{ inputs.arm64_profile_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare ARM64 profiling
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic
+          sudo sysctl kernel.perf_event_paranoid=-1
+          perf_bin=
+          for candidate in /usr/lib/linux-tools/*/perf; do
+            if [[ -x "$candidate" ]]; then perf_bin="$candidate"; fi
+          done
+          test -n "$perf_bin"
+          echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
+          lscpu | tee heliodor-arm64-host.txt
+          mkdir -p "$HELIODOR_RESULTS_DIR"
+          echo "CELOX_PERF_MAP=1" >> "$GITHUB_ENV"
 
       - name: Boot Linux with synchronous and tiered backends on ARM64
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
         shell: bash
         env:
           HELIODOR_RUNNERS: veryl-cc-sync celox celox-tiered veryl-cc-tiered
           HELIODOR_TIMEOUT_SEC: "1200"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
+
+      - name: Capture ARM64 profile
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          trap cleanup_heliodor_fallback EXIT
+          prepare
+          chmod +x "$CELOX_RUNNER_BIN"
+          collect_test_source_files test_soc_linux_boot sources
+          args=()
+          for source in "${sources[@]}"; do args+=(--source-file "$source"); done
+          cd "$HELIODOR_DIR"
+          "$PERF_BIN" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
+            "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+            --backend native --opt-level o2 "${args[@]}" \
+            --dump-ir-dir "$HELIODOR_RESULTS_DIR/profile-ir" --dump-ir-and-run \
+            > "$HELIODOR_RESULTS_DIR/profile-linux.log" 2>&1
+
+      - name: Summarize ARM64 profile
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          cp /tmp/perf-*.map "$HELIODOR_RESULTS_DIR/"
+          "$PERF_BIN" report --stdio --no-children --percent-limit 0.2 -i "$HELIODOR_RESULTS_DIR/perf.data" | tee "$HELIODOR_RESULTS_DIR/perf-report.txt"
+          "$PERF_BIN" script -i "$HELIODOR_RESULTS_DIR/perf.data" -F ip,sym,dso > "$HELIODOR_RESULTS_DIR/perf-samples.txt"
+
+      - name: Upload ARM64 profiling runners
+        if: inputs.arm64_profile && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-arm64-profiling-runners
+          retention-days: 7
+          path: |
+            target/release/celox-heliodor
+            target/release/veryl-heliodor
 
       - name: Upload nightly ARM64 Linux boot results
         if: always()
@@ -279,11 +355,16 @@ jobs:
             heliodor-arm64-output.txt
             target/heliodor-arm64/results/results.tsv
             target/heliodor-arm64/results/*.log
+            target/heliodor-arm64/results/perf*
+            target/heliodor-arm64/results/profile-ir/mir.txt
+            target/heliodor-arm64/results/profile-ir/native_optimized.sir
+            heliodor-arm64-host.txt
 
   publish-linux-boot:
     name: Publish Linux boot benchmarks
     if: >-
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      !inputs.arm64_profile &&
       github.ref == 'refs/heads/master'
     needs: [heliodor, arm64-linux-boot-full]
     runs-on: ubuntu-latest

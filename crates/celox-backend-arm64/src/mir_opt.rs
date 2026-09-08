@@ -5,6 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::HashMap;
 use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
+mod bitfield;
+mod known_bits;
+mod memory;
+
 /// Recover the compact immediate and copy forms expected by AArch64 emission.
 ///
 /// Instruction selection deliberately keeps SIR lowering straightforward, so
@@ -14,6 +18,14 @@ use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 pub(crate) fn optimize(function: &mut MFunction) {
     fold_constants(function);
     lower_immediate_uses(function);
+    for _ in 0..3 {
+        known_bits::fold(function);
+        fold_constants(function);
+        lower_immediate_uses(function);
+        canonicalize_identity_operations(function);
+        propagate_exact_copies(function);
+        dead_code_eliminate(function);
+    }
     canonicalize_identity_operations(function);
     fuse_compare_selects(function);
     eliminate_nearby_common_expressions(function);
@@ -21,6 +33,18 @@ pub(crate) fn optimize(function: &mut MFunction) {
     dead_code_eliminate(function);
     remove_redundant_low_masks(function);
     propagate_exact_copies(function);
+    dead_code_eliminate(function);
+    known_bits::fold_packed_bit_loads(function);
+    dead_code_eliminate(function);
+    bitfield::run(function);
+    dead_code_eliminate(function);
+    memory::run(function);
+    known_bits::fold(function);
+    fold_constants(function);
+    lower_immediate_uses(function);
+    canonicalize_identity_operations(function);
+    propagate_exact_copies(function);
+    memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
     fold_branch_predicates(function);
 }
@@ -653,84 +677,13 @@ fn propagate_exact_copies(function: &mut MFunction) {
 /// these values is an exact copy and can be propagated without changing its
 /// width-normalization semantics.
 fn known_u32_values(function: &MFunction) -> BTreeSet<VReg> {
-    let mut known = BTreeSet::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in &function.blocks {
-            for phi in &block.phis {
-                if !phi.sources.is_empty()
-                    && phi.sources.iter().all(|(_, source)| known.contains(source))
-                {
-                    changed |= known.insert(phi.dst);
-                }
-            }
-            for instruction in &block.insts {
-                let value = match instruction {
-                    MInst::LoadImm { dst, value } if *value <= u64::from(u32::MAX) => Some(*dst),
-                    MInst::Load { dst, size, .. }
-                    | MInst::LoadPtr { dst, size, .. }
-                    | MInst::LoadIndexed { dst, size, .. }
-                    | MInst::LoadPtrIndexed { dst, size, .. }
-                        if *size != crate::mir::OpSize::S64 =>
-                    {
-                        Some(*dst)
-                    }
-                    MInst::Mov32 { dst, .. }
-                    | MInst::Add32 { dst, .. }
-                    | MInst::Sub32 { dst, .. }
-                    | MInst::Mul32 { dst, .. }
-                    | MInst::And32 { dst, .. }
-                    | MInst::Or32 { dst, .. }
-                    | MInst::Xor32 { dst, .. }
-                    | MInst::AndImm32 { dst, .. }
-                    | MInst::Cmp { dst, .. }
-                    | MInst::CmpImm { dst, .. }
-                    | MInst::Popcnt { dst, .. }
-                    | MInst::Bsf { dst, .. } => Some(*dst),
-                    MInst::Mov { dst, src } if known.contains(src) => Some(*dst),
-                    MInst::AndImm { dst, imm, .. } if *imm <= u64::from(u32::MAX) => Some(*dst),
-                    MInst::OrImm { dst, src, imm }
-                        if *imm <= u64::from(u32::MAX) && known.contains(src) =>
-                    {
-                        Some(*dst)
-                    }
-                    MInst::ShrImm { dst, src, imm } if *imm >= 32 || known.contains(src) => {
-                        Some(*dst)
-                    }
-                    MInst::Select {
-                        dst,
-                        true_val,
-                        false_val,
-                        ..
-                    }
-                    | MInst::CmpSelect {
-                        dst,
-                        true_val,
-                        false_val,
-                        ..
-                    }
-                    | MInst::CmpImmSelect {
-                        dst,
-                        true_val,
-                        false_val,
-                        ..
-                    }
-                    | MInst::GuardedCmpSelect {
-                        dst,
-                        true_val,
-                        false_val,
-                        ..
-                    } if known.contains(true_val) && known.contains(false_val) => Some(*dst),
-                    _ => None,
-                };
-                if let Some(value) = value {
-                    changed |= known.insert(value);
-                }
-            }
-        }
-    }
-    known
+    known_bits::known_zeros(function)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, zero)| {
+            (zero & !u64::from(u32::MAX) == !u64::from(u32::MAX)).then_some(VReg(index as u32))
+        })
+        .collect()
 }
 
 fn dead_code_eliminate(function: &mut MFunction) {
@@ -934,7 +887,7 @@ mod tests {
             },
             MInst::LoadImm {
                 dst: VReg(3),
-                value: 17,
+                value: 64,
             },
             MInst::Cmp {
                 dst: VReg(4),
@@ -966,7 +919,7 @@ mod tests {
             MInst::CmpImm {
                 dst: VReg(4),
                 lhs: VReg(1),
-                imm: 17,
+                imm: 64,
                 kind: CmpKind::Eq
             }
         ));

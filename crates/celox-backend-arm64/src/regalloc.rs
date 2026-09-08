@@ -443,15 +443,13 @@ fn select_spill_batch(
     let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(6);
     let mut selected = BTreeSet::new();
     let mut peak = Vec::new();
-    for block in 0..function.blocks.len() {
-        let mut segments = intervals
-            .iter()
-            .filter_map(|(&value, interval)| {
-                interval
-                    .segment_in_block(block)
-                    .map(|segment| (segment.start, segment.end, value))
-            })
-            .collect::<Vec<_>>();
+    let mut block_segments = vec![Vec::new(); function.blocks.len()];
+    for (&value, interval) in intervals.iter() {
+        for segment in &interval.segments {
+            block_segments[segment.block].push((segment.start, segment.end, value));
+        }
+    }
+    for mut segments in block_segments {
         segments.sort_unstable();
         let mut active = Vec::<(u64, VReg)>::new();
         for (start, end, value) in segments {
@@ -556,6 +554,20 @@ fn spill_values(
         Ok(value)
     };
     let mut rewritten_definitions = BTreeSet::new();
+    let constants = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| match *inst {
+            MInst::LoadImm { dst, value }
+                if homes.contains_key(&dst)
+                    && crate::scalar::is_single_instruction_constant(value) =>
+            {
+                Some((dst, value))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
     let all_homes = function.spill_homes.clone();
     let mut external_phis = Vec::new();
     let mut edge_keep_alives = BTreeMap::<BlockId, BTreeSet<VReg>>::new();
@@ -656,11 +668,17 @@ fn spill_values(
                     reload
                 } else {
                     let reload = fresh(next_value)?;
-                    rewritten.push(MInst::Load {
-                        dst: reload,
-                        base: crate::mir::BaseReg::StackFrame,
-                        offset: homes[&spilled],
-                        size: crate::mir::OpSize::S64,
+                    // Keep the same def/use positions and phi spill homes,
+                    // but recover cheap constants without a memory read.
+                    rewritten.push(if let Some(&value) = constants.get(&spilled) {
+                        MInst::LoadImm { dst: reload, value }
+                    } else {
+                        MInst::Load {
+                            dst: reload,
+                            base: crate::mir::BaseReg::StackFrame,
+                            offset: homes[&spilled],
+                            size: crate::mir::OpSize::S64,
+                        }
                     });
                     reload_cache.insert(spilled, reload);
                     reload
@@ -1243,9 +1261,11 @@ mod tests {
     #[test]
     fn inserts_target_owned_spill_and_reload_instructions() {
         let mut instructions = (0..26)
-            .map(|value| MInst::LoadImm {
+            .map(|value| MInst::Load {
                 dst: VReg(value),
-                value: u64::from(value),
+                base: BaseReg::SimState,
+                offset: (value * 8) as i32,
+                size: OpSize::S64,
             })
             .collect::<Vec<_>>();
         instructions.extend((0..26).map(|value| MInst::Store {
