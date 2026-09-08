@@ -24,8 +24,10 @@ Only the second measurement is used for generated-code throughput comparisons.
 Tiered results have separate charts for startup until simulation begins, execution
 with background compilation, and total time through Linux completion. The tiered
 execution interval includes time on the initial backend and must not be read as
-compiled-code throughput. Startup and total time begin before design analysis;
-source-file loading and building the benchmark executables with Cargo are excluded.
+compiled-code throughput. Veryl-CC may finish on Cranelift before C compilation
+completes; these runs remain valid tiered measurements. Startup and total time
+begin before design analysis; source-file loading and building the benchmark
+executables with Cargo are excluded.
 The TSV retains `compile_elapsed_ns` for tiered startup, not the total background
 compiler time. Each synchronous and tiered Veryl-CC run uses its own empty AOT-C
 cache. Historical synchronous Veryl-CC measurements keep their original series.
@@ -41,8 +43,10 @@ A run is accepted only when it:
 - records compilation and execution separately;
 - compares runners built from the intended Celox and Veryl revisions;
 - preserves the logs needed to diagnose a timeout or semantic mismatch;
-- proves that the tiered run promoted and executed at least one generated-code
-  evaluation before Linux completed.
+- proves that Celox tiered promoted and executed at least one generated-code
+  evaluation before Linux completed;
+- confirms that Veryl-CC tiered enabled asynchronous C compilation and executed
+  at least one compiled or fallback dispatch.
 
 This fixed completion marker prevents faster failures or incomplete boots from
 being reported as performance improvements.
