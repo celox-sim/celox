@@ -1,0 +1,29 @@
+{
+  "heliodor_ref": "a78d04730cf2b37c616e039b4a5bd437c1cfd355",
+  "target": "aarch64-unknown-linux-gnu",
+  "opt_level": "O2",
+  "test": "test_soc_linux_boot",
+  "images": [
+    {
+      "label": "baseline",
+      "file": "baseline.native-image.gz",
+      "source": "7720d90e1",
+      "sha256": "4655f4afa908c0d69478fae55f720dd122dcecfdb1349d5888dfb412dd7cab86",
+      "compressed_sha256": "7e31a443ef5d320d1f1e6b4110449a257996b2671c843da95f2aad1b074bf89d"
+    },
+    {
+      "label": "exclusive",
+      "file": "exclusive.native-image.gz",
+      "source": "4b0b32172 with if_select::run disabled",
+      "sha256": "ee8a4c4c002243762987345b36b3ffa45ece407f9061cdfb20ae889b905a31be",
+      "compressed_sha256": "fbce9f358fb1caa9c0d2878d90b521479d1dff18e4edfd6c18e9264d06c27ce8"
+    },
+    {
+      "label": "candidate",
+      "file": "candidate.native-image.gz",
+      "source": "4b0b32172",
+      "sha256": "155f1abc9eced9adda49f336d372fb4026459404251dbda5162454c8b688dfd6",
+      "compressed_sha256": "49b21aad19fd4778b963faba0947e0a4d5e4ae1e814174803d3b48dcbd2eae69"
+    }
+  ]
+}
