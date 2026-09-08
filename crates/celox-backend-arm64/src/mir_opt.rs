@@ -7,6 +7,7 @@ use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 pub(crate) mod bit_projection;
 mod bitfield;
+pub(crate) mod byte_predicates;
 pub(crate) mod circular_scan;
 mod copies;
 pub(crate) mod counted_loop;
@@ -50,6 +51,7 @@ pub(crate) fn optimize(function: &mut MFunction) {
     bitfield::run(function);
     dead_code_eliminate(function);
     memory::run(function);
+    byte_predicates::run(function);
     bit_projection::run(function);
     propagate_exact_copies(function);
     dead_code_eliminate(function);

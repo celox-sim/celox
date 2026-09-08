@@ -3,7 +3,7 @@
 use super::*;
 use crate::mir::BaseReg;
 
-fn may_write(inst: &MInst, start: i64, end: i64) -> bool {
+pub(super) fn may_write(inst: &MInst, start: i64, end: i64) -> bool {
     let overlaps = |offset: i32, bytes: usize| {
         i64::from(offset) < end
             && i64::try_from(bytes)
