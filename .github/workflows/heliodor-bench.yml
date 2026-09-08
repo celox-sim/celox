@@ -24,6 +24,10 @@ on:
         description: Capture an ARM64 Linux boot profile without publishing history
         type: boolean
         default: false
+      arm64_profile_run_id:
+        description: Reuse profiling runners from this run ID (requires arm64_profile)
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -247,6 +251,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     env:
@@ -262,7 +267,18 @@ jobs:
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
+
+      - name: Reuse ARM64 profiling runners
+        if: inputs.arm64_profile && inputs.arm64_profile_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: heliodor-arm64-profiling-runners
+          path: target/release
+          run-id: ${{ inputs.arm64_profile_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Prepare ARM64 profiling
         if: inputs.arm64_profile
@@ -282,6 +298,7 @@ jobs:
           echo "CELOX_PERF_MAP=1" >> "$GITHUB_ENV"
 
       - name: Boot Linux with Veryl-CC and the native backend on ARM64
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
         shell: bash
         env:
           HELIODOR_RUNNERS: veryl-cc-sync celox
@@ -293,6 +310,9 @@ jobs:
         shell: bash
         run: |
           source scripts/run-heliodor-bench.sh
+          trap cleanup_heliodor_fallback EXIT
+          prepare
+          chmod +x "$CELOX_RUNNER_BIN"
           collect_test_source_files test_soc_linux_boot sources
           args=()
           for source in "${sources[@]}"; do args+=(--source-file "$source"); done
