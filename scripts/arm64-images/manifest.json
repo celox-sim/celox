@@ -7,29 +7,38 @@
     {
       "label": "baseline",
       "file": "baseline.native-image.gz",
-      "source": "f0716eb1e",
-      "experiment": "sparse-addresses",
-      "perf_map": false,
-      "sha256": "bf6510f3a63593e256d33848c28c6b4212c365fb1f1ec166f2779e85a74ab0a7",
-      "compressed_sha256": "91b1178e82b342ca10a68de63cfb25447d5e566491ee5999ce09293e5203c23c"
-    },
-    {
-      "label": "exclusive",
-      "file": "exclusive.native-image.gz",
-      "source": "5a3ac07c9",
-      "experiment": "byte-predicates-live",
-      "perf_map": false,
-      "sha256": "77cab7e407e705cdc290c2a78605c8c7d5242454b66c1169c0d4bb293e974327",
-      "compressed_sha256": "b62edb6660a5f595acb5bf53211eba98ed5ea3390c49b1d319d4682a0ac10856"
-    },
-    {
-      "label": "candidate",
-      "file": "candidate.native-image.gz",
       "source": "05995edab",
       "experiment": "sparse-groups",
       "perf_map": true,
       "sha256": "206b609b60cc96190721231a3411087506310780a26f77ec520ebc6b587ba63e",
       "compressed_sha256": "8e0f5df45a98fcee2d1431d71c21c1b785308afe54538b730ce5bdbbdcc615e2"
+    },
+    {
+      "label": "fragments",
+      "file": "fragments.native-image.gz",
+      "source": "3a3e832d5",
+      "experiment": "bit-fragments",
+      "perf_map": true,
+      "sha256": "680a0c0c26938cb3e272ae9928fef7fa68e628e928ccb3cec854008243393e70",
+      "compressed_sha256": "0ef209060c978e4816da08d5ea560c40066ccf1bcbab9fac49f302f0375c0b9b"
+    },
+    {
+      "label": "affinity",
+      "file": "affinity.native-image.gz",
+      "source": "464ecb67c",
+      "experiment": "bit-insert-affinity",
+      "perf_map": true,
+      "sha256": "8cc51f55e4989fe4f36e92bcdc24617d814743e2f98c05dde8cb79ecc8d8cbc4",
+      "compressed_sha256": "08e1e40d723a4cefb1256f645ee097ebf1cea3a06bcbab5327161901fc2e2e53"
+    },
+    {
+      "label": "candidate",
+      "file": "candidate.native-image.gz",
+      "source": "073c9555d",
+      "experiment": "bitmap-header-tails",
+      "perf_map": true,
+      "sha256": "322209246d1b1af3de8ba23e337000edb3e146e04239b39ab7624782fa62ee0c",
+      "compressed_sha256": "dbfe6457d8b290ed2f13b60122b73c513ac361f5a5c36ca62ff06af201a23910"
     }
   ]
 }
