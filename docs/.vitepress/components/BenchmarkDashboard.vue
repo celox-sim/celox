@@ -60,8 +60,11 @@ interface Series {
     | "heliodor-native-x86_64-jit"
     | "heliodor-native-x86_64"
     | "heliodor-tiered-x86_64"
+    | "heliodor-veryl-tiered-x86_64"
     | "heliodor-veryl-x86_64"
     | "heliodor-native-aarch64"
+    | "heliodor-tiered-aarch64"
+    | "heliodor-veryl-tiered-aarch64"
     | "heliodor-veryl-aarch64";
   points: SeriesPoint[];
 }
@@ -144,6 +147,7 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
         "heliodor-native-x86_64-jit",
         "heliodor-native-x86_64",
         "heliodor-tiered-x86_64",
+        "heliodor-veryl-tiered-x86_64",
         "heliodor-veryl-x86_64",
       ]),
     },
@@ -151,6 +155,8 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
       label: "AArch64 host",
       runtimes: new Set<Series["runtime"]>([
         "heliodor-native-aarch64",
+        "heliodor-tiered-aarch64",
+        "heliodor-veryl-tiered-aarch64",
         "heliodor-veryl-aarch64",
       ]),
     },
@@ -249,8 +255,11 @@ const RUNTIME_COLORS: Record<string, string> = {
   "heliodor-native-x86_64-jit": "#06b6d4",
   "heliodor-native-x86_64": "#2563eb",
   "heliodor-tiered-x86_64": "#8b5cf6",
+  "heliodor-veryl-tiered-x86_64": "#f97316",
   "heliodor-veryl-x86_64": "#f97316",
   "heliodor-native-aarch64": "#16a34a",
+  "heliodor-tiered-aarch64": "#8b5cf6",
+  "heliodor-veryl-tiered-aarch64": "#f97316",
   "heliodor-veryl-aarch64": "#f97316",
 };
 
@@ -262,10 +271,13 @@ const RUNTIME_LABELS: Record<string, string> = {
   verilator: "Verilator",
   "heliodor-native-x86_64-jit": "Native x86-64 (JIT code only)",
   "heliodor-native-x86_64": "Native x86-64",
-  "heliodor-tiered-x86_64": "Tiered JIT x86-64",
-  "heliodor-veryl-x86_64": "Veryl-CC x86-64",
+  "heliodor-tiered-x86_64": "Celox tiered JIT x86-64",
+  "heliodor-veryl-tiered-x86_64": "Veryl-CC tiered x86-64",
+  "heliodor-veryl-x86_64": "Veryl-CC synchronous x86-64",
   "heliodor-native-aarch64": "Native AArch64",
-  "heliodor-veryl-aarch64": "Veryl-CC AArch64",
+  "heliodor-tiered-aarch64": "Celox tiered JIT AArch64",
+  "heliodor-veryl-tiered-aarch64": "Veryl-CC tiered AArch64",
+  "heliodor-veryl-aarch64": "Veryl-CC synchronous AArch64",
 };
 
 // --- State ---
@@ -279,7 +291,7 @@ const activeTab = ref("counter");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -315,6 +327,9 @@ function runtime(name: string): Series["runtime"] | null {
   if (name.startsWith("heliodor-celox-total/")) return "heliodor-native-x86_64";
   if (name.startsWith("heliodor-celox-compile/")) return "heliodor-native-x86_64";
   if (name.startsWith("heliodor-celox-tiered/")) return "heliodor-tiered-x86_64";
+  if (name.startsWith("heliodor-celox-tiered-aarch64/")) return "heliodor-tiered-aarch64";
+  if (name.startsWith("heliodor-veryl-tiered-x86_64/")) return "heliodor-veryl-tiered-x86_64";
+  if (name.startsWith("heliodor-veryl-tiered-aarch64/")) return "heliodor-veryl-tiered-aarch64";
   if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-x86_64/")) return "heliodor-native-x86_64";
@@ -366,8 +381,11 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/_top_n1000/, "");
   // Strip optimize prefix patterns
   s = s.replace(/^optimize_/, "");
-  s = s.replace(/^heliodor_linux_boot_execution$/, "Linux boot execution");
-  s = s.replace(/^heliodor_linux_boot_compilation$/, "Linux boot compilation");
+  s = s.replace(/^heliodor_linux_boot_execution$/, "Linux boot execution (after compilation)");
+  s = s.replace(/^heliodor_linux_boot_compilation$/, "Linux boot compilation (synchronous)");
+  s = s.replace(/^heliodor_linux_boot_startup$/, "Tiered startup until simulation begins");
+  s = s.replace(/^heliodor_linux_boot_end_to_end$/, "Tiered Linux boot (end to end)");
+  s = s.replace(/^heliodor_linux_boot_tiered_execution$/, "Tiered execution (includes background compilation)");
 
   // Replace operation names (longer prefixes first to avoid partial matches)
   s = s.replace(/^native_tb_run/, "Native TB run");
@@ -419,7 +437,12 @@ const allSeries = computed<Series[]>(() => {
         if (isRetiredBenchmark(b.name)) continue;
         const seriesRuntime = runtime(b.name);
         if (!seriesRuntime) continue;
-        const benchName = normalizeBenchName(stripPrefix(b.name));
+        let benchName = normalizeBenchName(stripPrefix(b.name));
+        // Historical Celox tiered points also include background compilation.
+        // Keep their history, but do not mix them with post-compile throughput.
+        if (seriesRuntime.includes("tiered") && benchName === "heliodor_linux_boot_execution") {
+          benchName = "heliodor_linux_boot_tiered_execution";
+        }
         const key = `${seriesRuntime}/${benchName}`;
         let series = seriesByKey.get(key);
         if (!series) {
@@ -680,6 +703,15 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
+      <p v-if="activeTab === 'heliodor'" class="bench-methodology">
+        Synchronous runs finish compilation before simulation begins. Tiered runs
+        start on the interpreter (Celox) or Cranelift (Veryl-CC), then switch to
+        compiled code when it is ready. Startup measures time until simulation
+        begins; end-to-end measures time through Linux boot completion. Both
+        start before design analysis. Each Veryl-CC run uses an empty C compilation
+        cache. Building the benchmark executables is excluded.
+      </p>
+
       <!-- Tab content: sections with chart card grids -->
       <div
         v-if="activeSections.length > 0"
@@ -730,6 +762,11 @@ onBeforeUnmount(() => {
   padding: 2rem;
   text-align: center;
   color: var(--vp-c-text-2);
+}
+
+.bench-methodology {
+  color: var(--vp-c-text-2);
+  font-size: 0.9rem;
 }
 
 .bench-error {
@@ -805,11 +842,12 @@ onBeforeUnmount(() => {
 
 .bench-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
   gap: 1rem;
 }
 
 .bench-card {
+  min-width: 0;
   border: 1px solid var(--vp-c-divider);
   border-radius: 8px;
   padding: 0.75rem;
