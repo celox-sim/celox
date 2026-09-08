@@ -157,9 +157,21 @@ fn sparse_worklists_finish_each_active_entry_across_word_boundaries() {
 #[test]
 fn sparse_chunk_addresses_preserve_indices_tail_bytes_and_both_planes() {
     for (bias, pages) in layouts() {
-        for bytes in [1, 7, 9, 17, 511, 513] {
+        for (bytes, words) in [1, 7, 9, 17, 511, 512, 513]
+            .into_iter()
+            .flat_map(|bytes| [1, 2].map(|words| (bytes, words)))
+        {
             for four_state in [false, true] {
-                let row = [3, 16387, bytes, 32768, 2, 36864, 2, u64::from(four_state)];
+                let row = [
+                    3,
+                    16387,
+                    bytes,
+                    32768,
+                    words,
+                    36864,
+                    words,
+                    u64::from(four_state),
+                ];
                 let jit = emit_with_pages(pages, |ops| {
                     emit_sparse_commit(
                         ops,
@@ -167,9 +179,9 @@ fn sparse_chunk_addresses_preserve_indices_tail_bytes_and_both_planes() {
                         (bias + 16387) as i32,
                         bytes as usize,
                         (bias + 32768) as i32,
-                        2,
+                        words as usize,
                         (bias + 36864) as i32,
-                        2,
+                        words as usize,
                         four_state,
                         pages,
                     )
@@ -189,7 +201,7 @@ fn sparse_chunk_addresses_preserve_indices_tail_bytes_and_both_planes() {
                     );
                     assert_eq!(
                         state, expected,
-                        "bias={bias} pages={pages:?} bytes={bytes} four_state={four_state} bits={bits:x}"
+                        "bias={bias} pages={pages:?} bytes={bytes} words={words} four_state={four_state} bits={bits:x}"
                     );
                 }
             }

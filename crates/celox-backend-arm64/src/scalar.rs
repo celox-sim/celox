@@ -2211,9 +2211,53 @@ fn emit_sparse_commit(
         return;
     }
     let chunk_count = byte_size.div_ceil(8);
-    let last_chunk = chunk_count.saturating_sub(1);
-    let last_len = byte_size.saturating_sub(last_chunk * 8);
-    let plane_count = if four_state { 2 } else { 1 };
+    if (2..=64).contains(&chunk_count) && dirty_word_count == 1 && summary_word_count == 1 {
+        let done = ops.new_dynamic_label();
+        let dirty_loop = ops.new_dynamic_label();
+        emit_sparse_bitmap_take(ops, i64::from(summary_words_offset), state_pages);
+        dynasm!(ops ; .arch aarch64 ; tbz x17, #0, =>done);
+        emit_sparse_bitmap_take(ops, i64::from(dirty_words_offset), state_pages);
+        if chunk_count < 64 {
+            // A single dirty word covers the whole array. Discard invalid
+            // high bits once, so its loop needs no summary scan or bounds test.
+            ops.push_u32(
+                logical_immediate_encoding(
+                    (1_u64 << chunk_count) - 1,
+                    64,
+                    SCRATCH1,
+                    SCRATCH1,
+                    true,
+                )
+                .unwrap(),
+            );
+        }
+        dynasm!(ops
+            ; .arch aarch64
+            ; cbz x17, =>done
+            ; =>dirty_loop
+            ; rbit x16, x17
+            ; clz x16, x16
+            ; sub x30, x17, #1
+            ; and x17, x17, x30
+            ; fmov d2, x17
+            ; lsl x17, x16, #3
+        );
+        emit_sparse_selected_chunk(
+            ops,
+            src_offset,
+            dst_offset,
+            byte_size,
+            four_state,
+            state_pages,
+        );
+        dynasm!(ops
+            ; .arch aarch64
+            ; fmov x17, d2
+            ; cbnz x17, =>dirty_loop
+            ; =>done
+        );
+        return;
+    }
 
     for summary_index in 0..summary_word_count {
         let summary_loop = ops.new_dynamic_label();
@@ -2268,36 +2312,15 @@ fn emit_sparse_commit(
             ; cmp x17, x16
             ; b.hs =>dirty_restore
             ; lsl x17, x17, #3
-            ; fmov d4, x17
         );
-
-        if last_len != 8 {
-            let full_chunk = ops.new_dynamic_label();
-            let copy_done = ops.new_dynamic_label();
-            emit_load_imm(ops, SCRATCH0, (last_chunk * 8) as u64);
-            dynasm!(ops ; .arch aarch64 ; cmp x17, x16 ; b.ne =>full_chunk);
-            for plane in 0..plane_count {
-                let delta = (plane * byte_size) as i32;
-                emit_sparse_chunk_copy(
-                    ops,
-                    src_offset + delta,
-                    dst_offset + delta,
-                    last_len,
-                    state_pages,
-                );
-            }
-            dynasm!(ops ; .arch aarch64 ; b =>copy_done ; =>full_chunk);
-            for plane in 0..plane_count {
-                let delta = (plane * byte_size) as i32;
-                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8, state_pages);
-            }
-            dynasm!(ops ; .arch aarch64 ; =>copy_done);
-        } else {
-            for plane in 0..plane_count {
-                let delta = (plane * byte_size) as i32;
-                emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8, state_pages);
-            }
-        }
+        emit_sparse_selected_chunk(
+            ops,
+            src_offset,
+            dst_offset,
+            byte_size,
+            four_state,
+            state_pages,
+        );
         dynasm!(ops
             ; .arch aarch64
             ; =>dirty_restore
@@ -2308,6 +2331,49 @@ fn emit_sparse_commit(
             ; b =>summary_loop
             ; =>summary_done
         );
+    }
+}
+
+/// Copy the chunk at byte index x17, including a partial final chunk and both
+/// value planes when present. Preserve the enclosing worklists in d0..d2/d5.
+fn emit_sparse_selected_chunk(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    src_offset: i32,
+    dst_offset: i32,
+    byte_size: usize,
+    four_state: bool,
+    state_pages: StatePageBases,
+) {
+    let last_chunk = byte_size.div_ceil(8).saturating_sub(1);
+    let last_len = byte_size.saturating_sub(last_chunk * 8);
+    let plane_count = if four_state { 2 } else { 1 };
+    dynasm!(ops ; .arch aarch64 ; fmov d4, x17);
+    let copy_done = if last_len != 8 {
+        let full_chunk = ops.new_dynamic_label();
+        let copy_done = ops.new_dynamic_label();
+        emit_load_imm(ops, SCRATCH0, (last_chunk * 8) as u64);
+        dynasm!(ops ; .arch aarch64 ; cmp x17, x16 ; b.ne =>full_chunk);
+        for plane in 0..plane_count {
+            let delta = (plane * byte_size) as i32;
+            emit_sparse_chunk_copy(
+                ops,
+                src_offset + delta,
+                dst_offset + delta,
+                last_len,
+                state_pages,
+            );
+        }
+        dynasm!(ops ; .arch aarch64 ; b =>copy_done ; =>full_chunk);
+        Some(copy_done)
+    } else {
+        None
+    };
+    for plane in 0..plane_count {
+        let delta = (plane * byte_size) as i32;
+        emit_sparse_chunk_copy(ops, src_offset + delta, dst_offset + delta, 8, state_pages);
+    }
+    if let Some(copy_done) = copy_done {
+        dynasm!(ops ; .arch aarch64 ; =>copy_done);
     }
 }
 
