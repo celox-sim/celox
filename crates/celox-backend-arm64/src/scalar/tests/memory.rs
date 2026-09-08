@@ -1,6 +1,86 @@
 use super::*;
 
 #[test]
+fn scalarized_copies_preserve_snapshots_overlap_and_other_consumers() {
+    for size in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64] {
+        for chunks in [2usize, 4, 32] {
+            for destination in [31usize, 32, 33, 320] {
+                for snapshot in [false, true] {
+                    for extra_use in [false, true] {
+                        let bytes = usize::from(size.bytes());
+                        let mut block = MBlock::new(BlockId(0));
+                        let mut stores = Vec::new();
+                        for index in 0..chunks {
+                            block.push(MInst::Load {
+                                dst: VReg(index as u32),
+                                base: BaseReg::SimState,
+                                offset: (32 + index * bytes) as i32,
+                                size,
+                            });
+                            let store = MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: (destination + index * bytes) as i32,
+                                src: VReg(index as u32),
+                                size,
+                            };
+                            if snapshot {
+                                stores.push(store);
+                            } else {
+                                block.push(store);
+                            }
+                        }
+                        block.insts.extend(stores);
+                        if extra_use {
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: 600,
+                                src: VReg(0),
+                                size: OpSize::S64,
+                            });
+                        }
+                        block.push(MInst::Return);
+                        let mut function = MFunction::new(vec![block], vec![]);
+                        crate::mir_opt::optimize(&mut function);
+                        if !extra_use && chunks * bytes >= 16 && (snapshot || destination == 320) {
+                            assert!(function.blocks[0].insts.iter().any(|inst| {
+                                matches!(inst, MInst::MemCopy { byte_len, .. } if *byte_len == chunks * bytes)
+                            }));
+                        }
+                        let (jit, mut state) = compile(function, 608);
+                        for (index, byte) in state[..608].iter_mut().enumerate() {
+                            *byte = (index.wrapping_mul(29) ^ (index >> 2)) as u8;
+                        }
+                        let original = state[..608].to_vec();
+                        let mut expected = original.clone();
+                        if snapshot {
+                            expected[destination..destination + chunks * bytes]
+                                .copy_from_slice(&original[32..32 + chunks * bytes]);
+                        } else {
+                            for index in 0..chunks {
+                                expected.copy_within(
+                                    32 + index * bytes..32 + (index + 1) * bytes,
+                                    destination + index * bytes,
+                                );
+                            }
+                        }
+                        if extra_use {
+                            expected[600..608].fill(0);
+                            expected[600..600 + bytes].copy_from_slice(&original[32..32 + bytes]);
+                        }
+                        assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+                        assert_eq!(
+                            &state[..608],
+                            expected,
+                            "{size:?} {chunks} {destination} {snapshot} {extra_use}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn overwritten_stores_preserve_intermediate_reads_and_partial_updates() {
     for old_size in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64] {
         for new_size in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64] {

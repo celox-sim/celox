@@ -6,6 +6,7 @@ use crate::HashMap;
 use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 mod bitfield;
+mod copies;
 mod known_bits;
 mod memory;
 
@@ -18,6 +19,7 @@ mod memory;
 pub(crate) fn optimize(function: &mut MFunction) {
     fold_constants(function);
     lower_immediate_uses(function);
+    copies::fold(function);
     for _ in 0..3 {
         known_bits::fold(function);
         fold_constants(function);
@@ -46,6 +48,7 @@ pub(crate) fn optimize(function: &mut MFunction) {
     propagate_exact_copies(function);
     memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
+    copies::fold(function);
     fold_branch_predicates(function);
 }
 
