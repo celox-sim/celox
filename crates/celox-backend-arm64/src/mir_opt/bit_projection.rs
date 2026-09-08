@@ -105,19 +105,97 @@ impl Projection {
     }
 }
 
+/// Keep the usual single-source case allocation-free. A partial bit insert
+/// can temporarily combine several sources, then a later mask or shift can
+/// isolate one of them again.
+#[derive(Clone)]
+enum Fragments {
+    Single(Projection),
+    Mixed(Vec<Projection>),
+}
+
+impl Fragments {
+    fn identity(source: VReg) -> Self {
+        Self::Single(Projection::identity(source))
+    }
+
+    fn compact(mut parts: Vec<Projection>) -> Self {
+        parts.retain(|part| part.mask != 0);
+        match parts.len() {
+            0 => Self::identity(VReg(0)).masked(0),
+            1 => Self::Single(parts[0]),
+            _ => Self::Mixed(parts),
+        }
+    }
+
+    fn map(self, transform: impl Fn(Projection) -> Projection) -> Self {
+        match self {
+            Self::Single(part) => Self::Single(transform(part)),
+            Self::Mixed(mut parts) => {
+                for part in &mut parts {
+                    *part = transform(*part);
+                }
+                Self::compact(parts)
+            }
+        }
+    }
+
+    fn masked(self, mask: u64) -> Self {
+        self.map(|part| part.masked(mask))
+    }
+    fn shifted(self, shift: i16) -> Self {
+        self.map(|part| part.shifted(shift))
+    }
+
+    fn parts(self) -> Vec<Projection> {
+        match self {
+            Self::Single(part) => vec![part],
+            Self::Mixed(parts) => parts,
+        }
+    }
+
+    fn union(self, other: Self) -> Option<Self> {
+        if let (Self::Single(left), Self::Single(right)) = (&self, &other)
+            && let Some(part) = left.union(*right)
+        {
+            return Some(Self::Single(part));
+        }
+        let mut parts = self.parts();
+        for other in other.parts() {
+            if let Some(part) = parts
+                .iter_mut()
+                .find(|part| part.source == other.source && part.shift == other.shift)
+            {
+                part.mask |= other.mask;
+            } else {
+                parts.push(other);
+            }
+        }
+        // Bound compile-time work for long bit-concatenation expressions.
+        (parts.len() <= 8).then(|| Self::compact(parts))
+    }
+
+    fn instruction(&self, dst: VReg) -> Option<MInst> {
+        match self {
+            Self::Single(part) if part.source != dst || part.mask == 0 => part.instruction(dst),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn run(function: &mut MFunction) {
     for block in &mut function.blocks {
-        let mut projections = HashMap::<VReg, Projection>::default();
+        let mut projections = HashMap::<VReg, Fragments>::default();
         for inst in &mut block.insts {
             let Some(dst) = inst.def() else { continue };
             let get = |value| {
                 projections
                     .get(&value)
-                    .copied()
-                    .unwrap_or_else(|| Projection::identity(value))
+                    .cloned()
+                    .unwrap_or_else(|| Fragments::identity(value))
             };
             let projection = match *inst {
-                MInst::LoadImm { value: 0, .. } => Some(Projection::identity(dst).masked(0)),
+                MInst::LoadImm { value: 0, .. } => Some(Fragments::identity(dst).masked(0)),
                 MInst::Mov { src, .. } => Some(get(src)),
                 MInst::Mov32 { src, .. } => Some(get(src).masked(u64::from(u32::MAX))),
                 MInst::AndImm { src, imm, .. } => Some(get(src).masked(imm)),
@@ -153,9 +231,7 @@ pub(crate) fn run(function: &mut MFunction) {
                 _ => None,
             };
             if let Some(projection) = projection {
-                if projection.source != dst
-                    && let Some(replacement) = projection.instruction(dst)
-                {
+                if let Some(replacement) = projection.instruction(dst) {
                     *inst = replacement;
                 }
                 projections.insert(dst, projection);

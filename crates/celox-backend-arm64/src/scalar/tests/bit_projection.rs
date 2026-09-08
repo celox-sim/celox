@@ -248,3 +248,138 @@ fn reconstructed_partitions_preserve_truncations_and_mixed_sources() {
         }
     }
 }
+
+#[test]
+fn inserted_fragments_reconstruct_values_without_neighbor_bits() {
+    let mut block = MBlock::new(BlockId(0));
+    for value in 0..3 {
+        block.push(MInst::Load {
+            dst: VReg(value),
+            base: BaseReg::SimState,
+            offset: value as i32 * 8,
+            size: OpSize::S64,
+        });
+    }
+    let mut next = 3;
+    let mut cases = Vec::new();
+    let mut results = Vec::new();
+    for shift in [1_u8, 3, 7, 8, 13, 31, 32, 33, 57, 61, 63] {
+        for mode in 0..3 {
+            let [low, high_bits, high, read_low, read_high, shifted, result] =
+                std::array::from_fn(|index| VReg(next + index as u32));
+            next += 7;
+            block.push(MInst::BitInsert {
+                dst: low,
+                base: VReg(1),
+                src: VReg(0),
+                lsb: shift,
+                width: 64 - shift,
+            });
+            block.push(MInst::BitExtract {
+                dst: high_bits,
+                src: VReg(0),
+                lsb: 64 - shift,
+                width: shift,
+            });
+            block.push(MInst::BitInsert {
+                dst: high,
+                base: VReg(2),
+                src: high_bits,
+                lsb: 0,
+                width: shift,
+            });
+            block.push(MInst::BitExtract {
+                dst: read_low,
+                src: low,
+                lsb: shift,
+                width: 64 - shift,
+            });
+            // Reading the containing byte includes neighboring bits. They
+            // must be discarded before the high fragment rejoins the low.
+            block.push(MInst::AndImm {
+                dst: read_high,
+                src: high,
+                imm: u64::MAX >> (64 - shift.div_ceil(8) * 8),
+            });
+            if mode == 0 {
+                block.push(MInst::OrShifted {
+                    dst: result,
+                    lhs: read_low,
+                    rhs: read_high,
+                    shift: 64 - shift,
+                });
+            } else {
+                block.push(MInst::ShlImm {
+                    dst: shifted,
+                    src: read_high,
+                    imm: 64 - shift,
+                });
+                block.push(if mode == 1 {
+                    MInst::Or {
+                        dst: result,
+                        lhs: read_low,
+                        rhs: shifted,
+                    }
+                } else {
+                    MInst::Or32 {
+                        dst: result,
+                        lhs: read_low,
+                        rhs: shifted,
+                    }
+                });
+            }
+            for (column, src) in [low, high, result].into_iter().enumerate() {
+                block.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 32 + cases.len() as i32 * 24 + column as i32 * 8,
+                    src,
+                    size: OpSize::S64,
+                });
+            }
+            cases.push((shift, mode));
+            results.push(result);
+        }
+    }
+    block.push(MInst::Return);
+    let bytes = 32 + cases.len() * 24;
+    let original = MFunction::new(vec![block], vec![]);
+    let mut optimized = original.clone();
+    run(&mut optimized);
+    for result in results {
+        assert!(optimized.blocks[0].insts.iter().any(|inst| matches!(inst, MInst::Mov { dst, src: VReg(0) } | MInst::Mov32 { dst, src: VReg(0) } if *dst == result)));
+    }
+    let (before, a_size) = compile_raw(original, bytes);
+    let (after, b_size) = compile_raw(optimized, bytes);
+    for source in inputs() {
+        let base_low = !source.rotate_left(13);
+        let base_high = source.rotate_left(29);
+        let mut left = vec![0xa5; a_size.max(b_size)];
+        for (index, value) in [source, base_low, base_high].into_iter().enumerate() {
+            left[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut right = left.clone();
+        assert_eq!(unsafe { (before.fn_ptr)(left.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { (after.fn_ptr)(right.as_mut_ptr()) }, 0);
+        assert_eq!(&left[..bytes], &right[..bytes]);
+        for (index, &(shift, mode)) in cases.iter().enumerate() {
+            let mask = (1_u64 << shift) - 1;
+            let expected = [
+                (base_low & mask) | (source << shift),
+                (base_high & !mask) | (source >> (64 - shift)),
+                if mode == 2 {
+                    source & u64::from(u32::MAX)
+                } else {
+                    source
+                },
+            ];
+            for (column, value) in expected.into_iter().enumerate() {
+                let at = 32 + index * 24 + column * 8;
+                assert_eq!(
+                    &right[at..at + 8],
+                    &value.to_le_bytes(),
+                    "shift={shift} mode={mode} column={column}"
+                );
+            }
+        }
+    }
+}
