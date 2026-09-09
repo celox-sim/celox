@@ -18,6 +18,12 @@ one group byte and one summary byte covering 64 groups. Byte stores avoid an
 extra read/modify/write in generated code. Native lowering coalesces repeated
 notifications within a basic block. An observer skips unmarked summary groups,
 consumes the marked group bytes, and compares only their associated signals.
+The consumer reads each level eight bytes at a time. Empty words need one test;
+nonempty words become a mask of nonzero byte positions, visited in address order.
+It clears those words together and handles the remaining bytes separately.
+Safe slice loads support unaligned metadata without reading past the last flag.
+The mask exists only during collection; notification storage and generated
+stores retain their byte layout.
 Dense activity uses a direct scan. Aliases share the same home; a partial or
 dynamically indexed write notifies observers of the complete object. These are
 conservative write notifications: a notification does not imply a value change.
@@ -117,8 +123,21 @@ Useful sweeps are 1024/16384/131072 signals and widths 1/9/64/65/256/1024.
 Clustered versus scattered updates quantify the extra comparisons caused by
 coarse groups. Initialization uses nonzero values and is followed by an explicit
 flush before timing. The timed region includes mutation and the final flush.
+Mutation runs in a separate, non-inlined `Stimulus::apply` function. This keeps
+collector changes from also changing register allocation in the measurement's
+per-signal input loop. Case and notification settings are prepared before timing;
+the actual input writes and notifications remain timed. Rebuild both library
+versions with this same harness when comparing them.
 CSV reports wall time, comparisons, changed signals, and actual emitted bytes;
 `scan` and `dirty` must have identical change counts and output byte counts.
+
+Keep both `collect / idle` and `collect / same_value` as controls when changing
+the writer or collector. They expose collection costs without timed encoding;
+`dirty / idle` also includes timestamp output. Use millions of idle dumps and
+include small layouts with fewer than eight summary bytes, alongside larger
+layouts. Run timing executables serially, without overlapping builds or tests,
+and retain retired instructions as well as elapsed-time ranges: code placement
+can change elapsed time even when the executed work is unchanged.
 
 ## End-to-end benchmark
 
@@ -1095,6 +1114,165 @@ python3 scripts/compare-vcd-verilator.py \
   --baseline-celox target/vcd-shuffle-results/e2e-before \
   --output target/vcd-shuffle-results/paired-256 \
   --signals 256 --steps 100000 --repeats 5 \
+  --patterns counter full_width --reuse-builds
+```
+
+### Word-at-a-time activity collection
+
+The baseline for this stage is `5dafc4835`, including shared-byte SSE2 expansion.
+Instead of adjusting loop placement, the collector removes work from both
+levels of the activity hierarchy. It first obtains bounded, disjoint flag and
+summary slices, then tests eight bytes at once. Only nonempty summary words
+lead to flag ranges; only nonempty flag words lead to group enumeration.
+
+For a nonzero word, adding `0x7f` to each byte's low seven bits and ORing the
+original word sets a high bit exactly where that byte is nonzero. There are no
+carries between bytes. Clearing one low set bit per iteration visits those
+positions in ascending address order. The word is loaded as little endian so
+that order also holds on big-endian hosts. Short tails use byte loads. The
+implementation uses safe slices, has no new CPU-feature requirement, and accepts
+every nonzero flag value. It retains the notification ABI, raw-view fallback,
+registration order, and independent consumption of clock notifications.
+
+The selected implementation batches both levels with normal compiler inlining.
+A summary-only candidate reduced idle instructions but left most sparse flag
+scanning intact. An additional candidate prohibited inlining of `TraceLayout::take`;
+that did not remove the standalone dense instruction increase and added idle
+instructions, so it was not retained. Sources and executables for these trials
+are preserved as `v1`, `v2` (selected), and `v3` under
+`target/vcd-activity-results/`. No alignment directive or runtime code patch is
+part of this change.
+
+The original monolithic benchmark showed an additional 163.839 million
+instructions in `scan / dense` after the collector change: about two per input
+update, even though this mode never calls the collector. Disassembly shows
+additional loads in the stimulus loop. Its original three-way idle comparison
+is retained: complete records take 232.704 ms, shared SSE2 takes 279.659 ms,
+and word collection takes 137.913 ms at 16,384 signals and 5,000,000 dumps.
+Thus the large idle regression is removed even with the original harness.
+
+The final writer comparison rebuilds all three library versions with the
+isolated stimulus function. Its 278 instructions and 1,036-byte size agree in
+all three executables after normalizing link-time addresses. Placement can still
+vary. Across 130 correctness cases, the original stimulus, isolated stimulus,
+and new collector produce identical waveform bodies and statistics. Absolute
+timings and instruction counts from different harness revisions should not be
+compared directly.
+
+The following medians use CPU 0, `/dev/null`, 16,384 two-state 64-bit signals,
+one warm process and five rotated measured processes per variant. Counters
+cover the whole process, with no multiplexing. Builds and tests do not overlap
+timing runs.
+
+| Mode / case | Dumps | Complete records (ms) | Shared SSE2 baseline (ms) | Word collection (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| dirty / idle | 5,000,000 | 209.895 | 190.694 | 126.135 |
+| collect / idle | 5,000,000 | 99.363 | 95.290 | 29.498 |
+| scan / dense | 5,000 | 534.144 | 484.899 | 483.634 |
+| dirty / dense | 5,000 | 555.172 | 504.650 | 480.768 |
+
+Idle collection instructions fall from 3.166 to 0.841 billion (73.4%); complete
+idle writer instructions fall from 5.530 to 3.200 billion (42.1%). The complete
+idle writer's before range is 188.992–234.011 ms and after range
+118.923–137.412 ms. This improvement removes executed work rather than relying
+only on favorable placement. Dense instruction counts are almost unchanged:
+`scan` is 12.375 billion in both versions, and `dirty` is 13.107 versus 13.102
+billion. The 4.7% dense median improvement is not a new encoding optimization;
+its elapsed-time ranges overlap. The previous SSE2 instruction reduction is
+retained under the same harness.
+
+Sparse controls, comparing shared SSE2 with word collection:
+
+| Mode / case | Dumps | Before (ms) | After (ms) | Before instructions (billions) | After instructions (billions) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dirty / sparse_scattered | 100,000 | 109.105 | 68.232 | 2.160 | 1.453 |
+| dirty / same_value | 100,000 | 105.027 | 63.975 | 2.021 | 1.314 |
+| collect / same_value | 1,000,000 | 515.362 | 130.902 | 9.842 | 2.775 |
+
+The size sweep retains an important limitation. At 256 signals, there is only
+one summary byte, so a completely idle collector does not benefit from batching:
+5,000,000 `collect / idle` dumps take 14.742 versus 19.983 ms, an increase of
+about 1.05 ns per dump, with instructions rising from 0.366 to 0.521 billion.
+Complete `dirty / idle` takes 109.310 versus 112.490 ms. At 4,096 signals,
+complete idle takes 134.070 versus 119.515 ms; at 65,536 signals it takes
+409.415 versus 140.617 ms. Empty collection at 65,536 signals falls from
+11.572 to 1.747 billion instructions.
+
+Dense timing is not uniformly better across sizes: 256 signals take 491.849
+versus 508.344 ms, 4,096 take 460.039 versus 458.219 ms, and 65,536 take
+459.933 versus 482.440 ms, each with 81,920,000 input updates. All three pairs'
+elapsed-time ranges overlap, and their instruction counts differ by less than
+0.1%. The generic-width/four-state dense controls range from a 1.5% decrease
+to a 5.0% increase in median elapsed time, with overlapping ranges and nearly
+unchanged instructions. Four-state `mask_only` improves from 230.820 to
+190.531 ms. These controls remain in the raw results; this change is a sparse
+collection improvement, not a universal dense timing improvement.
+
+The native benchmark is rebuilt and linked with the bench/LTO profile. It
+uses the unchanged native harness, 256 counters, 500,000 full cycles, and five
+rotated measured processes after warming each engine. Verilator 5.052 uses
+the same verified cached executables as the preceding comparison. VCD medians:
+
+| Pattern / case | Shared SSE2 baseline (ms) | Word collection (ms) | Verilator (ms) |
+| --- | ---: | ---: | ---: |
+| counter / idle | 229.488 | 195.228 | 292.656 |
+| counter / sparse | 296.781 | 263.442 | 303.707 |
+| counter / dense | 987.490 | 992.998 | 792.315 |
+| full_width / idle | 225.576 | 221.236 | 293.164 |
+| full_width / sparse | 405.623 | 289.942 | 329.587 |
+| full_width / dense | 1,078.541 | 1,060.526 | 781.193 |
+
+Native dense is approximately preserved: counter changes by +0.6% and
+full-width by -1.7%, with overlapping ranges. The full-width ratio to Verilator
+is 1.38x versus 1.36x within this run; the dense gap remains. Idle and sparse
+medians improve, but their ranges overlap too. In particular, full-width sparse
+ranges are 269.614–433.173 versus 274.957–412.636 ms, so its large median
+decrease should not be treated as a stable 29% native speedup.
+
+Five rotated whole-process hardware-counter runs at 1,000,000 full-width cycles
+provide separate evidence of the work reduction:
+
+| Case | Before instructions (billions) | After instructions (billions) | Before cycles (billions) | After cycles (billions) |
+| --- | ---: | ---: | ---: | ---: |
+| idle | 10.266 | 9.830 | 3.114 | 2.841 |
+| dense | 53.386 | 53.158 | 11.356 | 11.195 |
+
+Native idle instructions fall by 4.2%; dense instructions fall by 0.4%.
+The final dense profile attributes 66.5% of whole-process samples to writer
+self time, 5.8% to `memmove`, and 1.8% to `TraceLayout::take`. This leaves
+the per-signal comparison/dispatch and output paths as the main targets for
+closing the dense Verilator gap.
+
+The `off` and `instrumented` controls are retained in the native results.
+Captured JIT images are byte-identical to the preceding stage in both modes,
+including the recorded hashes. No-output timings still vary (full-width dense
+`instrumented`: 148.837 versus 120.723 ms); they do not measure the new collector
+and must not be subtracted to estimate its cost.
+
+All three engines pass the waveform oracle at 256 and 4,096 counters. The nine
+old/new validation waveform bodies and all native timed byte counts agree.
+The larger native fixture is checked for correctness only in this stage;
+there is no new 4,096-counter native timing claim. Validation includes
+11 runtime tests, 9 state-layout tests, 4 cross-backend VCD integration tests,
+formatting, Clippy for all runtime/state-layout targets, and the aarch64 runtime
+check. The new tests cover zero-sized layouts, summary/word boundaries, partial
+tails, all byte values, unaligned metadata, stale result vectors, and untouched
+memory outside the consumed activity.
+
+Artifacts are in `target/vcd-activity-results/`. The selected library sources,
+original-harness binaries, native binaries, JIT captures, and profiles remain
+at that level. `isolated-writer/` contains the final writer comparison, all three
+rebuilt executables, source hashes, instruction-sequence comparison, and 130
+stimulus-equivalence checks. Its `compare-writer.py` accepts `regression`,
+`controls`, `scale`, and `fallback`. Reproduce the native comparison with:
+
+```sh
+python3 scripts/compare-vcd-verilator.py \
+  --verilator target/verilator-v5.052/bin/verilator \
+  --celox target/vcd-activity-results/e2e-after \
+  --baseline-celox target/vcd-activity-results/e2e-before \
+  --output target/vcd-activity-results/paired-256 \
+  --signals 256 --steps 500000 --repeats 5 \
   --patterns counter full_width --reuse-builds
 ```
 

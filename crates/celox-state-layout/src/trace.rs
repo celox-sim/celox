@@ -115,28 +115,142 @@ impl TraceLayout {
     pub fn take(&self, memory: &mut [u8], groups: &mut Vec<usize>) -> bool {
         groups.clear();
         let tracked = memory[self.untracked_offset] == 0;
-        for summary in 0..self.summary_count {
-            if memory[self.summary_offset + summary] == 0 {
-                continue;
-            }
-            memory[self.summary_offset + summary] = 0;
+        let (prefix, summaries) = memory.split_at_mut(self.summary_offset);
+        let flags = &mut prefix[self.flags_offset..][..self.group_count];
+        take_nonzero(&mut summaries[..self.summary_count], |summary| {
             let start = summary * GROUPS_PER_SUMMARY;
-            let end = (start + GROUPS_PER_SUMMARY).min(self.group_count);
-            for group in start..end {
-                let flag = &mut memory[self.flags_offset + group];
-                if *flag != 0 {
-                    *flag = 0;
-                    groups.push(group);
-                }
-            }
-        }
+            let flags = &mut flags[start..];
+            let len = flags.len().min(GROUPS_PER_SUMMARY);
+            take_nonzero(&mut flags[..len], |index| groups.push(start + index));
+        });
         tracked
+    }
+}
+
+/// Clear and visit nonzero bytes in address order. Notifications stay byte
+/// stores, while the consumer skips eight empty bytes with one word test.
+fn take_nonzero(bytes: &mut [u8], mut visit: impl FnMut(usize)) {
+    let (words, tail) = bytes.as_chunks_mut::<8>();
+    for (index, bytes) in words.iter_mut().enumerate() {
+        // A safe unaligned load; little endian keeps bit order in address order
+        // even on big-endian hosts.
+        let word = u64::from_le_bytes(*bytes);
+        if word == 0 {
+            continue;
+        }
+        bytes.fill(0);
+        // Set exactly the high bit of each nonzero byte, including flags other
+        // than 1. Adding 0x7f to the low seven bits cannot carry between bytes.
+        const LOW_BITS: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+        let mut active = (((word & LOW_BITS) + LOW_BITS) | word) & !LOW_BITS;
+        while active != 0 {
+            visit(index * 8 + active.trailing_zeros() as usize / 8);
+            active &= active - 1;
+        }
+    }
+    let base = words.len() * 8;
+    for (index, byte) in tail.iter_mut().enumerate() {
+        if *byte != 0 {
+            *byte = 0;
+            visit(base + index);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonzero_bytes_preserve_address_order() {
+        for alignment in 0..8 {
+            // Exercise every possible byte value, including adjacent zero and
+            // nonzero bytes, word boundaries, and short tails.
+            for len in 0..=512 {
+                let mut bytes = vec![0xa5; alignment + len + 8];
+                for (index, byte) in bytes[alignment..][..len].iter_mut().enumerate() {
+                    *byte = if index % 2 == 0 { (index / 2) as u8 } else { 0 };
+                }
+                let expected: Vec<_> = bytes[alignment..][..len]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, &byte)| (byte != 0).then_some(index))
+                    .collect();
+                let mut actual = vec![];
+                take_nonzero(&mut bytes[alignment..][..len], |index| actual.push(index));
+                assert_eq!(actual, expected);
+                assert!(bytes[..alignment].iter().all(|&byte| byte == 0xa5));
+                assert!(bytes[alignment..][..len].iter().all(|&byte| byte == 0));
+                assert!(bytes[alignment + len..].iter().all(|&byte| byte == 0xa5));
+            }
+        }
+    }
+
+    #[test]
+    fn activity_boundaries_match_scalar_collection() {
+        for group_count in [
+            0, 1, 7, 8, 9, 63, 64, 65, 127, 128, 447, 448, 449, 511, 512, 513, 575, 576, 577, 1024,
+        ] {
+            for alignment in 0..8 {
+                // Include partial stable groups and unaligned metadata.
+                let stable_size = (group_count * TRACE_GROUP_BYTES).saturating_sub(3);
+                let trace = TraceLayout::new(stable_size + alignment, stable_size, vec![]);
+                assert_eq!(trace.group_count, group_count);
+                for pattern in 0..5 {
+                    let mut memory = vec![0xa5; trace.end_offset() + 8];
+                    memory[trace.flags_offset..trace.end_offset()].fill(0);
+                    for group in 0..group_count {
+                        let flag = match pattern {
+                            0 => 0,
+                            1 => 1,
+                            2 => u8::from(group % 2 == 0),
+                            3 => {
+                                u8::from(group == 0 || group + 1 == group_count || group % 64 == 0)
+                            }
+                            _ => [0, 2, 0, 0x80, 0, 0xff, 1][group % 7],
+                        };
+                        memory[trace.flags_offset + group] = flag;
+                        if flag != 0 {
+                            memory[trace.summary_offset + group / GROUPS_PER_SUMMARY] = flag;
+                        }
+                    }
+                    // Both an empty marked summary and an unmarked summary with
+                    // stale flags must retain the scalar collector's behavior.
+                    if trace.summary_count > 1 && matches!(pattern, 0 | 4) {
+                        memory[trace.summary_offset] = 0xff;
+                        memory[trace.summary_offset + 1] = 0;
+                    }
+                    memory[trace.untracked_offset] = (pattern % 2) as u8;
+                    let mut expected_memory = memory.clone();
+                    let mut expected_groups = vec![];
+                    for summary in 0..trace.summary_count {
+                        if expected_memory[trace.summary_offset + summary] == 0 {
+                            continue;
+                        }
+                        expected_memory[trace.summary_offset + summary] = 0;
+                        for group in 0..group_count {
+                            if group / GROUPS_PER_SUMMARY == summary
+                                && expected_memory[trace.flags_offset + group] != 0
+                            {
+                                expected_memory[trace.flags_offset + group] = 0;
+                                expected_groups.push(group);
+                            }
+                        }
+                    }
+                    let mut groups = vec![usize::MAX];
+                    assert_eq!(trace.take(&mut memory, &mut groups), pattern % 2 == 0);
+                    assert_eq!(groups, expected_groups);
+                    // This also checks untouched state/clock bytes and the byte
+                    // immediately following the last (possibly partial) group.
+                    assert_eq!(memory, expected_memory);
+                    groups.push(usize::MAX);
+                    assert_eq!(trace.take(&mut memory, &mut groups), pattern % 2 == 0);
+                    assert!(groups.is_empty());
+                    assert_eq!(memory, expected_memory);
+                }
+            }
+        }
+    }
 
     #[test]
     fn aliases_partial_writes_and_separate_consumers() {

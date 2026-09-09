@@ -1,7 +1,7 @@
 //! See docs/internals/vcd-performance.md for controls and interpretation.
 use celox_runtime::{VcdSignalDesc, VcdWriter};
 use celox_state_layout::{
-    LayoutInput, LayoutSource, MemoryLayout, MemoryLayoutMode, StateObjectLayout,
+    LayoutInput, LayoutSource, MemoryLayout, MemoryLayoutMode, StateObjectLayout, TraceLayout,
 };
 use std::{hint::black_box, io::Write, time::Instant};
 
@@ -61,6 +61,58 @@ fn setting(name: &str) -> Result<String, std::env::VarError> {
 fn number(name: &str, default: usize) -> usize {
     setting(name).map_or(default, |x| x.parse().unwrap())
 }
+
+struct Stimulus {
+    width: usize,
+    scattered: bool,
+    same: bool,
+    mask_only: bool,
+    notify: bool,
+}
+
+impl Stimulus {
+    // Keep the timed input updates in a separate function so changes to the
+    // collector do not alter register allocation in this per-signal loop.
+    #[inline(never)]
+    fn apply(
+        &self,
+        step: usize,
+        count: usize,
+        descs: &[VcdSignalDesc],
+        memory: &mut [u8],
+        trace: &TraceLayout,
+    ) {
+        for j in 0..count {
+            let index = if self.scattered {
+                (j * descs.len() / count + step) % descs.len()
+            } else {
+                j
+            };
+            let home = descs[index].offset;
+            let bit = step % self.width.saturating_sub(1).max(1);
+            let at = home
+                + bit / 8
+                + if self.mask_only {
+                    self.width.div_ceil(8)
+                } else {
+                    0
+                };
+            let next = if self.same {
+                memory[at]
+            } else {
+                memory[at] ^ (1 << (bit % 8))
+            };
+            memory[at] = black_box(next);
+            if self.notify {
+                // Same two byte notifications emitted at generated stores.
+                unsafe {
+                    trace.mark_home(memory.as_mut_ptr(), home);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let signals = number("VCD_SIGNALS", 16_384);
     let steps = number("VCD_STEPS", 1_000);
@@ -106,6 +158,13 @@ fn main() {
         if case.as_ref().is_some_and(|case| case != name) || (name == "mask_only" && !four_state) {
             continue;
         }
+        let stimulus = Stimulus {
+            width,
+            scattered,
+            same,
+            mask_only: name == "mask_only",
+            notify: mode != "scan",
+        };
         for repeat in 0..repeats {
             let mut memory = vec![0; layout.merged_total_size];
             for (i, desc) in descs.iter().enumerate() {
@@ -129,27 +188,8 @@ fn main() {
                 } else {
                     count
                 };
-                for j in 0..count {
-                    let index = if scattered {
-                        (j * signals / count + step) % signals
-                    } else {
-                        j
-                    };
-                    let home = descs[index].offset;
-                    let bit = step % width.saturating_sub(1).max(1);
-                    let at = home + bit / 8 + if name == "mask_only" { size } else { 0 };
-                    let next = if same {
-                        memory[at]
-                    } else {
-                        memory[at] ^ (1 << (bit % 8))
-                    };
-                    memory[at] = black_box(next);
-                    if mode != "scan" {
-                        // Same two byte notifications emitted at generated stores.
-                        unsafe {
-                            trace.mark_home(memory.as_mut_ptr(), home);
-                        }
-                    }
+                if count != 0 {
+                    stimulus.apply(step, count, &descs, &mut memory, trace);
                 }
                 if mode != "scan" {
                     trace.take(&mut memory, &mut activity);
