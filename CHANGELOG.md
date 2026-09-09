@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.8 (2026-09-09)
+
+## What's Changed
+* chore(deps): update pnpm to v12.2.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/771
+* chore(deps): update rust crate syn to v3.0.5 by @renovate[bot] in https://github.com/celox-sim/celox/pull/770
+* fix(bench): measure Veryl-CC tiered Linux boot by @tignear in https://github.com/celox-sim/celox/pull/777
+* fix(bench): accept tiered completion before C-code adoption by @tignear in https://github.com/celox-sim/celox/pull/780
+* perf(arm64): reduce packed state and spill overhead by @tignear in https://github.com/celox-sim/celox/pull/779
+* perf(arm64): reduce loop scans, spill loads, and state copy overhead by @tignear in https://github.com/celox-sim/celox/pull/783
+* fix(simulator): type top-level parameter overrides before elaboration by @tignear in https://github.com/celox-sim/celox/pull/787
+* fix(veryl): preserve function copyout types and four-state values by @tignear in https://github.com/celox-sim/celox/pull/790
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.7...v0.4.8
+
 ## 0.4.7 (2026-09-07)
 
 ## What's Changed
