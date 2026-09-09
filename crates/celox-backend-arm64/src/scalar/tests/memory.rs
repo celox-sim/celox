@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn vector_copies_preserve_unaligned_tails_and_overlapping_sources() {
+    for bytes in (1..40).chain([63, 64, 65, 127, 128, 129, 255, 256, 257]) {
+        for destination in [0, 31, 32, 35, 768] {
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::MemCopy {
+                src_offset: 32,
+                dst_offset: destination,
+                byte_len: bytes,
+            });
+            block.push(MInst::Return);
+            let (jit, mut state) = compile(MFunction::new(vec![block], Vec::new()), 1100);
+            for (index, byte) in state[..1100].iter_mut().enumerate() {
+                *byte = (index.wrapping_mul(29) ^ (index >> 2)) as u8;
+            }
+            let mut expected = state[..1100].to_vec();
+            expected.copy_within(32..32 + bytes, destination as usize);
+            assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
+            assert_eq!(&state[..1100], expected, "bytes={bytes} dst={destination}");
+        }
+    }
+}
+
+#[test]
 fn scalarized_copies_preserve_snapshots_overlap_and_other_consumers() {
     for size in [OpSize::S8, OpSize::S16, OpSize::S32, OpSize::S64] {
         for chunks in [2usize, 4, 32] {

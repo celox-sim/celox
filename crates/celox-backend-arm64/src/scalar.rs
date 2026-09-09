@@ -1539,6 +1539,7 @@ fn emit_mem_copy_forward_vectors(
     byte_len: usize,
     state_pages: StatePageBases,
 ) {
+    debug_assert!(byte_len <= 256);
     let (src_base, src_relative) =
         select_vector_memory_base(BaseReg::SimState, i64::from(src_offset), state_pages);
     emit_address_to(ops, SCRATCH0, src_base, src_relative);
@@ -1546,26 +1547,37 @@ fn emit_mem_copy_forward_vectors(
         select_vector_memory_base(BaseReg::SimState, i64::from(dst_offset), state_pages);
     emit_address_to(ops, SCRATCH1, dst_base, dst_relative);
 
-    let vector_chunks = byte_len / 16;
-    for _ in 0..vector_chunks {
+    // Fixed offsets avoid a dependent address update after every vector.
+    // Pair adjacent vectors while keeping forward memmove ordering.
+    let pairs = byte_len / 32;
+    for pair in 0..pairs {
+        let offset = (pair * 32) as i32;
         dynasm!(ops
             ; .arch aarch64
-            ; ldr q0, [x16], #16
-            ; str q0, [x17], #16
+            ; ldp q0, q1, [x16, offset]
+            ; stp q0, q1, [x17, offset]
         );
+    }
+    let mut offset = (pairs * 32) as u32;
+    if byte_len % 32 >= 16 {
+        dynasm!(ops ; .arch aarch64 ; ldr q0, [x16, offset] ; str q0, [x17, offset]);
+        offset += 16;
     }
     let remainder = byte_len % 16;
     if remainder >= 8 {
-        dynasm!(ops ; .arch aarch64 ; ldr x30, [x16], #8 ; str x30, [x17], #8);
+        dynasm!(ops ; .arch aarch64 ; ldr x30, [x16, offset] ; str x30, [x17, offset]);
+        offset += 8;
     }
     if remainder % 8 >= 4 {
-        dynasm!(ops ; .arch aarch64 ; ldr w30, [x16], #4 ; str w30, [x17], #4);
+        dynasm!(ops ; .arch aarch64 ; ldr w30, [x16, offset] ; str w30, [x17, offset]);
+        offset += 4;
     }
     if remainder % 4 >= 2 {
-        dynasm!(ops ; .arch aarch64 ; ldrh w30, [x16], #2 ; strh w30, [x17], #2);
+        dynasm!(ops ; .arch aarch64 ; ldrh w30, [x16, offset] ; strh w30, [x17, offset]);
+        offset += 2;
     }
     if remainder % 2 == 1 {
-        dynasm!(ops ; .arch aarch64 ; ldrb w30, [x16] ; strb w30, [x17]);
+        dynasm!(ops ; .arch aarch64 ; ldrb w30, [x16, offset] ; strb w30, [x17, offset]);
     }
 }
 
