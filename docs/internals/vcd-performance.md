@@ -689,9 +689,9 @@ regression. Both profiles reported no lost samples. A subsequent five-process
 reproduced the difference: same-value writes took 32.527 versus 45.823 ms;
 sparse scattered writes took 32.565 versus 52.950 ms; mask-only writes took
 37.130 versus 47.515 ms. This establishes an effect outside the timed writer
-calls, without establishing its exact cause. Do not subtract these separate
-samples to estimate isolated writer cost. Use the native controls below to
-assess the effect on simulation.
+calls. The code-placement experiments below investigate its cause. Do not
+subtract these separate samples to estimate isolated writer cost. Use the
+native controls below to assess the effect on simulation.
 
 Raw samples, binary hashes and source snapshots are under
 `target/vcd-record-results/`. The writer tables are reproduced by
@@ -731,7 +731,9 @@ The no-output controls are also retained. For `full_width` dense, off took
 14.495 versus 14.656 ms, while instrumented-without-dumping took 21.034 versus
 28.829 ms. The latter regression also appeared in `counter` dense
 (21.685 versus 29.257 ms), with disjoint before/after sample ranges. A writer
-dump is not called during those timed loops; the cause remains unestablished.
+dump is not called during those timed loops. The code-placement experiments
+below reproduce and substantially reduce this regression without changing the
+emitted simulation instructions.
 Do not attribute the entire before/after difference to encoding or claim that
 all controls are unchanged. The full matrix, ranges, commands, and binary
 hashes are retained in `target/vcd-record-results/paired-256/`.
@@ -790,6 +792,157 @@ For the larger run use `--signals 4096 --steps 10000 --patterns full_width
 fresh Verilator fixtures. `binaries.json` links the saved executables to the
 runtime source snapshots; `output-equivalence.json` records the nine identical
 before/after validation waveform bodies and equal timed byte counts.
+
+### Investigation of the no-output regressions
+
+The complete-record implementation is committed as `e45be5052`. Follow-up
+experiments use the same saved baseline and optimized executables, CPU 0 on
+the Ryzen 7 9800X3D, and `/dev/null`. Builds and other benchmarks were excluded
+from timing runs. Code placement demonstrably affects both no-output controls;
+the particular CPU frontend mechanism remains unmeasured.
+
+First, an `mprotect` interposer captured the packed native JIT image before
+execution. The old and new executables emit byte-identical images in each mode:
+
+| Mode | Image bytes | SHA-256, identical before/after |
+| --- | ---: | --- |
+| off | 51,514 | `3400ee6c67fd55b389ceb4d3fb395811f870b7d80843b6103089b2a44d7a5174` |
+| instrumented | 63,165 | `03f7393ad9710a01a7466b5cdb65ae9b91e724727746a9f79f51d5bb5ca4a045` |
+
+A separate allocation interposer aligned the simulation state to either
+64 bytes or 4 KiB. The instrumented regression remained at both alignments.
+Whole-process instructions and branches were almost unchanged. Thus neither
+additional emitted JIT instructions nor state alignment alone explains it.
+
+Next, a diagnostic mapping interposer moved the entire instrumented image
+within its executable allocation, retaining its bytes and relative entry
+offsets. A five-process confirmation rotates all six version/placement
+combinations, after one warm process each. At 256 full-width dense counters
+and 5,000,000 cycles, medians are:
+
+| JIT start offset from page boundary | Before (ms) | Complete records (ms) | Before cycles (billions) | Complete-record cycles (billions) |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 1,096.909 | 1,511.675 | 6.345 | 8.337 |
+| 64 | 1,100.134 | 1,161.446 | 6.267 | 6.449 |
+| 4,096 | 1,098.994 | 1,550.816 | 6.264 | 8.412 |
+
+Elapsed times cover the simulation loop; hardware counters cover the whole
+process. All six variants retire approximately 16.364 billion instructions
+and 2.322 billion branches. Median branch misses range from 4.60 to 4.77 million;
+the extra cycles at offset zero do not accompany extra branch misses. Moving
+the image by 64 bytes reduces the elapsed-time regression from 37.8% to 5.6%.
+Moving by 4 KiB restores it. A 64-byte move preserves every instruction's
+position within a cache line, so individual loop alignment alone cannot
+explain this result. Interaction with other code through frontend caches or
+predictor indexing is a hypothesis consistent with these measurements.
+All six placements produce the same 20-cycle waveform body as the previously
+oracle-validated fixture. The initial three-process sweep also retains results
+for offsets 0, 16, 32, 48, and 64; none were discarded from their summaries.
+
+The standalone `collect` regression has a smaller reproducible example. Its
+hot `TraceLayout::take` loop has the same 36-byte instruction sequence after
+relocating branch destinations. In the baseline it starts at `0x1dec1`, offset
+1 within a 64-byte line; after the writer change it starts at `0x1e021`, offset
+33. In the latter position the flag comparison crosses the line boundary.
+A diagnostic trampoline places this loop at either offset in a page 1 MiB
+from the executable base. It retains all inner-loop instructions and adds
+jumps only on entry/exit. At 16,384 signals, 64 bits, 1,000,000 same-value dumps,
+one warm process and five rotated measured processes per variant give:
+
+| Mode | Loop offset within line | Before (ms) | Complete records (ms) | Before cycles (billions) | Complete-record cycles (billions) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| collect | 1 | 347.377 | 339.390 | 1.764 | 1.739 |
+| collect | 33 | 506.066 | 487.752 | 2.488 | 2.444 |
+| dirty | 1 | 752.042 | 730.221 | 3.737 | 3.630 |
+| dirty | 33 | 950.933 | 921.109 | 4.621 | 4.493 |
+
+At matching placement the original before/after regression disappears. Moving
+either version's loop by 32 bytes slows `collect` by 44–46% and `dirty` by
+about 26%, with the same work and effectively unchanged instruction counts
+within each binary/mode. Comparisons, changes, and bytes agree across variants.
+These trampoline times include their added jumps and are not directly
+comparable to the original benchmark's absolute times. An earlier trampoline
+64 MiB away also showed placement sensitivity but had noisier samples and a
+residual `collect` difference; those results remain in the raw records.
+
+AMD's [Zen 5 optimization guide, sections 2.8.2–2.8.3 and 2.9.1](https://docs.amd.com/v/u/en-US/58455_1.00)
+describes effects of loop/branch placement on prediction throughput and of
+Op Cache misses on instruction supply. This supports investigating frontend
+placement even when branch-miss counts remain low. The measurements above
+establish placement sensitivity, not a specific Op Cache conflict or loss of
+instruction fusion. Identifying that mechanism needs suitable frontend PMU
+events beyond the generic counters used here. The observed offsets are
+diagnostic interventions for these executables and this processor, rather
+than a generally validated JIT padding policy.
+
+Raw data and diagnostic sources are in the ignored directory
+`target/vcd-followup-results/`: `jit-captures.json`, `align-state-summary.json`,
+`shift-summary.json`, `shift-confirm-summary.json`, `loop-summary.json`, and
+`loop-near-summary.json`. The confirmation manifests record every command;
+summaries retain every measured sample, including outliers. `binaries.json`
+pins the executables. The C interposers are `capture-jit.c`, `align-state.c`,
+`shift-jit.c`, and `relocate-loop-near.c`; the latter two experiments are run
+by `measure-shift-confirm.py` and `measure-loop-near.py` after compiling each
+interposer with `gcc -O2 -Wall -Wextra -Werror -shared -fPIC`. Their fixed image
+size and instruction offsets apply only to the saved fixtures. The benchmark
+process receives `LD_PRELOAD` after `perf stat -- env`, so the diagnostic does
+not patch the profiler itself. `shift-confirm-validation.json` records the
+six identical validation waveforms.
+
+### Next steps toward Verilator
+
+The current 256-counter dense result needs a further 33.0% elapsed-time
+reduction to match Verilator in that run. The 4,096-counter result already
+has lower elapsed time, so both sizes remain necessary controls. The existing
+activity tracking still provides the sparse advantage.
+
+Grouping the new native profile's instruction addresses puts approximately
+34% of whole-process cycle samples in 64-bit encoding, 27% in signal-loop
+dispatch and scalar/integer comparisons, and 5% in suffix/output management.
+Separate `memmove` samples account for 5.7%. These are sampling estimates,
+including possible skid, rather than isolated costs or additive speedups.
+The address ranges are recorded in `writer-regions.json`.
+
+1. **Reduce 64-bit conversion instructions first.** The current SSE2 path
+   broadcasts words, shifts/masks them, and packs bytes before testing bits.
+   Verilator's [SSE2 conversion](https://github.com/verilator/verilator/blob/ea338be98e1e838d3518809ce8899f85a009963c/include/verilated_trace_imp.h#L474)
+   uses byte unpacking and shuffles instead. Compare that approach with the
+   current encoder while preserving leading-zero abbreviation, including
+   short counters, full-width data, and unaligned output. Test an AVX2 path
+   separately, selecting an entire encoding loop outside per-signal work.
+   The compared Verilator fixture uses `-O3 -flto` without `-march=native` or
+   `-mavx2`; its result does not require an AVX2 explanation. Even halving the
+   sampled conversion cost would imply only about 17% overall improvement,
+   so encoding alone is not an established solution to the remaining gap.
+
+2. **Move repeated signal decisions into trace construction.** Signal metadata
+   still has a 104-byte stride including names/scopes unused by normal dumps.
+   A compact trace plan can separate header data, precompute same-type runs,
+   and distinguish the initial snapshot from steady-state comparisons.
+   Validate memory coverage before the loop, preserving the public slice
+   bounds contract, and reduce repeated indexing checks. Verilator's
+   [typed comparison primitives](https://github.com/verilator/verilator/blob/ea338be98e1e838d3518809ce8899f85a009963c/include/verilated_trace.h#L398)
+   are called from generated fixed-offset code. Celox can first specialize
+   its trace plan without runtime code rewriting, retaining registration
+   order, aliases, external values, and the four-state fallback.
+
+3. **Revisit the remaining output-buffer copy after those changes.** Complete
+   records removed short-ID copy calls, while dump tails still pass through
+   `BufWriter`. Eliminating all sampled `memmove` time would save only about
+   5.7% in isolation. A single output buffer may also reduce surrounding
+   bookkeeping, but must retain timestamp ordering, flush/Drop behavior,
+   short-write handling, and I/O error propagation.
+
+Use instruction counts together with elapsed-time distributions, preserving
+`off`, `instrumented`, and `collect` controls. A source change can move unrelated
+hot code even when the generated simulation image is identical. Benchmark
+candidate loop layouts across circuit sizes and sparse/dense patterns before
+adopting a padding policy. PGO can affect placement and inlining, but the
+0.082% dense branch-miss rate gives little evidence for prioritizing branch
+hints over removing work. The next implementation should isolate the SSE2
+conversion change, then repeat the existing waveform oracle and paired native
+matrix; the candidate improvements above have not yet been implemented or
+measured as production changes.
 
 ## Correctness
 
