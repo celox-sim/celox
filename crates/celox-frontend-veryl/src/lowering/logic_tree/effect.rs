@@ -481,7 +481,7 @@ fn collect_function_call_effects(
         )?;
         let (output_expr, output_sources, output_is_2state) =
             super::function_output_value(module, arg_id, call, &final_local_store, arena)?;
-        let output_signed = expr::is_signed(module, output_expr, arena);
+        let output_signed = module.variables[&arg_id].r#type.signed;
         let output_expr =
             coerce_node_width(arena, output_expr, Some(destination_width), output_signed)?;
         let mut current_offset = 0;
