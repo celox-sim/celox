@@ -2557,6 +2557,7 @@ fn assign_node_to_dsts(
     rhs_expr: NodeId,
     rhs_sources: HashSet<VarAtomBase<VarId>>,
     source_is_2state: bool,
+    source_signed: bool,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let destination_width = checked_destination_width(
@@ -2573,8 +2574,7 @@ fn assign_node_to_dsts(
             dsts.first().map(|destination| &destination.token),
         ));
     }
-    let rhs_signed = expr::is_signed(module, rhs_expr, arena);
-    let rhs_expr = coerce_node_width(arena, rhs_expr, Some(destination_width), rhs_signed)?;
+    let rhs_expr = coerce_node_width(arena, rhs_expr, Some(destination_width), source_signed)?;
 
     if dsts.len() == 1 {
         let dst = &dsts[0];
@@ -2806,6 +2806,9 @@ pub(super) fn apply_function_output(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let (output_expr, output_sources, output_is_2state) =
         function_output_value(module, arg_id, call, final_local_store, arena)?;
+    // Copy-out reads the formal variable. Its declared signedness can differ
+    // from the expression stored by the last assignment in the callee.
+    let output_signed = module.variables[&arg_id].r#type.signed;
     assign_node_to_dsts(
         module,
         store,
@@ -2814,6 +2817,7 @@ pub(super) fn apply_function_output(
         output_expr,
         output_sources,
         output_is_2state,
+        output_signed,
         arena,
     )
 }
