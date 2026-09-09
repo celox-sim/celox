@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use veryl_analyzer::conv::utils::get_component;
-use veryl_analyzer::ir::{Comptime, Expression, Signature, VarPath};
+use veryl_analyzer::conv::utils::{TypePosition, eval_const_assign, eval_expr, get_component};
+use veryl_analyzer::ir::{
+    AssignDestination, Comptime, Expression, Signature, VarId, VarIndex, VarPath, VarSelect,
+};
+use veryl_analyzer::symbol::{Affiliation, ClockDomain, SymbolKind};
 use veryl_analyzer::value::Value;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::{ClockType, Component, ComponentBackendKind, Metadata, ResetType};
@@ -139,18 +142,81 @@ fn elaborate_parameterized_top(
         )
     })?;
 
-    let mut signature = Signature::new(symbol.found.id);
-    let mut override_map = fxhash::FxHashMap::default();
-    let token = veryl_parser::token_range::TokenRange::default();
-    for (name, value) in param_overrides {
-        let name_id = resource_table::insert_str(name);
-        let path = VarPath::new(name_id);
-        let value = Value::new(*value, 64, false);
-        let comptime = Comptime::create_value(value.clone(), token);
-        let expr = Expression::create_value(value, token);
-        signature.add_parameter(name_id, comptime.value.clone());
-        override_map.insert(path, (comptime, expr));
-    }
+    let SymbolKind::Module(property) = &symbol.found.kind else {
+        unreachable!();
+    };
+    let values: fxhash::FxHashMap<_, _> = param_overrides
+        .iter()
+        .map(|(name, value)| (resource_table::insert_str(name), *value))
+        .collect();
+
+    // push_override expects expressions that have already been evaluated in
+    // the formal parameter type (as get_overridden_params does for HDL insts).
+    // Resolve the header in declaration order so dependent widths/defaults see
+    // earlier overrides, independently of the order of builder.param() calls.
+    let mut header = Context::default();
+    header.inherit(context);
+    header.push_affiliation(Affiliation::Module);
+    header.push_namespace(symbol.found.inner_namespace());
+    let overrides = (|| {
+        let mut signature = Signature::new(symbol.found.id);
+        let mut override_map = fxhash::FxHashMap::default();
+        for parameter in &property.parameters {
+            let property = parameter.property();
+            let token = property.token.into();
+            let invalid = || {
+                ParserError::illegal_context(
+                    "top-level parameter override",
+                    format!(
+                        "unable to evaluate parameter `{}` of top module `{top}`",
+                        parameter.name
+                    ),
+                    Some(&token),
+                )
+            };
+            let r#type = property
+                .r#type
+                .to_ir_type(&mut header, TypePosition::Variable)
+                .map_err(|_| invalid())?;
+            let path = VarPath::new(parameter.name);
+            let mut expr = if let Some(value) = values.get(&parameter.name) {
+                let width = r#type.total_width().ok_or_else(invalid)?;
+                let mut value = Value::new(*value, 64, false)
+                    .expand(width, false)
+                    .into_owned();
+                value.trunc(width);
+                value.set_signed(r#type.signed);
+                let mut comptime = Comptime::create_value(value.clone(), token);
+                comptime.r#type = r#type.clone();
+                let expr = Expression::create_value(value, token);
+                signature.add_parameter(parameter.name, comptime.value.clone());
+                override_map.insert(path.clone(), (comptime.clone(), expr.clone()));
+                (comptime, expr)
+            } else {
+                eval_expr(
+                    &mut header,
+                    Some(r#type.clone()),
+                    property.value.as_ref().ok_or_else(invalid)?,
+                    false,
+                )
+                .map_err(|_| invalid())?
+            };
+            let dst = AssignDestination {
+                id: VarId::default(),
+                path,
+                index: VarIndex::default(),
+                select: VarSelect::default(),
+                comptime: Comptime::from_type(r#type, ClockDomain::None, token),
+                token,
+            };
+            eval_const_assign(&mut header, (&property.kind).into(), &dst, &mut expr)
+                .map_err(|_| invalid())?;
+        }
+        Ok::<_, ParserError>((signature, override_map))
+    })();
+    header.pop_namespace();
+    context.inherit(&mut header);
+    let (signature, override_map) = overrides?;
 
     context.push_override(override_map);
     let component = get_component(context, &signature, top_token).map_err(|_| {
