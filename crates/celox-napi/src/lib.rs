@@ -1416,9 +1416,14 @@ impl NativeSimulatorHandle {
 
     /// Invalidate this handle and release its simulator resources.
     #[napi]
-    pub fn dispose(&mut self) {
+    pub fn dispose(&mut self) -> Result<()> {
         self.backend = None;
-        self.vcd_writer = None;
+        if let Some(mut writer) = self.vcd_writer.take() {
+            writer
+                .flush()
+                .map_err(|e| Error::from_reason(format!("VCD flush error: {e}")))?;
+        }
+        Ok(())
     }
 }
 
@@ -1746,8 +1751,12 @@ impl NativeSimulationHandle {
 
     /// Invalidate this handle.
     #[napi]
-    pub fn dispose(&mut self) {
-        self.sim = None;
+    pub fn dispose(&mut self) -> Result<()> {
+        if let Some(mut sim) = self.sim.take() {
+            sim.flush_vcd()
+                .map_err(|e| Error::from_reason(format!("VCD flush error: {e}")))?;
+        }
+        Ok(())
     }
 }
 
@@ -3293,7 +3302,7 @@ mod tests {
     fn disposed_errors_take_precedence_over_event_validation() {
         let mut simulator =
             NativeSimulatorHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None).unwrap();
-        simulator.dispose();
+        simulator.dispose().unwrap();
         assert_eq!(
             simulator.tick(0).unwrap_err().reason,
             "Simulator has been disposed"
@@ -3306,7 +3315,7 @@ mod tests {
         let mut simulation =
             NativeSimulationHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None)
                 .unwrap();
-        simulation.dispose();
+        simulation.dispose().unwrap();
         assert_eq!(
             simulation.add_clock(0, 10.0, 0.0).unwrap_err().reason,
             "Simulation has been disposed"

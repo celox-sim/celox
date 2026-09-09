@@ -509,6 +509,10 @@ pub struct LaidOutProgram {
 }
 
 impl LaidOutProgram {
+    pub(crate) fn enable_vcd_tracking(&mut self) {
+        self.layout.enable_trace();
+    }
+
     pub fn layout(&self) -> &crate::backend::MemoryLayout {
         &self.layout
     }

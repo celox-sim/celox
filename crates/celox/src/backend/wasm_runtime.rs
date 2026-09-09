@@ -458,6 +458,7 @@ impl WasmBackend {
     }
 
     pub fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         assert!(provided_size <= allocated_size);
@@ -481,6 +482,7 @@ impl WasmBackend {
     }
 
     pub fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut bytes = value.to_bytes_le();
         bytes.resize(allocated_size, 0u8);
@@ -497,6 +499,7 @@ impl WasmBackend {
     }
 
     pub fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut v_bytes = value.to_bytes_le();
         v_bytes.resize(allocated_size, 0u8);
@@ -571,6 +574,7 @@ impl WasmBackend {
     }
 
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        celox_runtime::backend::SimBackend::disable_vcd_tracking(self);
         let data = self.memory.data_mut(&mut self.store);
         (data.as_mut_ptr(), self.layout.merged_total_size)
     }

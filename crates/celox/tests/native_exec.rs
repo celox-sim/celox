@@ -195,6 +195,7 @@ fn native_image_restores_four_state_mode_for_vcd() {
 
     sim.set_four_state(sim.signal("a"), 0xffu8.into(), 0xffu8.into());
     sim.dump(0);
+    sim.flush_vcd().unwrap();
     let dump = std::fs::read_to_string(vcd_path).unwrap();
     assert!(dump.contains("xxxxxxxx"), "{dump}");
 }
@@ -786,4 +787,71 @@ fn test_native_dynamic_index_pattern() {
         state[val_off] = 0x55;
     });
     assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x04550201);
+}
+
+#[test]
+fn native_image_roundtrip_preserves_waveform_write_activity() {
+    let code = r#"module Top (a: input logic<8>, q: output logic<8>) { assign q = a + 1; }"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.vcd");
+    let image = Simulator::builder(code, "Top")
+        .vcd(&path)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    assert!(image.layout().trace.is_some());
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let mut sim = Simulator::from_sources(Vec::new(), "Top")
+        .vcd(&path)
+        .build_native_from_image(image)
+        .unwrap();
+    sim.dump(0);
+    sim.set(sim.signal("a"), 41u8);
+    sim.dump(1);
+    assert_eq!(sim.get_as::<u8>(sim.signal("q")), 42);
+    let before = sim.vcd_statistics().unwrap();
+    sim.dump(2);
+    assert_eq!(
+        sim.vcd_statistics().unwrap().comparisons,
+        before.comparisons
+    );
+    assert!(before.changes >= 4);
+    sim.flush_vcd().unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let mut parser = vcd::Parser::new(bytes.as_slice());
+    parser.parse_header().unwrap();
+    assert!(parser.map(Result::unwrap).any(|command| {
+        matches!(command, vcd::Command::ChangeVector(_, ref value) if value.to_string() == "101010")
+    }));
+}
+
+#[test]
+fn tracing_an_imported_strided_image_requests_compatible_recompilation() {
+    let code = r#"
+        module Top (clk: input clock, d: input logic<3>, index: input logic<2>, q: output logic<3>) {
+            var mem: logic<3>[4];
+            always_ff (clk) { mem[index] = d; }
+            assign q = mem[index];
+        }
+    "#;
+    let image = Simulator::builder(code, "Top")
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    assert!(!image.layout().unpacked_arrays.is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    let result = Simulator::from_sources(Vec::new(), "Top")
+        .vcd(dir.path().join("incompatible.vcd"))
+        .build_native_from_image(image);
+    let Err(error) = result else {
+        panic!("an incompatible waveform layout was accepted");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("compile this native image with VCD enabled"),
+        "{error}"
+    );
 }

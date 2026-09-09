@@ -718,6 +718,16 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
         value: &SIRValue,
     ) -> Result<(), InterpError> {
+        if bits != 0
+            && let Some(offsets) = self.layout.trace_notification_offsets(addr)
+        {
+            for offset in offsets {
+                // SAFETY: notification offsets belong to the complete state image.
+                unsafe {
+                    *self.byte_mut(offset) = 1;
+                }
+            }
+        }
         let object = self.object_offset(addr)?;
         let absolute_addr_ref = addr.absolute_addr();
         let bit_offset =
@@ -748,6 +758,16 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
         value: u64,
     ) -> Result<(), InterpError> {
+        if bits != 0
+            && let Some(offsets) = self.layout.trace_notification_offsets(addr)
+        {
+            for offset in offsets {
+                // SAFETY: notification offsets belong to the complete state image.
+                unsafe {
+                    *self.byte_mut(offset) = 1;
+                }
+            }
+        }
         debug_assert!(bits <= 64);
         let object = self.object_offset(addr)?;
         let absolute = addr.absolute_addr();
@@ -796,6 +816,16 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         access: ResolvedAccess<'_>,
         bits: usize,
     ) -> Result<(), InterpError> {
+        if bits != 0
+            && let Some(offsets) = self.layout.trace_notification_offsets(dst)
+        {
+            for offset in offsets {
+                // SAFETY: notification offsets belong to the complete state image.
+                unsafe {
+                    *self.byte_mut(offset) = 1;
+                }
+            }
+        }
         if src.region == SPARSE_WORKING_REGION {
             return self.commit_sparse_object(src);
         }
@@ -1575,6 +1605,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.four_state && signal.is_4state;
@@ -1620,6 +1651,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         if let Some(ref arr) = signal.array_layout {
             let base = self.memory.as_mut_ptr() as *mut u8;
             unsafe {
@@ -1652,6 +1684,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         if let Some(ref arr) = signal.array_layout {
             let base = self.memory.as_mut_ptr() as *mut u8;
             unsafe {
@@ -1810,6 +1843,7 @@ impl SimBackend for InterpBackend {
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        celox_runtime::backend::SimBackend::disable_vcd_tracking(self);
         (
             self.memory.as_mut_ptr() as *mut u8,
             self.layout.merged_total_size,

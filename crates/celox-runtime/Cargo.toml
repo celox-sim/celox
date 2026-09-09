@@ -21,6 +21,11 @@ serde = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+vcd = "0.7"
+
+[[bench]]
+name = "vcd"
+harness = false
 
 [lints]
 workspace = true

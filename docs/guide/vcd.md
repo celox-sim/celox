@@ -26,8 +26,15 @@ sim.dispose();    // flushes and closes the file
 ```
 
 ::: warning
-The VCD file is not written until `dispose()` is called. Always call `dispose()` when you are done — or use a try/finally block.
+VCD output is buffered. Always call `dispose()` when you are done so the remaining bytes are written — or use a try/finally block.
 :::
+
+In Rust, call `Simulator::flush_vcd()` or `Simulation::flush_vcd()` to make
+buffered output visible before dropping the simulator and to handle write errors.
+Standalone `VcdWriter` instances provide `flush()` and `into_inner()`.
+
+The [VCD performance notes](../internals/vcd-performance.md) describe change
+tracking, shared-memory behavior, and reproducible benchmarks.
 
 ## With Time-Based Simulation
 

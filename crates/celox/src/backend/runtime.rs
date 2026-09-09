@@ -712,6 +712,7 @@ impl JitBackend {
 
     /// Set value for a variable using a pre-resolved [`SignalRef`].
     pub fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.shared.options.four_state && signal.is_4state;
@@ -744,6 +745,7 @@ impl JitBackend {
 
     /// Set value for a variable using a pre-resolved [`SignalRef`] and `BigUint`.
     pub fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut bytes = value.to_bytes_le();
 
@@ -826,6 +828,7 @@ impl JitBackend {
     /// - `(v=1, m=1)` → X (unknown)
     /// - `(v=0, m=1)` → Z (high-impedance)
     pub fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
 
         let mut v_bytes = value.to_bytes_le();
@@ -931,6 +934,7 @@ impl JitBackend {
 
     /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        celox_runtime::backend::SimBackend::disable_vcd_tracking(self);
         let size = self.shared.layout.merged_total_size;
         (self.memory.as_mut_ptr() as *mut u8, size)
     }

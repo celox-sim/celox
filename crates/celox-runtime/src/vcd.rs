@@ -1,4 +1,4 @@
-use celox_state_layout::get_byte_size;
+use celox_state_layout::{TRACE_GROUP_BYTES, get_byte_size};
 use num_bigint::BigUint;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -36,6 +36,9 @@ pub struct VcdExternalSignalDesc {
 enum VcdWriterSource {
     Memory { offset: usize, is_4state: bool },
     External { index: usize },
+    // Classify once so the dump loop can use a fixed-width load and store.
+    MemoryBit { offset: usize },
+    Memory64 { offset: usize },
 }
 
 struct VcdWriterSignal {
@@ -44,45 +47,125 @@ struct VcdWriterSignal {
     name: String,
     width: usize,
     source: VcdWriterSource,
+    previous_offset: usize,
 }
 
-pub struct VcdWriter {
-    writer: BufWriter<File>,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VcdStatistics {
+    pub comparisons: u64,
+    pub changes: u64,
+    pub value_bytes: u64,
+}
+
+pub struct VcdWriter<W: Write = File> {
+    writer: BufWriter<W>,
     signals: Vec<VcdWriterSignal>,
-    last_values: Vec<Option<(BigUint, BigUint)>>,
+    previous: Vec<u8>,
+    initialized: Vec<bool>,
+    groups: fxhash::FxHashMap<usize, Vec<usize>>,
+    selected: Vec<usize>,
+    activity: Vec<usize>,
+    /// Complete value records accumulated for a bulk write. Successful dumps
+    /// always hand the tail to BufWriter so flush and Drop own pending output.
+    encoded: Vec<u8>,
+    encoded_changes: u64,
+    stats: VcdStatistics,
     timestamp: u64,
     header_written: bool,
     external_count: usize,
 }
 
-impl VcdWriter {
+impl VcdWriter<File> {
     pub fn new<P: AsRef<Path>>(path: P, descs: &[VcdSignalDesc]) -> std::io::Result<Self> {
-        let file = File::create(path)?;
-        let writer = BufWriter::new(file);
+        Ok(Self::from_writer(File::create(path)?, descs))
+    }
+}
+
+impl<W: Write> VcdWriter<W> {
+    pub fn from_writer(writer: W, descs: &[VcdSignalDesc]) -> Self {
+        let mut previous = Vec::new();
+        let mut groups: fxhash::FxHashMap<usize, Vec<usize>> = Default::default();
         let signals = descs
             .iter()
-            .map(|desc| VcdWriterSignal {
-                vcd_id: String::new(),
-                scope: desc.scope.clone(),
-                name: desc.name.clone(),
-                width: desc.width,
-                source: VcdWriterSource::Memory {
-                    offset: desc.offset,
-                    is_4state: desc.is_4state,
-                },
+            .enumerate()
+            .map(|(index, desc)| {
+                let previous_offset = previous.len();
+                previous.resize(previous.len() + get_byte_size(desc.width) * 2, 0);
+                let group = desc.offset / TRACE_GROUP_BYTES;
+                groups.entry(group).or_default().push(index);
+                VcdWriterSignal {
+                    vcd_id: String::new(),
+                    scope: desc.scope.clone(),
+                    name: desc.name.clone(),
+                    width: desc.width,
+                    source: match (desc.width, desc.is_4state) {
+                        (1, false) => VcdWriterSource::MemoryBit {
+                            offset: desc.offset,
+                        },
+                        (64, false) => VcdWriterSource::Memory64 {
+                            offset: desc.offset,
+                        },
+                        _ => VcdWriterSource::Memory {
+                            offset: desc.offset,
+                            is_4state: desc.is_4state,
+                        },
+                    },
+                    previous_offset,
+                }
             })
             .collect::<Vec<_>>();
-
-        let last_values = vec![None; signals.len()];
-
-        Ok(Self {
-            writer,
+        Self {
+            writer: BufWriter::with_capacity(256 * 1024, writer),
+            initialized: vec![false; signals.len()],
             signals,
-            last_values,
+            previous,
+            groups,
+            selected: Vec::new(),
+            activity: Vec::new(),
+            encoded: Vec::new(),
+            encoded_changes: 0,
+            stats: VcdStatistics::default(),
             timestamp: 0,
             header_written: false,
             external_count: 0,
-        })
+        }
+    }
+
+    /// Publish buffered output, also reporting errors that Drop cannot report.
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+
+    pub fn statistics(&self) -> VcdStatistics {
+        self.stats
+    }
+    pub fn get_ref(&self) -> &W {
+        self.writer.get_ref()
+    }
+
+    /// Dump as the backend's sole incremental waveform observer. Multiple
+    /// writers must consume activity once and share it through
+    /// `dump_with_activity`, since each consumption clears the pending flags.
+    pub fn dump_backend<B: crate::backend::SimBackend>(
+        &mut self,
+        timestamp: u64,
+        backend: &mut B,
+        external: &[(BigUint, BigUint)],
+    ) -> std::io::Result<()> {
+        let mut activity = std::mem::take(&mut self.activity);
+        let tracked = backend.take_vcd_activity(&mut activity);
+        let (ptr, size) = backend.memory_as_ptr();
+        // SAFETY: the backend owns the image and cannot run during this dump.
+        let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
+        let result =
+            self.dump_with_activity(timestamp, memory, external, tracked.then_some(&activity));
+        self.activity = activity;
+        result
+    }
+
+    pub fn into_inner(mut self) -> std::io::Result<W> {
+        self.flush()?;
+        self.writer.into_inner().map_err(|error| error.into_error())
     }
 
     /// Adds externally supplied signals before the first dump. VCD headers
@@ -121,16 +204,17 @@ impl VcdWriter {
                 name: desc.name.clone(),
                 width: desc.width,
                 source: VcdWriterSource::External { index },
+                previous_offset: self.previous.len(),
             });
-            self.last_values.push(None);
+            self.previous
+                .resize(self.previous.len() + get_byte_size(desc.width) * 2, 0);
+            self.initialized.push(false);
         }
         Ok(())
     }
 
+    #[cold]
     fn write_header(&mut self) -> std::io::Result<()> {
-        if self.header_written {
-            return Ok(());
-        }
         writeln!(self.writer, "$date")?;
         writeln!(
             self.writer,
@@ -174,6 +258,16 @@ impl VcdWriter {
         writeln!(self.writer, "$enddefinitions $end")?;
         writeln!(self.writer, "$dumpvars")?;
         writeln!(self.writer, "$end")?;
+        if let Some(max_record) = self
+            .signals
+            .iter()
+            .map(|signal| signal.width + signal.vcd_id.len() + 3)
+            .max()
+        {
+            // A block can cross the writer's capacity by one complete record.
+            // Reserve both here, once IDs and external signals are finalized.
+            self.encoded.reserve(self.writer.capacity() + max_record);
+        }
         self.header_written = true;
         Ok(())
     }
@@ -192,39 +286,29 @@ impl VcdWriter {
         id.chars().rev().collect()
     }
 
-    /// Read a value from the JIT memory at the given offset and width.
-    fn read_value(memory: &[u8], offset: usize, width: usize) -> BigUint {
-        let byte_size = get_byte_size(width);
-        let slice = &memory[offset..offset + byte_size];
-        let mut val = BigUint::from_bytes_le(slice);
-        let extra_bits = byte_size * 8 - width;
-        if extra_bits > 0 {
-            let mask = (BigUint::from(1u32) << width) - 1u32;
-            val &= mask;
-        }
-        val
-    }
-
-    fn mask_to_width(mut value: BigUint, width: usize) -> BigUint {
-        if value.bits() > width as u64 {
-            value &= (BigUint::from(1u8) << width) - 1u8;
-        }
-        value
-    }
-
-    /// Dump all changed signals at the given timestamp.
-    ///
-    /// `memory` is the raw JIT memory (stable region or full buffer).
+    /// Full-scan reference path, also suitable for uninstrumented/raw memory.
     pub fn dump(&mut self, timestamp: u64, memory: &[u8]) -> std::io::Result<()> {
         self.dump_with_external(timestamp, memory, &[])
     }
 
-    /// Dump memory-backed signals and external values in registration order.
     pub fn dump_with_external(
         &mut self,
         timestamp: u64,
         memory: &[u8],
         external: &[(BigUint, BigUint)],
+    ) -> std::io::Result<()> {
+        self.dump_with_activity(timestamp, memory, external, None)
+    }
+
+    /// `activity` contains unique physical group IDs consumed from TraceLayout.
+    /// None requests a full scan. Initial values and external signals are always
+    /// observed, including when no generated store has executed.
+    pub fn dump_with_activity(
+        &mut self,
+        timestamp: u64,
+        memory: &[u8],
+        external: &[(BigUint, BigUint)],
+        activity: Option<&[usize]>,
     ) -> std::io::Result<()> {
         if external.len() != self.external_count {
             return Err(std::io::Error::new(
@@ -236,99 +320,273 @@ impl VcdWriter {
                 ),
             ));
         }
-        self.write_header()?;
+        let first_dump = !self.header_written;
+        if first_dump {
+            self.write_header()?;
+        }
         if timestamp > self.timestamp || timestamp == 0 {
             writeln!(self.writer, "#{}", timestamp)?;
             self.timestamp = timestamp;
         }
-
-        for (i, sig) in self.signals.iter().enumerate() {
-            let (current_val, current_mask, is_4state) = match sig.source {
-                VcdWriterSource::Memory { offset, is_4state } => {
-                    let byte_size = get_byte_size(sig.width);
-                    let value = Self::read_value(memory, offset, sig.width);
-                    let mask = if is_4state {
-                        Self::read_value(memory, offset + byte_size, sig.width)
-                    } else {
-                        BigUint::from(0u32)
+        self.encoded.clear();
+        self.encoded_changes = 0;
+        self.selected.clear();
+        // Dense activity is cheaper to walk directly in registration order.
+        let sparse = activity
+            .filter(|activity| !first_dump && activity.len() < self.groups.len().div_ceil(2));
+        if let Some(activity) = sparse {
+            for &group in activity {
+                if let Some(indices) = self.groups.get(&group) {
+                    self.selected.extend_from_slice(indices);
+                }
+            }
+            self.selected
+                .extend(self.signals.len() - self.external_count..self.signals.len());
+            // Preserve registration order even when homes are laid out differently.
+            self.selected.sort_unstable();
+            self.selected.dedup();
+        }
+        let count = if sparse.is_some() {
+            self.selected.len()
+        } else {
+            self.signals.len()
+        };
+        for index in 0..count {
+            let i = if sparse.is_some() {
+                self.selected[index]
+            } else {
+                index
+            };
+            let sig = &self.signals[i];
+            self.stats.comparisons += 1;
+            match sig.source {
+                VcdWriterSource::Memory { .. } | VcdWriterSource::External { .. } => {
+                    let size = get_byte_size(sig.width);
+                    // The memory path borrows bytes directly. External component values
+                    // retain their existing BigUint ABI and are converted only here.
+                    let external_bytes;
+                    let (value, mask, track_mask): (&[u8], &[u8], bool) = match sig.source {
+                        VcdWriterSource::MemoryBit { .. } | VcdWriterSource::Memory64 { .. } => {
+                            unreachable!()
+                        }
+                        VcdWriterSource::Memory { offset, is_4state } => (
+                            &memory[offset..offset + size],
+                            if is_4state {
+                                &memory[offset + size..offset + size * 2]
+                            } else {
+                                &[]
+                            },
+                            is_4state,
+                        ),
+                        VcdWriterSource::External { index } => {
+                            external_bytes = (
+                                external[index].0.to_bytes_le(),
+                                external[index].1.to_bytes_le(),
+                            );
+                            (&external_bytes.0, &external_bytes.1, true)
+                        }
                     };
-                    (value, mask, is_4state)
-                }
-                VcdWriterSource::External { index } => {
-                    let (value, mask) = &external[index];
-                    let value = Self::mask_to_width(value.clone(), sig.width);
-                    let mask = Self::mask_to_width(mask.clone(), sig.width);
-                    let is_4state = mask != BigUint::default();
-                    (value, mask, is_4state)
-                }
-            };
-
-            let prev = &self.last_values[i];
-            let changed = match prev {
-                Some((pv, pm)) => pv != &current_val || pm != &current_mask,
-                None => true,
-            };
-
-            if changed {
-                if is_4state && current_mask != BigUint::from(0u32) {
-                    Self::write_four_state_value(
-                        &mut self.writer,
+                    let old =
+                        &mut self.previous[sig.previous_offset..sig.previous_offset + size * 2];
+                    if self.initialized[i]
+                        && plane_equal(&old[..size], value, sig.width)
+                        && (!track_mask || plane_equal(&old[size..], mask, sig.width))
+                    {
+                        continue;
+                    }
+                    copy_plane(&mut old[..size], value, sig.width);
+                    // A two-state memory signal's previous mask stays zero for the
+                    // writer's lifetime. External values can change between X/Z and
+                    // known values, so their masks always participate.
+                    if track_mask {
+                        copy_plane(&mut old[size..], mask, sig.width);
+                    }
+                    self.initialized[i] = true;
+                    encode_value(
+                        &mut self.encoded,
                         sig.width,
-                        &current_val,
-                        &current_mask,
-                        &sig.vcd_id,
-                    )?;
-                } else if sig.width == 1 {
-                    writeln!(self.writer, "{}{}", current_val, sig.vcd_id)?;
-                } else {
-                    writeln!(
-                        self.writer,
-                        "b{} {}",
-                        current_val.to_str_radix(2),
-                        sig.vcd_id
-                    )?;
+                        &old[..size],
+                        if track_mask { &old[size..] } else { &[] },
+                    );
                 }
-                self.last_values[i] = Some((current_val, current_mask));
+                VcdWriterSource::MemoryBit { offset } => {
+                    let value = memory[offset] & 1;
+                    let old = &mut self.previous[sig.previous_offset];
+                    if self.initialized[i] && *old == value {
+                        continue;
+                    }
+                    *old = value;
+                    self.initialized[i] = true;
+                    self.encoded.push(b'0' + value);
+                }
+                VcdWriterSource::Memory64 { offset } => {
+                    let value: [u8; 8] = memory[offset..offset + 8].try_into().unwrap();
+                    let old: &mut [u8; 8] = (&mut self.previous
+                        [sig.previous_offset..sig.previous_offset + 8])
+                        .try_into()
+                        .unwrap();
+                    if self.initialized[i] && u64::from_ne_bytes(*old) == u64::from_ne_bytes(value)
+                    {
+                        continue;
+                    }
+                    *old = value;
+                    self.initialized[i] = true;
+                    encode_u64(&mut self.encoded, u64::from_le_bytes(value));
+                }
+            }
+            if sig.width != 1 {
+                self.encoded.push(b' ');
+            }
+            self.encoded.extend_from_slice(sig.vcd_id.as_bytes());
+            self.encoded.push(b'\n');
+            self.encoded_changes += 1;
+            if self.encoded.len() >= self.writer.capacity() {
+                self.write_encoded()?;
             }
         }
-        self.writer.flush()?;
+        self.write_encoded()
+    }
+
+    fn write_encoded(&mut self) -> std::io::Result<()> {
+        if !self.encoded.is_empty() {
+            // Full blocks bypass BufWriter's internal copy. A dump's final
+            // partial block stays buffered with the timestamps and header.
+            self.writer.write_all(&self.encoded)?;
+            self.stats.changes += self.encoded_changes;
+            self.stats.value_bytes += self.encoded.len() as u64;
+            self.encoded.clear();
+            self.encoded_changes = 0;
+        }
         Ok(())
     }
+}
 
-    fn write_four_state_value(
-        writer: &mut BufWriter<File>,
-        width: usize,
-        value: &BigUint,
-        mask: &BigUint,
-        vcd_id: &str,
-    ) -> std::io::Result<()> {
-        if width == 1 {
-            let m = mask.bit(0);
-            let v = value.bit(0);
-            let ch = match (m, v) {
-                (false, false) => '0',
-                (false, true) => '1',
-                (true, false) => 'z',
-                (true, true) => 'x',
-            };
-            writeln!(writer, "{}{}", ch, vcd_id)
-        } else {
-            write!(writer, "b")?;
-            for i in (0..width).rev() {
-                let m = mask.bit(i as u64);
-                let v = value.bit(i as u64);
-                let ch = match (m, v) {
-                    (false, false) => '0',
-                    (false, true) => '1',
-                    (true, false) => 'z',
-                    (true, true) => 'x',
-                };
-                write!(writer, "{}", ch)?;
-            }
-            writeln!(writer, " {}", vcd_id)
-        }
+fn last_mask(width: usize) -> u8 {
+    if width.is_multiple_of(8) {
+        0xff
+    } else {
+        ((1u16 << (width % 8)) - 1) as u8
     }
 }
+
+fn plane_equal(old: &[u8], value: &[u8], width: usize) -> bool {
+    let Some((&last, prefix)) = old.split_last() else {
+        return true;
+    };
+    if value.len() >= old.len() {
+        prefix == &value[..prefix.len()] && last == value[prefix.len()] & last_mask(width)
+    } else {
+        old.iter().enumerate().all(|(i, &byte)| {
+            byte == value.get(i).copied().unwrap_or(0)
+                & if i + 1 == old.len() {
+                    last_mask(width)
+                } else {
+                    0xff
+                }
+        })
+    }
+}
+
+fn copy_plane(dst: &mut [u8], src: &[u8], width: usize) {
+    let len = dst.len().min(src.len());
+    dst[..len].copy_from_slice(&src[..len]);
+    dst[len..].fill(0);
+    if let Some(last) = dst.last_mut() {
+        *last &= last_mask(width);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[inline]
+fn encode_u64(out: &mut Vec<u8>, value: u64) {
+    use std::arch::x86_64::*;
+
+    let bits = (64 - value.leading_zeros() as usize).max(1);
+    let mut remaining = value << (64 - bits);
+    out.push(b'b');
+    out.reserve(64);
+    let start = out.len();
+    // SAFETY: SSE2 is enabled for this target. Each unaligned store initializes
+    // exactly one 16-byte chunk of reserved capacity. Only the significant
+    // digits are published; any extra initialized bytes remain outside len.
+    unsafe {
+        let masks = _mm_set1_epi64x(0x0102_0408_1020_4080);
+        for chunk in out.spare_capacity_mut()[..64]
+            .as_chunks_mut::<16>()
+            .0
+            .iter_mut()
+            .take(bits.div_ceil(16))
+        {
+            // Repeat each of the next two bytes eight times, then select one
+            // bit per lane in most-significant-bit-first order.
+            let word = _mm_set1_epi16((remaining >> 48) as i16);
+            let bytes = _mm_packus_epi16(
+                _mm_srli_epi16::<8>(word),
+                _mm_and_si128(word, _mm_set1_epi16(0xff)),
+            );
+            let zero = _mm_cmpeq_epi8(_mm_and_si128(bytes, masks), _mm_setzero_si128());
+            let ascii = _mm_add_epi8(_mm_set1_epi8(b'1' as i8), zero);
+            _mm_storeu_si128(chunk.as_mut_ptr().cast(), ascii);
+            remaining <<= 16;
+        }
+        out.set_len(start + bits);
+    }
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
+#[inline]
+fn encode_u64(out: &mut Vec<u8>, value: u64) {
+    encode_value(out, 64, &value.to_le_bytes(), &[]);
+}
+
+fn encode_value(out: &mut Vec<u8>, width: usize, value: &[u8], mask: &[u8]) {
+    if width != 1 {
+        out.push(b'b');
+    }
+    let four_state = mask.iter().any(|&byte| byte != 0);
+    let bits = if four_state {
+        width
+    } else {
+        value
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .map_or(1, |i| i * 8 + (8 - value[i].leading_zeros() as usize))
+    };
+    out.reserve(bits);
+    if !four_state {
+        let bytes = bits.div_ceil(8);
+        let high = value.get(bytes - 1).copied().unwrap_or(0);
+        out.extend_from_slice(&BINARY[high as usize][8 - (bits - (bytes - 1) * 8)..]);
+        for &byte in value[..bytes - 1].iter().rev() {
+            out.extend_from_slice(&BINARY[byte as usize]);
+        }
+        return;
+    }
+    for bit in (0..bits).rev() {
+        let v = value.get(bit / 8).copied().unwrap_or(0) >> (bit % 8) & 1;
+        let m = mask.get(bit / 8).copied().unwrap_or(0) >> (bit % 8) & 1;
+        out.push(match (m, v) {
+            (0, 0) => b'0',
+            (0, _) => b'1',
+            (_, 0) => b'z',
+            _ => b'x',
+        });
+    }
+}
+
+const BINARY: [[u8; 8]; 256] = {
+    let mut table = [[b'0'; 8]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut bit = 0;
+        while bit < 8 {
+            table[byte][bit] += ((byte >> (7 - bit)) & 1) as u8;
+            bit += 1;
+        }
+        byte += 1;
+    }
+    table
+};
 
 #[cfg(test)]
 mod tests {
@@ -357,9 +615,419 @@ mod tests {
         writer
             .dump_with_external(1, &[], &[(BigUint::from(0xffu8), BigUint::default())])
             .unwrap();
+        writer
+            .dump_with_external(2, &[], &[(BigUint::default(), BigUint::from(0xffu8))])
+            .unwrap();
+        writer
+            .dump_with_external(3, &[], &[(BigUint::default(), BigUint::default())])
+            .unwrap();
 
+        writer.flush().unwrap();
         let dump = std::fs::read_to_string(path).unwrap();
         assert!(!dump.contains("b111111111"), "{dump}");
         assert_eq!(dump.matches("b11111111 !").count(), 1, "{dump}");
+        assert_eq!(dump.matches("bzzzzzzzz !").count(), 1, "{dump}");
+        assert_eq!(dump.matches("b0 !").count(), 1, "{dump}");
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    fn changes(bytes: &[u8]) -> Vec<(u64, String)> {
+        let mut parser = vcd::Parser::new(bytes);
+        parser.parse_header().unwrap();
+        let mut time = 0;
+        parser
+            .filter_map(|command| match command.unwrap() {
+                vcd::Command::Timestamp(t) => {
+                    time = t;
+                    None
+                }
+                vcd::Command::ChangeScalar(_, value) => Some((time, value.to_string())),
+                vcd::Command::ChangeVector(_, value) => Some((time, value.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn integer_encoding_matches_binary_format_at_every_bit_length() {
+        let mut values = vec![0, u64::MAX, 0x0123_4567_89ab_cdef, 0xaaaa_5555_aaaa_5555];
+        let mut random = 0x8314_40be_9d6a_2785u64;
+        for bit in 0..64 {
+            let mask = u64::MAX >> (63 - bit);
+            values.extend([1 << bit, mask]);
+            for _ in 0..32 {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                values.push((random & mask) | (1 << bit));
+            }
+        }
+        // Exercise unaligned output, capacity growth, and reuse of spare bytes
+        // after truncation, checking that neither prefixes nor lengths change.
+        for prefix in [0, 1, 15, 16, 63] {
+            let mut actual = vec![b'#'; prefix];
+            let mut expected = actual.clone();
+            for &value in &values {
+                encode_u64(&mut actual, value);
+                expected.extend_from_slice(format!("b{value:b}").as_bytes());
+                assert_eq!(actual, expected, "prefix={prefix} value={value:#x}");
+                if actual.len() > 4096 {
+                    actual.truncate(prefix);
+                    expected.truncate(prefix);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_memory_at_unaligned_buffer_end_preserves_changes_and_aliases() {
+        for offset in 1..=8 {
+            let descs = [
+                VcdSignalDesc {
+                    scope: "top".into(),
+                    name: "prefix".into(),
+                    offset: 0,
+                    width: 7,
+                    is_4state: false,
+                },
+                VcdSignalDesc {
+                    scope: "top".into(),
+                    name: "q".into(),
+                    offset,
+                    width: 64,
+                    is_4state: false,
+                },
+                VcdSignalDesc {
+                    scope: "top".into(),
+                    name: "alias".into(),
+                    offset,
+                    width: 64,
+                    is_4state: false,
+                },
+            ];
+            let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+            // Both previous values follow a 7-bit signal, so their cached
+            // offsets are unaligned too. No padding follows the memory value.
+            let mut memory = vec![0; offset + 8];
+            memory[0] = 0x45;
+            let mut expected = vec![(0, format!("{:b}", memory[0]))];
+            for (step, value) in std::iter::once(0u64)
+                .chain((0..64).map(|bit| 1 << bit))
+                .chain([u64::MAX, 0])
+                .enumerate()
+            {
+                let time = (step * 2) as u64;
+                memory[offset..].copy_from_slice(&value.to_le_bytes());
+                writer.dump(time, &memory).unwrap();
+                writer.dump(time + 1, &memory).unwrap();
+                expected.extend(std::iter::repeat_n((time, format!("{value:b}")), 2));
+            }
+            assert_eq!(writer.statistics().changes, expected.len() as u64);
+            assert_eq!(
+                changes(&writer.into_inner().unwrap()),
+                expected,
+                "offset={offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn emitted_values_match_independent_biguint_oracle() {
+        for width in [1, 7, 8, 9, 31, 32, 63, 64, 65, 257, 1024] {
+            for four_state in [false, true] {
+                let desc = VcdSignalDesc {
+                    scope: "top".into(),
+                    name: "q".into(),
+                    offset: 0,
+                    width,
+                    is_4state: four_state,
+                };
+                let mut writer = VcdWriter::from_writer(Vec::new(), &[desc]);
+                let size = width.div_ceil(8);
+                let mut memory = vec![0; size * 2];
+                let limit = (BigUint::from(1u8) << width) - 1u8;
+                let mut expected = vec![];
+                let mut previous = None;
+                let mut random = 0x8314_40be_9d6a_2785u64;
+                for step in 0..96u64 {
+                    if step % 4 != 1 {
+                        for byte in &mut memory {
+                            random ^= random << 13;
+                            random ^= random >> 7;
+                            random ^= random << 17;
+                            *byte = random as u8;
+                        }
+                    }
+                    if step % 3 == 0 {
+                        memory[size..].fill(0);
+                    }
+                    if step % 8 == 0 {
+                        memory[..size].fill(0);
+                    }
+                    // Deliberately include nonzero padding above the declared width.
+                    let value = BigUint::from_bytes_le(&memory[..size]) & &limit;
+                    let mask = if four_state {
+                        BigUint::from_bytes_le(&memory[size..]) & &limit
+                    } else {
+                        BigUint::default()
+                    };
+                    let state = (value.clone(), mask.clone());
+                    if previous.as_ref() != Some(&state) {
+                        let text = if mask == BigUint::default() {
+                            value.to_str_radix(2)
+                        } else {
+                            (0..width)
+                                .rev()
+                                .map(|bit| match (mask.bit(bit as u64), value.bit(bit as u64)) {
+                                    (false, false) => '0',
+                                    (false, true) => '1',
+                                    (true, false) => 'z',
+                                    (true, true) => 'x',
+                                })
+                                .collect()
+                        };
+                        expected.push((step / 2, text));
+                        previous = Some(state);
+                    }
+                    writer.dump(step / 2, &memory).unwrap();
+                }
+                assert_eq!(
+                    changes(&writer.into_inner().unwrap()),
+                    expected,
+                    "width={width} four_state={four_state}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_selection_preserves_aliases_initial_values_and_registration_order() {
+        let descs = [128, 0, 129, 0, 512, 640, 768, 896, 1024, 1152]
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| VcdSignalDesc {
+                scope: "top".into(),
+                name: format!("s{index}"),
+                offset,
+                width: 8,
+                is_4state: false,
+            })
+            .collect::<Vec<_>>();
+        let mut sparse = VcdWriter::from_writer(Vec::new(), &descs);
+        let mut full = VcdWriter::from_writer(Vec::new(), &descs);
+        let mut memory = vec![0; 1153];
+        for time in 0..5 {
+            memory[0] = time as u8;
+            memory[129] = (time * 3) as u8;
+            // First sample ignores an empty candidate set; later sets arrive unsorted.
+            let groups = if time == 0 { &[][..] } else { &[2, 0, 2][..] };
+            sparse
+                .dump_with_activity(time, &memory, &[], Some(groups))
+                .unwrap();
+            full.dump(time, &memory).unwrap();
+        }
+        assert!(sparse.statistics().comparisons < full.statistics().comparisons);
+        let parse = |bytes: Vec<u8>| {
+            let mut parser = vcd::Parser::new(bytes.as_slice());
+            parser.parse_header().unwrap();
+            parser.map(Result::unwrap).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse(sparse.into_inner().unwrap()),
+            parse(full.into_inner().unwrap())
+        );
+    }
+
+    #[test]
+    fn padding_and_mask_only_changes_have_exact_semantics() {
+        let desc = VcdSignalDesc {
+            scope: "top".into(),
+            name: "q".into(),
+            offset: 0,
+            width: 1,
+            is_4state: true,
+        };
+        let mut writer = VcdWriter::from_writer(Vec::new(), &[desc]);
+        for (time, bytes) in [[0, 0], [0xfe, 0xfe], [0, 1], [1, 1], [1, 0]]
+            .iter()
+            .enumerate()
+        {
+            writer.dump(time as u64, bytes).unwrap();
+        }
+        assert_eq!(
+            changes(&writer.into_inner().unwrap()),
+            [(0, "0"), (2, "z"), (3, "x"), (4, "1")].map(|(t, s)| (t, s.to_string()))
+        );
+    }
+
+    #[derive(Default)]
+    struct ShortWrites {
+        bytes: Vec<u8>,
+        calls: usize,
+        fail_after: Option<usize>,
+    }
+
+    impl Write for ShortWrites {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls.is_multiple_of(7) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let remaining = self
+                .fail_after
+                .unwrap_or(usize::MAX)
+                .saturating_sub(self.bytes.len());
+            if remaining == 0 && !bytes.is_empty() {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            let len = bytes.len().min(113).min(remaining);
+            self.bytes.extend_from_slice(&bytes[..len]);
+            Ok(len)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn blocks_and_oversized_records_survive_short_writes_and_drop() {
+        let mut offset = 0;
+        let descs = (0..1025)
+            .map(|i| {
+                let width = if i == 1024 {
+                    256 * 1024 + 17
+                } else {
+                    [1, 9, 65, 1024][i % 4]
+                };
+                let is_4state = i % 3 == 0 || i == 1024;
+                let desc = VcdSignalDesc {
+                    scope: "top".into(),
+                    name: format!("s{i}"),
+                    offset,
+                    width,
+                    is_4state,
+                };
+                offset += width.div_ceil(8) * if is_4state { 2 } else { 1 };
+                desc
+            })
+            .collect::<Vec<_>>();
+        let mut memory = vec![0xff; offset];
+        let mut sink = ShortWrites::default();
+        let mut expected = Vec::new();
+        let stats = {
+            let mut writer = VcdWriter::from_writer(&mut sink, &descs);
+            writer
+                .add_external_signals(&[VcdExternalSignalDesc {
+                    scope: "component".into(),
+                    name: "state".into(),
+                    width: 9,
+                }])
+                .unwrap();
+            for time in 0..4 {
+                if time == 1 {
+                    memory.fill(0);
+                } else if time == 3 {
+                    for desc in &descs {
+                        let size = desc.width.div_ceil(8);
+                        if desc.is_4state {
+                            memory[desc.offset + size..desc.offset + size * 2].fill(0xff);
+                        } else {
+                            memory[desc.offset..desc.offset + size].fill(0xff);
+                        }
+                    }
+                }
+                let external = match time {
+                    0 => (BigUint::from(0x1ffu16), BigUint::from(0x1ffu16)),
+                    3 => (BigUint::default(), BigUint::from(0x1ffu16)),
+                    _ => (BigUint::default(), BigUint::default()),
+                };
+                writer
+                    .dump_with_external(time, &memory, &[external])
+                    .unwrap();
+                if time != 2 {
+                    for desc in &descs {
+                        let value = if time == 1 {
+                            "0".into()
+                        } else if desc.is_4state {
+                            if time == 0 { "x" } else { "z" }.repeat(desc.width)
+                        } else {
+                            "1".repeat(desc.width)
+                        };
+                        expected.push((time, value));
+                    }
+                    expected.push((
+                        time,
+                        match time {
+                            0 => "x".repeat(9),
+                            3 => "z".repeat(9),
+                            _ => "0".into(),
+                        },
+                    ));
+                }
+            }
+            // Leave the final partial block buffered and exercise Drop.
+            writer.statistics()
+        };
+        assert_eq!(changes(&sink.bytes), expected);
+        let text = std::str::from_utf8(&sink.bytes).unwrap();
+        assert!(text.contains("\n#2\n#3\n"));
+        assert_eq!(stats.changes, expected.len() as u64);
+        let values = text.split_once("$dumpvars\n$end\n").unwrap().1;
+        assert_eq!(
+            stats.value_bytes,
+            values
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| (line.len() + 1) as u64)
+                .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn block_and_tail_io_errors_are_reported() {
+        for (width, fail_after, fails_during_dump) in
+            [(64, 16, false), (512 * 1024, 256 * 1024 + 13, true)]
+        {
+            let desc = VcdSignalDesc {
+                scope: "top".into(),
+                name: "q".into(),
+                offset: 0,
+                width,
+                is_4state: false,
+            };
+            let mut sink = ShortWrites {
+                fail_after: Some(fail_after),
+                ..Default::default()
+            };
+            {
+                let mut writer = VcdWriter::from_writer(&mut sink, &[desc]);
+                let dump = writer.dump(0, &vec![0xff; width.div_ceil(8)]);
+                assert_eq!(dump.is_err(), fails_during_dump);
+                let error = dump.and_then(|()| writer.flush()).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+            assert_eq!(sink.bytes.len(), fail_after);
+        }
+    }
+
+    #[test]
+    fn explicit_flush_reports_sink_failure() {
+        struct BadFlush;
+        impl Write for BadFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("flush failed"))
+            }
+        }
+        let mut writer = VcdWriter::from_writer(BadFlush, &[]);
+        writer.dump(0, &[]).unwrap();
+        assert_eq!(writer.flush().unwrap_err().to_string(), "flush failed");
     }
 }

@@ -1183,8 +1183,36 @@ pub fn lower_execution_unit_with_diagnostics(
         let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
+        // Waveform observers share Store/Commit notification sites with clock
+        // triggers. Mark before specialized store/commit lowering can absorb a
+        // run (packed stores and sparse worklists included). Repeated writes
+        // in this basic block need only one notification per physical group.
+        let mut trace_marks = HashSet::default();
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            let target = match inst {
+                SIRInstruction::Store(addr, _, width, _, _, _)
+                | SIRInstruction::Commit(_, addr, _, width, _)
+                    if *width != 0 =>
+                {
+                    Some(addr)
+                }
+                _ => None,
+            };
+            if let Some(offsets) = target.and_then(|addr| layout.trace_notification_offsets(addr)) {
+                for offset in offsets {
+                    if trace_marks.insert(offset) {
+                        let one = ctx.alloc_vreg(SpillDesc::remat(1));
+                        mblock.push(MInst::LoadImm { dst: one, value: 1 });
+                        mblock.push(MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: offset as i32,
+                            src: one,
+                            size: OpSize::S8,
+                        });
+                    }
+                }
+            }
             if branch_table_plan.is_some_and(|plan| plan.skip_indices.contains(&inst_idx)) {
                 continue;
             }
@@ -14331,6 +14359,7 @@ mod tests {
 
     fn empty_layout() -> MemoryLayout {
         MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -17371,6 +17400,7 @@ mod tests {
         eu.verify();
 
         let layout = MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -17747,6 +17777,7 @@ mod tests {
         };
         eu.verify();
         let layout = MemoryLayout {
+            trace: None,
             four_state,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -17982,6 +18013,7 @@ mod tests {
         };
         eu.verify();
         let layout = MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -18126,6 +18158,7 @@ mod tests {
         eu.verify();
 
         let layout = MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -18865,6 +18898,7 @@ mod tests {
         fixture.eu.verify();
 
         let layout = MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -19080,6 +19114,7 @@ mod tests {
         eu.verify();
 
         let layout = MemoryLayout {
+            trace: None,
             four_state,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -19306,6 +19341,7 @@ mod tests {
         eu.verify();
 
         let layout = MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -19481,6 +19517,7 @@ mod tests {
         eu.verify();
 
         let layout = MemoryLayout {
+            trace: None,
             four_state: false,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
