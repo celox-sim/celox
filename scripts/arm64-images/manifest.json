@@ -7,47 +7,38 @@
     {
       "label": "baseline",
       "file": "baseline.native-image.gz",
-      "source": "073c9555d",
-      "experiment": "bitmap-header-tails",
-      "perf_map": true,
-      "sha256": "322209246d1b1af3de8ba23e337000edb3e146e04239b39ab7624782fa62ee0c",
-      "compressed_sha256": "dbfe6457d8b290ed2f13b60122b73c513ac361f5a5c36ca62ff06af201a23910"
-    },
-    {
-      "label": "active",
-      "file": "active.native-image.gz",
-      "source": "5fdcf8ad6",
-      "experiment": "bitmap-active-bits",
-      "perf_map": true,
-      "sha256": "24f727498e1c84622c54e8401d79c407b4aeec4c017511ecb284dccb6911265a",
-      "compressed_sha256": "673d0708a67bf15e848f9538197370bfc07be17c04c85bd554b7137677618237"
-    },
-    {
-      "label": "compact",
-      "file": "compact.native-image.gz",
-      "source": "510edcfa2",
-      "experiment": "sparse-single-word",
-      "perf_map": true,
-      "sha256": "2df7137d23b4539433ae85118fac19dfc34d42796f3ed4416c5e19021de14b38",
-      "compressed_sha256": "6c0042f295e3c2a90625c582192f38b7fe181f371bb344b59b7d1c03f6106284"
-    },
-    {
-      "label": "dense",
-      "file": "dense.native-image.gz",
-      "source": "9b33671db",
-      "experiment": "sparse-dense-copy",
-      "perf_map": true,
-      "sha256": "5e3477c6c86c07cbfeebd8a93ca2857fa8e8aa0a33c6f5416d39a017a7920145",
-      "compressed_sha256": "6b286d8592dfc561653ed5ae0fcf77276990dba379a17fb478bec22eed56fdbf"
-    },
-    {
-      "label": "candidate",
-      "file": "candidate.native-image.gz",
       "source": "3dabec748",
       "experiment": "sparse-dense-clean",
       "perf_map": true,
       "sha256": "a0f6ea1671f76a9384a114c949dd6779016a510b4018a61aaa2104a7aef6380c",
       "compressed_sha256": "6e1bd439ec20cc5ec05253ed782845ad9b810d6481b1bb47ed6e2b3c785a2586"
+    },
+    {
+      "label": "cleanup",
+      "file": "cleanup.native-image.gz",
+      "source": "dd357fea8",
+      "experiment": "sparse-measured",
+      "perf_map": true,
+      "sha256": "27f236bc3d8095e539494a47b048249ca9b8fea7ffdea5ec587db72693df33d8",
+      "compressed_sha256": "ee9bc9b4da8721ea61ff193e36b128aa0a3d88ad13e5ae43e695749b14bed791"
+    },
+    {
+      "label": "bits",
+      "file": "bits.native-image.gz",
+      "source": "3b7dd0e7f",
+      "experiment": "bit-set-updates",
+      "perf_map": true,
+      "sha256": "f70622667ad863eb89b82878fcc2d6ca052a673c68ff104dbc80b243f0ffb638",
+      "compressed_sha256": "c57438af4638ce9705b7a7156c02e9edd1b9853e5e896c72088ee281e7b9627c"
+    },
+    {
+      "label": "candidate",
+      "file": "candidate.native-image.gz",
+      "source": "26c1b8c1c",
+      "experiment": "paired-copies",
+      "perf_map": true,
+      "sha256": "42a3cc5d0776780364b81ea2e328fadb2762443c77cb4b3b7bd779ae4dd585b0",
+      "compressed_sha256": "98f506d0a1615917f4c6aae025d9e165d99702ddcf57f3dd2d9560b749d26bbe"
     }
   ]
 }

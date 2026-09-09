@@ -24,9 +24,9 @@ PY
 cd "$HELIODOR_DIR"
 for round in 1 2 3; do
   case "$round" in
-    1) order=(baseline active compact dense candidate veryl) ;;
-    2) order=(veryl candidate dense compact active baseline) ;;
-    3) order=(compact baseline veryl active candidate dense) ;;
+    1) order=(baseline cleanup bits candidate veryl) ;;
+    2) order=(veryl candidate bits cleanup baseline) ;;
+    3) order=(bits baseline veryl cleanup candidate) ;;
   esac
   for label in "${order[@]}"; do
     log="$HELIODOR_RESULTS_DIR/image-$label-$round.log"
@@ -48,7 +48,7 @@ import json, re, statistics, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 summary = {}
-for label in ['baseline', 'active', 'compact', 'dense', 'candidate', 'veryl']:
+for label in ['baseline', 'cleanup', 'bits', 'candidate', 'veryl']:
     times = []
     for round in range(1, 4):
         path = root / f'image-{label}-{round}.log'
@@ -60,7 +60,7 @@ for label in ['baseline', 'active', 'compact', 'dense', 'candidate', 'veryl']:
         timing = next(line for line in text.splitlines() if line.startswith(marker + '_TEST_TIMING '))
         times.append(int(re.search(r'\bexecute_ns=(\d+)', timing)[1]) / 1e9)
     summary[label] = {'execute_seconds': times, 'median_seconds': statistics.median(times)}
-output = json.dumps({'all_eighteen_boots_match': True, 'summary': summary}, indent=2)
+output = json.dumps({'all_fifteen_boots_match': True, 'summary': summary}, indent=2)
 (root / 'image-summary.log').write_text(output + '\n')
 print(output)
 PY
