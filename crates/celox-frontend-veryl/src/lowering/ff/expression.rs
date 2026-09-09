@@ -3058,42 +3058,16 @@ impl<'a> FfParser<'a> {
             let final_reg = if current_offset == 0 && part_width == rhs_width {
                 rhs_reg
             } else {
-                let shifted_reg = if current_offset == 0 {
-                    rhs_reg
-                } else {
-                    let shifted_reg = ir_builder.alloc_logic(rhs_width);
-
-                    let shift_amt_reg = ir_builder.alloc_bit(64, false);
-                    ir_builder.emit(SIRInstruction::Imm(
-                        shift_amt_reg,
-                        SIRValue::new(current_offset),
-                    ));
-
-                    ir_builder.emit(SIRInstruction::Binary(
-                        shifted_reg,
-                        rhs_reg,
-                        BinaryOp::Shr,
-                        shift_amt_reg,
-                    ));
-                    shifted_reg
-                };
-
-                if part_width == rhs_width && current_offset == 0 {
-                    shifted_reg
-                } else {
-                    let mask_val = (BigUint::from(1u64) << part_width) - BigUint::from(1u64);
-                    let mask_reg = ir_builder.alloc_bit(part_width, false);
-                    ir_builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-
-                    let final_reg = ir_builder.alloc_logic(part_width);
-                    ir_builder.emit(SIRInstruction::Binary(
-                        final_reg,
-                        shifted_reg,
-                        BinaryOp::And,
-                        mask_reg,
-                    ));
-                    final_reg
-                }
+                // Splitting an assignment copies bits, including X/Z, rather
+                // than applying a logical mask that changes Z into X.
+                let final_reg = ir_builder.alloc_logic(part_width);
+                ir_builder.emit(SIRInstruction::Slice(
+                    final_reg,
+                    rhs_reg,
+                    current_offset,
+                    part_width,
+                ));
+                final_reg
             };
 
             self.stack.push_back(final_reg);
