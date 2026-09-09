@@ -18,6 +18,8 @@ use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, 
 use crate::mir::{AllocatedFunction, BlockId, MFunction, MInst, VReg};
 use crate::{Arm64Reg, HashMap};
 
+mod rematerialize;
+
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,22 +280,9 @@ pub(crate) fn allocate_with_spills(
     // Observed once per spill-retry round so a cancelled compile unwinds at
     // the next round instead of finishing the remaining iterations. Callers
     // without cancellation pass `|| false`, which folds away after inlining.
-    let initial_facts = build_facts(&function)?;
     if is_cancelled() {
         return Err(TargetRegallocError::Cancelled);
     }
-    let mut candidates = initial_facts
-        .blocks
-        .iter()
-        .flat_map(|block| {
-            block.phis.iter().map(|phi| phi.destination).chain(
-                block
-                    .instructions
-                    .iter()
-                    .flat_map(|instruction| instruction.defs.iter().copied()),
-            )
-        })
-        .collect::<BTreeSet<_>>();
     let mut next_value = function
         .blocks
         .iter()
@@ -309,6 +298,26 @@ pub(crate) fn allocate_with_spills(
         .map(|value| value.0)
         .max()
         .map_or(0, |value| value.saturating_add(1));
+    // Spilling a shared constant must not force every phi fed by it into memory.
+    // Short edge materializations remain ordinary, spillable SSA
+    // values and participate in the same pressure checks.
+    rematerialize::phi_constants(&mut function, &mut next_value)?;
+    let initial_facts = build_facts(&function)?;
+    // Spill rewriting preserves the CFG, so compute loop frequencies once,
+    // rather than repeating dominance analysis for every allocation attempt.
+    let frequencies = spill_frequencies(&function, &initial_facts);
+    let mut candidates = initial_facts
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block.phis.iter().map(|phi| phi.destination).chain(
+                block
+                    .instructions
+                    .iter()
+                    .flat_map(|instruction| instruction.defs.iter().copied()),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     let mut spill_frame_size = 0_u32;
 
     loop {
@@ -320,7 +329,7 @@ pub(crate) fn allocate_with_spills(
             .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
         let proactive = close_phi_spill_set(
             &function,
-            select_spill_batch(&function, &intervals, &candidates, false),
+            select_spill_batch(&function, &intervals, &candidates, &frequencies, false),
         );
         if !proactive.is_empty() {
             insert_spill_batch(
@@ -343,7 +352,7 @@ pub(crate) fn allocate_with_spills(
             Err(TargetRegallocError::RegisterPressure { value }) => {
                 let spilled = close_phi_spill_set(
                     &function,
-                    select_spill_batch(&function, &intervals, &candidates, true),
+                    select_spill_batch(&function, &intervals, &candidates, &frequencies, true),
                 );
                 if spilled.is_empty() {
                     return Err(TargetRegallocError::UnspillablePressure { value });
@@ -392,10 +401,37 @@ fn close_phi_spill_set(function: &MFunction, spilled: Vec<VReg>) -> Vec<VReg> {
     newly_spilled.into_iter().collect()
 }
 
+fn spill_frequencies(function: &MFunction, facts: &AllocationFacts) -> BTreeMap<BlockId, u64> {
+    let mut weights = vec![1_u64; function.blocks.len()];
+    let successors = facts
+        .blocks
+        .iter()
+        .map(|block| block.successors.clone())
+        .collect();
+    if let Ok(cfg) =
+        celox_analysis::cfg::ForwardControlFlowGraph::analyze_structure(successors, facts.entry)
+    {
+        for region in cfg.loops {
+            for block in region.blocks {
+                // This estimates relative frequency, not a trip-count proof.
+                // Cap nested loops so cold uses still contribute to the cost.
+                weights[block] = (weights[block] * 8).min(4096);
+            }
+        }
+    }
+    function
+        .blocks
+        .iter()
+        .zip(weights)
+        .map(|(block, weight)| (block.id, weight))
+        .collect()
+}
+
 fn select_spill_batch(
     function: &MFunction,
     intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
     candidates: &BTreeSet<VReg>,
+    frequencies: &BTreeMap<BlockId, u64>,
     force: bool,
 ) -> Vec<VReg> {
     let live_lengths = intervals
@@ -411,36 +447,39 @@ fn select_spill_batch(
         .collect::<BTreeMap<_, _>>();
     let mut use_counts = BTreeMap::<VReg, u64>::new();
     for block in &function.blocks {
+        let weight = frequencies.get(&block.id).copied().unwrap_or(1);
         for phi in &block.phis {
-            *use_counts.entry(phi.dst).or_default() += 1;
-            for &(_, source) in &phi.sources {
-                *use_counts.entry(source).or_default() += 1;
+            *use_counts.entry(phi.dst).or_default() += weight;
+            for &(predecessor, source) in &phi.sources {
+                *use_counts.entry(source).or_default() +=
+                    frequencies.get(&predecessor).copied().unwrap_or(1);
             }
         }
         for instruction in &block.insts {
             if !matches!(instruction, MInst::KeepAlive { .. }) {
                 for value in instruction.uses() {
-                    *use_counts.entry(value).or_default() += 1;
+                    *use_counts.entry(value).or_default() += weight;
                 }
             }
             if let Some(value) = instruction.def() {
-                *use_counts.entry(value).or_default() += 1;
+                *use_counts.entry(value).or_default() += weight;
             }
         }
     }
     let live_length = |value: VReg| live_lengths.get(&value).copied().unwrap_or(0);
-    let spill_priority = |value: VReg| {
-        let cost = use_counts.get(&value).copied().unwrap_or(1);
-        (
-            live_length(value) / cost,
-            live_length(value),
-            Reverse(value),
-        )
+    let compare_priority = |left: VReg, right: VReg| {
+        let cost = |value| use_counts.get(&value).copied().unwrap_or(1);
+        // Compare length/cost without truncating every hot value's score to
+        // zero. u128 keeps the product exact even for large live intervals.
+        (u128::from(live_length(left)) * u128::from(cost(right)))
+            .cmp(&(u128::from(live_length(right)) * u128::from(cost(left))))
+            .then_with(|| live_length(left).cmp(&live_length(right)))
+            .then_with(|| right.cmp(&left))
     };
-    // The widest target instruction has five uses and one definition. Keep
-    // that many registers free so a spilled row's local reload/definition
-    // temporaries do not immediately create a second pressure wave.
-    let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(6);
+    // Reserve reload space for the common three-input operations and their
+    // result. Wider pseudos are accounted for by the next allocation round,
+    // instead of reducing every block's capacity for their worst case.
+    let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(4);
     let mut selected = BTreeSet::new();
     let mut peak = Vec::new();
     let mut block_segments = vec![Vec::new(); function.blocks.len()];
@@ -466,7 +505,7 @@ fn select_spill_batch(
                 let Some(spilled) = active
                     .iter()
                     .filter(|(_, value)| candidates.contains(value))
-                    .max_by_key(|(_, value)| spill_priority(*value))
+                    .max_by(|(_, left), (_, right)| compare_priority(*left, *right))
                     .map(|&(_, value)| value)
                 else {
                     break;
@@ -485,7 +524,7 @@ fn select_spill_batch(
     }
     peak.into_iter()
         .filter(|value| candidates.contains(value))
-        .max_by_key(|value| spill_priority(*value))
+        .max_by(|left, right| compare_priority(*left, *right))
         .into_iter()
         .collect()
 }
@@ -570,7 +609,6 @@ fn spill_values(
         .collect::<BTreeMap<_, _>>();
     let all_homes = function.spill_homes.clone();
     let mut external_phis = Vec::new();
-    let mut edge_keep_alives = BTreeMap::<BlockId, BTreeSet<VReg>>::new();
     for block in &mut function.blocks {
         let mut retained = Vec::with_capacity(block.phis.len());
         for phi in std::mem::take(&mut block.phis) {
@@ -586,10 +624,6 @@ fn spill_values(
                             let source = if let Some(&offset) = all_homes.get(&source) {
                                 crate::mir::SpilledPhiSource::Stack(offset)
                             } else {
-                                edge_keep_alives
-                                    .entry(predecessor)
-                                    .or_default()
-                                    .insert(source);
                                 crate::mir::SpilledPhiSource::Value(source)
                             };
                             (predecessor, source)
@@ -619,8 +653,23 @@ fn spill_values(
         }
     }
     function.spilled_phis.extend(external_phis);
+    let mut edge_keep_alives = BTreeMap::<BlockId, BTreeSet<VReg>>::new();
+    for phi in &function.spilled_phis {
+        for &(predecessor, source) in &phi.sources {
+            if let crate::mir::SpilledPhiSource::Value(value) = source {
+                edge_keep_alives
+                    .entry(predecessor)
+                    .or_default()
+                    .insert(value);
+            }
+        }
+    }
     for block in &mut function.blocks {
-        let original = std::mem::take(&mut block.insts);
+        let edge_uses = edge_keep_alives.remove(&block.id).unwrap_or_default();
+        let original = std::mem::take(&mut block.insts)
+            .into_iter()
+            .filter(|inst| !matches!(inst, MInst::KeepAlive { src } if edge_uses.contains(src)))
+            .collect::<Vec<_>>();
         let spill_uses = original
             .iter()
             .map(|instruction| {
@@ -636,32 +685,11 @@ fn spill_values(
             })
             .collect::<Vec<BTreeSet<_>>>();
         let mut reload_cache = BTreeMap::<VReg, VReg>::new();
-        let existing_keep_alives = original
-            .iter()
-            .filter_map(|instruction| match instruction {
-                MInst::KeepAlive { src } if !homes.contains_key(src) => Some(*src),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let new_keep_alives = edge_keep_alives
-            .remove(&block.id)
-            .unwrap_or_default()
-            .difference(&existing_keep_alives)
-            .copied()
-            .collect::<Vec<_>>();
         let terminator_index = original.len().saturating_sub(1);
-        let mut rewritten = Vec::with_capacity(original.len() + new_keep_alives.len());
+        let mut rewritten = Vec::with_capacity(original.len() + edge_uses.len());
         for (index, mut instruction) in original.into_iter().enumerate() {
             if matches!(instruction, MInst::KeepAlive { src } if homes.contains_key(&src)) {
                 continue;
-            }
-            if index == terminator_index {
-                rewritten.extend(
-                    new_keep_alives
-                        .iter()
-                        .copied()
-                        .map(|src| MInst::KeepAlive { src }),
-                );
             }
             for spilled in spill_uses[index].iter().copied() {
                 let reload = if let Some(&reload) = reload_cache.get(&spilled) {
@@ -685,6 +713,17 @@ fn spill_values(
                 };
                 instruction.rewrite_use(spilled, reload);
             }
+            if index == terminator_index {
+                // Edge copies execute after the branch decision. Keep their
+                // register inputs live across every terminator reload,
+                // including reloads inserted by later spill rounds.
+                rewritten.extend(
+                    edge_uses
+                        .iter()
+                        .copied()
+                        .map(|src| MInst::KeepAlive { src }),
+                );
+            }
             let mut definition_cache = None;
             if let Some(spilled) = instruction.def().filter(|value| homes.contains_key(value)) {
                 let temporary = fresh(next_value)?;
@@ -704,13 +743,29 @@ fn spill_values(
                 rewritten.push(instruction);
             }
             let next_uses = spill_uses.get(index + 1);
-            reload_cache
-                .retain(|value, _| next_uses.is_some_and(|next_uses| next_uses.contains(value)));
-            if let Some((spilled, temporary)) = definition_cache
-                && next_uses.is_some_and(|next_uses| next_uses.contains(&spilled))
-            {
+            if let Some((spilled, temporary)) = definition_cache {
                 reload_cache.insert(spilled, temporary);
             }
+            // An induction value can feed several addresses separated by
+            // loads and masks. Keep one such reload across a short gap, in
+            // addition to operands used by the very next instruction. The
+            // bounds limit the extra pressure from unspillable reloads.
+            let lookahead_end = spill_uses.len().min(index + 9);
+            let reuse_after_gap = reload_cache
+                .keys()
+                .filter(|value| !next_uses.is_some_and(|uses| uses.contains(value)))
+                .filter_map(|&value| {
+                    spill_uses[index + 1..lookahead_end]
+                        .iter()
+                        .position(|uses| uses.contains(&value))
+                        .map(|distance| (distance, value))
+                })
+                .min()
+                .map(|(_, value)| value);
+            reload_cache.retain(|value, _| {
+                next_uses.is_some_and(|uses| uses.contains(value))
+                    || reuse_after_gap == Some(*value)
+            });
         }
         block.insts = rewritten;
     }
@@ -755,15 +810,20 @@ fn color_intervals(
         .iter()
         .map(|(&value, _)| (value, BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    for block in 0..function.blocks.len() {
-        let mut segments = intervals
-            .iter()
-            .filter_map(|(&value, interval)| {
-                interval
-                    .segment_in_block(block)
-                    .map(|segment| (segment.start, segment.end, value))
-            })
-            .collect::<Vec<_>>();
+    // Index intervals by block once; large kernels have many values that
+    // are live in only a small fraction of their basic blocks.
+    let mut block_segments = vec![Vec::new(); function.blocks.len()];
+    for (&value, interval) in intervals.iter() {
+        for segment in &interval.segments {
+            let segments = &mut block_segments[segment.block];
+            // Match segment_in_block's first-segment semantics if an
+            // interval ever carries more than one segment for a block.
+            if !segments.last().is_some_and(|&(_, _, last)| last == value) {
+                segments.push((segment.start, segment.end, value));
+            }
+        }
+    }
+    for mut segments in block_segments {
         segments.sort_unstable();
         let mut active = Vec::<(u64, VReg)>::new();
         for (start, end, value) in segments {
@@ -782,6 +842,16 @@ fn color_intervals(
             for &(_, source) in &phi.sources {
                 affinities.entry(phi.dst).or_default().insert(source);
                 affinities.entry(source).or_default().insert(phi.dst);
+            }
+        }
+        for instruction in &block.insts {
+            if let MInst::Mov { dst, src } | MInst::BitInsert { dst, base: src, .. } = *instruction
+            {
+                // BFI updates its base operand. Reusing that register avoids
+                // a move when the base dies here; interference still protects
+                // both operands if either value remains live afterwards.
+                affinities.entry(dst).or_default().insert(src);
+                affinities.entry(src).or_default().insert(dst);
             }
         }
     }
@@ -1211,7 +1281,7 @@ mod tests {
 
     #[test]
     fn prefers_long_lived_values_with_fewer_uses_for_spilling() {
-        let mut instructions = (0..19_u32)
+        let mut instructions = (0..21_u32)
             .map(|value| MInst::LoadImm {
                 dst: VReg(value),
                 value: u64::from(value),
@@ -1229,7 +1299,7 @@ mod tests {
             src: VReg(0),
             size: OpSize::S64,
         });
-        instructions.extend((2..19_u32).map(|value| MInst::Store {
+        instructions.extend((2..21_u32).map(|value| MInst::Store {
             base: BaseReg::SimState,
             offset: 800 + (value as i32) * 8,
             src: VReg(value),
@@ -1253,8 +1323,102 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(
-            select_spill_batch(&function, &intervals, &candidates, false),
+            select_spill_batch(&function, &intervals, &candidates, &BTreeMap::new(), false),
             vec![VReg(0)]
+        );
+    }
+
+    #[test]
+    fn spill_cost_keeps_repeated_loop_uses_in_registers() {
+        let mut entry = MBlock::new(BlockId(10));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        entry.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 9,
+        });
+        // Both values span a long entry block, but only v0 is read on every
+        // loop iteration. The eight exit stores execute just once.
+        entry
+            .insts
+            .extend((0..100).map(|_| MInst::KeepAlive { src: VReg(0) }));
+        entry.push(MInst::Jump {
+            target: BlockId(20),
+        });
+        let mut header = MBlock::new(BlockId(20));
+        header.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: VReg(0),
+            size: OpSize::S64,
+        });
+        header.push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(20),
+            false_bb: BlockId(30),
+        });
+        let mut exit = MBlock::new(BlockId(30));
+        exit.insts.extend((0..8).map(|index| MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8 + index * 8,
+            src: VReg(1),
+            size: OpSize::S64,
+        }));
+        exit.push(MInst::Return);
+        let function = MFunction::new(vec![entry, header, exit], Vec::new());
+        let facts = build_facts(&function).unwrap();
+        let frequencies = spill_frequencies(&function, &facts);
+        assert_eq!(
+            frequencies,
+            BTreeMap::from([(BlockId(10), 1), (BlockId(20), 8), (BlockId(30), 1)])
+        );
+        let intervals = analyze_live_intervals(&facts).unwrap();
+        let candidates = BTreeSet::from([VReg(0), VReg(1)]);
+        assert_eq!(
+            select_spill_batch(&function, &intervals, &candidates, &BTreeMap::new(), true),
+            vec![VReg(0)]
+        );
+        assert_eq!(
+            select_spill_batch(&function, &intervals, &candidates, &frequencies, true),
+            vec![VReg(1)]
+        );
+    }
+
+    #[test]
+    fn spill_frequencies_distinguish_nested_loops_and_exits() {
+        let mut blocks = (0..6)
+            .map(|index| MBlock::new(BlockId(index * 10)))
+            .collect::<Vec<_>>();
+        blocks[0].push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 0,
+        });
+        for (index, target) in [(0, 10), (1, 20), (2, 30)] {
+            blocks[index].push(MInst::Jump {
+                target: BlockId(target),
+            });
+        }
+        blocks[3].push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(20),
+            false_bb: BlockId(40),
+        });
+        blocks[4].push(MInst::Branch {
+            cond: VReg(0),
+            true_bb: BlockId(10),
+            false_bb: BlockId(50),
+        });
+        blocks[5].push(MInst::Return);
+        let function = MFunction::new(blocks, Vec::new());
+        let facts = build_facts(&function).unwrap();
+        assert_eq!(
+            spill_frequencies(&function, &facts)
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 8, 64, 64, 8, 1]
         );
     }
 
@@ -1268,6 +1432,9 @@ mod tests {
                 size: OpSize::S64,
             })
             .collect::<Vec<_>>();
+        // Keep a pressure boundary: scheduling independent loads and stores
+        // together would otherwise remove the need for spill reconstruction.
+        instructions.push(MInst::KeepAlive { src: VReg(0) });
         instructions.extend((0..26).map(|value| MInst::Store {
             base: BaseReg::SimState,
             offset: value * 8,
@@ -1374,6 +1541,61 @@ mod tests {
     }
 
     #[test]
+    fn reuses_a_spilled_index_across_address_calculations() {
+        let mut instructions = vec![MInst::Load {
+            dst: VReg(0),
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        }];
+        // Move the first use beyond the reuse window, so it must reload.
+        instructions.extend((1..=10).map(|value| MInst::LoadImm {
+            dst: VReg(value),
+            value: u64::from(value),
+        }));
+        for index in 0..3 {
+            instructions.push(MInst::AddImm {
+                dst: VReg(11 + index),
+                src: VReg(0),
+                imm: index as i32,
+            });
+            instructions.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: (index * 8) as i32,
+                src: VReg(11 + index),
+                size: OpSize::S64,
+            });
+        }
+        instructions.push(MInst::Return);
+        let mut function = MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: vec![],
+                insts: instructions,
+            }],
+            vec![],
+        );
+        let homes = [(VReg(0), 0)].into_iter().collect();
+        function.spill_homes.insert(VReg(0), 0);
+        spill_values(&mut function, &homes, &mut 14).unwrap();
+        assert_eq!(
+            function.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+        );
+        allocate_without_spills(function).unwrap();
+    }
+
+    #[test]
     fn colors_disjoint_pressure_waves_into_shared_stack_slots() {
         let mut instructions = Vec::new();
         for wave in 0..2_u32 {
@@ -1382,6 +1604,7 @@ mod tests {
                 dst: VReg(first + value),
                 value: u64::from(first + value),
             }));
+            instructions.push(MInst::KeepAlive { src: VReg(first) });
             instructions.extend((0..26).map(|value| MInst::Store {
                 base: BaseReg::SimState,
                 offset: i32::try_from((first + value) * 8).unwrap(),
@@ -1482,6 +1705,77 @@ mod tests {
                 .as_slice()
             )
         );
+    }
+
+    #[test]
+    fn external_phi_sources_interfere_with_reloaded_branch_conditions() {
+        for separate_rounds in [false, true] {
+            let mut entry = MBlock::new(BlockId(0));
+            entry.push(MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            });
+            entry.push(MInst::LoadImm {
+                dst: VReg(1),
+                value: 11,
+            });
+            for _ in 0..10 {
+                entry.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                });
+            }
+            entry.push(MInst::Branch {
+                cond: VReg(0),
+                true_bb: BlockId(2),
+                false_bb: BlockId(1),
+            });
+            let mut other = MBlock::new(BlockId(1));
+            other.push(MInst::LoadImm {
+                dst: VReg(3),
+                value: 29,
+            });
+            other.push(MInst::Jump { target: BlockId(2) });
+            let mut join = MBlock::new(BlockId(2));
+            join.phis.push(PhiNode {
+                dst: VReg(4),
+                sources: vec![(BlockId(0), VReg(1)), (BlockId(1), VReg(3))],
+            });
+            join.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(4),
+                size: OpSize::S64,
+            });
+            join.push(MInst::Return);
+            let mut function = MFunction::new(vec![entry, other, join], vec![]);
+            let mut next = 5;
+            if separate_rounds {
+                let homes = BTreeMap::from([(VReg(4), 8)]);
+                function.spill_homes.extend(homes.clone());
+                spill_values(&mut function, &homes, &mut next).unwrap();
+            }
+            let homes = if separate_rounds {
+                BTreeMap::from([(VReg(0), 0)])
+            } else {
+                BTreeMap::from([(VReg(0), 0), (VReg(4), 8)])
+            };
+            function.spill_homes.extend(homes.clone());
+            spill_values(&mut function, &homes, &mut next).unwrap();
+            let MInst::Branch { cond, .. } = *function.blocks[0].insts.last().unwrap() else {
+                unreachable!()
+            };
+            let allocated = allocate_without_spills(function).unwrap();
+            assert_ne!(
+                allocated.assignment.get(&VReg(1)),
+                allocated.assignment.get(&cond),
+                "separate_rounds={separate_rounds}: the edge value must survive the branch-condition reload"
+            );
+        }
     }
 
     #[test]

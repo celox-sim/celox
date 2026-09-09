@@ -109,7 +109,15 @@ pub(crate) fn legalize_variable_shift_counts(function: &mut MFunction) {
 }
 
 pub(crate) fn value_upper_bounds(function: &MFunction) -> BTreeMap<VReg, u64> {
-    let mut bounds = BTreeMap::new();
+    // Instruction selection must not lose the source bounds when a shift
+    // becomes UBFX or a packed reconstruction becomes BFI/ORR. Start with the
+    // same bit facts as optimization, then retain numeric range refinements.
+    let mut bounds = crate::mir_opt::known_bits::known_zeros(function)
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, zero)| zero != 0)
+        .map(|(value, zero)| (VReg(value as u32), !zero))
+        .collect::<BTreeMap<_, _>>();
     let mut changed = true;
     while changed {
         changed = false;
@@ -375,5 +383,72 @@ mod tests {
         assert_eq!(function.vregs.count(), 4);
         assert_eq!(function.blocks[0].insts.len(), 3);
         assert!(matches!(function.blocks[0].insts[1], MInst::Shr { .. }));
+    }
+
+    #[test]
+    fn selected_bitfields_keep_their_source_bounds() {
+        use crate::mir::{BaseReg, OpSize};
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..8 {
+            vregs.alloc();
+        }
+        let mut function = MFunction::for_isel(vregs, vec![SpillDesc::transient(); 8]);
+        let mut block = MBlock::new(BlockId(0));
+        block.insts = vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S8,
+            },
+            // UBFX's encoded width is deliberately wider than its input.
+            MInst::BitExtract {
+                dst: VReg(1),
+                src: VReg(0),
+                lsb: 6,
+                width: 58,
+            },
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(0),
+                imm: 15,
+            },
+            MInst::OrShifted {
+                dst: VReg(3),
+                lhs: VReg(2),
+                rhs: VReg(1),
+                shift: 4,
+            },
+            MInst::LoadImm {
+                dst: VReg(4),
+                value: 0,
+            },
+            MInst::BitInsert {
+                dst: VReg(5),
+                base: VReg(4),
+                src: VReg(0),
+                lsb: 0,
+                width: 5,
+            },
+            MInst::Shl {
+                dst: VReg(6),
+                lhs: VReg(0),
+                rhs: VReg(3),
+            },
+            MInst::Shr {
+                dst: VReg(7),
+                lhs: VReg(0),
+                rhs: VReg(5),
+            },
+            MInst::Return,
+        ];
+        function.blocks.push(block);
+        let bounds = value_upper_bounds(&function);
+        assert_eq!(bounds[&VReg(1)], 3);
+        assert_eq!(bounds[&VReg(3)], 63);
+        assert_eq!(bounds[&VReg(5)], 31);
+        legalize_variable_shift_counts(&mut function);
+        assert_eq!(function.vregs.count(), 8);
+        assert_eq!(function.blocks[0].insts.len(), 9);
     }
 }

@@ -352,32 +352,12 @@ fn instruction_bits(inst: &MInst, facts: &[KnownBits]) -> KnownBits {
 /// Start with unknown bits and refine along SSA uses, revisiting a loop only
 /// when one of its inputs improves. Phi joins retain facts shared by every
 /// incoming edge; they never assume a constant from just the entry edge.
-pub(super) fn known_zeros(func: &MFunction) -> Vec<u64> {
+pub(crate) fn known_zeros(func: &MFunction) -> Vec<u64> {
     analyze(func).into_iter().map(|bits| bits.zero).collect()
 }
 
 fn analyze(func: &MFunction) -> Vec<KnownBits> {
-    let value_count = func
-        .blocks
-        .iter()
-        .flat_map(|block| {
-            block
-                .phis
-                .iter()
-                .flat_map(|phi| {
-                    std::iter::once(phi.dst).chain(phi.sources.iter().map(|&(_, src)| src))
-                })
-                .chain(
-                    block
-                        .insts
-                        .iter()
-                        .flat_map(|inst| inst.def().into_iter().chain(inst.uses())),
-                )
-        })
-        .map(|value| value.0 as usize + 1)
-        .max()
-        .unwrap_or(0)
-        .max(func.vregs.count() as usize);
+    let value_count = func.value_count();
     let mut definitions = vec![None::<ValueDefinition>; value_count];
     let mut users = vec![Vec::<VReg>::new(); value_count];
     let mut queue = VecDeque::new();
@@ -402,6 +382,9 @@ fn analyze(func: &MFunction) -> Vec<KnownBits> {
         }
     }
     let mut facts = vec![KnownBits::default(); value_count];
+    for (value, zero) in super::counted_loop::index_zeros(func) {
+        facts[value.0 as usize].zero = zero;
+    }
     while let Some(value) = queue.pop_front() {
         let index = value.0 as usize;
         queued[index] = false;
