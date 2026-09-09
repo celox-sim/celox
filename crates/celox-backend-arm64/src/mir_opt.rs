@@ -6,7 +6,6 @@ use crate::HashMap;
 use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
 pub(crate) mod bit_projection;
-pub(crate) mod bit_updates;
 mod bitfield;
 pub(crate) mod bitmap_worklist;
 pub(crate) mod byte_predicates;
@@ -65,7 +64,6 @@ pub(crate) fn optimize(function: &mut MFunction) {
     memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
     copies::fold(function);
-    bit_updates::run(function);
     bitmap_worklist::merge_header_tails(function);
     bitmap_worklist::run(function);
     dead_code_eliminate(function);
