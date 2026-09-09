@@ -1562,6 +1562,148 @@ mod tests {
     }
 
     #[test]
+    fn preserves_logical_constant_case_selector_masks() {
+        for selector in [
+            "1'bx && 1'b1",
+            "1'b0 || 1'bz",
+            "(1'bx && 1'b1) || 1'b0",
+            "!(1'bx || 1'b0)",
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 always_comb case ({selector}) 1'bx: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("logical_constant_case.sv"))
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+        }
+    }
+
+    #[test]
+    fn preserves_selected_size_argument_dimensions() {
+        for (argument, expected) in [
+            ("a", 5),
+            ("a[0]", 3),
+            ("a[0][0]", 2),
+            ("a[0][0][0]", 4),
+            ("a[0][0][0][0]", 1),
+            ("(a[0][0])", 2),
+            ("a[0][0][1:0]", 2),
+            ("a[0][0][0][2:1]", 2),
+        ] {
+            let source = format!(
+                "module Top(output logic [31:0] y); \
+                 logic [1:0][3:0] a[5][3]; \
+                 localparam P = $size({argument})'(32'hffff_ffff); \
+                 always_comb y = P; endmodule"
+            );
+            let ir = analyze_source(&source, Path::new("selected_size_dimensions.sv"))
+                .unwrap_or_else(|error| panic!("{argument}: {error}"));
+            assert_eq!(
+                ir.modules()[0].parameters()[0].resolved_value(),
+                Some((1 << expected) - 1),
+                "$size({argument})"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_alias_casts_in_generate_local_parameters() {
+        for declaration in ["localparam S = t'(4);", "localparam t S = 4;"] {
+            let source = format!(
+                r#"
+                    module Top(output logic y);
+                        typedef logic [1:0] t;
+                        if (1) begin : selected
+                            {declaration}
+                            if (S) begin : disabled
+                                function automatic logic invalid(input real x);
+                                    return x;
+                                endfunction
+                            end else begin : enabled
+                                assign y = 1'b1;
+                            end
+                        end
+                    endmodule
+                "#
+            );
+            let ir = analyze_source(&source, Path::new("generate_local_alias_cast.sv"))
+                .expect("generate-local aliases must select the reachable branch");
+            assert_eq!(ir.modules()[0].comb_processes().len(), 1);
+        }
+    }
+
+    #[test]
+    fn preserves_known_conditional_case_selector_types() {
+        for (selector, label) in [
+            ("1'b1 ? 1'sb1 : 2'sb00", "2'b11"),
+            ("1'b0 ? 2'sb00 : 1'sb1", "2'b11"),
+            ("1'b1 ? 1'sb1 : 2'b00", "2'b01"),
+            ("1'b1 ? 1'sbx : 2'sb00", "2'bxx"),
+            ("1'b1 ? 1'sbz : 2'b00", "2'b0z"),
+            ("1'b1 ? '1 : 2'b00", "2'b11"),
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 always_comb case ({selector}) {label}: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("known_conditional_case.sv"))
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+        }
+    }
+
+    #[test]
+    fn recognizes_single_bit_two_state_bitwise_complements() {
+        for predicate in ["s", "~(~s)", "s != 0"] {
+            let source = format!(
+                "module Top(input bit s, input logic outer, a, b, output logic y); \
+                 always_comb if (outer) begin \
+                 if ({predicate}) y = a; if (~({predicate})) y = b; \
+                 end else y = a; endmodule"
+            );
+            analyze_source(&source, Path::new("one_bit_complements.sv"))
+                .unwrap_or_else(|error| panic!("{predicate}: {error}"));
+        }
+        for declaration in ["logic s", "bit [1:0] s"] {
+            let source = format!(
+                "module Top(input {declaration}, input logic outer, a, b, output logic y); \
+                 always_comb if (outer) begin \
+                 if (s) y = a; if (~s) y = b; end else y = a; endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("non_complementary_bitwise_guards.sv"))
+                    .expect_err("only a one-bit two-state bitwise inverse proves coverage")
+                    .to_string()
+                    .contains("latch inference inside always_comb")
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_size_casts_in_declaration_ranges_without_recursion() {
+        for declaration in [
+            "output logic [$bits(f())'(7):0] y",
+            "output logic [$size(f())'(7):0] y",
+        ] {
+            let source = format!(
+                "module Top({declaration}); \
+                 function logic [7:0] f(); return '0; endfunction \
+                 logic [$bits(f())'(7):0] a; \
+                 always_comb begin a = '1; y = a; end endmodule"
+            );
+            let ir = analyze_source(&source, Path::new("declaration_size_cast.sv"))
+                .expect("size casts must not rebuild the declaration recursively");
+            assert_eq!(
+                ir.modules()[0].ports()[0].r#type().resolved_width(),
+                Some(8)
+            );
+            assert_eq!(
+                ir.modules()[0].signals()[0].r#type().resolved_width(),
+                Some(8)
+            );
+        }
+    }
+
+    #[test]
     fn applies_function_return_types_in_procedural_lvalue_indices() {
         let ir = analyze_source(
             r#"

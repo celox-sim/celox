@@ -1036,14 +1036,15 @@ fn size_function_expression_type(
     );
     let expression = expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions)?;
     let width = if first_dimension_only {
-        match &expression {
-            Expr::Ident(name) => variable_size_function_width(const_env, name, true),
-            Expr::Call { name, .. } => packed_dimensions
-                .function_return_types
-                .get(name)
-                .and_then(|metadata| metadata.first_packed_dimension_width),
-            _ => expr_static_width(&expression, &packed_dimensions),
-        }
+        selected_expression_first_dimension_width(argument, syntax_tree, &packed_dimensions)
+            .or_else(|| match &expression {
+                Expr::Ident(name) => variable_size_function_width(const_env, name, true),
+                Expr::Call { name, .. } => packed_dimensions
+                    .function_return_types
+                    .get(name)
+                    .and_then(|metadata| metadata.first_packed_dimension_width),
+                _ => expr_static_width(&expression, &packed_dimensions),
+            })
     } else {
         expr_static_width(&expression, &packed_dimensions)
     }?;
@@ -1069,6 +1070,63 @@ fn size_function_expression_type(
     })
 }
 
+fn selected_expression_first_dimension_width(
+    argument: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<usize> {
+    let sv_parser::Expression::Primary(primary) = argument else {
+        return None;
+    };
+    if let sv_parser::Primary::MintypmaxExpression(grouped) = &**primary
+        && let sv_parser::MintypmaxExpression::Expression(argument) = &grouped.nodes.0.nodes.1
+    {
+        return selected_expression_first_dimension_width(argument, syntax_tree, packed_dimensions);
+    }
+    let sv_parser::Primary::Hierarchical(hierarchical) = &**primary else {
+        return None;
+    };
+    let name = identifier_text(
+        RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+        syntax_tree,
+    )?;
+    let dimensions = packed_dimensions.get(&name)?;
+    let select = &hierarchical.nodes.2;
+    if let Some(range) = &select.nodes.2 {
+        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
+            return None;
+        };
+        let bound = |expression| {
+            let expression = const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(expression),
+                syntax_tree,
+                &packed_dimensions.const_env,
+                &packed_dimensions.type_aliases,
+            )?;
+            eval_ast_const_expr(&expression, &packed_dimensions.const_env)
+        };
+        return usize::try_from(bound(&range.nodes.0)?.abs_diff(bound(&range.nodes.2)?))
+            .ok()?
+            .checked_add(1);
+    }
+    // Each index removes one declared dimension. Inspect the syntax before
+    // flattening, which otherwise loses the remaining array shape.
+    let index_count = select.nodes.1.nodes.0.len();
+    let width = dimensions
+        .unpacked
+        .iter()
+        .map(|dimension| &dimension.width)
+        .chain(dimensions.packed.iter().map(|dimension| &dimension.width))
+        .nth(index_count);
+    match width {
+        Some(width) => {
+            usize::try_from(eval_ast_const_expr(width, &packed_dimensions.const_env)?).ok()
+        }
+        None if index_count == dimensions.unpacked.len() + dimensions.packed.len() => Some(1),
+        None => None,
+    }
+}
+
 fn containing_packed_dimensions(
     target: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -1088,6 +1146,14 @@ fn containing_packed_dimensions(
         if target_start < module_start || target_end > module_end {
             continue;
         }
+        let module_span = (module_start, module_end);
+        if !ACTIVE_PACKED_DIMENSIONS.with(|active| active.borrow_mut().insert(module_span)) {
+            return None;
+        }
+        // A declaration range can query a size that requires this same
+        // module's metadata. Recursive discovery uses the caller's constant
+        // and function type environments instead of rebuilding declarations.
+        let _guard = ActivePackedDimensionsGuard { module_span };
         let ports =
             ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
         let signals =
@@ -1169,9 +1235,23 @@ fn containing_function_return_types(
 }
 
 thread_local! {
+    static ACTIVE_PACKED_DIMENSIONS: RefCell<HashSet<(usize, usize)>> =
+        RefCell::new(HashSet::default());
     static ACTIVE_FUNCTION_RETURN_METADATA:
         RefCell<HashMap<(usize, usize), HashMap<String, FunctionReturnMetadata>>> =
         RefCell::new(HashMap::default());
+}
+
+struct ActivePackedDimensionsGuard {
+    module_span: (usize, usize),
+}
+
+impl Drop for ActivePackedDimensionsGuard {
+    fn drop(&mut self) {
+        ACTIVE_PACKED_DIMENSIONS.with(|active| {
+            active.borrow_mut().remove(&self.module_span);
+        });
+    }
 }
 
 struct ActiveFunctionReturnMetadataGuard {
@@ -2277,7 +2357,12 @@ fn generate_selections_from_generate_block<'a>(
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
             for item in &block.nodes.3 {
-                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                if add_localparams_from_generate_item(
+                    item,
+                    syntax_tree,
+                    &mut block_env,
+                    type_aliases,
+                ) {
                     continue;
                 }
                 generate_selections_from_generate_item(
@@ -3491,7 +3576,12 @@ fn signals_from_generate_block(
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
             for item in &block.nodes.3 {
-                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                if add_localparams_from_generate_item(
+                    item,
+                    syntax_tree,
+                    &mut block_env,
+                    type_aliases,
+                ) {
                     continue;
                 }
                 signals_from_generate_item(item, syntax_tree, type_aliases, &block_env, signals)?;
@@ -5452,7 +5542,12 @@ fn instances_from_generate_block(
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
             for item in &block.nodes.3 {
-                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                if add_localparams_from_generate_item(
+                    item,
+                    syntax_tree,
+                    &mut block_env,
+                    &packed_dimensions.type_aliases,
+                ) {
                     continue;
                 }
                 instances_from_generate_item(
@@ -7785,7 +7880,12 @@ fn comb_processes_from_generate_block(
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
             for item in &block.nodes.3 {
-                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                if add_localparams_from_generate_item(
+                    item,
+                    syntax_tree,
+                    &mut block_env,
+                    &packed_dimensions.type_aliases,
+                ) {
                     continue;
                 }
                 comb_processes_from_generate_item(
@@ -7809,14 +7909,22 @@ fn add_localparams_from_generate_item(
     item: &sv_parser::GenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &mut HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
 ) -> bool {
-    add_localparams_from_generate_item_with_literals(item, syntax_tree, const_env, None)
+    add_localparams_from_generate_item_with_literals(
+        item,
+        syntax_tree,
+        const_env,
+        type_aliases,
+        None,
+    )
 }
 
 fn add_localparams_from_generate_item_with_literals(
     item: &sv_parser::GenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &mut HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     mut parameter_literals: Option<&mut HashMap<String, Expr>>,
 ) -> bool {
     let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
@@ -7846,7 +7954,7 @@ fn add_localparams_from_generate_item_with_literals(
         &mut parameters,
         true,
         const_env,
-        &HashMap::default(),
+        type_aliases,
         &HashMap::default(),
     )
     .is_err()
@@ -9261,6 +9369,31 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             let condition = simplify_constant_mux_conditions(*condition, const_env);
             let mut then_expr = simplify_constant_mux_conditions(*then_expr, const_env);
             let mut else_expr = simplify_constant_mux_conditions(*else_expr, const_env);
+            let parameter_types = parameter_types_from_const_env(const_env);
+            let arm_type = |arm: &Expr| {
+                if let Expr::Literal(literal) = arm
+                    && resize_unbased_fill_literal_for_cast(literal, 1, false).is_some()
+                {
+                    Some(ExprType {
+                        width: 1,
+                        signed: false,
+                    })
+                } else if let Expr::Resize { width, signed, .. } = arm {
+                    Some(ExprType {
+                        width: *width,
+                        signed: *signed,
+                    })
+                } else {
+                    infer_const_expr_type(&expr_to_const(arm.clone())?, &parameter_types)
+                }
+            };
+            let result_type =
+                arm_type(&then_expr)
+                    .zip(arm_type(&else_expr))
+                    .map(|(then_type, else_type)| ExprType {
+                        width: then_type.width.max(else_type.width),
+                        signed: then_type.signed && else_type.signed,
+                    });
             // Repeated-condition mux folding is only valid for a condition
             // that cannot be X/Z. Procedural guards are explicitly coerced
             // to two state, but source-level ternaries need not be.
@@ -9293,8 +9426,40 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
             match expr_to_const(condition.clone())
                 .and_then(|condition| eval_ast_const_expr(&condition, const_env))
             {
-                Some(0) => else_expr,
-                Some(_) => then_expr,
+                Some(value) => {
+                    let selected = if value == 0 { else_expr } else { then_expr };
+                    let Some(result_type) = result_type else {
+                        return selected;
+                    };
+                    if let Expr::Literal(literal) = &selected {
+                        if let Some(resized) = resize_unbased_fill_literal_for_cast(
+                            literal,
+                            result_type.width,
+                            result_type.signed,
+                        ) {
+                            return Expr::Literal(resized);
+                        }
+                    }
+                    let Some(selected_type) = arm_type(&selected) else {
+                        return selected;
+                    };
+                    // Both arms determine a ternary's type, even when its
+                    // condition is known. Set that signedness before extending
+                    // the chosen value so an unsigned peer prevents sign extension.
+                    let selected = Expr::Resize {
+                        expr: Box::new(selected),
+                        width: selected_type.width,
+                        signed: result_type.signed,
+                    };
+                    simplify_constant_mux_conditions(
+                        Expr::Resize {
+                            expr: Box::new(selected),
+                            width: result_type.width,
+                            signed: result_type.signed,
+                        },
+                        const_env,
+                    )
+                }
                 None => Expr::Mux {
                     condition: Box::new(condition),
                     then_expr: Box::new(then_expr),
@@ -10965,6 +11130,7 @@ fn ff_processes_from_generate_block(
                     item,
                     syntax_tree,
                     &mut block_env,
+                    &packed_dimensions.type_aliases,
                     Some(&mut block_parameter_literals),
                 ) {
                     continue;
@@ -12667,10 +12833,11 @@ fn normalized_two_state_boolean<'a>(
     expr: &'a Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Option<(&'a Expr, bool)> {
-    if let Expr::Unary {
-        op: UnaryOp::LogicNot,
-        expr,
-    } = expr
+    if let Expr::Unary { op, expr } = expr
+        && (*op == UnaryOp::LogicNot
+            || (*op == UnaryOp::BitNot
+                && expr_static_width(expr, packed_dimensions) == Some(1)
+                && expr_is_two_state(expr, packed_dimensions)))
     {
         let (expr, positive) = normalized_two_state_boolean(expr, packed_dimensions)?;
         return Some((expr, !positive));

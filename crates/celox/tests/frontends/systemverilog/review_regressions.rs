@@ -7794,7 +7794,153 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
     assert_eq!(sim.get(x), 2u8.into());
 }
 
+#[test]
+fn rejects_indexed_part_selects_in_comb_write_groups() {
+    for select in ["index +: 2", "index -: 2"] {
+        let source = format!(
+            "module Top(input int index, input logic replace, output logic [7:0] value); \
+             always_comb begin value = '0; value[{select}] = 2'b11; \
+             if (replace) value = '1; end endmodule"
+        );
+        let error = cranelift_build_error(&source);
+        assert!(error.contains("indexed part-select"), "{error}");
+    }
+}
+
 sv_backends! {
+    fn preserves_constant_case_selector_context(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
+                    always_comb begin
+                        case (1'bx && 1'b1) 1'bx: y0 = a; endcase
+                        case (1'b0 || 1'bz) 1'bx: y1 = a; endcase
+                        case (1'b1 ? 1'sb1 : 2'sb00) 2'b11: y2 = a; endcase
+                        case (1'b0 ? 2'sb00 : 1'sb1) 2'b11: y3 = a; endcase
+                        case (1'b1 ? 1'sb1 : 2'b00) 2'b01: y4 = a; endcase
+                        case (1'b1 ? 1'sbx : 2'sb00) 2'bxx: y5 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("constant_case_context.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = ["y0", "y1", "y2", "y3", "y4", "y5"].map(|name| sim.signal(name));
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for output in outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [7:0] data,
+                    output logic [$bits(f())'(7):0] y, output logic [7:0] sizes);
+                    function automatic logic [7:0] f(); return '0; endfunction
+                    logic [$size(f())'(7):0] value;
+                    logic [1:0][3:0] a[2];
+                    localparam P = $size(a[0])'(8'hff);
+                    localparam Q = $size(a[0][0])'(8'hff);
+                    always_comb begin
+                        value = data;
+                        y = value;
+                        sizes = {P, Q, 2'b00};
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("size_cast_dimensions.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let y = sim.signal("y");
+        let sizes = sim.signal("sizes");
+        for value in [0x80u8, 1, 0x55, 0xff, 0] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(y), value.into());
+            assert_eq!(sim.get(sizes), 0xfcu8.into());
+        }
+    }
+
+    fn resolves_generate_local_alias_casts_for_all_processes(sim) {
+        @setup {
+            let source = r#"
+                module Buffer(input logic a, output logic y);
+                    assign y = a;
+                endmodule
+                module Top(input logic clk, data, output logic comb_y, ff_y);
+                    typedef logic [1:0] select_t;
+                    if (1) begin : enabled
+                        localparam S = select_t'(4);
+                        localparam select_t WIDTH = 1;
+                        logic [WIDTH-1:0] connected;
+                        Buffer u(.a(data), .y(connected));
+                        if (S) begin : disabled
+                            assign comb_y = 1'b0;
+                            always_ff @(posedge clk) ff_y <= 1'b0;
+                        end else begin : selected
+                            always_comb comb_y = connected;
+                            always_ff @(posedge clk) ff_y <= connected;
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("generate_local_alias_casts.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let comb_y = sim.signal("comb_y");
+        let ff_y = sim.signal("ff_y");
+        let clk = sim.event("clk");
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(comb_y), value.into());
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(ff_y), value.into());
+        }
+    }
+
+    fn covers_single_bit_bitwise_complementary_guards(sim) {
+        @setup {
+            let source = r#"
+                module Top(input bit s, input logic outer, a, b, output logic y);
+                    always_comb if (outer) begin
+                        if (s) y = a;
+                        if (~s) y = b;
+                    end else y = a;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("bitwise_complementary_guards.sv"))], "Top"
+        ).four_state(true);
+        let s = sim.signal("s");
+        let outer = sim.signal("outer");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let y = sim.signal("y");
+        for inputs in 0u8..16 {
+            sim.modify(|io| {
+                io.set(s, inputs & 1 != 0);
+                io.set(outer, inputs & 2 != 0);
+                io.set(a, inputs & 4 != 0);
+                io.set(b, inputs & 8 != 0);
+            }).unwrap();
+            let expected = if inputs & 2 == 0 || inputs & 1 != 0 {
+                inputs & 4 != 0
+            } else {
+                inputs & 8 != 0
+            };
+            assert_eq!(sim.get(y), expected.into());
+        }
+    }
+
     fn normalizes_function_parameter_cast_dimensions(sim) {
         @setup {
             let source = r#"
