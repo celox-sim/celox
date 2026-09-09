@@ -567,7 +567,7 @@ fn encode_u64(out: &mut [MaybeUninit<u8>], value: u64) -> usize {
     use std::arch::x86_64::*;
 
     let bits = (64 - value.leading_zeros() as usize).max(1);
-    let mut remaining = value << (64 - bits);
+    let remaining = value << (64 - bits);
     let out = &mut out[..65];
     out[0].write(b'b');
     // SAFETY: SSE2 is enabled for this target. Each unaligned store initializes
@@ -575,23 +575,37 @@ fn encode_u64(out: &mut [MaybeUninit<u8>], value: u64) -> usize {
     // digits are published; any extra initialized bytes remain outside len.
     unsafe {
         let masks = _mm_set1_epi64x(0x0102_0408_1020_4080);
-        for chunk in out[1..]
-            .as_chunks_mut::<16>()
-            .0
-            .iter_mut()
-            .take(bits.div_ceil(16))
-        {
-            // Repeat each of the next two bytes eight times, then select one
-            // bit per lane in most-significant-bit-first order.
-            let word = _mm_set1_epi16((remaining >> 48) as i16);
-            let bytes = _mm_packus_epi16(
-                _mm_srli_epi16::<8>(word),
-                _mm_and_si128(word, _mm_set1_epi16(0xff)),
-            );
-            let zero = _mm_cmpeq_epi8(_mm_and_si128(bytes, masks), _mm_setzero_si128());
-            let ascii = _mm_add_epi8(_mm_set1_epi8(b'1' as i8), zero);
+        // Duplicate all eight input bytes once. Each chunk then selects two
+        // adjacent bytes and repeats each eight times, high byte first.
+        let word = _mm_cvtsi64_si128(remaining as i64);
+        let pairs = _mm_unpacklo_epi8(word, word);
+        let chunks = out[1..].as_chunks_mut::<16>().0;
+        let emit = |chunk: &mut [MaybeUninit<u8>; 16], bytes| {
+            let ones = _mm_cmpeq_epi8(_mm_and_si128(bytes, masks), masks);
+            let ascii = _mm_sub_epi8(_mm_set1_epi8(b'0' as i8), ones);
             _mm_storeu_si128(chunk.as_mut_ptr().cast(), ascii);
-            remaining <<= 16;
+        };
+        emit(
+            &mut chunks[0],
+            _mm_shuffle_epi32::<0xfa>(_mm_shufflehi_epi16::<0xaf>(pairs)),
+        );
+        if bits > 16 {
+            emit(
+                &mut chunks[1],
+                _mm_shuffle_epi32::<0xfa>(_mm_shufflehi_epi16::<0x05>(pairs)),
+            );
+        }
+        if bits > 32 {
+            emit(
+                &mut chunks[2],
+                _mm_shuffle_epi32::<0x50>(_mm_shufflelo_epi16::<0xaf>(pairs)),
+            );
+        }
+        if bits > 48 {
+            emit(
+                &mut chunks[3],
+                _mm_shuffle_epi32::<0x50>(_mm_shufflelo_epi16::<0x05>(pairs)),
+            );
         }
     }
     1 + bits

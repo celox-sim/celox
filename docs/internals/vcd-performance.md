@@ -42,10 +42,11 @@ mask stays zero for the writer's lifetime. Two-state memory signals of widths
 1 and 64 are classified when registering signals and use fixed-size integer
 comparisons and copies, including unaligned memory and previous-value offsets.
 The one-bit path emits its ASCII digit directly. On x86-64 with SSE2 enabled,
-the 64-bit path expands 16 bits at a time directly into spare output capacity;
-other targets retain the scalar lookup-table encoder. It publishes only the
-significant digits, preserving leading-zero abbreviation and the single digit
-for zero. Other widths and four-state/external values use the generic byte
+the 64-bit path duplicates all input bytes once, then shuffles each required
+pair into 16 output digits directly in spare capacity. Other targets retain
+the scalar lookup-table encoder. It publishes only the significant digits,
+preserving leading-zero abbreviation and the single digit for zero.
+Other widths and four-state/external values use the generic byte
 encoder; unknown bits retain VCD's `x`/`z` distinction. A changed vector
 emits its complete VCD value, even if only one bit changed.
 Header construction precomputes each record's suffix: a space for vectors,
@@ -939,10 +940,163 @@ hot code even when the generated simulation image is identical. Benchmark
 candidate loop layouts across circuit sizes and sparse/dense patterns before
 adopting a padding policy. PGO can affect placement and inlining, but the
 0.082% dense branch-miss rate gives little evidence for prioritizing branch
-hints over removing work. The next implementation should isolate the SSE2
-conversion change, then repeat the existing waveform oracle and paired native
-matrix; the candidate improvements above have not yet been implemented or
-measured as production changes.
+hints over removing work. The following stage implements and measures the
+SSE2 conversion change in isolation; the trace-plan and buffer changes remain
+subsequent candidates.
+
+### Shared-byte SSE2 expansion
+
+This stage uses the complete-record implementation (`e45be5052`, documented
+in `32873bbae`) as the baseline. It duplicates the eight input bytes once and
+uses two immediate shuffles per required 16-digit group. Explicit groups let
+the compiler share the input expansion without a runtime shuffle selector.
+Leading-zero abbreviation, output bounds and padding, suffix publication,
+and the SSE2 requirement are retained. Signal selection, comparison, and
+buffering are outside this change.
+
+The first candidate replaced each 16-bit broadcast/pack with unpack/shuffle
+operations but repeated the input expansion. It reduced writer instructions
+by about 5%, while elapsed time was essentially unchanged (scan 490.325 to
+484.478 ms, dirty 505.512 to 515.641 ms). The shared expansion below was selected
+after a separate paired comparison. Both candidates and their raw samples
+are preserved; the first candidate's executable and summaries use the `v1-`
+prefix.
+
+The final writer comparison uses 16,384 two-state 64-bit signals, 5,000 dense
+dumps, CPU 0, `/dev/null`, one warm process and five alternating measured
+processes per binary/mode. Comparisons, changes, and bytes are equal in each
+pair: 81,920,000 comparisons and changes, and 5,689,308,893 timed bytes.
+Hardware counters cover the whole process and run for 100% of enabled time.
+
+| Mode | Before (ms) | Shared expansion (ms) | Before instructions (billions) | Shared-expansion instructions (billions) |
+| --- | ---: | ---: | ---: | ---: |
+| scan | 487.172 | 431.845 | 15.979 | 14.177 |
+| dirty | 510.597 | 467.532 | 16.639 | 14.837 |
+
+Elapsed time falls by 8.4–11.4%, with a 10.8–11.3% instruction reduction.
+
+The negative controls are retained. Their dump counts are longer because
+short idle/sparse samples are too small to assess reliably:
+
+| Mode / case | Dumps | Before (ms) | Shared expansion (ms) |
+| --- | ---: | ---: | ---: |
+| dirty / idle | 5,000,000 | 183.925 | 233.011 |
+| dirty / sparse_scattered | 100,000 | 101.930 | 90.917 |
+| dirty / same_value | 100,000 | 89.742 | 76.900 |
+| collect / same_value | 1,000,000 | 468.916 | 367.315 |
+
+Same-value and `collect` improvements occur without executing the changed
+encoder during timing. Conversely, idle regresses by 26.7% despite essentially
+unchanged whole-process instructions (about 5.52 billion each). These are not
+uniform encoder speedups. The generic-width/four-state matrix also retains
+its results: 32-bit dense takes 232.573 versus 242.213 ms; the other measured
+1/63/65/256-bit dense and 64-bit four-state cases range from a 4.8% decrease
+to a 1.5% increase in median time. All pairs retain equal comparisons, changes,
+and output bytes.
+
+A 100,000,000-dump idle profile reproduces the regression (3.772 versus
+4.545 seconds, no lost samples). Most additional cycle samples are in the
+benchmark's activity-summary loop. Its 85-byte body is identical except
+external branch displacements, but moves from `0x1df90` (offset 16 within a
+64-byte line) to `0x1df80` (offset 0). The latter placement makes the memory
+bounds comparison cross a line boundary. A diagnostic trampoline copies
+this unchanged body to controlled offsets in a page 1 MiB from the executable
+base; it adds entry/exit jumps and retains every inner-loop instruction.
+At 5,000,000 idle dumps, one warm process and five rotated measured processes
+per variant give:
+
+| Mode | Loop offset within line | Before (ms) | Shared expansion (ms) |
+| --- | ---: | ---: | ---: |
+| collect | 0 | 141.161 | 136.827 |
+| collect | 16 | 94.220 | 94.579 |
+| dirty | 0 | 221.398 | 231.388 |
+| dirty | 16 | 179.057 | 184.399 |
+
+Matching placement removes the isolated collection regression. The complete
+idle writer retains a 3.0–4.5% median difference under matching placement,
+compared with 26.7% in the unmodified executables. This confirms a substantial
+placement contribution, without identifying a specific frontend mechanism.
+Trampoline timings include their added jumps; the production change contains
+only the encoder improvement. The original idle regression remains a measured
+limitation of these built executables.
+
+The native benchmark is rebuilt and linked with the repository's bench/LTO
+profile. The following comparison rotates the baseline, shared expansion, and
+the same verified Verilator 5.052 executables over five measured processes
+after warming each variant. CPU 0, `/dev/null`, initial-snapshot exclusions,
+and the previous counter oracle apply. Dense medians:
+
+| Counters / pattern / cycles | Before (ms) | Shared expansion (ms) | Verilator (ms) |
+| --- | ---: | ---: | ---: |
+| 256 / counter / 100,000 | 183.688 | 177.787 | 164.883 |
+| 256 / full_width / 100,000 | 206.137 | 196.232 | 146.668 |
+| 4,096 / full_width / 10,000 | 298.556 | 286.959 | 334.363 |
+
+At 256 counters, dense elapsed time falls by 3.2% for short counters and 4.8%
+for full-width values. The full-width ratio to Verilator narrows from 1.41x to
+1.34x within this comparison. Its before range is 202.864–213.830 ms and after
+range 193.003–199.543 ms. Native sparse medians are nearly equal (counter:
+52.436 versus 52.529 ms; full-width: 51.486 versus 51.548 ms). Idle takes
+39.416 versus 41.562 ms for counter and 40.741 versus 40.587 ms for full-width;
+the before/after ranges overlap. These data do not establish a general idle
+or sparse improvement.
+
+The 4,096-counter matrix is much noisier: dense ranges are 287.173–321.475 ms
+before and 265.330–604.975 ms after. Sparse ranges are 28.854–141.769 and
+28.642–138.538 ms. Those samples remain in the reported medians; this matrix
+alone does not establish a reliable larger-fixture speedup. The stable
+256-counter result and retired-instruction reduction support this change.
+
+The dense no-output controls also vary: counter `off` takes 14.931 versus
+15.240 ms and `instrumented` takes 30.888 versus 29.981 ms; full-width takes
+15.729 versus 15.021 ms and 30.961 versus 29.459 ms respectively. Captured JIT
+images for both modes are byte-identical to the baseline, with the same hashes
+reported in the preceding investigation. Do not subtract separate controls
+to estimate isolated encoding time.
+
+At 256 full-width dense counters and 1,000,000 cycles, five rotated whole-process
+`perf stat` samples give:
+
+| Engine | Instructions (billions) | Branches (billions) | Cycles (billions) |
+| --- | ---: | ---: | ---: |
+| Complete-record baseline | 59.274 | 10.126 | 11.850 |
+| Shared expansion | 53.386 | 10.126 | 11.124 |
+| Verilator | 30.073 | 2.949 | 7.444 |
+
+Instructions fall by 9.9%; cycles fall by 6.1% in these medians. Branch counts
+are essentially unchanged. A 499 Hz profile of the final native executable
+has 1,105 samples with none lost: writer self time is 66.1%, with `memmove` at
+5.8%. Grouping instruction addresses puts approximately 27% of whole-process
+cycle samples in 64-bit encoding and 33% in signal-loop dispatch and
+scalar/integer comparison. These are sampling estimates, including possible
+skid, not isolated costs. The next target is the compact trace plan described
+above: reduce per-signal decisions and repeated metadata/indexing work.
+
+All three engines pass the waveform oracle; the nine old/new validation
+waveform bodies are also byte-identical, and all timed byte counts match.
+Validation includes the 11 runtime tests, 7 state-layout tests, 4 cross-backend
+VCD integration tests, formatting, Clippy for all runtime targets with warnings
+denied, and the aarch64 runtime check. The existing integer oracle covers every
+significant bit length, zero, random values, and unaligned output; record tests
+check that partial SIMD groups never publish their padding.
+
+Raw samples, commands, source/binary hashes, JIT captures, and profiles are in
+`target/vcd-shuffle-results/`. `compare-writer.py` accepts `dense`, `controls`,
+and `fallback`; `run-comparisons.py` records the paired native matrix and
+hardware-counter runs. `output-equivalence.json` records exact waveform and
+byte-count agreement. `profile-idle.py`, `relocate-idle-loop.c`, and
+`measure-idle-loop.py` retain the idle diagnosis; that shim is specific to the
+saved executable offsets. The comparison can be repeated with:
+
+```sh
+python3 scripts/compare-vcd-verilator.py \
+  --verilator target/verilator-v5.052/bin/verilator \
+  --celox target/vcd-shuffle-results/e2e-after \
+  --baseline-celox target/vcd-shuffle-results/e2e-before \
+  --output target/vcd-shuffle-results/paired-256 \
+  --signals 256 --steps 100000 --repeats 5 \
+  --patterns counter full_width --reuse-builds
+```
 
 ## Correctness
 
