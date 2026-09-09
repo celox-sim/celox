@@ -47,14 +47,20 @@ other targets retain the scalar lookup-table encoder. It publishes only the
 significant digits, preserving leading-zero abbreviation and the single digit
 for zero. Other widths and four-state/external values use the generic byte
 encoder; unknown bits retain VCD's `x`/`z` distinction. A changed vector
-emits its complete VCD value, even if
-only one bit changed. Values, IDs, and newlines are appended directly to a
-reusable output block. Blocks at least as large as the `BufWriter` capacity
+emits its complete VCD value, even if only one bit changed.
+Header construction precomputes each record's suffix: a space for vectors,
+the ID, and a newline. Suffixes of up to eight bytes are stored inline and
+copied with a fixed-size store; longer IDs retain a separate byte allocation.
+The encoders write directly into checked slices of the output block's spare
+capacity. The writer publishes the complete record with one Vec length update.
+Padding written by SIMD or the fixed-size suffix copy stays outside that length.
+Blocks at least as large as the `BufWriter` capacity
 (256 KiB) bypass its internal copy; a dump's final partial block is handed to
 `BufWriter` before returning. Headers, timestamps, and value records therefore
 retain their order, including when a single record exceeds the block size.
-The block reserves capacity for 256 KiB plus the largest possible record at the
-first dump, adding roughly 256 KiB compared with a single-record buffer.
+The block reserves capacity for 256 KiB plus the largest possible record,
+including fixed-store padding, at the first dump. No record grows the Vec;
+the allocation adds roughly 256 KiB compared with a single-record buffer.
 Header construction stays in a separate cold function. The pending change
 count belongs to the output block, so unchanged-signal comparisons need not
 carry a separate local accumulator through the loop.
@@ -631,6 +637,160 @@ include construction, and sample shares are not absolute time measurements.
 The data, command, environment, and binary hash are retained as
 `profile-final.*` and `profile-manifest.json` in the same results directory.
 
+### Complete-record output
+
+The next change uses commit `4c9a50735` (integer comparison and SSE2 encoding)
+as its baseline. It precomputes the space/ID/newline suffix, replaces short-ID
+copies with a fixed eight-byte store, and updates the output Vec length once
+per complete record. The encoding algorithm, significant-digit abbreviation,
+activity selection, and output-block/flush policy are retained. Checked spare
+capacity includes suffix padding even for scalar-only traces. Long suffixes
+use a separate byte slice. No generated-code rewriting, PGO, or additional
+instruction-set requirement is introduced.
+
+The writer comparison again uses 16,384 signals, 1,000 dumps, CPU 0,
+`/dev/null`, one warm process and five measured processes per binary/case,
+with alternating binary order. Comparison counts, change counts, and emitted
+byte counts match in every pair. Median times in milliseconds:
+
+| Width / states | Mode | Case | Before | Complete records |
+| --- | --- | --- | ---: | ---: |
+| 64 / 2 | scan | dense | 139.909 | 99.210 |
+| 64 / 2 | dirty | dense | 146.960 | 116.869 |
+| 1 / 2 | dirty | dense | 99.294 | 69.621 |
+| 32 / 2 | dirty | dense | 272.081 | 244.892 |
+| 63 / 2 | dirty | dense | 305.122 | 264.444 |
+| 65 / 2 | dirty | dense | 314.191 | 292.528 |
+| 256 / 2 | dirty | dense | 508.588 | 456.981 |
+| 64 / 4 | dirty | dense | 347.422 | 345.496 |
+
+An alternating three-process `perf stat` control on the 64-bit dirty dense
+case measured 4.149 billion instructions before versus 3.393 billion after,
+including process setup, an 18.2% reduction. The short-ID copy in the compiled
+writer is an inline fixed-size store. The SIMD algorithm remains unchanged.
+
+Short sparse samples were noisy, so a separate control increased their length
+to 100,000 dumps. This reproduced a regression in the standalone benchmark:
+
+| Width / states | Dirty case | Before (ms) | Complete records (ms) |
+| --- | --- | ---: | ---: |
+| 64 / 2 | idle | 3.907 | 3.794 |
+| 64 / 2 | sparse scattered | 91.127 | 100.434 |
+| 64 / 2 | same-value writes | 73.319 | 84.626 |
+| 64 / 4 | mask-only sparse | 220.271 | 239.759 |
+
+These regressions are retained rather than discarded. In three alternating
+hardware-counter samples, same-value instructions remained almost identical
+(2.170 versus 2.166 billion), while cycles increased. Profiles of 2,000,000
+same-value dumps locate most additional cycle samples in the benchmark main
+function's activity-collection loop; they do not establish a per-record writer
+regression. Both profiles reported no lost samples. A subsequent five-process
+`collect` control, which never calls the writer during the timed loop, also
+reproduced the difference: same-value writes took 32.527 versus 45.823 ms;
+sparse scattered writes took 32.565 versus 52.950 ms; mask-only writes took
+37.130 versus 47.515 ms. This establishes an effect outside the timed writer
+calls, without establishing its exact cause. Do not subtract these separate
+samples to estimate isolated writer cost. Use the native controls below to
+assess the effect on simulation.
+
+Raw samples, binary hashes and source snapshots are under
+`target/vcd-record-results/`. The writer tables are reproduced by
+`compare-writer.py`, `compare-writer.py --fallback`, `compare-controls.py`, and
+`compare-collection.py`
+in that directory. Their summaries retain all five samples per binary/case;
+no sample was removed from a reported median.
+
+### Native results after complete-record output
+
+The native comparison uses saved executables for `4c9a50735`, the record-output
+change, and the same Verilator 5.052 fixtures. It rotates engine order and runs
+five measured processes after a warm process per engine/mode. CPU 0,
+`/dev/null`, and the preceding construction/initial-snapshot exclusions apply.
+All three engines pass the 20-cycle waveform oracle. Old and new Celox also
+emit the same timed byte counts, and their validation waveform bodies match
+byte for byte after the header. At 256 counters and 100,000 full cycles,
+median elapsed times with VCD enabled are:
+
+| Pattern | Case | Celox before (ms) | Complete records (ms) | Verilator (ms) |
+| --- | --- | ---: | ---: | ---: |
+| counter | idle | 46.728 | 38.650 | 58.263 |
+| counter | sparse | 48.215 | 48.598 | 56.958 |
+| counter | dense | 250.238 | 186.323 | 146.935 |
+| full_width | idle | 38.162 | 38.495 | 57.582 |
+| full_width | sparse | 47.965 | 49.459 | 58.575 |
+| full_width | dense | 284.127 | 211.982 | 142.041 |
+
+Dense elapsed time fell by about 25% in both patterns. The `full_width` gap
+relative to Verilator narrowed from 2.00x to 1.49x in this paired run. Dense
+ranges were 253.461–311.118 ms before, 204.028–217.089 ms after, and
+140.161–157.244 ms for Verilator. Native sparse elapsed times differed by
+0.8–3.1%; individual ranges overlap. These results do not support a sparse
+speedup from record encoding.
+
+The no-output controls are also retained. For `full_width` dense, off took
+14.495 versus 14.656 ms, while instrumented-without-dumping took 21.034 versus
+28.829 ms. The latter regression also appeared in `counter` dense
+(21.685 versus 29.257 ms), with disjoint before/after sample ranges. A writer
+dump is not called during those timed loops; the cause remains unestablished.
+Do not attribute the entire before/after difference to encoding or claim that
+all controls are unchanged. The full matrix, ranges, commands, and binary
+hashes are retained in `target/vcd-record-results/paired-256/`.
+
+At 4,096 counters and 10,000 full cycles, five processes per engine give:
+
+| Full-width case | Celox before (ms) | Complete records (ms) | Verilator (ms) |
+| --- | ---: | ---: | ---: |
+| idle | 22.072 | 21.636 | 113.053 |
+| sparse | 29.795 | 28.660 | 113.871 |
+| dense | 403.500 | 292.690 | 319.673 |
+
+Dense elapsed time fell by 27.5%; new Celox took 8.4% less time than Verilator
+in this run. Dense ranges were 378.755–428.553 ms before, 279.528–298.023 ms
+after, and 301.363–334.930 ms for Verilator. Old and new Celox both emitted
+2,826,428,895 timed bytes; Verilator emitted 2,837,328,892 bytes. The larger
+fixture retains the sparse advantage. Results are in
+`target/vcd-record-results/paired-4096/`. These results concern this two-state
+counter fixture and `/dev/null`, not storage throughput or a general advantage
+over Verilator on other designs.
+
+The hardware-counter comparison runs 256 `full_width` dense counters for
+1,000,000 cycles, rotating all three engines over five processes each.
+`perf stat` counts user-space events for the whole process, including
+construction; each event was counted for 100% of its enabled time. Medians:
+
+| Engine | Instructions (billions) | Branches (billions) | Branch-miss rate |
+| --- | ---: | ---: | ---: |
+| Celox before | 70.391 | 13.218 | 0.061% |
+| Complete records | 59.274 | 10.126 | 0.082% |
+| Verilator | 30.073 | 2.949 | 0.176% |
+
+Celox's instruction count fell by 15.8%, but remains 1.97x Verilator's in
+this whole-process measurement. A 499 Hz profile of the new binary collected
+1,154 samples with none lost: 67.3% self time was in `dump_with_activity`
+and 5.7% in `memmove`. The earlier same-workload profile of the baseline
+had 69.3% and 11.9% respectively. Profile shares are not absolute time
+comparisons. Commands, environment, hashes, per-process counters, and the
+profile are retained in `stat-manifest.json`, `stat-summary.json`, and
+`profile-after.*` under `target/vcd-record-results/`.
+
+Repeat the verified cached native comparison with:
+
+```sh
+python3 scripts/compare-vcd-verilator.py \
+  --verilator target/verilator-v5.052/bin/verilator \
+  --celox target/vcd-record-results/e2e-after \
+  --baseline-celox target/vcd-record-results/e2e-before \
+  --output target/vcd-record-results/paired-256 \
+  --signals 256 --steps 100000 --repeats 5 \
+  --patterns counter full_width --reuse-builds
+```
+
+For the larger run use `--signals 4096 --steps 10000 --patterns full_width
+--modes vcd` and output directory `paired-4096`. Omit `--reuse-builds` for
+fresh Verilator fixtures. `binaries.json` links the saved executables to the
+runtime source snapshots; `output-equivalence.json` records the nine identical
+before/after validation waveform bodies and equal timed byte counts.
+
 ## Correctness
 
 `cargo test --locked -p celox-runtime -p celox-state-layout` checks byte encoding
@@ -638,7 +798,11 @@ against an independent BigUint oracle, padding, mask-only transitions,
 registration order, aliases, activity consumption, and flush errors. It also
 checks integer formatting at every significant bit length, unaligned input and
 output, exact end-of-buffer loads, output capacity growth/reuse, and aliases of
-64-bit values with repeated unchanged samples. The output tests cover
+64-bit values with repeated unchanged samples. Suffix tests cover ID carries,
+the inline/long boundary, adjacent records of different significant lengths,
+and bounds on fixed-store padding. Scalar-only and mixed-width traces cross
+small block sizes while retaining registration order and scope/ID mappings.
+The output tests cover
 output-block boundaries, records larger than a block, short writes,
 interrupted writes, partial I/O failures, and the final tail flushed by Drop.
 `cargo test --locked -p celox --test vcd` compares parsed incremental output with

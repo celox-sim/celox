@@ -2,6 +2,7 @@ use celox_state_layout::{TRACE_GROUP_BYTES, get_byte_size};
 use num_bigint::BigUint;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::mem::MaybeUninit;
 use std::path::Path;
 
 /// Describes a signal for VCD recording.
@@ -42,12 +43,65 @@ enum VcdWriterSource {
 }
 
 struct VcdWriterSignal {
-    vcd_id: String,
+    suffix: VcdRecordSuffix,
     scope: String,
     name: String,
     width: usize,
     source: VcdWriterSource,
     previous_offset: usize,
+}
+
+/// Finalized with the header: an optional space, the ID, and a newline.
+/// Most IDs fit in one fixed-size copy; retain arbitrary-length IDs as well.
+enum VcdRecordSuffix {
+    Inline { bytes: [u8; 8], len: u8 },
+    Long(Box<[u8]>),
+}
+
+impl VcdRecordSuffix {
+    fn new(width: usize, id: &str) -> Self {
+        let prefix = usize::from(width != 1);
+        let len = prefix + id.len() + 1;
+        if len <= 8 {
+            let mut bytes = [b' '; 8];
+            bytes[prefix..len - 1].copy_from_slice(id.as_bytes());
+            bytes[len - 1] = b'\n';
+            Self::Inline {
+                bytes,
+                len: len as u8,
+            }
+        } else {
+            let mut bytes = Vec::with_capacity(len);
+            if prefix != 0 {
+                bytes.push(b' ');
+            }
+            bytes.extend_from_slice(id.as_bytes());
+            bytes.push(b'\n');
+            Self::Long(bytes.into_boxed_slice())
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Inline { .. } => 8,
+            Self::Long(bytes) => bytes.len(),
+        }
+    }
+
+    /// Initializes the returned number of bytes, plus padding for short IDs.
+    #[inline]
+    fn encode(&self, out: &mut [MaybeUninit<u8>]) -> usize {
+        match self {
+            Self::Inline { bytes, len } => {
+                copy_encoded(out, bytes);
+                *len as usize
+            }
+            Self::Long(bytes) => {
+                copy_encoded(out, bytes);
+                bytes.len()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -94,7 +148,7 @@ impl<W: Write> VcdWriter<W> {
                 let group = desc.offset / TRACE_GROUP_BYTES;
                 groups.entry(group).or_default().push(index);
                 VcdWriterSignal {
-                    vcd_id: String::new(),
+                    suffix: VcdRecordSuffix::new(desc.width, ""),
                     scope: desc.scope.clone(),
                     name: desc.name.clone(),
                     width: desc.width,
@@ -199,7 +253,7 @@ impl<W: Write> VcdWriter<W> {
             let index = self.external_count;
             self.external_count += 1;
             self.signals.push(VcdWriterSignal {
-                vcd_id: String::new(),
+                suffix: VcdRecordSuffix::new(desc.width, ""),
                 scope: desc.scope.clone(),
                 name: desc.name.clone(),
                 width: desc.width,
@@ -245,12 +299,13 @@ impl<W: Write> VcdWriter<W> {
             writeln!(self.writer, "$scope module {} $end", scope)?;
             for signal_index in group {
                 let signal = &mut self.signals[signal_index];
-                signal.vcd_id = Self::generate_vcd_id(next_id);
+                let id = Self::generate_vcd_id(next_id);
+                signal.suffix = VcdRecordSuffix::new(signal.width, &id);
                 next_id += 1;
                 writeln!(
                     self.writer,
                     "$var wire {} {} {} $end",
-                    signal.width, signal.vcd_id, signal.name
+                    signal.width, id, signal.name
                 )?;
             }
             writeln!(self.writer, "$upscope $end")?;
@@ -261,11 +316,15 @@ impl<W: Write> VcdWriter<W> {
         if let Some(max_record) = self
             .signals
             .iter()
-            .map(|signal| signal.width + signal.vcd_id.len() + 3)
+            .map(|signal| {
+                signal.width.max(1) + usize::from(signal.width != 1) + signal.suffix.capacity()
+            })
             .max()
         {
             // A block can cross the writer's capacity by one complete record.
-            // Reserve both here, once IDs and external signals are finalized.
+            // Include the short suffix's padding, even for scalar-only traces.
+            // Integer SIMD stores also fit within the full declared width.
+            // Reserve here so record encoding never needs to grow the Vec.
             self.encoded.reserve(self.writer.capacity() + max_record);
         }
         self.header_written = true;
@@ -359,7 +418,7 @@ impl<W: Write> VcdWriter<W> {
             };
             let sig = &self.signals[i];
             self.stats.comparisons += 1;
-            match sig.source {
+            let value_len = match sig.source {
                 VcdWriterSource::Memory { .. } | VcdWriterSource::External { .. } => {
                     let size = get_byte_size(sig.width);
                     // The memory path borrows bytes directly. External component values
@@ -403,11 +462,11 @@ impl<W: Write> VcdWriter<W> {
                     }
                     self.initialized[i] = true;
                     encode_value(
-                        &mut self.encoded,
+                        self.encoded.spare_capacity_mut(),
                         sig.width,
                         &old[..size],
                         if track_mask { &old[size..] } else { &[] },
-                    );
+                    )
                 }
                 VcdWriterSource::MemoryBit { offset } => {
                     let value = memory[offset] & 1;
@@ -417,7 +476,8 @@ impl<W: Write> VcdWriter<W> {
                     }
                     *old = value;
                     self.initialized[i] = true;
-                    self.encoded.push(b'0' + value);
+                    self.encoded.spare_capacity_mut()[0].write(b'0' + value);
+                    1
                 }
                 VcdWriterSource::Memory64 { offset } => {
                     let value: [u8; 8] = memory[offset..offset + 8].try_into().unwrap();
@@ -431,14 +491,19 @@ impl<W: Write> VcdWriter<W> {
                     }
                     *old = value;
                     self.initialized[i] = true;
-                    encode_u64(&mut self.encoded, u64::from_le_bytes(value));
+                    encode_u64(self.encoded.spare_capacity_mut(), u64::from_le_bytes(value))
                 }
+            };
+            let suffix_len = sig
+                .suffix
+                .encode(&mut self.encoded.spare_capacity_mut()[value_len..]);
+            // SAFETY: the encoders initialize their returned lengths in checked
+            // slices of spare capacity. Publish only the complete record, once;
+            // any SIMD/suffix padding stays outside the Vec's visible length.
+            unsafe {
+                self.encoded
+                    .set_len(self.encoded.len() + value_len + suffix_len);
             }
-            if sig.width != 1 {
-                self.encoded.push(b' ');
-            }
-            self.encoded.extend_from_slice(sig.vcd_id.as_bytes());
-            self.encoded.push(b'\n');
             self.encoded_changes += 1;
             if self.encoded.len() >= self.writer.capacity() {
                 self.write_encoded()?;
@@ -498,20 +563,19 @@ fn copy_plane(dst: &mut [u8], src: &[u8], width: usize) {
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
-fn encode_u64(out: &mut Vec<u8>, value: u64) {
+fn encode_u64(out: &mut [MaybeUninit<u8>], value: u64) -> usize {
     use std::arch::x86_64::*;
 
     let bits = (64 - value.leading_zeros() as usize).max(1);
     let mut remaining = value << (64 - bits);
-    out.push(b'b');
-    out.reserve(64);
-    let start = out.len();
+    let out = &mut out[..65];
+    out[0].write(b'b');
     // SAFETY: SSE2 is enabled for this target. Each unaligned store initializes
     // exactly one 16-byte chunk of reserved capacity. Only the significant
     // digits are published; any extra initialized bytes remain outside len.
     unsafe {
         let masks = _mm_set1_epi64x(0x0102_0408_1020_4080);
-        for chunk in out.spare_capacity_mut()[..64]
+        for chunk in out[1..]
             .as_chunks_mut::<16>()
             .0
             .iter_mut()
@@ -529,19 +593,22 @@ fn encode_u64(out: &mut Vec<u8>, value: u64) {
             _mm_storeu_si128(chunk.as_mut_ptr().cast(), ascii);
             remaining <<= 16;
         }
-        out.set_len(start + bits);
     }
+    1 + bits
 }
 
 #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
 #[inline]
-fn encode_u64(out: &mut Vec<u8>, value: u64) {
-    encode_value(out, 64, &value.to_le_bytes(), &[]);
+fn encode_u64(out: &mut [MaybeUninit<u8>], value: u64) -> usize {
+    encode_value(out, 64, &value.to_le_bytes(), &[])
 }
 
-fn encode_value(out: &mut Vec<u8>, width: usize, value: &[u8], mask: &[u8]) {
+/// Initializes and returns the value's encoded length. The caller reserves a
+/// full-width record, including any SIMD and suffix padding, before encoding.
+fn encode_value(out: &mut [MaybeUninit<u8>], width: usize, value: &[u8], mask: &[u8]) -> usize {
+    let prefix = usize::from(width != 1);
     if width != 1 {
-        out.push(b'b');
+        out[0].write(b'b');
     }
     let four_state = mask.iter().any(|&byte| byte != 0);
     let bits = if four_state {
@@ -552,25 +619,42 @@ fn encode_value(out: &mut Vec<u8>, width: usize, value: &[u8], mask: &[u8]) {
             .rposition(|&byte| byte != 0)
             .map_or(1, |i| i * 8 + (8 - value[i].leading_zeros() as usize))
     };
-    out.reserve(bits);
+    let out = &mut out[prefix..prefix + bits];
     if !four_state {
         let bytes = bits.div_ceil(8);
         let high = value.get(bytes - 1).copied().unwrap_or(0);
-        out.extend_from_slice(&BINARY[high as usize][8 - (bits - (bytes - 1) * 8)..]);
-        for &byte in value[..bytes - 1].iter().rev() {
-            out.extend_from_slice(&BINARY[byte as usize]);
+        let high_bits = bits - (bytes - 1) * 8;
+        copy_encoded(out, &BINARY[high as usize][8 - high_bits..]);
+        for (chunk, &byte) in out[high_bits..]
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(value[..bytes - 1].iter().rev())
+        {
+            copy_encoded(chunk, &BINARY[byte as usize]);
         }
-        return;
+        return prefix + bits;
     }
-    for bit in (0..bits).rev() {
+    for (dst, bit) in out.iter_mut().zip((0..bits).rev()) {
         let v = value.get(bit / 8).copied().unwrap_or(0) >> (bit % 8) & 1;
         let m = mask.get(bit / 8).copied().unwrap_or(0) >> (bit % 8) & 1;
-        out.push(match (m, v) {
+        dst.write(match (m, v) {
             (0, 0) => b'0',
             (0, _) => b'1',
             (_, 0) => b'z',
             _ => b'x',
         });
+    }
+    prefix + bits
+}
+
+#[inline]
+fn copy_encoded(out: &mut [MaybeUninit<u8>], bytes: &[u8]) {
+    let out = &mut out[..bytes.len()];
+    // SAFETY: the checked destination has enough capacity and the borrowed
+    // source cannot overlap it. This initializes exactly bytes.len() bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr().cast(), bytes.len());
     }
 }
 
@@ -672,13 +756,150 @@ mod encoding_tests {
             let mut actual = vec![b'#'; prefix];
             let mut expected = actual.clone();
             for &value in &values {
-                encode_u64(&mut actual, value);
+                actual.reserve(65);
+                let len = encode_u64(actual.spare_capacity_mut(), value);
+                // SAFETY: encode_u64 initialized len bytes of spare capacity.
+                unsafe { actual.set_len(actual.len() + len) };
                 expected.extend_from_slice(format!("b{value:b}").as_bytes());
                 assert_eq!(actual, expected, "prefix={prefix} value={value:#x}");
                 if actual.len() > 4096 {
                     actual.truncate(prefix);
                     expected.truncate(prefix);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn record_suffixes_preserve_ids_and_never_publish_padding() {
+        for (number, expected) in [(0, "!"), (93, "~"), (94, "!!"), (8929, "~~"), (8930, "!!!")] {
+            assert_eq!(VcdWriter::<Vec<u8>>::generate_vcd_id(number), expected);
+        }
+        // Test both sides of the inline boundary without allocating the huge
+        // signal set needed to reach long IDs through normal registration.
+        for id in [
+            "!",
+            "~",
+            "!!",
+            "~~~",
+            "abcdef",
+            "abcdefg",
+            "abcdefgh",
+            "abcdefghi",
+            "abcdefghijklmnop",
+        ] {
+            for width in [1, 64] {
+                let suffix = VcdRecordSuffix::new(width, id);
+                let expected_suffix = format!("{}{id}\n", if width == 1 { "" } else { " " });
+                for prefix in 0..16 {
+                    let mut guarded = [MaybeUninit::new(b'#'); 64];
+                    let end = prefix + suffix.capacity();
+                    let len = suffix.encode(&mut guarded[prefix..end]);
+                    // SAFETY: all guard bytes started initialized, and encoding
+                    // only overwrites them with initialized suffix bytes.
+                    let actual = guarded.map(|byte| unsafe { byte.assume_init() });
+                    assert_eq!(&actual[..prefix], vec![b'#'; prefix]);
+                    assert_eq!(&actual[prefix..prefix + len], expected_suffix.as_bytes());
+                    assert!(actual[end..].iter().all(|&byte| byte == b'#'));
+
+                    let mut records = vec![b'#'; prefix];
+                    let mut expected = records.clone();
+                    for value in [0u64, 1, 1 << 63, u64::MAX, 0] {
+                        let value_capacity = if width == 1 { 1 } else { 65 };
+                        records.reserve(value_capacity + suffix.capacity());
+                        // Bound the spare slice to exactly the reserved record
+                        // space, including fixed-store padding. Later records
+                        // must overwrite that padding at the visible length.
+                        let out =
+                            &mut records.spare_capacity_mut()[..value_capacity + suffix.capacity()];
+                        let value_len = if width == 1 {
+                            out[0].write(b'0' + (value & 1) as u8);
+                            1
+                        } else {
+                            encode_u64(out, value)
+                        };
+                        let suffix_len = suffix.encode(&mut out[value_len..]);
+                        // SAFETY: both encoders initialized their returned lengths.
+                        unsafe { records.set_len(records.len() + value_len + suffix_len) };
+                        let value_text = if width == 1 {
+                            (value & 1).to_string()
+                        } else {
+                            format!("b{value:b}")
+                        };
+                        expected.extend_from_slice(value_text.as_bytes());
+                        expected.extend_from_slice(expected_suffix.as_bytes());
+                        assert_eq!(records, expected, "id={id} width={width} prefix={prefix}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_records_cross_small_blocks_with_scalar_and_mixed_widths() {
+        for scalar_only in [true, false] {
+            let descs = (0..100)
+                .map(|i| VcdSignalDesc {
+                    scope: format!("scope{}", i % 2),
+                    name: format!("s{i}"),
+                    offset: i * 8,
+                    width: if scalar_only { 1 } else { [1, 9, 64][i % 3] },
+                    is_4state: false,
+                })
+                .collect::<Vec<_>>();
+            for capacity in [1, 3, 7, 8, 9, 16, 64, 71, 72, 73] {
+                let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+                writer.writer = BufWriter::with_capacity(capacity, Vec::new());
+                for (time, value) in [0xff, 0, 0, 0xff].into_iter().enumerate() {
+                    writer.dump(time as u64, &[value; 800]).unwrap();
+                }
+                assert_eq!(writer.statistics().changes, 300);
+                let bytes = writer.into_inner().unwrap();
+                let mut parser = vcd::Parser::new(bytes.as_slice());
+                let header = parser.parse_header().unwrap();
+                let mut names = fxhash::FxHashMap::default();
+                for item in header.items {
+                    if let vcd::ScopeItem::Scope(scope) = item {
+                        for item in scope.items {
+                            if let vcd::ScopeItem::Var(var) = item {
+                                names.insert(var.code, var.reference);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(names.len(), descs.len());
+                let mut time = 0;
+                let actual = parser
+                    .filter_map(|command| {
+                        let (id, value) = match command.unwrap() {
+                            vcd::Command::Timestamp(t) => {
+                                time = t;
+                                return None;
+                            }
+                            vcd::Command::ChangeScalar(id, value) => (id, value.to_string()),
+                            vcd::Command::ChangeVector(id, value) => (id, value.to_string()),
+                            _ => return None,
+                        };
+                        Some((time, names[&id].clone(), value))
+                    })
+                    .collect::<Vec<_>>();
+                let expected = [0, 1, 3]
+                    .into_iter()
+                    .flat_map(|time| {
+                        descs.iter().map(move |desc| {
+                            let value = if time == 1 {
+                                "0".into()
+                            } else {
+                                "1".repeat(desc.width)
+                            };
+                            (time, desc.name.clone(), value)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual, expected,
+                    "scalar_only={scalar_only} capacity={capacity}"
+                );
             }
         }
     }
