@@ -1161,6 +1161,10 @@ impl MBlock {
         self.insts.push(instruction);
     }
 
+    pub(crate) fn terminator(&self) -> Option<&MInst> {
+        self.insts.last()
+    }
+
     pub(crate) fn successors(&self) -> Vec<BlockId> {
         match self.insts.last() {
             Some(MInst::Branch {
@@ -1226,6 +1230,29 @@ impl MFunction {
         let id = ConstantTableId(self.constant_tables.len());
         self.constant_tables.push(values);
         id
+    }
+
+    pub(crate) fn value_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .flat_map(|block| {
+                block
+                    .phis
+                    .iter()
+                    .flat_map(|phi| {
+                        std::iter::once(phi.dst).chain(phi.sources.iter().map(|&(_, src)| src))
+                    })
+                    .chain(
+                        block
+                            .insts
+                            .iter()
+                            .flat_map(|inst| inst.def().into_iter().chain(inst.uses())),
+                    )
+            })
+            .map(|value| value.0 as usize + 1)
+            .max()
+            .unwrap_or(0)
+            .max(self.vregs.count() as usize)
     }
 
     pub(crate) fn constant_tables(&self) -> &[Vec<u64>] {

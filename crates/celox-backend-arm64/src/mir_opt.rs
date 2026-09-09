@@ -5,8 +5,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::HashMap;
 use crate::mir::{BranchPredicate, CmpKind, MFunction, MInst, VReg};
 
+pub(crate) mod bit_projection;
+pub(crate) mod bit_updates;
 mod bitfield;
-mod known_bits;
+pub(crate) mod bitmap_worklist;
+pub(crate) mod byte_predicates;
+pub(crate) mod circular_scan;
+mod copies;
+pub(crate) mod counted_loop;
+pub(crate) mod exclusive_loop;
+pub(crate) mod if_select;
+pub(crate) mod known_bits;
 mod memory;
 
 /// Recover the compact immediate and copy forms expected by AArch64 emission.
@@ -18,6 +27,7 @@ mod memory;
 pub(crate) fn optimize(function: &mut MFunction) {
     fold_constants(function);
     lower_immediate_uses(function);
+    copies::fold(function);
     for _ in 0..3 {
         known_bits::fold(function);
         fold_constants(function);
@@ -26,6 +36,7 @@ pub(crate) fn optimize(function: &mut MFunction) {
         propagate_exact_copies(function);
         dead_code_eliminate(function);
     }
+    counted_loop::run(function);
     canonicalize_identity_operations(function);
     fuse_compare_selects(function);
     eliminate_nearby_common_expressions(function);
@@ -36,9 +47,16 @@ pub(crate) fn optimize(function: &mut MFunction) {
     dead_code_eliminate(function);
     known_bits::fold_packed_bit_loads(function);
     dead_code_eliminate(function);
+    counted_loop::hoist_invariant_loads(function);
+    circular_scan::run(function);
+    dead_code_eliminate(function);
     bitfield::run(function);
     dead_code_eliminate(function);
     memory::run(function);
+    byte_predicates::run(function);
+    bit_projection::run(function);
+    propagate_exact_copies(function);
+    dead_code_eliminate(function);
     known_bits::fold(function);
     fold_constants(function);
     lower_immediate_uses(function);
@@ -46,6 +64,13 @@ pub(crate) fn optimize(function: &mut MFunction) {
     propagate_exact_copies(function);
     memory::eliminate_overwritten_stores(function);
     dead_code_eliminate(function);
+    copies::fold(function);
+    bit_updates::run(function);
+    bitmap_worklist::merge_header_tails(function);
+    bitmap_worklist::run(function);
+    dead_code_eliminate(function);
+    exclusive_loop::run(function);
+    if_select::run(function);
     fold_branch_predicates(function);
 }
 
