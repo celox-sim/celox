@@ -3,6 +3,7 @@ use crate::jit_mem::JitCode;
 use crate::mir::{MBlock, MemoryAliasRange, PhiNode};
 
 mod bit_projection;
+mod bit_updates;
 mod bitmap_worklist;
 mod byte_predicates;
 mod circular_scan;
