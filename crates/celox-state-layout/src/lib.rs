@@ -11,6 +11,9 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
+mod trace;
+pub use trace::{TRACE_GROUP_BYTES, TraceLayout};
+
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
 pub const STATE_HEADER_SIZE: usize = 32;
@@ -139,6 +142,8 @@ pub trait LayoutSource<A> {
     deserialize = "A: Deserialize<'de> + Eq + Hash"
 ))]
 pub struct MemoryLayout<A> {
+    /// Present only in builds that record waveforms.
+    pub trace: Option<TraceLayout>,
     pub four_state: bool,
     pub mode: MemoryLayoutMode,
     /// Stable region offsets. Includes all declared state objects.
@@ -367,6 +372,7 @@ where
         }
 
         Self {
+            trace: None,
             four_state,
             mode,
             offsets,
@@ -400,6 +406,41 @@ where
         self.scratch_size = scratch_size;
         self.merged_total_size = align_up(self.scratch_base_offset + scratch_size, 8);
         self
+    }
+
+    /// Reserve observer activity after scheduler metadata and before backend
+    /// scratch. Stable/working addresses and clock-trigger offsets stay fixed.
+    pub fn enable_trace(&mut self) {
+        if self.trace.is_some() {
+            return;
+        }
+        assert_eq!(
+            self.scratch_size, 0,
+            "trace must be enabled before backend planning"
+        );
+        let homes = self
+            .offsets
+            .iter()
+            .map(|(address, &offset)| {
+                let planes = if self.four_state { 2 } else { 1 };
+                (offset, offset + self.plane_size(address) * planes)
+            })
+            .collect();
+        let trace = TraceLayout::new(self.scratch_base_offset, self.total_size, homes);
+        self.scratch_base_offset = align_up(trace.end_offset(), 8);
+        self.merged_total_size = self.scratch_base_offset;
+        self.trace = Some(trace);
+    }
+
+    pub fn trace_notification_offsets<R: RegionedAddress<A>>(
+        &self,
+        address: &R,
+    ) -> Option<[usize; 2]> {
+        if address.region() != STABLE_REGION {
+            return None;
+        }
+        let trace = self.trace.as_ref()?;
+        Some(trace.notification_offsets(self.offsets[&address.absolute_address()]))
     }
 
     pub fn plane_size(&self, address: &A) -> usize {

@@ -283,6 +283,25 @@ impl SIRTranslator {
         state: &mut TranslationState,
         inst: &SIRInstruction<RegionedAbsoluteAddr>,
     ) {
+        let target = match inst {
+            SIRInstruction::Store(addr, _, width, _, _, _)
+            | SIRInstruction::Commit(_, addr, _, width, _)
+                if *width != 0 =>
+            {
+                Some(addr)
+            }
+            _ => None,
+        };
+        if let Some(offsets) = target.and_then(|addr| self.layout.trace_notification_offsets(addr))
+        {
+            let one = state.builder.ins().iconst(types::I8, 1);
+            for offset in offsets {
+                state
+                    .builder
+                    .ins()
+                    .store(MemFlags::trusted(), one, state.mem_ptr, offset as i32);
+            }
+        }
         match inst {
             SIRInstruction::Imm(dst, val) => {
                 self.translate_imm_inst(state, dst, val);

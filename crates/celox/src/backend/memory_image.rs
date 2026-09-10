@@ -47,6 +47,9 @@ impl MemoryAllocation {
 pub(crate) struct MemoryImage {
     allocation: Arc<MemoryAllocation>,
     logical_words: usize,
+    // Keep this outside the exposed allocation: restoring or clearing the
+    // whole state image must not forget an escaped writable pointer.
+    raw_view_exposed: bool,
 }
 
 impl MemoryImage {
@@ -54,6 +57,7 @@ impl MemoryImage {
         Self {
             allocation: Arc::new(MemoryAllocation::zeroed(logical_words)),
             logical_words,
+            raw_view_exposed: false,
         }
     }
 
@@ -63,6 +67,15 @@ impl MemoryImage {
 
     pub(crate) fn as_mut_ptr(&mut self) -> *mut u64 {
         self.allocation.as_mut_ptr()
+    }
+
+    pub(crate) fn expose_mut_ptr(&mut self) -> *mut u64 {
+        self.raw_view_exposed = true;
+        self.as_mut_ptr()
+    }
+
+    pub(crate) fn vcd_tracking_enabled(&self) -> bool {
+        !self.raw_view_exposed
     }
 
     #[cfg(test)]

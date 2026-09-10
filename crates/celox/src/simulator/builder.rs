@@ -1221,6 +1221,14 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         if let Some(path) = vcd_path {
+            if sim.layout().unpacked_arrays.values().any(|array| {
+                !array.element_width.is_multiple_of(8)
+                    || array.element_stride != array.element_width / 8
+            }) {
+                return Err(SimulatorError::from(crate::CodegenError::message(
+                    "VCD requires packed array storage; compile this native image with VCD enabled",
+                )));
+            }
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::VcdWriter::new(path, &descs)
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
@@ -1925,6 +1933,13 @@ mod host {
             ),
             SimulatorError,
         > {
+            // VCD descriptors currently describe packed whole objects. Apply
+            // the same layout rule to every factory, including native images.
+            let layout_mode = if self.vcd_path.is_some() {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             self.enforce_native_force_optimizer();
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
@@ -1993,6 +2008,9 @@ mod host {
             let layout_start = phase_timing.then(crate::timing::now);
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+            if self.vcd_path.is_some() {
+                laid_out.enable_vcd_tracking();
+            }
             if let Some(start) = layout_start {
                 tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
             }
@@ -2469,6 +2487,11 @@ mod host {
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            let layout_mode = if self.vcd_path.is_some() {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             let injected_manifests = self.injected_components.manifests();
             let program_res = if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
@@ -2530,6 +2553,9 @@ mod host {
             let sim_res = program_res.and_then(|(program, warnings)| {
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+                if self.vcd_path.is_some() {
+                    laid_out.enable_vcd_tracking();
+                }
 
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -2676,6 +2702,11 @@ mod host {
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            let layout_mode = if self.vcd_path.is_some() {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
                 compile_frontend_to_sir_with_layout_mode(
                     artifact,
@@ -2712,6 +2743,9 @@ mod host {
             };
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+            if self.vcd_path.is_some() {
+                laid_out.enable_vcd_tracking();
+            }
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
