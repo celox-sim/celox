@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789050640845,
+  "lastUpdate": 1789069824005,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -246674,6 +246674,153 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution",
             "value": 19749.938158,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "username": "tignear",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "e0707d9606cba56d8217dbc27eec7f45ffa35441",
+          "message": "fix(bench): restore standard Veryl execution for Heliodor (#808)",
+          "timestamp": "2026-09-10T18:27:45Z",
+          "url": "https://github.com/celox-sim/celox/commit/e0707d9606cba56d8217dbc27eec7f45ffa35441"
+        },
+        "date": 1789069800302,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 25575.327384,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 25584.909737,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 27312.319006,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 14255.362489,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 98715.442805,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_linux_boot_end_to_end",
+            "value": 40364.005788,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_linux_boot_startup",
+            "value": 10147.191402,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_linux_boot_execution",
+            "value": 30207.260814,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_linux_boot_end_to_end",
+            "value": 70970.052835,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_linux_boot_startup",
+            "value": 8259.56569,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_linux_boot_execution",
+            "value": 62710.486665,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_linux_boot_end_to_end",
+            "value": 33891.613827,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_linux_boot_startup",
+            "value": 10271.2259,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_linux_boot_execution",
+            "value": 23608.46469,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_linux_boot_end_to_end",
+            "value": 67684.109735,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_linux_boot_startup",
+            "value": 8856.716411,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_linux_boot_execution",
+            "value": 58827.39262,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_linux_boot_compilation",
+            "value": 14255.362489,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_linux_boot_execution",
+            "value": 25584.909737,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_linux_boot_compilation",
+            "value": 98715.442805,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_linux_boot_execution",
+            "value": 27312.319006,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_linux_boot_compilation",
+            "value": 13399.733777,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_linux_boot_execution",
+            "value": 20498.544103,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_compilation",
+            "value": 169524.60901,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution",
+            "value": 19808.773697,
             "unit": "ms"
           }
         ]
