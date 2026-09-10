@@ -28,6 +28,11 @@ iced-x86 = { version = "1.21", default-features = false, features = ["std", "enc
 
 [dev-dependencies]
 celox-sir-opt = { workspace = true }
+criterion = "0.8"
+
+[[bench]]
+name = "compilation"
+harness = false
 
 [lints]
 workspace = true
