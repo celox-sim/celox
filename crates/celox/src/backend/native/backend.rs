@@ -495,6 +495,20 @@ impl NativeProgramImage {
             .merged_total_size
             .checked_add(self.layout.triggered_bits_total_size)
             .ok_or_else(|| "semantic memory size overflows".to_string())?;
+        if let Some(trace) = &self.layout.trace {
+            let metadata_start = self
+                .layout
+                .triggered_bits_offset
+                .checked_add(self.layout.triggered_bits_total_size)
+                .ok_or_else(|| "trace metadata offset overflows".to_string())?;
+            if !trace.validate(
+                self.layout.total_size,
+                metadata_start,
+                self.layout.scratch_base_offset,
+            ) {
+                return Err("invalid waveform activity layout".into());
+            }
+        }
         if self.native_memory_size < semantic_size {
             return Err("native memory is smaller than the semantic state".into());
         }
@@ -2565,6 +2579,7 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
@@ -2607,6 +2622,7 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
         self.write_signal_plane(signal, false, &val);
         if clear_mask {
@@ -2615,6 +2631,7 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let write_mask = self.compiled.options.four_state && signal.is_4state;
         self.write_signal_plane(signal, false, &val);
         if write_mask {
@@ -2668,11 +2685,18 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        (self.mem_mut_ptr(), self.memory.len_words() * 8)
+        (
+            self.memory.expose_mut_ptr().cast(),
+            self.memory.len_words() * 8,
+        )
     }
 
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         Some(self.memory.owner())
+    }
+
+    fn vcd_tracking_enabled(&self) -> bool {
+        self.memory.vcd_tracking_enabled()
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {

@@ -100,10 +100,22 @@ fn injected_clocked_component_uses_component_scheduling() {
         )
         .unwrap();
 
-    let result = Simulator::builder(source, "InjectedComponentTb")
+    let dir = tempfile::tempdir().unwrap();
+    let mut sim = Simulator::builder(source, "InjectedComponentTb")
         .with_injected_components(components)
-        .run_test()
+        .vcd(dir.path().join("component.vcd"))
+        .build()
         .unwrap();
+    let tb = celox::testbench::compile_initial_testbench(&sim).unwrap();
+    let result = celox::testbench::run_compiled_testbench(&mut sim, &tb);
+    sim.dump(100);
+    let before = sim.vcd_statistics().unwrap().comparisons;
+    sim.dump(101);
+    assert_eq!(
+        sim.vcd_statistics().unwrap().comparisons,
+        before,
+        "staging component inputs must not expose a retained mutable view"
+    );
     assert_eq!(result, TestResult::Pass, "{result:?}");
     assert_eq!(
         *phases.lock().unwrap(),

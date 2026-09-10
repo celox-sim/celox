@@ -26,8 +26,12 @@ sim.dispose();    // ファイルをフラッシュして閉じる
 ```
 
 ::: warning
-VCD ファイルは `dispose()` を呼ぶまで書き出されません。終了時は必ず `dispose()` を呼ぶか、try/finally ブロックで確実に実行してください。
+VCD 出力はバッファリングされます。残りのデータを書き出すため、終了時は必ず `dispose()` を呼ぶか、try/finally ブロックで確実に実行してください。
 :::
+
+Rust では `Simulator::flush_vcd()` または `Simulation::flush_vcd()` を呼ぶと、
+シミュレータの破棄前に出力を反映し、書き込みエラーを処理できます。
+単独の `VcdWriter` では `flush()` と `into_inner()` を使用できます。
 
 ## タイムベースシミュレーションでの使い方
 

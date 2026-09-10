@@ -661,7 +661,9 @@ mod host {
         ) {
             let value_byte_size = signal.width.div_ceil(8);
             let write_mask = self.backend.layout().four_state && signal.is_4state;
-            let (ptr, mem_len) = self.backend.memory_as_mut_ptr();
+            // Initial writes precede the first full dump; no mutable view escapes.
+            let (ptr, mem_len) = self.backend.memory_as_ptr();
+            let ptr = ptr.cast_mut();
             let mem = unsafe { std::slice::from_raw_parts_mut(ptr, mem_len) };
 
             for run in runs {
@@ -869,12 +871,22 @@ mod host {
             }
             let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
-                let (ptr, size) = self.backend.memory_as_ptr();
-                let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
                 writer
-                    .dump_with_external(timestamp, memory, &component_traces)
+                    .dump_backend(timestamp, &mut self.backend, &component_traces)
                     .unwrap();
             }
+        }
+
+        /// Make buffered waveform output visible and report write errors.
+        pub fn flush_vcd(&mut self) -> std::io::Result<()> {
+            if let Some(writer) = self.vcd_writer.as_mut() {
+                writer.flush()?;
+            }
+            Ok(())
+        }
+
+        pub fn vcd_statistics(&self) -> Option<celox_runtime::VcdStatistics> {
+            self.vcd_writer.as_ref().map(crate::VcdWriter::statistics)
         }
 
         /// Sets a signal value and marks combinational logic as dirty.

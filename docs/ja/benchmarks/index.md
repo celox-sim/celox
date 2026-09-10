@@ -57,7 +57,13 @@ pnpm bench
 
 # Verilator 比較（Verilator と C++ ツールチェーンが必要）
 bash scripts/run-verilator-bench.sh
+
+# VCD 比較（Python 3 も必要。波形の一致を検証してから計測）
+python3 scripts/compare-vcd-verilator.py
 ```
+
+[VCD の測定条件と結果](../../internals/vcd-performance.md#verilator-comparison)には、
+idle・sparse・dense の各負荷で、記録なし／ありを比較した結果をまとめています。
 
 CodSpeed ワークフローは pull request と `master` でベンチマークを実行します。
 CodSpeed は `merge_group` event をサポートしていないため、merge queue では

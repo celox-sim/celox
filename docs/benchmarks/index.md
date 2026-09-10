@@ -59,7 +59,13 @@ pnpm bench
 
 # Verilator comparison (requires Verilator and a C++ toolchain)
 bash scripts/run-verilator-bench.sh
+
+# VCD comparison (also requires Python 3; validates matching waveforms)
+python3 scripts/compare-vcd-verilator.py
 ```
+
+The [VCD benchmark methodology and results](../internals/vcd-performance.md#verilator-comparison)
+cover idle, sparse, and dense recording, with tracing disabled and enabled.
 
 The CodSpeed workflow runs benchmarks on pull requests and `master`. Merge queue
 events preserve the workflow check without running CodSpeed because CodSpeed does
