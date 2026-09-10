@@ -230,6 +230,59 @@ mod activity {
         parser.map(Result::unwrap).collect()
     }
 
+    #[test]
+    fn invalid_external_values_preserve_backend_activity_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let sim = SimulatorBuilder::new(
+            "module Top (a: input logic<8>, q: output logic<8>) { assign q = a + 1; }",
+            "Top",
+        )
+        .vcd(dir.path().join("unused.vcd"))
+        .build_cranelift()
+        .unwrap();
+        let input = sim.signal("a");
+        let descs = sim.build_vcd_descs(false);
+        let mut backend = sim.into_backend();
+        let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+        let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+        let external_descs = [celox_runtime::VcdExternalSignalDesc {
+            scope: "component".into(),
+            name: "state".into(),
+            width: 8,
+        }];
+        writer.add_external_signals(&external_descs).unwrap();
+        reference.add_external_signals(&external_descs).unwrap();
+
+        for time in 0..3u64 {
+            backend.set(input, time as u8);
+            backend.eval_comb().unwrap();
+            let external = [(BigUint::from(time), BigUint::default())];
+            if time != 0 {
+                // Both missing and excess values are recoverable input errors.
+                // Retry without another memory write to expose lost activity.
+                let invalid = vec![external[0].clone(); if time == 1 { 0 } else { 2 }];
+                let before = writer.statistics();
+                let error = writer
+                    .dump_backend(time, &mut backend, &invalid)
+                    .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(writer.statistics().comparisons, before.comparisons);
+            }
+            writer.dump_backend(time, &mut backend, &external).unwrap();
+            let (ptr, size) = backend.memory_as_ptr();
+            // SAFETY: backend owns this memory and is not mutated during the dump.
+            let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
+            reference
+                .dump_with_external(time, memory, &external)
+                .unwrap();
+        }
+
+        assert_eq!(
+            commands(&writer.into_inner().unwrap()),
+            commands(&reference.into_inner().unwrap())
+        );
+    }
+
     fn compare<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path, four_state: bool) {
         assert!(sim.layout().trace.is_some());
         let descs = sim.build_vcd_descs(four_state);

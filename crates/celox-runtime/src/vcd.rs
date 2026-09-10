@@ -188,6 +188,8 @@ impl<W: Write> VcdWriter<W> {
         backend: &mut B,
         external: &[(BigUint, BigUint)],
     ) -> std::io::Result<()> {
+        // Reject recoverable input errors before consuming pending writes.
+        self.validate_external_count(external.len())?;
         let mut activity = std::mem::take(&mut self.activity);
         let tracked = backend.take_vcd_activity(&mut activity);
         let (ptr, size) = backend.memory_as_ptr();
@@ -342,6 +344,19 @@ impl<W: Write> VcdWriter<W> {
         self.dump_with_activity(timestamp, memory, external, None)
     }
 
+    fn validate_external_count(&self, count: usize) -> std::io::Result<()> {
+        if count != self.external_count {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "expected {} external VCD values, got {count}",
+                    self.external_count
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// `activity` contains unique physical group IDs consumed from TraceLayout.
     /// None requests a full scan. Initial values and external signals are always
     /// observed, including when no generated store has executed.
@@ -352,16 +367,7 @@ impl<W: Write> VcdWriter<W> {
         external: &[(BigUint, BigUint)],
         activity: Option<&[usize]>,
     ) -> std::io::Result<()> {
-        if external.len() != self.external_count {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "expected {} external VCD values, got {}",
-                    self.external_count,
-                    external.len()
-                ),
-            ));
-        }
+        self.validate_external_count(external.len())?;
         let first_dump = !self.initial_values_written;
         if !self.header_written {
             self.write_header()?;
