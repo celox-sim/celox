@@ -422,6 +422,9 @@ fn point_loop<A>(
     upper: Value,
     emit: impl FnOnce(&mut SIRBuilder<A>, Value) -> Result<()>,
 ) -> Result<()> {
+    if lower.constant.is_some() && lower.constant == upper.constant {
+        return emit(builder, lower);
+    }
     if let (Some(lower), Some(upper)) = (lower.constant, upper.constant)
         && lower > upper
     {
@@ -450,6 +453,103 @@ fn point_loop<A>(
     builder.seal_block(SIRTerminator::Jump(header, vec![next.register]));
     builder.switch_to_block(exit);
     Ok(())
+}
+
+/// Partition a statically bounded innermost coordinate at every statement's
+/// endpoints. Boundary-only statements must not make the intersection of all
+/// domains empty and force guards on every iteration of a large interior.
+/// There are at most twice as many pieces as statements, independent of the
+/// trip count. Dynamic-prefix domains continue to use the general scanner.
+fn static_pieces<A: Clone>(
+    builder: &mut SIRBuilder<A>,
+    plan: &ScanPlan,
+    bodies: &[StatementBody<A>],
+    prefix: &[Value],
+    lower: Value,
+    upper: Value,
+) -> Result<bool> {
+    let (Some(lower), Some(upper)) = (lower.constant, upper.constant) else {
+        return Ok(false);
+    };
+    let Some(prefix_values) = prefix
+        .iter()
+        .map(|v| v.constant)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(false);
+    };
+    let axis = prefix.len();
+    let mut intervals = Vec::new();
+    let mut endpoints = std::collections::BTreeSet::new();
+    for statement in &plan.statements {
+        let mut coordinates = prefix_values.clone();
+        coordinates.push(0);
+        coordinates.extend(
+            statement.fixed_coordinates[axis + 1..]
+                .iter()
+                .map(|v| v.unwrap()),
+        );
+        let (mut low, mut high) = (i128::from(lower), i128::from(upper));
+        for row in &statement.domain {
+            let constant = row.coefficients.iter().zip(&coordinates).try_fold(
+                i128::from(row.constant),
+                |sum, (&a, &x)| {
+                    sum.checked_add(i128::from(a) * i128::from(x))
+                        .ok_or(Error::ArithmeticOverflow)
+                },
+            )?;
+            let coefficient = i128::from(row.coefficients[axis]);
+            if coefficient > 0 {
+                let numerator = constant.checked_neg().ok_or(Error::ArithmeticOverflow)?;
+                let bound = numerator.div_euclid(coefficient)
+                    + i128::from(numerator.rem_euclid(coefficient) != 0);
+                low = low.max(bound);
+            } else if coefficient < 0 {
+                high = high.min(constant.div_euclid(-coefficient));
+            } else if constant < 0 {
+                low = 1;
+                high = 0;
+                break;
+            }
+        }
+        if low <= high {
+            let start = i64::try_from(low).map_err(|_| Error::ArithmeticOverflow)?;
+            let end = i64::try_from(high)
+                .map_err(|_| Error::ArithmeticOverflow)?
+                .checked_add(1)
+                .ok_or(Error::ArithmeticOverflow)?;
+            endpoints.extend([start, end]);
+            intervals.push(Some(start..end));
+        } else {
+            intervals.push(None);
+        }
+    }
+    let endpoints = endpoints.into_iter().collect::<Vec<_>>();
+    for pair in endpoints.windows(2) {
+        let active = intervals
+            .iter()
+            .enumerate()
+            .filter_map(|(s, interval)| {
+                interval
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&pair[0]))
+                    .then_some(s)
+            })
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            continue;
+        }
+        let mut piece = plan.clone();
+        piece.statements = active.iter().map(|&s| plan.statements[s].clone()).collect();
+        let sources = active
+            .iter()
+            .map(|&s| bodies[s].clone())
+            .collect::<Vec<_>>();
+        let start = immediate(builder, pair[0]);
+        let end = immediate(builder, pair[1] - 1);
+        interior_loop(builder, &piece, &sources, prefix, start, end)?;
+    }
+    Ok(true)
 }
 
 /// Intersect statement domains on the innermost non-scalar coordinate. Their
@@ -580,6 +680,9 @@ fn walk<A: Clone>(
                 .all(Option::is_some)
         })
     {
+        if static_pieces(builder, plan, bodies, prefix, lower, upper)? {
+            return Ok(());
+        }
         return interior(builder, plan, bodies, prefix, lower, upper);
     }
     point_loop(builder, lower, upper, |builder, value| {

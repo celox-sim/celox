@@ -1,0 +1,20 @@
+map four_state=false pre recovered: statements=1
+map four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+map four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+map four_state=true pre recovered: statements=1
+map four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+map four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+producer_consumer four_state=false pre recovered: statements=4
+producer_consumer four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+producer_consumer four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+producer_consumer four_state=true pre recovered: statements=4
+producer_consumer four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+producer_consumer four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+reduction four_state=false pre: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+reduction four_state=false post: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+reduction four_state=true pre: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+reduction four_state=true post: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+ff_shift four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+ff_shift four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+ff_shift four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+ff_shift four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}

@@ -82,7 +82,8 @@ permutable band: dimensions [0, 2)
 | --- | --- | --- |
 | Shared scheduler and scan | `celox-analysis::polyhedral` | Specialized domains and affine access relations |
 | SLT adapter | `celox-slt::affine::extract` | Explicit array statements retaining iteration/write provenance; ordinary SLT expression lowering |
-| SIR adapter | `celox-sir::affine::extract` | Complete canonical counted-loop CFG; access relations derived from instructions |
+| SIR loop adapter | `celox-sir::affine::extract` | Complete canonical counted-loop CFG; access relations derived from instructions |
+| Unrolled SIR bridge | `celox-sir::affine::recover_independent_stores` | Complete straight-line unit, immutable input objects, distinct complete output cells |
 | Output | `Kernel::lower` | Independently verified schedule and optional tile sizes; verified SIR |
 
 The SLT API binds separate signed 64-bit iterator inputs. Existing `ForFold`
@@ -155,10 +156,129 @@ recorded run. Shift's small gains have overlapping interquartile ranges and
 are not strong evidence. These are two synthetic kernels on one host, without
 a statistical significance claim or comparison to C compilers/Pluto.
 
-The next adoption step is preserving array-update provenance in actual frontend
-SLT and measuring eligible HDL regions. Parameter tuning should follow a stable
-schedule/code-generation baseline and should account for compilation cost.
-The 2026 paper's coordinate search remains a separate, unimplemented stage.
+The following experiment checks the frontend integration assumption with actual
+Veryl source. Parameter tuning should follow a stable schedule/code-generation
+baseline and should account for compilation cost. The 2026 paper's coordinate
+search remains a separate, unimplemented stage.
+
+## Veryl frontend experiment, 2026-09-11
+
+The first commit (`ba134ab90`) measured constructed loop kernels. The follow-up
+uses Veryl source for array mapping, a producer/consumer stencil, scalar
+reduction, and an FF shift register. `affine_veryl audit` calls the ordinary
+`compile_to_sir` entry point with all existing optimizations enabled and captures
+both sides of SIR optimization. These are frontend-compiled microkernels, not
+representative application or whole-simulator benchmarks.
+
+At 32 elements, in both two- and four-state mode:
+
+| Veryl case | Existing SIR loops | Stores before/after SIR optimization | Canonical extraction | Unrolled bridge before optimization |
+| --- | ---: | ---: | --- | --- |
+| Map | 0 | 32 / 8 | Rejected | 1 statement |
+| Producer/consumer | 0 | 64 / 16 | Rejected | 4 statements, including boundary stores |
+| Reduction | 1 | 1 / 1 | Rejected | Rejected |
+| FF shift | 0 | 64 / 17 across 3 units | Rejected | Rejected |
+
+The map and stencil are already expanded into scalar expression DAGs. The
+stencil reads the original input directly, shares intermediate multiplications,
+and has no remaining reads from its temporary array. Stores are grouped into
+128-bit SIR operations. Native inspection finds **scalar arithmetic and grouped
+scalar stores**, not SIMD arithmetic, in these fixtures. Merely counting wide
+SIR stores would misidentify the cause of the baseline's performance.
+
+The reduction retains a `ForFoldGroup` and a loop header with three parameters:
+remaining count, source induction, and accumulated state. The first two are
+loop control; accepting all additional parameters as independent induction
+variables would erase a real recurrence. FF scheduling also requires its
+region/commit and event semantics. Neither case enters the new bridge.
+
+The bridge checks every store's typed expression DAG after translating static
+input indices relative to its output index. It groups identical templates into
+contiguous intervals, splits holes, and proves that each output cell is written
+once and every loaded object is immutable. This permits reordering the store
+families before the shared dependence/reuse scheduler. It is not a general
+reconstruction of source loops, and does not recover mutable-array dependences
+already eliminated by the frontend. Effects, partial cells, overlapping writes,
+mutable inputs and unsupported control flow are rejected. Statement and work
+limits bound the experiment, without adding dependencies.
+
+Boundary-only statements initially caused the scanner's shared interior to be
+empty. The emitter now partitions a statically bounded innermost coordinate at
+all statement endpoints and emits only the active statements in each interval.
+There are at most twice as many pieces as statements, independent of trip count.
+Integer ceil/floor and singleton intervals are tested. Dynamic-prefix domains
+retain the existing guarded scanner.
+
+### Execution and code generation
+
+Same host/profile/CPU pinning as above. The baseline uses the fully optimized
+SIR produced by `compile_to_sir`, with its packed layout. The candidate is
+recovered from pre-optimization SIR and then scheduled. Both pass through the
+existing merged-unit SIR optimizer and x86 backend. This comparison does not
+include the native simulator's dispatch loop or claim equivalence to every
+layout choice in `SimulatorBuilder::build_native`.
+
+Each row is the median of 15 batches, alternating baseline/candidate order.
+Each batch repeats an invocation `clamp(2,000,000 / n, 32, 100,000)` times;
+initialization and stable-state comparison are outside the timer. Inputs change
+between batches, not within a batch, so this measures hot, repeatedly evaluated
+kernels. Four-state batches include pseudo-random unknown masks. Both instruction
+streams are warmed first. Raw samples and quartiles are retained; no statistical
+significance claim is made. Compilation timings are single observations.
+
+| Case | Elements | Mode | Existing µs | Scheduled µs | Existing / scheduled |
+| --- | ---: | --- | ---: | ---: | ---: |
+| map | 32 | 2-state | 0.0237 | 0.0317 | 0.747x |
+| map | 32 | 4-state | 0.0298 | 0.0512 | 0.583x |
+| producer_consumer | 32 | 2-state | 0.0288 | 0.0470 | 0.613x |
+| producer_consumer | 32 | 4-state | 0.0593 | 0.1357 | 0.437x |
+| map | 512 | 2-state | 0.0807 | 0.2033 | 0.397x |
+| map | 512 | 4-state | 0.3386 | 0.5496 | 0.616x |
+| producer_consumer | 512 | 2-state | 0.1772 | 0.6575 | 0.270x |
+| producer_consumer | 512 | 4-state | 1.0423 | 2.2808 | 0.457x |
+| map | 4,096 | 2-state | 1.2232 | 1.5960 | 0.766x |
+| map | 4,096 | 4-state | 2.6425 | 4.2566 | 0.621x |
+| producer_consumer | 4,096 | 2-state | 1.8889 | 4.7510 | 0.398x |
+| producer_consumer | 4,096 | 4-state | 7.9602 | 18.3433 | 0.434x |
+
+All measured schedule/tile variants lose execution throughput to this baseline.
+Tile 64 does not establish an improvement over the untiled schedule; on the
+stencil it can also reintroduce substantial dynamic boundary overhead. The
+recovered scalar loops discard cross-iteration expression sharing and add loop
+control. Instruction-level parallelism and memory-access form may also
+contribute; their individual costs have not been isolated.
+
+The code-size and backend-time tradeoff is large at 4,096 elements:
+
+| Case / mode | Existing bytes | Scheduled bytes | Existing backend ms | Scheduled backend ms | Recovery + schedule + lowering ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| map / 2-state | 83,357 | 78 | 212.386 | 0.669 | 4.570 |
+| map / 4-state | 211,565 | 168 | 613.285 | 0.975 | 3.735 |
+| producer_consumer / 2-state | 143,571 | 222 | 323.031 | 1.287 | 12.485 |
+| producer_consumer / 4-state | 543,867 | 573 | 2086.054 | 1.820 | 12.877 |
+
+The common Veryl-to-optimized-SIR phase still costs 450–1,439 ms for these
+4,096-element inputs and is included separately as `compile_ms` in the CSV.
+The experiment already pays for expansion and ordinary SIR optimization before
+recovering a loop. The backend timings therefore demonstrate a potential
+compilation-cost tradeoff, not a measured default-pipeline compilation speedup.
+For long simulations, the added per-evaluation runtime can outweigh that saving.
+
+This changes the adoption priority: preserve array iteration provenance early,
+and preserve or deliberately trade off existing cross-iteration sharing and
+unrolling when generating a schedule. A profitability/search layer must retain
+the existing optimized unit as a candidate. The synthetic Jacobi result does
+not justify enabling recovered scalar loops by default. This bridge and endpoint
+partitioning are integration/code-generation experiments, not the 2026 paper's
+coordinate-wise parameter search.
+
+Artifacts: [eligibility CSV](../benchmarks/data/affine-veryl-2026-09-11/audit-32.csv),
+[rejection details](../benchmarks/data/affine-veryl-2026-09-11/audit-32.txt),
+[32-element CSV](../benchmarks/data/affine-veryl-2026-09-11/bench-32.csv),
+[512-element CSV](../benchmarks/data/affine-veryl-2026-09-11/bench-512.csv),
+[4,096-element CSV](../benchmarks/data/affine-veryl-2026-09-11/bench-4096.csv),
+and [native inspection](../benchmarks/data/affine-veryl-2026-09-11/native-inspection.txt).
+Each timing CSV has a sibling `.txt` containing schedules and all samples.
 
 ## Reproduction and validation
 
@@ -188,3 +308,29 @@ without `host-runtime`; the timing example requires x86-64 host execution.
 Validation for this change passed 265 crate unit tests and 3 integration tests,
 the 3 interpreter-only integration tests without default features, both focused
 Clippy commands, and the workspace formatting check.
+
+Follow-up reproduction (optional dump directories retain source/IR and native
+images for inspection):
+
+```sh
+cargo build --offline --profile heliodor-dev -p celox --example affine_veryl
+taskset -c 2 target/heliodor-dev/examples/affine_veryl audit 32 /tmp/affine-audit
+taskset -c 2 target/heliodor-dev/examples/affine_veryl bench 32 15 /tmp/affine-native
+taskset -c 2 target/heliodor-dev/examples/affine_veryl bench 512 15
+taskset -c 2 target/heliodor-dev/examples/affine_veryl bench 4096 15
+cargo test --offline --profile heliodor-dev -p celox-sir --lib
+cargo test --offline --profile heliodor-dev -p celox --test affine_veryl --test affine_scheduling
+cargo test --offline --profile heliodor-dev -p celox --no-default-features --test affine_veryl --test affine_scheduling
+cargo clippy --offline -p celox-sir --all-targets -- -D warnings
+cargo clippy --offline -p celox --test affine_veryl --test affine_scheduling --example affine_veryl -- -D warnings
+cargo fmt --all -- --check
+```
+
+Follow-up validation passed 38 SIR unit tests, 6 integration tests, the same 6
+integration tests without default features, focused Clippy, and formatting.
+The actual frontend cases include a last-lane exception, holes/boundaries,
+three element counts, wrapping 32-bit data, and known/X/Z values. Recovered,
+scheduled and tiled units are checked against the original interpreter;
+nineteen-element cases also compare all semantic cells in native execution.
+Known data additionally has an independent Rust oracle. The endpoint regression
+checks non-integral inequality bounds against independently rounded intervals.

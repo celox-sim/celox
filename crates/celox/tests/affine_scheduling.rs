@@ -212,6 +212,47 @@ fn slt_and_cfg_schedules_preserve_memory_and_unknown_bits() {
 }
 
 #[test]
+fn constrained_statement_endpoints_preserve_integer_rounding() {
+    for four_state in [false, true] {
+        let mut fixture = Fixture::new(Kind::Shift, 19, 1);
+        fixture.statements[0].domain.constraints =
+            vec![Affine::new(vec![2], -3), Affine::new(vec![-3], 22)];
+        fixture.statements[1].domain.constraints =
+            vec![Affine::new(vec![3], -14), Affine::new(vec![-2], 19)];
+        let kernel = fixture.slt_kernel(four_state);
+        let chosen = schedule(kernel.region(), &ScheduleOptions::default()).unwrap();
+        // Independently rounded source intervals: [ceil(3/2), floor(22/3)]
+        // and [ceil(14/3), floor(19/2)]. The direct CFG ignores constraints.
+        fixture.statements[0].domain.bounds[0] = 2..8;
+        fixture.statements[1].domain.bounds[0] = 5..10;
+        let initial = fixture.initial(four_state, 123);
+        let mut expected = Machine(initial.clone());
+        celox::execute_unit(
+            &fixture.original(four_state),
+            &mut expected,
+            &[],
+            four_state,
+        )
+        .unwrap();
+        let unit = kernel.lower(&chosen, None, WORK).unwrap();
+        let mut actual = Machine(initial.clone());
+        celox::execute_unit(&unit, &mut actual, &[], four_state).unwrap();
+        assert_eq!(actual.0, expected.0);
+        #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+        {
+            let layout = fixture.layout(four_state);
+            let mut native = support::native::Executable::new(&unit, &layout);
+            native.initialize(&layout, &initial);
+            native.run();
+            assert_eq!(
+                native.cells(&layout, fixture.objects.len(), fixture.n),
+                expected.0
+            );
+        }
+    }
+}
+
+#[test]
 fn negative_time_tiles_and_disjoint_statement_interiors_preserve_results() {
     for kind in [Kind::Shift, Kind::Jacobi] {
         let mut fixture = Fixture::new(kind, 19, 3);

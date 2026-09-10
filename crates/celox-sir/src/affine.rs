@@ -10,6 +10,7 @@
 
 mod emit;
 mod extract;
+mod unrolled;
 
 use crate::{
     BinaryOp, ExecutionUnit, HashMap, RegisterId, RegisterType, SIRInstruction, SIROffset, UnaryOp,
@@ -22,6 +23,7 @@ use num_traits::{ToPrimitive, Zero};
 use std::hash::Hash;
 
 pub use extract::extract;
+pub use unrolled::{UnrolledOptions, recover_independent_stores};
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug)]
