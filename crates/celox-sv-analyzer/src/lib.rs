@@ -1615,6 +1615,82 @@ mod tests {
     }
 
     #[test]
+    fn preserves_four_state_relational_case_selector_masks() {
+        for op in ["<", "<=", ">", ">="] {
+            for (left, right) in [("1'bx", "1'b1"), ("2'b1z", "2'b00")] {
+                let source = format!(
+                    "module Top(input logic a, output logic y); \
+                     always_comb case ({left} {op} {right}) \
+                     1'bx: y = a; endcase endmodule"
+                );
+                analyze_source(&source, Path::new("relational_constant_case.sv"))
+                    .unwrap_or_else(|error| panic!("{left} {op} {right}: {error}"));
+            }
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 always_comb case (1'bx {op} 1'b1) \
+                 1'b0, 1'b1: y = a; endcase endmodule"
+            );
+            let error = analyze_source(&source, Path::new("unmatched_relational_case.sv"))
+                .expect_err("two-state labels cannot cover an unknown relational result");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
+    fn folds_compound_four_state_case_labels() {
+        for (selector, label) in [
+            ("1'bx", "(1'bx | 1'b0)"),
+            ("1'bx", "(1'bz & 1'b1)"),
+            ("2'bxz", "{1'bx, 1'bz}"),
+            ("2'bxx", "{2{1'bx}}"),
+            ("1'bz", "(1'bx ? 1'bz : 1'bz)"),
+            ("2'bxx", "(1'b1 ? 1'sbx : 2'sb00)"),
+            ("1'bx", "(1'bx < 1'b1)"),
+            ("1'bx", "label()"),
+            ("4'b1111", "'1"),
+            ("4'sb1111", "'1"),
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 function logic label(); return 1'bx | 1'b0; endfunction \
+                 always_comb case ({selector}) {label}: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("compound_constant_case_label.sv"))
+                .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
+        }
+        let error = analyze_source(
+            "module Top(input logic a, output logic y); \
+             always_comb case (1'bz) (1'bx | 1'b0): y = a; endcase endmodule",
+            Path::new("unmatched_compound_case_label.sv"),
+        )
+        .expect_err("an X-valued label must not cover a Z-valued selector");
+        assert!(error.to_string().contains("latch inference"), "{error}");
+    }
+
+    #[test]
+    fn preserves_use_site_dimensions_in_function_alias_types() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter W = 4)(output logic [7:0] y);
+                    typedef logic [3:0] nibble_t;
+                    function automatic nibble_t [W'(2):W'(1)] f();
+                        return 8'hab;
+                    endfunction
+                    localparam BITS = $bits(f())'(16'hffff);
+                    localparam SIZE = $size(f())'(8'hff);
+                    always_comb y = f();
+                endmodule
+            "#,
+            Path::new("function_alias_use_site_dimensions.sv"),
+        )
+        .expect("function aliases should retain their use-site packed dimensions");
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_value(), Some(255));
+        assert_eq!(parameters[2].resolved_value(), Some(3));
+    }
+
+    #[test]
     fn preserves_selected_size_argument_dimensions() {
         for (argument, expected) in [
             ("a", 5),

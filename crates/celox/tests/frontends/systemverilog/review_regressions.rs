@@ -7808,6 +7808,155 @@ fn rejects_indexed_part_selects_in_comb_write_groups() {
 }
 
 sv_backends! {
+    fn preserves_use_site_dimensions_in_function_alias_types(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter W = 4)(input logic [7:0] data,
+                    output logic [7:0] constant_y, echo_y,
+                    output logic [3:0] high_y, low_y, ascending_y, inherited_y,
+                    output logic [15:0] signed_y, sizes);
+                    typedef logic [3:0] nibble_t;
+                    typedef logic signed [3:0] signed_nibble_t;
+                    function automatic nibble_t [1:0] constant_value();
+                        return 8'hab;
+                    endfunction
+                    function automatic nibble_t [W'(2):W'(1)] echo(
+                        input nibble_t [W'(2):W'(1)] x);
+                        return x;
+                    endfunction
+                    function automatic nibble_t high(input nibble_t [2:1] x);
+                        return x[2];
+                    endfunction
+                    function automatic nibble_t low;
+                        input nibble_t [2:1] x;
+                        return x[1];
+                    endfunction
+                    function automatic nibble_t ascending(input nibble_t [1:2] x);
+                        return x[1];
+                    endfunction
+                    function automatic nibble_t inherited(input nibble_t [2:1] x, z);
+                        return z[2];
+                    endfunction
+                    function automatic signed_nibble_t [1:0] signed_echo(
+                        input signed_nibble_t [1:0] x);
+                        return x;
+                    endfunction
+                    localparam BITS = $bits(constant_value())'(16'hffff);
+                    localparam SIZE = $size(constant_value())'(8'hff);
+                    always_comb begin
+                        constant_y = constant_value();
+                        echo_y = echo(data);
+                        high_y = high(data);
+                        low_y = low(data);
+                        ascending_y = ascending(data);
+                        inherited_y = inherited('0, data);
+                        signed_y = signed_echo(data);
+                        sizes = {BITS, SIZE};
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("function_alias_use_site_dimensions.sv"))], "Top"
+        ).four_state(true);
+        let data = sim.signal("data");
+        let constant_y = sim.signal("constant_y");
+        let echo_y = sim.signal("echo_y");
+        let high_y = sim.signal("high_y");
+        let low_y = sim.signal("low_y");
+        let ascending_y = sim.signal("ascending_y");
+        let inherited_y = sim.signal("inherited_y");
+        let signed_y = sim.signal("signed_y");
+        let sizes = sim.signal("sizes");
+        for value in [0xabu8, 0x80, 0x12, 0xff, 0] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(constant_y), 0xabu8.into());
+            assert_eq!(sim.get(echo_y), value.into());
+            assert_eq!(sim.get(high_y), (value >> 4).into());
+            assert_eq!(sim.get(low_y), (value & 0xf).into());
+            assert_eq!(sim.get(ascending_y), (value >> 4).into());
+            assert_eq!(sim.get(inherited_y), (value >> 4).into());
+            assert_eq!(sim.get(signed_y), (value as i8 as i16 as u16).into());
+            assert_eq!(sim.get(sizes), 0x3ffu16.into());
+        }
+    }
+
+    fn preserves_four_state_relational_case_selectors(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3);
+                    always_comb begin
+                        case (1'bx < 1'b1) 1'bx: y0 = a; endcase
+                        case (1'bz <= 1'b0) 1'bx: y1 = a; endcase
+                        case (2'b1x > 2'b00) 1'bx: y2 = a; endcase
+                        case (2'b0z >= 2'b10) 1'bx: y3 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_relational_case_selectors.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = ["y0", "y1", "y2", "y3"].map(|name| sim.signal(name));
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for output in outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn folds_compound_four_state_case_labels(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic s, a, b,
+                    output logic constant_y, concat_y, function_y, dynamic_y);
+                    function automatic logic label(); return 1'bx | 1'b0; endfunction
+                    always_comb begin
+                        case (1'bx) (1'bx | 1'b0): constant_y = a; endcase
+                        case (2'bxz) {1'bx, 1'bz}: concat_y = a; endcase
+                        case (1'bx) label(): function_y = a; endcase
+                        case (s)
+                            (1'b0 & 1'b1): dynamic_y = a;
+                            (1'b1 | 1'b0): dynamic_y = b;
+                            (1'bx | 1'b0): dynamic_y = a ^ b;
+                            (1'bx ? 1'bz : 1'bz): dynamic_y = ~a;
+                        endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("compound_four_state_case_labels.sv"))], "Top"
+        ).four_state(true);
+        let s = sim.signal("s");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let constant_outputs = ["constant_y", "concat_y", "function_y"].map(|name| sim.signal(name));
+        let dynamic_y = sim.signal("dynamic_y");
+        for inputs in 0u8..4 {
+            let a_value = inputs & 1 != 0;
+            let b_value = inputs & 2 != 0;
+            for (value, mask, expected) in [
+                (0u8, 0u8, a_value),
+                (1, 0, b_value),
+                (1, 1, a_value ^ b_value),
+                (0, 1, !a_value),
+            ] {
+                sim.modify(|io| {
+                    io.set(a, a_value);
+                    io.set(b, b_value);
+                    io.set_four_state(s, BigUint::from(value), BigUint::from(mask));
+                }).unwrap();
+                for output in constant_outputs {
+                    assert_eq!(sim.get(output), a_value.into());
+                }
+                assert_eq!(sim.get(dynamic_y), expected.into());
+            }
+        }
+    }
+
     fn preserves_four_state_equality_case_selectors(sim) {
         @setup {
             let source = r#"

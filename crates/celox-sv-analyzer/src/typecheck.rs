@@ -349,8 +349,17 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         signed,
         signed_extension(&right, signed),
     );
-    if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
-        || left.mask != BigUint::default()
+    if matches!(
+        op,
+        BinaryOp::LogicAnd
+            | BinaryOp::LogicOr
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+    ) || left.mask != BigUint::default()
         || right.mask != BigUint::default()
     {
         if let Some(result) = eval_four_state_binary(&left, op, &right, signed) {
@@ -359,26 +368,6 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         if left.mask != BigUint::default() || right.mask != BigUint::default() {
             return None;
         }
-    }
-    if matches!(
-        op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-    ) {
-        let ordering = if signed {
-            integral_literal_as_i128(&left, true)?.cmp(&integral_literal_as_i128(&right, true)?)
-        } else {
-            left.value.cmp(&right.value)
-        };
-        let result = match op {
-            BinaryOp::Eq => ordering.is_eq(),
-            BinaryOp::Ne => ordering.is_ne(),
-            BinaryOp::Lt => ordering.is_lt(),
-            BinaryOp::Le => ordering.is_le(),
-            BinaryOp::Gt => ordering.is_gt(),
-            BinaryOp::Ge => ordering.is_ge(),
-            _ => unreachable!(),
-        };
-        return Some(result as i128);
     }
     let modulus = BigUint::from(1u8) << width;
     let width_mask = &modulus - BigUint::from(1u8);
@@ -461,6 +450,30 @@ fn eval_four_state_binary_literal(
             _ => None,
         };
         return Some(integral_literal_from_truth(truth));
+    }
+    if matches!(
+        op,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) {
+        // Relational comparisons are unknown if either operand contains X/Z,
+        // even when known bits alone would establish an ordering.
+        if left.mask != BigUint::default() || right.mask != BigUint::default() {
+            return Some(integral_literal_from_truth(None));
+        }
+        let negative = |literal: &IntegralLiteral| {
+            signed && literal.width != 0 && literal.value.bit((literal.width - 1) as u64)
+        };
+        let ordering = negative(right)
+            .cmp(&negative(left))
+            .then_with(|| left.value.cmp(&right.value));
+        let truth = match op {
+            BinaryOp::Lt => ordering.is_lt(),
+            BinaryOp::Le => ordering.is_le(),
+            BinaryOp::Gt => ordering.is_gt(),
+            BinaryOp::Ge => ordering.is_ge(),
+            _ => unreachable!(),
+        };
+        return Some(integral_literal_from_truth(Some(truth)));
     }
     if !matches!(
         op,
@@ -624,7 +637,15 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
         ConstExpr::Binary { left, op, right }
             if matches!(
                 op,
-                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Eq | BinaryOp::Ne
+                BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
             ) =>
         {
             let (mut left, mut right) = integral_binary_operands(left, right)?;
@@ -1307,6 +1328,89 @@ mod literal_tests {
                 .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
                 let expected = equality.map(|equal| equal ^ (op == BinaryOp::Ne));
                 let expected_bit = expected.map_or('x', |equal| if equal { '1' } else { '0' });
+                assert_eq!(
+                    format_integral_literal_binary(&literal),
+                    format!("1'b{expected_bit}"),
+                    "{expr:?}"
+                );
+                assert_eq!(
+                    eval_const_expr(&expr, &HashMap::default()),
+                    expected.map(i128::from),
+                    "{expr:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_four_state_relational_truth_tables() {
+        let inputs = ["1'b0", "1'b1", "1'bx", "1'bz"];
+        for (op, truth_table) in [
+            (BinaryOp::Lt, ["01xx", "00xx", "xxxx", "xxxx"]),
+            (BinaryOp::Le, ["11xx", "01xx", "xxxx", "xxxx"]),
+            (BinaryOp::Gt, ["00xx", "10xx", "xxxx", "xxxx"]),
+            (BinaryOp::Ge, ["10xx", "11xx", "xxxx", "xxxx"]),
+        ] {
+            for (left_index, left) in inputs.iter().enumerate() {
+                for (right_index, right) in inputs.iter().enumerate() {
+                    let expr = ConstExpr::Binary {
+                        left: Box::new(ConstExpr::Literal((*left).to_string())),
+                        op,
+                        right: Box::new(ConstExpr::Literal((*right).to_string())),
+                    };
+                    let literal = eval_const_integral_literal_with_types(
+                        &expr,
+                        &HashMap::default(),
+                        &HashMap::default(),
+                    )
+                    .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
+                    let expected = truth_table[left_index].as_bytes()[right_index] as char;
+                    assert_eq!(
+                        format_integral_literal_binary(&literal),
+                        format!("1'b{expected}"),
+                        "{expr:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_sizes_four_state_relational_operands() {
+        for (left, right, ordering) in [
+            ("2'b0x", "2'b1x", None),
+            ("2'b1z", "2'b00", None),
+            ("1'sb1", "2'sb00", Some(std::cmp::Ordering::Less)),
+            ("1'sb1", "2'b00", Some(std::cmp::Ordering::Greater)),
+            ("1'sb1", "2'sb11", Some(std::cmp::Ordering::Equal)),
+            ("8'hff", "'1", Some(std::cmp::Ordering::Equal)),
+            (
+                "129'sh1ffffffffffffffffffffffffffffffff",
+                "129'sb0",
+                Some(std::cmp::Ordering::Less),
+            ),
+            ("129'bx", "129'b0", None),
+        ] {
+            for op in [BinaryOp::Lt, BinaryOp::Le, BinaryOp::Gt, BinaryOp::Ge] {
+                let expr = ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Literal(left.to_string())),
+                    op,
+                    right: Box::new(ConstExpr::Literal(right.to_string())),
+                };
+                let expected = ordering.map(|ordering| match op {
+                    BinaryOp::Lt => ordering.is_lt(),
+                    BinaryOp::Le => ordering.is_le(),
+                    BinaryOp::Gt => ordering.is_gt(),
+                    BinaryOp::Ge => ordering.is_ge(),
+                    _ => unreachable!(),
+                });
+                let literal = eval_const_integral_literal_with_types(
+                    &expr,
+                    &HashMap::default(),
+                    &HashMap::default(),
+                )
+                .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
+                let expected_bit = expected.map_or('x', |value| if value { '1' } else { '0' });
                 assert_eq!(
                     format_integral_literal_binary(&literal),
                     format!("1'b{expected_bit}"),

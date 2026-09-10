@@ -5103,17 +5103,14 @@ fn function_param_packed_dimensions(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<PackedDimension> {
-    if let Some(alias) = type_alias_from_data_type_or_implicit(data_type, syntax_tree, type_aliases)
-    {
-        function_packed_dimension_widths(alias.packed_ranges())
-    } else {
-        function_packed_dimension_widths(&packed_ranges_from_ref_node_with_env(
-            RefNode::DataTypeOrImplicit(data_type),
-            syntax_tree,
-            const_env,
-            type_aliases,
-        ))
-    }
+    function_type_from_ref_node(
+        RefNode::DataTypeOrImplicit(data_type),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .map(|r#type| function_packed_dimension_widths(r#type.packed_ranges()))
+    .unwrap_or_default()
 }
 
 fn parameter_marker(name: &str) -> String {
@@ -6485,23 +6482,12 @@ fn function_return_first_packed_dimension_width(
     type_aliases: &HashMap<String, Type>,
     return_type: Option<ExprType>,
 ) -> Option<usize> {
-    let r#type = match node {
-        sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(data_type) => match &**data_type {
-            sv_parser::DataTypeOrVoid::DataType(data_type) => type_from_ref_node_with_env(
-                RefNode::DataType(data_type),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )
-            .or_else(|| type_alias_from_data_type(data_type, syntax_tree, type_aliases)),
-            sv_parser::DataTypeOrVoid::Void(_) => None,
-        },
-        sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(data_type) => {
-            let node = RefNode::ImplicitDataType(data_type);
-            type_from_ref_node_with_env(node.clone(), syntax_tree, const_env, type_aliases)
-                .or_else(|| type_alias_from_ref_node(node, syntax_tree, type_aliases))
-        }
-    };
+    let r#type = function_type_from_ref_node(
+        RefNode::FunctionDataTypeOrImplicit(node),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    );
     let Some(first) = r#type
         .as_ref()
         .and_then(|r#type| r#type.packed_ranges().first())
@@ -6666,17 +6652,12 @@ fn value_type_from_data_type_or_implicit(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
-    match node {
-        sv_parser::DataTypeOrImplicit::DataType(data_type) => {
-            value_type_from_data_type(data_type, syntax_tree, const_env, type_aliases)
-        }
-        sv_parser::DataTypeOrImplicit::ImplicitDataType(data_type) => value_type_from_ref_node(
-            RefNode::ImplicitDataType(data_type),
-            syntax_tree,
-            const_env,
-            type_aliases,
-        ),
-    }
+    value_type_from_ref_node(
+        RefNode::DataTypeOrImplicit(node),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
 }
 
 fn value_type_from_data_type(
@@ -6685,29 +6666,12 @@ fn value_type_from_data_type(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
-    let r#type = type_from_ref_node_with_env(
+    value_type_from_ref_node(
         RefNode::DataType(node),
         syntax_tree,
         const_env,
         type_aliases,
     )
-    .or_else(|| type_alias_from_data_type(node, syntax_tree, type_aliases))?;
-    let width = if r#type.packed_ranges().is_empty() {
-        1
-    } else {
-        r#type
-            .packed_ranges()
-            .iter()
-            .try_fold(1usize, |acc, range| {
-                let left = eval_ast_const_expr(range.left(), const_env)?;
-                let right = eval_ast_const_expr(range.right(), const_env)?;
-                acc.checked_mul(left.abs_diff(right) as usize + 1)
-            })?
-    };
-    Some(ExprType {
-        width,
-        signed: r#type.is_signed(),
-    })
 }
 
 fn value_type_from_ref_node(
@@ -6716,40 +6680,54 @@ fn value_type_from_ref_node(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
-    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
-    if alias.is_none()
-        && let Some(r#type) = integer_atom_expr_type(node.clone())
-    {
-        return Some(r#type);
-    }
-    let direct_ranges;
-    let ranges = if let Some(alias) = &alias {
-        alias.packed_ranges()
-    } else {
-        direct_ranges = packed_ranges_from_ref_node_with_env(
-            node.clone(),
-            syntax_tree,
-            const_env,
-            type_aliases,
-        );
-        &direct_ranges
+    let r#type = function_type_from_ref_node(node, syntax_tree, const_env, type_aliases)?;
+    expr_type_from_type(&r#type, const_env)
+}
+
+fn function_type_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<Type> {
+    let node = match node {
+        RefNode::DataTypeOrImplicit(node) => match node {
+            sv_parser::DataTypeOrImplicit::DataType(node) => RefNode::DataType(node),
+            sv_parser::DataTypeOrImplicit::ImplicitDataType(node) => {
+                RefNode::ImplicitDataType(node)
+            }
+        },
+        RefNode::FunctionDataTypeOrImplicit(node) => match node {
+            sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(node) => match &**node {
+                sv_parser::DataTypeOrVoid::DataType(node) => RefNode::DataType(node),
+                sv_parser::DataTypeOrVoid::Void(_) => return None,
+            },
+            sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(node) => {
+                RefNode::ImplicitDataType(node)
+            }
+        },
+        node => node,
     };
-    let width = if ranges.is_empty() {
-        1
-    } else {
-        ranges.iter().try_fold(1usize, |acc, range| {
-            let left = eval_ast_const_expr(range.left(), const_env)?;
-            let right = eval_ast_const_expr(range.right(), const_env)?;
-            acc.checked_mul(left.abs_diff(right) as usize + 1)
-        })?
+    // Only the declared type can supply an alias. A typedef used in a range
+    // bound's cast must not cause the built-in type's dimensions to be added twice.
+    let r#type = match &node {
+        RefNode::DataType(data_type) => {
+            let Some(alias) = type_alias_from_data_type(data_type, syntax_tree, type_aliases)
+            else {
+                return type_from_ref_node_with_env(node, syntax_tree, const_env, type_aliases);
+            };
+            alias
+        }
+        RefNode::ImplicitDataType(_) => Type::implicit(),
+        _ => return None,
     };
-    Some(ExprType {
-        width,
-        signed: alias
-            .as_ref()
-            .map(|r#type| r#type.is_signed())
-            .unwrap_or_else(|| is_signed_from_ref_node(node).unwrap_or(false)),
-    })
+    Some(type_with_fallback_ranges_with_env(
+        r#type,
+        node,
+        syntax_tree,
+        const_env,
+        type_aliases,
+    ))
 }
 
 fn integer_atom_expr_type(node: RefNode<'_>) -> Option<ExprType> {
@@ -9479,6 +9457,11 @@ fn simplify_constant_mux_conditions(expr: Expr, const_env: &HashMap<String, i128
 }
 
 fn fold_const_integral_expr_preserving_mask(expr: Expr, const_env: &HashMap<String, i128>) -> Expr {
+    // Keep unbased fill literals available for their later comparison context.
+    // Literal expressions already retain their value, type, and X/Z mask.
+    if matches!(expr, Expr::Literal(_)) {
+        return expr;
+    }
     let parameter_types = parameter_types_from_const_env(const_env)
         .into_iter()
         .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
@@ -11971,6 +11954,7 @@ fn two_state_case_item_reachability(
                             )
                         })
                         .map(|label| simplify_constant_mux_conditions(label, const_env))
+                        .map(|label| fold_const_integral_expr_preserving_mask(label, const_env))
                         .and_then(expr_to_const)
                     })
                     .collect::<Option<Vec<_>>>()?;
@@ -14883,7 +14867,10 @@ fn type_with_fallback_ranges_with_env(
     let direct_ranges =
         packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, const_env, type_aliases);
     if type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases).is_some() {
-        r#type.packed_ranges.extend(direct_ranges);
+        // Use-site dimensions enclose the aliased packed type.
+        let mut ranges = direct_ranges;
+        ranges.extend(r#type.packed_ranges);
+        r#type.packed_ranges = ranges;
     } else if r#type.packed_ranges.is_empty() {
         r#type.packed_ranges = direct_ranges;
     }
