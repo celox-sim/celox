@@ -53,13 +53,13 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             value.checked_shr(bit).map(|value| value & 1)
         }
         ConstExpr::Function { name, args } => eval_const_function(name, args, constants),
-        ConstExpr::Unary { op, expr } => {
-            if let ConstExpr::Literal(literal) = &**expr
-                && let Some(result) = eval_literal_unary(*op, literal)
+        ConstExpr::Unary { op, expr: operand } => {
+            if let Some(result) = integral_literal_from_const_expr(expr)
+                && let Some(value) = integral_literal_as_i128(&result, result.signed)
             {
-                return Some(result);
+                return Some(value);
             }
-            let value = eval_const_expr(expr, constants)?;
+            let value = eval_const_expr(operand, constants)?;
             match op {
                 UnaryOp::Plus => Some(value),
                 UnaryOp::Minus => value.checked_neg(),
@@ -349,78 +349,7 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         signed,
         signed_extension(&right, signed),
     );
-    if matches!(
-        op,
-        BinaryOp::LogicAnd
-            | BinaryOp::LogicOr
-            | BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::Lt
-            | BinaryOp::Le
-            | BinaryOp::Gt
-            | BinaryOp::Ge
-    ) || left.mask != BigUint::default()
-        || right.mask != BigUint::default()
-    {
-        if let Some(result) = eval_four_state_binary(&left, op, &right, signed) {
-            return Some(result);
-        }
-        if left.mask != BigUint::default() || right.mask != BigUint::default() {
-            return None;
-        }
-    }
-    let modulus = BigUint::from(1u8) << width;
-    let width_mask = &modulus - BigUint::from(1u8);
-    if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
-        if right.value == BigUint::default() {
-            return None;
-        }
-        if signed {
-            let left = integral_literal_as_i128(&left, true)?;
-            let right = integral_literal_as_i128(&right, true)?;
-            let value = match op {
-                BinaryOp::Div if left == i128::MIN && right == -1 => i128::MIN,
-                BinaryOp::Mod if left == i128::MIN && right == -1 => 0,
-                BinaryOp::Div => left.checked_div(right)?,
-                BinaryOp::Mod => left.checked_rem(right)?,
-                _ => unreachable!(),
-            };
-            let value = BigUint::from(value as u128) & &width_mask;
-            return integral_literal_as_i128(
-                &IntegralLiteral {
-                    width,
-                    signed,
-                    value,
-                    mask: BigUint::default(),
-                },
-                true,
-            );
-        }
-        let value = match op {
-            BinaryOp::Div => left.value / right.value,
-            BinaryOp::Mod => left.value % right.value,
-            _ => unreachable!(),
-        };
-        return i128::try_from(value).ok();
-    }
-    let value = match op {
-        BinaryOp::Add => (left.value + right.value) & &width_mask,
-        BinaryOp::Sub => (left.value + &modulus - right.value) & &width_mask,
-        BinaryOp::Mul => (left.value * right.value) & &width_mask,
-        BinaryOp::BitAnd => left.value & right.value,
-        BinaryOp::BitOr => left.value | right.value,
-        BinaryOp::BitXor => left.value ^ right.value,
-        _ => unreachable!(),
-    };
-    integral_literal_as_i128(
-        &IntegralLiteral {
-            width,
-            signed,
-            value,
-            mask: BigUint::default(),
-        },
-        signed,
-    )
+    eval_four_state_binary(&left, op, &right, signed)
 }
 
 fn eval_four_state_binary(
@@ -439,6 +368,64 @@ fn eval_four_state_binary_literal(
     right: &IntegralLiteral,
     signed: bool,
 ) -> Option<IntegralLiteral> {
+    if matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+    ) {
+        let width = left.width;
+        let modulus = BigUint::from(1u8) << width;
+        let width_mask = &modulus - BigUint::from(1u8);
+        // Arithmetic propagates any X/Z bit to the entire result, retaining
+        // the common operand width and signedness. Division by zero does too.
+        if left.mask != BigUint::default()
+            || right.mask != BigUint::default()
+            || (matches!(op, BinaryOp::Div | BinaryOp::Mod) && right.value == BigUint::default())
+        {
+            return Some(IntegralLiteral {
+                width,
+                signed,
+                value: width_mask.clone(),
+                mask: width_mask,
+            });
+        }
+        let value = match op {
+            BinaryOp::Add => (&left.value + &right.value) & &width_mask,
+            BinaryOp::Sub => (&left.value + &modulus - &right.value) & &width_mask,
+            BinaryOp::Mul => (&left.value * &right.value) & &width_mask,
+            BinaryOp::Div | BinaryOp::Mod => {
+                let negative = |literal: &IntegralLiteral| {
+                    signed && width != 0 && literal.value.bit((width - 1) as u64)
+                };
+                let magnitude = |literal: &IntegralLiteral| {
+                    if negative(literal) {
+                        &modulus - &literal.value
+                    } else {
+                        literal.value.clone()
+                    }
+                };
+                let (value, negative) = if op == BinaryOp::Div {
+                    (
+                        magnitude(left) / magnitude(right),
+                        negative(left) ^ negative(right),
+                    )
+                } else {
+                    (magnitude(left) % magnitude(right), negative(left))
+                };
+                if negative && value != BigUint::default() {
+                    &modulus - value
+                } else {
+                    value
+                }
+            }
+            _ => unreachable!(),
+        };
+        return Some(IntegralLiteral {
+            width,
+            signed,
+            value,
+            mask: BigUint::default(),
+        });
+    }
     if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
         let left = integral_literal_truth(left);
         let right = integral_literal_truth(right);
@@ -599,31 +586,17 @@ fn merge_unknown_integral_literals(
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
-        ConstExpr::Unary {
-            op: UnaryOp::LogicNot,
-            expr,
-        } => Some(integral_literal_from_truth(
-            integral_literal_truth(&integral_literal_from_const_expr(expr)?).map(|truth| !truth),
-        )),
-        ConstExpr::Unary {
-            op: UnaryOp::BitNot,
-            expr,
-        } => {
-            let mut literal = integral_literal_from_const_expr(expr)?;
-            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
-            let known = &width_mask ^ &literal.mask;
-            literal.value = ((&width_mask ^ literal.value) & known) | &literal.mask;
-            Some(literal)
-        }
-        ConstExpr::Unary {
-            op: UnaryOp::ToTwoState,
-            expr,
-        } => {
-            let mut literal = integral_literal_from_const_expr(expr)?;
-            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
-            literal.value &= width_mask ^ &literal.mask;
-            literal.mask = BigUint::default();
-            Some(literal)
+        ConstExpr::Unary { op, expr } => {
+            let operand = if matches!(op, UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor)
+                && let Some(fill) = unbased_fill_from_const_expr(expr)
+            {
+                // Reduction operands are self-determined, so an unbased
+                // unsized fill contributes one bit (not an integer's width).
+                integral_fill_literal(fill, 1)?
+            } else {
+                integral_literal_from_const_expr(expr)?
+            };
+            Some(eval_integral_unary(*op, operand))
         }
         ConstExpr::Binary { left, op, right }
             if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) =>
@@ -637,7 +610,12 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
         ConstExpr::Binary { left, op, right }
             if matches!(
                 op,
-                BinaryOp::BitAnd
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::BitAnd
                     | BinaryOp::BitOr
                     | BinaryOp::BitXor
                     | BinaryOp::Eq
@@ -712,60 +690,59 @@ fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i
     }
 }
 
-fn eval_literal_unary(op: UnaryOp, literal: &str) -> Option<i128> {
-    let literal_text = literal;
-    let literal = parse_integral_literal(literal_text)?;
-    if op == UnaryOp::ToTwoState {
-        let mut literal = literal;
-        let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
-        literal.value &= width_mask ^ &literal.mask;
-        literal.mask = BigUint::default();
-        return integral_literal_as_i128(&literal, literal.signed);
-    }
-    if literal.mask != BigUint::default() {
-        return None;
-    }
-    let value = literal_as_i128(literal_text)?;
+fn eval_integral_unary(op: UnaryOp, mut literal: IntegralLiteral) -> IntegralLiteral {
+    let modulus = BigUint::from(1u8) << literal.width;
+    let width_mask = &modulus - BigUint::from(1u8);
     match op {
-        UnaryOp::Plus => Some(value),
+        UnaryOp::Plus | UnaryOp::Minus if literal.mask != BigUint::default() => {
+            literal.value = width_mask.clone();
+            literal.mask = width_mask;
+        }
+        UnaryOp::Plus => {}
         UnaryOp::Minus => {
-            let modulus = BigUint::from(1u8) << literal.width;
-            let negated = if literal.value == BigUint::default() {
-                BigUint::default()
-            } else {
-                &modulus - literal.value
-            };
-            integral_literal_as_i128(
-                &IntegralLiteral {
-                    width: literal.width,
-                    signed: literal.signed,
-                    value: negated,
-                    mask: BigUint::default(),
-                },
-                literal.signed,
-            )
+            if literal.value != BigUint::default() {
+                literal.value = modulus - literal.value;
+            }
         }
-        UnaryOp::BitNot if literal.signed => Some(!value),
         UnaryOp::BitNot => {
-            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
-            i128::try_from(width_mask ^ literal.value).ok()
+            let known = &width_mask ^ &literal.mask;
+            literal.value = ((&width_mask ^ literal.value) & known) | &literal.mask;
         }
-        UnaryOp::LogicNot => Some((literal.value == BigUint::default()) as i128),
-        UnaryOp::ToTwoState => Some(value),
+        UnaryOp::LogicNot => {
+            return integral_literal_from_truth(
+                integral_literal_truth(&literal).map(|truth| !truth),
+            );
+        }
+        UnaryOp::ToTwoState => {
+            literal.value &= width_mask ^ &literal.mask;
+            literal.mask = BigUint::default();
+        }
         UnaryOp::RedAnd => {
-            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
-            Some((literal.value == width_mask) as i128)
+            // A known zero dominates any X/Z bits; otherwise all bits must
+            // be known ones for the reduction to be true.
+            let truth = if (&literal.value | &literal.mask) != width_mask {
+                Some(false)
+            } else if literal.mask == BigUint::default() {
+                Some(true)
+            } else {
+                None
+            };
+            return integral_literal_from_truth(truth);
         }
-        UnaryOp::RedOr => Some((literal.value != BigUint::default()) as i128),
-        UnaryOp::RedXor => Some(
-            (literal
-                .value
-                .iter_u64_digits()
-                .map(u64::count_ones)
-                .sum::<u32>()
-                & 1) as i128,
-        ),
+        UnaryOp::RedOr => return integral_literal_from_truth(integral_literal_truth(&literal)),
+        UnaryOp::RedXor => {
+            let truth = (literal.mask == BigUint::default()).then(|| {
+                literal
+                    .value
+                    .iter_u64_digits()
+                    .fold(false, |parity, digit| {
+                        parity ^ (digit.count_ones() % 2 != 0)
+                    })
+            });
+            return integral_literal_from_truth(truth);
+        }
     }
+    literal
 }
 
 fn eval_literal_four_state_equality(
@@ -1149,6 +1126,184 @@ mod literal_tests {
     use super::*;
 
     #[test]
+    fn preserves_four_state_arithmetic_results() {
+        for op in [
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::Div,
+            BinaryOp::Mod,
+        ] {
+            for (left, right, expected) in [
+                ("1'bx", "1'b0", "1'bx"),
+                ("2'b1z", "4'b0001", "4'bxxxx"),
+                ("4'sb0001", "2'sb1z", "4'sbxxxx"),
+                ("4'sb0001", "2'b1z", "4'bxxxx"),
+                ("'z", "8'h01", "8'bxxxxxxxx"),
+                ("'x", "'1", "1'bx"),
+                ("256'hx", "1'b1", &format!("256'b{}", "x".repeat(256))),
+            ] {
+                let expr = ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Literal(left.to_string())),
+                    op,
+                    right: Box::new(ConstExpr::Literal(right.to_string())),
+                };
+                let result = integral_literal_from_const_expr(&expr)
+                    .unwrap_or_else(|| panic!("{left} {op:?} {right}"));
+                assert_eq!(
+                    format_integral_literal_binary(&result),
+                    expected,
+                    "{left} {op:?} {right}"
+                );
+                assert_eq!(eval_const_expr(&expr, &HashMap::default()), None);
+            }
+        }
+        for op in [UnaryOp::Plus, UnaryOp::Minus] {
+            for (operand, expected) in [("2'b1z", "2'bxx"), ("2'sb0x", "2'sbxx")] {
+                let expr = ConstExpr::Unary {
+                    op,
+                    expr: Box::new(ConstExpr::Literal(operand.to_string())),
+                };
+                let result = integral_literal_from_const_expr(&expr).unwrap();
+                assert_eq!(format_integral_literal_binary(&result), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn folds_nested_sized_arithmetic_without_losing_width_or_sign() {
+        for (left, op, right, expected) in [
+            ("4'hf", BinaryOp::Add, "4'h1", "4'b0000"),
+            ("4'h0", BinaryOp::Sub, "4'h1", "4'b1111"),
+            ("4'h8", BinaryOp::Mul, "4'h2", "4'b0000"),
+            ("4'sh9", BinaryOp::Div, "4'sh2", "4'sb1101"),
+            ("4'sh9", BinaryOp::Mod, "4'sh2", "4'sb1111"),
+            ("4'sh9", BinaryOp::Div, "4'h2", "4'b0100"),
+            ("4'sh7", BinaryOp::Div, "4'she", "4'sb1101"),
+            ("4'sh7", BinaryOp::Mod, "4'she", "4'sb0001"),
+            ("4'sh8", BinaryOp::Div, "4'shf", "4'sb1000"),
+            ("4'sh8", BinaryOp::Mod, "4'shf", "4'sb0000"),
+            ("4'h7", BinaryOp::Div, "4'h0", "4'bxxxx"),
+            ("4'h7", BinaryOp::Mod, "4'h0", "4'bxxxx"),
+        ] {
+            let expr = ConstExpr::Binary {
+                left: Box::new(ConstExpr::Literal(left.to_string())),
+                op,
+                right: Box::new(ConstExpr::Literal(right.to_string())),
+            };
+            let result = integral_literal_from_const_expr(&expr).unwrap();
+            assert_eq!(
+                format_integral_literal_binary(&result),
+                expected,
+                "{left} {op:?} {right}"
+            );
+            let reduced = ConstExpr::Unary {
+                op: UnaryOp::RedAnd,
+                expr: Box::new(expr),
+            };
+            let result = integral_literal_from_const_expr(&reduced).unwrap();
+            assert_eq!(result.width, 1);
+            assert!(!result.signed);
+            assert_eq!(
+                eval_const_expr(&reduced, &HashMap::default()),
+                integral_literal_as_i128(&result, false)
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_four_state_reduction_truth_tables() {
+        let states = ['0', '1', 'x', 'z'];
+        for a in states {
+            for b in states {
+                for c in states {
+                    let bits = [a, b, c];
+                    let unknown = bits.contains(&'x') || bits.contains(&'z');
+                    for (op, truth) in [
+                        (
+                            UnaryOp::RedAnd,
+                            if bits.contains(&'0') {
+                                Some(false)
+                            } else if unknown {
+                                None
+                            } else {
+                                Some(true)
+                            },
+                        ),
+                        (
+                            UnaryOp::RedOr,
+                            if bits.contains(&'1') {
+                                Some(true)
+                            } else if unknown {
+                                None
+                            } else {
+                                Some(false)
+                            },
+                        ),
+                        (
+                            UnaryOp::RedXor,
+                            if unknown {
+                                None
+                            } else {
+                                Some(bits.iter().filter(|&&bit| bit == '1').count() % 2 == 1)
+                            },
+                        ),
+                    ] {
+                        let expr = ConstExpr::Unary {
+                            op,
+                            expr: Box::new(ConstExpr::Literal(format!("3'sb{a}{b}{c}"))),
+                        };
+                        let result = integral_literal_from_const_expr(&expr)
+                            .unwrap_or_else(|| panic!("{op:?} 3'sb{a}{b}{c}"));
+                        assert_eq!(
+                            result,
+                            integral_literal_from_truth(truth),
+                            "{op:?} 3'sb{a}{b}{c}"
+                        );
+                        assert_eq!(
+                            eval_const_expr(&expr, &HashMap::default()),
+                            truth.map(i128::from)
+                        );
+                        let complement = ConstExpr::Unary {
+                            op: UnaryOp::BitNot,
+                            expr: Box::new(expr),
+                        };
+                        assert_eq!(
+                            integral_literal_from_const_expr(&complement).unwrap(),
+                            integral_literal_from_truth(truth.map(|value| !value))
+                        );
+                        assert_eq!(
+                            eval_const_expr(&complement, &HashMap::default()),
+                            truth.map(|value| i128::from(!value))
+                        );
+                    }
+                }
+            }
+        }
+        for op in [UnaryOp::RedAnd, UnaryOp::RedOr, UnaryOp::RedXor] {
+            for (operand, truth) in [
+                ("'0", Some(false)),
+                ("'1", Some(true)),
+                ("'x", None),
+                ("'z", None),
+            ] {
+                let expr = ConstExpr::Unary {
+                    op,
+                    expr: Box::new(ConstExpr::Literal(operand.to_string())),
+                };
+                assert_eq!(
+                    integral_literal_from_const_expr(&expr).unwrap(),
+                    integral_literal_from_truth(truth)
+                );
+                assert_eq!(
+                    eval_const_expr(&expr, &HashMap::default()),
+                    truth.map(i128::from)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parses_sized_based_literals() {
         let lit = parse_integral_literal("8'hf_f").unwrap();
         assert_eq!(lit.width, 8);
@@ -1195,6 +1350,16 @@ mod literal_tests {
         let expr = ConstExpr::Literal("128'h80000000000000000000000000000000".to_string());
 
         assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(i128::MIN));
+        for op in [UnaryOp::Plus, UnaryOp::ToTwoState] {
+            let unary = ConstExpr::Unary {
+                op,
+                expr: Box::new(expr.clone()),
+            };
+            assert_eq!(
+                eval_const_expr(&unary, &HashMap::default()),
+                Some(i128::MIN)
+            );
+        }
     }
 
     #[test]

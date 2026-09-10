@@ -7808,6 +7808,105 @@ fn rejects_indexed_part_selects_in_comb_write_groups() {
 }
 
 sv_backends! {
+    fn preserves_use_site_dimensions_in_parameter_alias_types(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter N = 2)(
+                    output logic [7:0] p, l, filled,
+                    output logic [15:0] signed_y, sized_y);
+                    typedef logic [3:0] nibble_t;
+                    typedef logic signed [3:0] signed_nibble_t;
+                    parameter nibble_t [1:0] P = 8'hab;
+                    localparam nibble_t [2:1] L = P;
+                    localparam nibble_t [1:0] F = '1;
+                    localparam signed_nibble_t [1:0] S = 8'hab;
+                    parameter nibble_t [N-1:0] R = 16'hcdef;
+                    always_comb begin
+                        p = P;
+                        l = L;
+                        filled = F;
+                        signed_y = S;
+                        sized_y = R;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("parameter_alias_use_site_dimensions.sv"))], "Top"
+        ).param("P", 0xcd).param("N", 4);
+        for (name, expected) in [("p", 0xcdu16), ("l", 0xcd), ("filled", 0xff), ("signed_y", 0xffab), ("sized_y", 0xcdef)] {
+            assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+        }
+    }
+
+    fn preserves_four_state_arithmetic_case_constants(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (1'bx + 1'b0) 1'bx: y0 = a; endcase
+                        case (2'b1z - 4'b0001) 4'bxxxx: y1 = a; endcase
+                        case (4'b0000 * 2'b1x) 4'bxxxx: y2 = a; endcase
+                        case (2'b1z / 2'b01) 2'bxx: y3 = a; endcase
+                        case (2'b1x % 2'b01) 2'bxx: y4 = a; endcase
+                        case (-(2'b1z)) 2'bxx: y5 = a; endcase
+                        case ((2'b11 + 2'b01) + 2'b0x) 2'bxx: y6 = a; endcase
+                        case ((2'b1x + 2'b01) & 2'b00) 2'b00: y7 = a; endcase
+                        case (1'bx) (1'bx + 1'b0): y8 = a; endcase
+                        case (2'b01 / 2'b1x) 2'bxx: y9 = a; endcase
+                        case (2'b01 % 2'b1z) 2'bxx: y10 = a; endcase
+                        case (+(2'b1z)) 2'bxx: y11 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_arithmetic_case_constants.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for &output in &outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn preserves_four_state_reduction_case_constants(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (&1'bx) 1'bx: y0 = a; endcase
+                        case (|1'bz) 1'bx: y1 = a; endcase
+                        case (^2'b1x) 1'bx: y2 = a; endcase
+                        case (&3'b1z0) 1'b0: y3 = a; endcase
+                        case (|3'b0z1) 1'b1: y4 = a; endcase
+                        case (~&2'b1z) 1'bx: y5 = a; endcase
+                        case (~|2'b0x) 1'bx: y6 = a; endcase
+                        case (~^2'b1z) 1'bx: y7 = a; endcase
+                        case (^~2'b1x) 1'bx: y8 = a; endcase
+                        case (1'bx) (&1'bx): y9 = a; endcase
+                        case (^'1) 1'b1: y10 = a; endcase
+                        case (&'z) 1'bx: y11 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_reduction_case_constants.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for &output in &outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
     fn preserves_use_site_dimensions_in_function_alias_types(sim) {
         @setup {
             let source = r#"

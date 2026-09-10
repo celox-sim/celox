@@ -4034,6 +4034,17 @@ fn type_alias_from_ref_node(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
+    // A cast within a built-in type's range does not make the declared type
+    // an alias. Inspect the outer type before searching wrapper nodes.
+    match &node {
+        RefNode::DataType(data_type) => {
+            return type_alias_from_data_type(data_type, syntax_tree, type_aliases);
+        }
+        RefNode::DataTypeOrImplicit(data_type) => {
+            return type_alias_from_data_type_or_implicit(data_type, syntax_tree, type_aliases);
+        }
+        _ => {}
+    }
     if let Some(RefNode::DataType(data_type)) = unwrap_node!(node.clone(), DataType)
         && let Some(r#type) = type_alias_from_data_type(data_type, syntax_tree, type_aliases)
     {
@@ -4214,17 +4225,13 @@ fn parameter_declared_width(
         }
     }
     env.extend(const_env_from_parameters(parameters));
-    let ranges = declared_alias
-        .as_ref()
-        .map(|r#type| r#type.packed_ranges.clone())
-        .unwrap_or_else(|| {
-            packed_ranges_from_ref_node_with_env(
-                node.clone(),
-                syntax_tree,
-                &range_env,
-                type_aliases,
-            )
-        });
+    let mut ranges =
+        packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, &range_env, type_aliases);
+    if let Some(alias) = &declared_alias {
+        // Use-site dimensions enclose the aliased packed type, just as they
+        // do for ports, signals, and function types.
+        ranges.extend(alias.packed_ranges.iter().cloned());
+    }
     if ranges.is_empty() {
         if declared_alias.is_some() {
             return Some(1);

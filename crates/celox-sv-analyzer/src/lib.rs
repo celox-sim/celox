@@ -1669,6 +1669,132 @@ mod tests {
     }
 
     #[test]
+    fn preserves_use_site_dimensions_in_parameter_alias_types() {
+        let source = r#"
+            module Top #(parameter W = 4, N = 2) ();
+                typedef logic [3:0] nibble_t;
+                typedef logic signed [3:0] signed_nibble_t;
+                parameter nibble_t [1:0] P = 8'hab;
+                localparam nibble_t [W'(2):W'(1)] L = P;
+                localparam signed_nibble_t [1:0] S = 8'hab;
+                localparam nibble_t [1:0] F = '1;
+                localparam logic [nibble_t'(7):nibble_t'(0)] B = 8'hab;
+                localparam BITS = $bits(P);
+                parameter nibble_t [N-1:0] R = 16'hcdef;
+            endmodule
+        "#;
+        for (overrides, p_value, r_width, r_value) in [
+            (HashMap::default(), 0xab, 8, 0xef),
+            (
+                [("P".to_string(), 0xcd), ("N".to_string(), 4)]
+                    .into_iter()
+                    .collect(),
+                0xcd,
+                16,
+                0xcdef,
+            ),
+        ] {
+            let ir = analyze_source_with_module_parameter_overrides(
+                source,
+                Path::new("parameter_alias_use_site_dimensions.sv"),
+                "Top",
+                &overrides,
+            )
+            .expect("parameter aliases should retain use-site packed dimensions");
+            let parameters = ir.modules()[0].parameters();
+            for (name, width, signed, value) in [
+                ("P", Some(8), Some(false), p_value),
+                ("L", Some(8), Some(false), p_value),
+                ("S", Some(8), Some(true), -85),
+                ("F", Some(8), Some(false), 255),
+                ("B", Some(8), Some(false), 0xab),
+                ("BITS", None, None, 8),
+                ("R", Some(r_width), Some(false), r_value),
+            ] {
+                let parameter = parameters
+                    .iter()
+                    .find(|parameter| parameter.name() == name)
+                    .unwrap();
+                assert_eq!(parameter.declared_width(), width, "{name}");
+                assert_eq!(parameter.declared_signed(), signed, "{name}");
+                assert_eq!(parameter.resolved_value(), Some(value), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_four_state_arithmetic_case_constants() {
+        for (expression, expected) in [
+            ("1'bx + 1'b0", "1'bx"),
+            ("2'b1z - 4'b0001", "4'bxxxx"),
+            ("4'b0000 * 2'b1x", "4'bxxxx"),
+            ("2'b1z / 2'b01", "2'bxx"),
+            ("2'b1x % 2'b01", "2'bxx"),
+            ("2'b01 / 2'b1x", "2'bxx"),
+            ("2'b01 % 2'b1z", "2'bxx"),
+            ("+(2'b1z)", "2'bxx"),
+            ("-(2'b1z)", "2'bxx"),
+            ("(2'b11 + 2'b01) + 2'b0x", "2'bxx"),
+            ("(2'b1x + 2'b01) & 2'b00", "2'b00"),
+        ] {
+            for (selector, label) in [(expression, expected), (expected, expression)] {
+                let source = format!(
+                    "module Top(input logic a, output logic y); \
+                     always_comb case ({selector}) ({label}): y = a; endcase endmodule"
+                );
+                analyze_source(&source, Path::new("arithmetic_case_constants.sv"))
+                    .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
+            }
+        }
+        let error = analyze_source(
+            "module Top(input logic a, output logic y); \
+             always_comb case (1'bx + 1'b0) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule",
+            Path::new("unmatched_arithmetic_case.sv"),
+        )
+        .expect_err("arithmetic X results must not match known values or Z");
+        assert!(error.to_string().contains("latch inference"), "{error}");
+    }
+
+    #[test]
+    fn preserves_four_state_reduction_case_constants() {
+        for (expression, expected) in [
+            ("&1'bx", "1'bx"),
+            ("|1'bz", "1'bx"),
+            ("^2'b1x", "1'bx"),
+            ("&3'b1z0", "1'b0"),
+            ("|3'b0z1", "1'b1"),
+            ("~&2'b1z", "1'bx"),
+            ("~|2'b0x", "1'bx"),
+            ("~^2'b1z", "1'bx"),
+            ("^~2'b1x", "1'bx"),
+            ("^'1", "1'b1"),
+            ("&'z", "1'bx"),
+            ("&(4'b1x11 & 4'b0111)", "1'b0"),
+            ("|(4'b0z00 | 4'b1000)", "1'b1"),
+            (
+                "^256'hffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "1'b0",
+            ),
+        ] {
+            for (selector, label) in [(expression, expected), (expected, expression)] {
+                let source = format!(
+                    "module Top(input logic a, output logic y); \
+                     always_comb case ({selector}) ({label}): y = a; endcase endmodule"
+                );
+                analyze_source(&source, Path::new("reduction_case_constants.sv"))
+                    .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
+            }
+        }
+        let error = analyze_source(
+            "module Top(input logic a, output logic y); \
+             always_comb case (&1'bx) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule",
+            Path::new("unmatched_reduction_case.sv"),
+        )
+        .expect_err("reduction X results must not match known values or Z");
+        assert!(error.to_string().contains("latch inference"), "{error}");
+    }
+
+    #[test]
     fn preserves_use_site_dimensions_in_function_alias_types() {
         let ir = analyze_source(
             r#"
