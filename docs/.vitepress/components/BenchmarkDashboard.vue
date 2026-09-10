@@ -144,7 +144,8 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
     {
       label: "x86-64 host",
       runtimes: new Set<Series["runtime"]>([
-        "heliodor-native-x86_64-jit",
+        // JIT-only samples omit the host testbench. Keep them in the raw
+        // history for Celox regressions, outside cross-simulator comparisons.
         "heliodor-native-x86_64",
         "heliodor-tiered-x86_64",
         "heliodor-veryl-tiered-x86_64",
@@ -710,6 +711,7 @@ onBeforeUnmount(() => {
         begins; end-to-end measures time through Linux boot completion. Both
         start before design analysis. Each Veryl-CC run uses an empty C compilation
         cache. Building the benchmark executables is excluded.
+        Execution time includes the testbench for both simulators.
       </p>
 
       <!-- Tab content: sections with chart card grids -->

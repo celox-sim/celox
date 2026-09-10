@@ -20,7 +20,7 @@ The complete benchmark matrix and raw history are available on the
 | Standard library | A mix of combinational, sequential, and structured datapaths |
 | TypeScript testbench | N-API calls, typed signal access, and scheduler overhead |
 | Verilator comparison | Equivalent generated simulators for a reference baseline |
-| Heliodor Linux | Whole-design compilation, generated-code throughput, and tiered startup/total time |
+| Heliodor Linux | Whole-design compilation, execution including the host testbench, and tiered startup/total time |
 
 Compilation and execution are reported separately. A faster compile does not
 imply faster generated code, and a microbenchmark result does not establish
