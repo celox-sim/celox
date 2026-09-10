@@ -1579,6 +1579,42 @@ mod tests {
     }
 
     #[test]
+    fn preserves_four_state_equality_case_selector_masks() {
+        for (selector, expected) in [
+            ("1'bx == 1'bx", "1'bx"),
+            ("1'bz != 1'b0", "1'bx"),
+            ("2'b0x == 2'b1x", "1'b0"),
+            ("2'b0z != 2'b1x", "1'b1"),
+            ("!(1'bx == 1'b0)", "1'bx"),
+            ("(1'bx != 1'bz) && 1'b1", "1'bx"),
+            ("(1'bx && 1'b1) == 1'bx", "1'bx"),
+            ("(1'bx == 1'bx) ? 1'b0 : 1'b1", "1'bx"),
+            ("(1'bx == 1'bx) ? 1'bz : 1'bz", "1'bz"),
+            ("1'sbx == 2'b1x", "1'b0"),
+            ("1'sbx != 2'sb1x", "1'bx"),
+            ("8'hff == '1", "1'b1"),
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 always_comb case ({selector}) {expected}: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("equality_constant_case.sv"))
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+        }
+
+        for op in ["==", "!="] {
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 always_comb case (1'bx {op} 1'bx) \
+                 1'b0, 1'b1: y = a; endcase endmodule"
+            );
+            let error = analyze_source(&source, Path::new("unmatched_equality_case.sv"))
+                .expect_err("two-state labels cannot cover an unknown equality result");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
     fn preserves_selected_size_argument_dimensions() {
         for (argument, expected) in [
             ("a", 5),

@@ -7808,6 +7808,41 @@ fn rejects_indexed_part_selects_in_comb_write_groups() {
 }
 
 sv_backends! {
+    fn preserves_four_state_equality_case_selectors(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a,
+                    output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (1'bx == 1'bx) 1'bx: y0 = a; endcase
+                        case (1'bz != 1'b0) 1'bx: y1 = a; endcase
+                        case (2'b0x == 2'b1x) 1'b0: y2 = a; endcase
+                        case (2'b0z != 2'b1x) 1'b1: y3 = a; endcase
+                        case (!(1'bx == 1'b0)) 1'bx: y4 = a; endcase
+                        case ((1'bx != 1'bz) && 1'b1) 1'bx: y5 = a; endcase
+                        case ((1'bx && 1'b1) == 1'bx) 1'bx: y6 = a; endcase
+                        case ((1'bx == 1'bx) ? 1'b0 : 1'b1) 1'bx: y7 = a; endcase
+                        case ((1'bx == 1'bx) ? 1'bz : 1'bz) 1'bz: y8 = a; endcase
+                        case (1'sbx == 2'b1x) 1'b0: y9 = a; endcase
+                        case (1'sbx != 2'sb1x) 1'bx: y10 = a; endcase
+                        case (8'hff == '1) 1'b1: y11 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_equality_case_selectors.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for output in &outputs {
+                assert_eq!(sim.get(*output), value.into());
+            }
+        }
+    }
+
     fn preserves_constant_case_selector_context(sim) {
         @setup {
             let source = r#"
