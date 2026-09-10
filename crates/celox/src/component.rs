@@ -20,6 +20,7 @@ pub use injected::{
     InjectedPort, InjectedResult, InjectedValue,
 };
 
+use crate::testbench::eval_backend_expr;
 use crate::{EventHandle, SignalRef, SimBackend};
 
 /// Registers an in-process Veryl component implementation.
@@ -102,8 +103,7 @@ impl ComponentWrite {
             backend.set_four_state(self.target.signal, self.value, self.mask_xz);
             return;
         };
-        let (values, _) = backend.memory_as_mut_ptr();
-        let offset = selection.offset.eval_u64(values) as usize;
+        let offset = eval_backend_expr(backend, &selection.offset).to_u64() as usize;
         let width = selection
             .width
             .min(self.target.signal.width.saturating_sub(offset));
@@ -299,16 +299,15 @@ fn take_output_writes(component: &mut LiveComponent) -> Vec<ComponentWrite> {
 }
 
 fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend: &mut B) {
-    let (values, _) = backend.memory_as_mut_ptr();
     for input in &component.inputs {
-        let value = input.expr.eval_value(values).to_biguint();
+        let value = eval_backend_expr(backend, &input.expr).to_biguint();
         let mask_xz = input
             .mask_source
             .as_ref()
             .map(|source| {
                 let (_, mut mask) = backend.get_four_state(source.signal);
                 if let Some(selection) = &source.selection {
-                    let offset = selection.offset.eval_u64(values) as usize;
+                    let offset = eval_backend_expr(backend, &selection.offset).to_u64() as usize;
                     mask >>= offset;
                     mask &= width_mask(selection.width);
                 }

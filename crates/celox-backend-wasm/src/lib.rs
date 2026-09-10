@@ -437,6 +437,26 @@ fn compile_instruction(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    let target = match inst {
+        SIRInstruction::Store(addr, _, width, _, _, _)
+        | SIRInstruction::Commit(_, addr, _, width, _)
+            if *width != 0 =>
+        {
+            Some(addr)
+        }
+        _ => None,
+    };
+    if let Some(offsets) = target.and_then(|addr| layout.trace_notification_offsets(addr)) {
+        for offset in offsets {
+            instrs.push(Instruction::I32Const(offset as i32));
+            instrs.push(Instruction::I32Const(1));
+            instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
+    }
     match inst {
         SIRInstruction::Imm(dst, val) => {
             compile_imm(dst, val, unit, four_state, &*locals, instrs);
@@ -5918,6 +5938,7 @@ mod bit_count_tests {
         let working_base_offset = (total_size + 7) & !7;
 
         MemoryLayout {
+            trace: None,
             four_state,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),

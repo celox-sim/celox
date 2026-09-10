@@ -194,13 +194,13 @@ impl CompiledTier {
 
     fn memory_base_mut(&mut self) -> *mut u8 {
         match self {
-            Self::Jit(jit) => jit.memory_as_mut_ptr().0,
+            Self::Jit(jit) => jit.memory_as_ptr().0.cast_mut(),
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
                 target_arch = "aarch64"
             ))]
-            Self::Native(native) => native.memory_as_mut_ptr().0,
+            Self::Native(native) => native.memory_as_ptr().0.cast_mut(),
         }
     }
 
@@ -1284,6 +1284,20 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn vcd_tracking_enabled(&self) -> bool {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.vcd_tracking_enabled(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.vcd_tracking_enabled(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.vcd_tracking_enabled(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.runtime_event_buffer_as_ptr(),
@@ -1876,6 +1890,90 @@ module Top (
         }
 
         assert_eq!(observed, reference_outputs(&inputs));
+    }
+
+    #[test]
+    fn waveform_activity_survives_promotion_before_dump() {
+        for expose_raw in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("promotion.vcd");
+            let gate = Gate::closed();
+            let worker_gate = gate.0.clone();
+            let mut sim: Simulator<TieredBackend> =
+                SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+                    .vcd(&path)
+                    .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                        wait_for_gate_or_cancel(&worker_gate, cancel)?;
+                        let image = NativeBackend::compile_image(laid_out, options)?;
+                        let shared = unsafe { SharedNativeCode::from_image(image)? };
+                        Ok(CompiledCode::Native(Arc::new(shared)))
+                    })
+                    .unwrap();
+            let descs = sim.build_vcd_descs(false);
+            let mut reference = crate::VcdWriter::from_writer(Vec::new(), &descs);
+            let dump = |sim: &mut Simulator<TieredBackend>,
+                        reference: &mut crate::VcdWriter<Vec<u8>>,
+                        time| {
+                sim.dump(time);
+                let (ptr, size) = sim.memory_as_ptr();
+                reference
+                    .dump(time, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
+            };
+            let clk = sim.event("clk");
+            let rst = sim.signal("rst");
+            let d = sim.signal("d");
+            sim.set(rst, 0u8);
+            sim.tick(clk).unwrap();
+            dump(&mut sim, &mut reference, 0);
+            let raw = expose_raw.then(|| {
+                let (ptr, size) = sim.memory_as_ptr();
+                // Snapshot before exposing a pointer, then restore the full image.
+                let snapshot = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+                let (ptr, _) = sim.memory_as_mut_ptr();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(snapshot.as_ptr(), ptr, size);
+                }
+                ptr
+            });
+            sim.set(rst, 1u8);
+            sim.set(d, 0xa5u8);
+            sim.tick(clk).unwrap();
+            sim.tick(clk).unwrap();
+            assert!(!sim.is_compiled());
+            // Leave interpreted writes pending while the compiled tier is adopted.
+            gate.open();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !sim.is_compiled() && std::time::Instant::now() < deadline {
+                sim.tick(clk).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(sim.is_compiled(), "{:?}", sim.promotion_error());
+            dump(&mut sim, &mut reference, 1);
+            let before = sim.vcd_statistics().unwrap().comparisons;
+            if let Some(raw) = raw {
+                // Reuse the pointer obtained while interpreting, without exposing
+                // a new pointer from the compiled backend or notifying a setter.
+                unsafe {
+                    *raw.add(d.offset) = 0x3c;
+                }
+            }
+            dump(&mut sim, &mut reference, 2);
+            assert_eq!(
+                sim.vcd_statistics().unwrap().comparisons,
+                before + if expose_raw { descs.len() as u64 } else { 0 }
+            );
+            sim.flush_vcd().unwrap();
+            let parse = |bytes: Vec<u8>| {
+                let mut parser = vcd::Parser::new(bytes.as_slice());
+                parser.parse_header().unwrap();
+                parser.map(Result::unwrap).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                parse(std::fs::read(path).unwrap()),
+                parse(reference.into_inner().unwrap())
+            );
+        }
     }
 
     #[test]

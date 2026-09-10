@@ -86,8 +86,38 @@ pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::E
 
 pub(crate) type CompiledAssertArg = ExecutableArgument;
 
-fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char>) -> String {
-    let value = arg.expr.eval_value(memory);
+fn eval_expr<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    expr: &celox_testbench::CompiledExpr,
+) -> TbValue {
+    eval_backend_expr(&mut sim.backend, expr)
+}
+
+pub(crate) fn eval_backend_expr<B: SimBackend>(
+    backend: &mut B,
+    expr: &celox_testbench::CompiledExpr,
+) -> TbValue {
+    // This pointer is used only during evaluation, never exposed to a host.
+    // Observe VM stores explicitly instead of disabling tracking for reads.
+    let (memory, _) = backend.memory_as_ptr();
+    let trace = backend.layout().trace.as_ref();
+    expr.eval_value_with_write_observer(memory.cast_mut(), |offset, len| {
+        if let Some(trace) = trace {
+            // SAFETY: bound bytecode writes valid locations in this image, and
+            // the simulator cannot execute concurrently with this evaluation.
+            unsafe {
+                trace.mark_range(memory.cast_mut(), offset, len);
+            }
+        }
+    })
+}
+
+fn format_assert_arg<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    arg: &CompiledAssertArg,
+    spec: Option<char>,
+) -> String {
+    let value = eval_expr(sim, &arg.expr);
     let value = value.to_biguint();
     format_display_arg(
         &DisplayFormatArg {
@@ -101,16 +131,16 @@ fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char
     )
 }
 
-fn render_assert_message(
+fn render_assert_message<B: SimBackend>(
+    sim: &mut Simulator<B>,
     message: &Option<AssertMessage>,
-    memory: *mut u8,
     current_time: u64,
 ) -> Option<String> {
     match message {
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
-                .map(|arg| format_assert_arg(arg, memory, Some('x')))
+                .map(|arg| format_assert_arg(sim, arg, Some('x')))
                 .collect::<Vec<_>>()
                 .join(" "),
         ),
@@ -142,7 +172,7 @@ fn render_assert_message(
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
                                 if let Some(arg) = args.get(arg_idx) {
-                                    rendered.push_str(&format_assert_arg(arg, memory, Some(spec)));
+                                    rendered.push_str(&format_assert_arg(sim, arg, Some(spec)));
                                 }
                                 arg_idx += 1;
                             }
@@ -185,8 +215,7 @@ fn sim_set_target<B: SimBackend>(
         return;
     };
 
-    let (ptr, _) = sim.memory_as_mut_ptr();
-    let offset = selection.offset.eval_u64(ptr) as usize;
+    let offset = eval_expr(sim, &selection.offset).to_u64() as usize;
     let width = selection
         .width
         .min(target.signal.width.saturating_sub(offset));
@@ -330,8 +359,7 @@ fn eval_clock_count<B: SimBackend>(
         ClockCount::Dynamic(expr) => {
             sim.eval_comb()
                 .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            expr.eval_u64(ptr)
+            eval_expr(sim, expr).to_u64()
         }
     })
 }
@@ -351,8 +379,7 @@ fn eval_loop_bound<B: SimBackend>(
         } => {
             sim.eval_comb()
                 .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            let value = expr.eval_value(ptr);
+            let value = eval_expr(sim, expr);
             if *signed {
                 decode_signed_loop_bound(value, *width)
             } else {
@@ -1179,11 +1206,10 @@ fn publish_tb_assert_event<B: SimBackend>(
     sim: &mut Simulator<B>,
     site_id: u32,
     message: &Option<AssertMessage>,
-    memory: *mut u8,
 ) {
     let args = assert_event_args(message)
         .iter()
-        .map(|arg| arg.expr.eval_value(memory).to_biguint())
+        .map(|arg| eval_expr(sim, &arg.expr).to_biguint())
         .collect::<Vec<_>>();
     let layout = sim.layout();
     let Some(site_layout) = layout
@@ -1471,10 +1497,9 @@ fn exec_one_detailed<B: SimBackend>(
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            let passed = expr.eval_bool(ptr);
+            let passed = !eval_expr(sim, expr).is_zero();
             if passed {
-                let rendered_message = render_assert_message(message, ptr, ctx.current_time);
+                let rendered_message = render_assert_message(sim, message, ctx.current_time);
                 ctx.assertions.push(AssertionResult {
                     passed,
                     message: rendered_message.clone(),
@@ -1482,10 +1507,10 @@ fn exec_one_detailed<B: SimBackend>(
                 });
                 ExecResult::Continue
             } else {
-                publish_tb_assert_event(sim, *site_id, message, ptr);
+                publish_tb_assert_event(sim, *site_id, message);
                 let rendered_message = drain_runtime_assertions(sim, ctx, location.as_ref())
                     .last_message
-                    .or_else(|| render_assert_message(message, ptr, ctx.current_time));
+                    .or_else(|| render_assert_message(sim, message, ctx.current_time));
                 if !continue_on_fail {
                     ExecResult::Fail(
                         rendered_message.unwrap_or_else(|| "assertion failed".to_string()),
@@ -1499,9 +1524,8 @@ fn exec_one_detailed<B: SimBackend>(
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
             let rendered =
-                render_assert_message(message, ptr, ctx.current_time).unwrap_or_default();
+                render_assert_message(sim, message, ctx.current_time).unwrap_or_default();
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
@@ -1513,8 +1537,7 @@ fn exec_one_detailed<B: SimBackend>(
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            if expr.eval_bool(ptr) {
+            if !eval_expr(sim, expr).is_zero() {
                 exec_detailed(sim, then_block, ctx)
             } else {
                 exec_detailed(sim, else_block, ctx)
@@ -1544,8 +1567,7 @@ fn exec_one_detailed<B: SimBackend>(
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            let val = expr.eval_value(ptr);
+            let val = eval_expr(sim, expr);
             sim_set_target(sim, dst, val);
             ExecResult::Continue
         }
@@ -1560,8 +1582,7 @@ fn exec_one_detailed<B: SimBackend>(
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            ctx.random.seed(handle, value.eval_u64(ptr));
+            ctx.random.seed(handle, eval_expr(sim, value).to_u64());
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomGet {
@@ -1592,9 +1613,8 @@ fn exec_one_detailed<B: SimBackend>(
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
-            let min = min.eval_u64(ptr);
-            let max = max.eval_u64(ptr);
+            let min = eval_expr(sim, min).to_u64();
+            let max = eval_expr(sim, max).to_u64();
             let value = ctx.random.get_range(handle, min, max, *width, *signed);
             if let Some(ret) = ret {
                 sim_set_random_target(sim, ret, value, *width, *signed);
@@ -1627,12 +1647,11 @@ fn exec_one_detailed<B: SimBackend>(
             {
                 return ExecResult::Fail(format!("eval_comb: {error}"));
             }
-            let (ptr, _) = sim.memory_as_mut_ptr();
             let host_args = args
                 .iter()
                 .map(|arg| {
                     crate::component::host_value_from_argument(
-                        arg.expr.eval_value(ptr),
+                        eval_expr(sim, &arg.expr),
                         arg.width,
                         arg.is_string,
                     )
@@ -1848,6 +1867,68 @@ mod tests {
             run_compiled_testbench(&mut sim, &tb),
             TestResult::Fail("continue failure".to_string()),
         );
+    }
+
+    #[test]
+    fn expression_evaluation_preserves_sparse_vcd_tracking() {
+        let code = r#"
+            #[test(t)]
+            module t {
+                var a: logic<8>;
+                var b: logic<8>;
+                initial {
+                    a = 1;
+                    b = a;
+                    if b == 1 {
+                        $assert(a == b);
+                        $display("a=%h", a);
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let mut sim = Simulator::builder(code, "t")
+            .vcd(dir.path().join("testbench.vcd"))
+            .build()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        sim.dump(0);
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        sim.dump(1);
+        let before = sim.vcd_statistics().unwrap();
+        sim.dump(2);
+        assert_eq!(
+            sim.vcd_statistics().unwrap().comparisons,
+            before.comparisons
+        );
+    }
+
+    #[test]
+    fn expression_stores_notify_vcd_without_exposing_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sim = Simulator::builder("module Top (a: input logic<8>) {}", "Top")
+            .vcd(dir.path().join("expression.vcd"))
+            .build()
+            .unwrap();
+        let a = sim.signal("a");
+        let expr = celox_testbench::CompiledExpr::new(celox_testbench::ExprBytecode::new(vec![
+            celox_testbench::ExprOpcode::ConstU64(7),
+            celox_testbench::ExprOpcode::StoreU64 {
+                location: a.offset,
+                byte_size: 1,
+            },
+            celox_testbench::ExprOpcode::ConstU64(7),
+        ]));
+        sim.dump(0);
+        let before = sim.vcd_statistics().unwrap();
+        assert_eq!(eval_expr(&mut sim, &expr).to_u64(), 7);
+        assert_eq!(sim.get_as::<u8>(a), 7);
+        sim.dump(1);
+        let after = sim.vcd_statistics().unwrap();
+        assert_eq!(after.changes, before.changes + 1);
+        sim.dump(2);
+        assert_eq!(sim.vcd_statistics().unwrap().comparisons, after.comparisons);
     }
 
     #[test]
