@@ -545,6 +545,7 @@ dependencies = [
  "celox-sir",
  "celox-sir-opt",
  "celox-state-layout",
+ "criterion",
  "fxhash",
  "iced-x86",
  "libc",

@@ -15,6 +15,7 @@ mod boolean;
 mod branch_merge;
 mod circular_scan;
 mod counted_loop;
+mod dead_code;
 mod exclusive_loop;
 mod known_bits;
 mod loop_guard;
@@ -4162,14 +4163,18 @@ fn fold_contiguous_load_packs(func: &mut MFunction) {
 
 /// Select flag-consuming branch forms before allocation.
 ///
-/// A compare or direct load whose only use is the immediately following
-/// branch has no independently observable SSA result. Keeping that result
+/// A compare or direct load whose only use is a branch has no independently
+/// observable SSA result. Keeping that result
 /// until emission invents a live range and can make the allocator spill around
 /// a value which the machine code never materializes.
 ///
 /// Direct-memory predicates are selected by a separate late pass after
 /// StateSSA forwarding. Register comparisons are selected exactly once at the
 /// register-allocation boundary, before pressure scheduling.
+/// An immediate comparison can move past intervening instructions: carrying
+/// its one SSA input instead of its boolean result does not add register
+/// pressure. Two-register comparisons and memory reads remain adjacent to
+/// avoid extending two input live ranges or moving a read across a write.
 pub(crate) fn fold_register_branch_predicates(func: &mut MFunction) -> usize {
     fold_branch_predicates(func, BranchPredicateClass::Register)
 }
@@ -4185,16 +4190,19 @@ enum BranchPredicateClass {
 }
 
 fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> usize {
-    let mut use_counts = HashMap::<VReg, usize>::default();
+    // Only distinguish unused, single-use, and shared values.
+    let mut use_counts = vec![0u8; func.vregs.count() as usize];
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
-                *use_counts.entry(source).or_default() += 1;
+                let count = &mut use_counts[source.0 as usize];
+                *count = count.saturating_add(1);
             }
         }
         for instruction in &block.insts {
             for source in instruction.uses() {
-                *use_counts.entry(source).or_default() += 1;
+                let count = &mut use_counts[source.0 as usize];
+                *count = count.saturating_add(1);
             }
         }
     }
@@ -4212,17 +4220,32 @@ fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> 
         else {
             continue;
         };
-        if use_counts.get(&cond).copied() != Some(1) {
+        if use_counts[cond.0 as usize] != 1 {
             continue;
         }
 
-        let predicate = match block.insts[block.insts.len() - 2].clone() {
+        let adjacent = block.insts.len() - 2;
+        let definition = if matches!(class, BranchPredicateClass::Register) {
+            let Some(index) = block.insts[..=adjacent]
+                .iter()
+                .rposition(|inst| inst.def() == Some(cond))
+            else {
+                continue;
+            };
+            index
+        } else {
+            adjacent
+        };
+        let predicate = match block.insts[definition].clone() {
             MInst::Cmp {
                 dst,
                 lhs,
                 rhs,
                 kind,
-            } if matches!(class, BranchPredicateClass::Register) && dst == cond => {
+            } if matches!(class, BranchPredicateClass::Register)
+                && definition == adjacent
+                && dst == cond =>
+            {
                 BranchPredicate::Compare { lhs, rhs, kind }
             }
             MInst::CmpImm {
@@ -4243,7 +4266,8 @@ fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> 
             }
             _ => continue,
         };
-        block.insts.truncate(block.insts.len() - 2);
+        block.insts.pop();
+        block.insts.remove(definition);
         block.insts.push(MInst::BranchPred {
             predicate,
             true_bb,
@@ -7616,75 +7640,15 @@ fn copy_propagate(func: &mut MFunction) {
     }
 }
 
-/// Dead code elimination: remove instructions whose defs are never used.
+/// Remove scalar definitions that cannot affect an observable instruction.
 fn dead_code_eliminate(func: &mut MFunction) {
-    dead_code_eliminate_impl(func, true);
+    dead_code::eliminate(func, true);
 }
 
 /// Post-allocation DCE must preserve the phi rows used to construct the
 /// already-verified parallel-copy plan.
 fn dead_code_eliminate_preserving_phis(func: &mut MFunction) {
-    dead_code_eliminate_impl(func, false);
-}
-
-fn dead_code_eliminate_impl(func: &mut MFunction, remove_unused_phis: bool) {
-    // Iterate until no more dead code is removed (cascading DCE).
-    loop {
-        let mut used: HashSet<VReg> = HashSet::default();
-        for block in &func.blocks {
-            for inst in &block.insts {
-                for u in inst.uses() {
-                    used.insert(u);
-                }
-            }
-            for phi in &block.phis {
-                for (_, src) in &phi.sources {
-                    used.insert(*src);
-                }
-            }
-        }
-
-        let mut removed = false;
-        for block in &mut func.blocks {
-            let before = block.insts.len();
-            block.insts.retain(|inst| {
-                if let Some(def) = inst.def() {
-                    if !used.contains(&def) {
-                        return matches!(
-                            inst,
-                            MInst::Store { .. }
-                                | MInst::StorePtr { .. }
-                                | MInst::ReleaseStorePtr { .. }
-                                | MInst::StoreIndexed { .. }
-                                | MInst::OrStoreIndexed { .. }
-                                | MInst::StorePtrIndexed { .. }
-                                | MInst::ReleaseStorePtrIndexed { .. }
-                                | MInst::Branch { .. }
-                                | MInst::Jump { .. }
-                                | MInst::Return
-                                | MInst::ReturnError { .. }
-                        );
-                    }
-                }
-                true
-            });
-            if block.insts.len() < before {
-                removed = true;
-            }
-
-            if remove_unused_phis {
-                let phi_before = block.phis.len();
-                block.phis.retain(|phi| used.contains(&phi.dst));
-                if block.phis.len() < phi_before {
-                    removed = true;
-                }
-            }
-        }
-
-        if !removed {
-            break;
-        }
-    }
+    dead_code::eliminate(func, false);
 }
 
 /// Rewrite all use operands in an instruction according to the alias map.
@@ -9305,6 +9269,166 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    fn delayed_immediate_branch(kind: CmpKind, imm: i32) -> MFunction {
+        let mut function = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::CmpImm {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    imm,
+                    kind,
+                },
+                // Clobber flags and overwrite the original memory. The
+                // delayed predicate must still compare the loaded SSA value.
+                MInst::AddImm {
+                    dst: VReg(2),
+                    src: VReg(0),
+                    imm: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Branch {
+                    cond: VReg(1),
+                    true_bb: BlockId(1),
+                    false_bb: BlockId(2),
+                },
+            ],
+            3,
+        );
+        for (block, code) in [(1, 1), (2, 2)] {
+            let mut body = MBlock::new(BlockId(block));
+            body.push(MInst::ReturnError { code });
+            function.blocks.push(body);
+        }
+        function
+    }
+
+    #[test]
+    fn delayed_branch_predicates_keep_shared_results_and_memory_order() {
+        let mut shared = delayed_immediate_branch(CmpKind::Ne, 0);
+        // More than 255 uses must not wrap the compact use count back to one.
+        for _ in 0..256 {
+            shared.blocks[0].insts.insert(
+                2,
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+            );
+        }
+        shared.verify_result().unwrap();
+        assert_eq!(fold_register_branch_predicates(&mut shared), 0);
+
+        let mut memory = delayed_immediate_branch(CmpKind::Ne, 0);
+        memory.blocks[0].insts[1] = MInst::Load {
+            dst: VReg(1),
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        };
+        memory.verify_result().unwrap();
+        assert_eq!(fold_memory_branch_predicates(&mut memory), 0);
+        assert_eq!(fold_register_branch_predicates(&mut memory), 0);
+
+        let mut registers = delayed_immediate_branch(CmpKind::Ne, 0);
+        registers.blocks[0].insts[1] = MInst::Cmp {
+            dst: VReg(1),
+            lhs: VReg(0),
+            rhs: VReg(0),
+            kind: CmpKind::Ne,
+        };
+        assert_eq!(fold_register_branch_predicates(&mut registers), 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn delayed_immediate_branches_emit_less_code_and_preserve_signedness() {
+        use crate::native::{emit, jit_mem::JitCode, regalloc};
+
+        let mut assignment = AssignmentMap::default();
+        for (value, register) in [PhysReg::RAX, PhysReg::RCX, PhysReg::RDX]
+            .into_iter()
+            .enumerate()
+        {
+            assignment.set(VReg(value as u32), register);
+        }
+        for kind in [
+            CmpKind::Eq,
+            CmpKind::Ne,
+            CmpKind::LtU,
+            CmpKind::LeU,
+            CmpKind::GtU,
+            CmpKind::GeU,
+            CmpKind::LtS,
+            CmpKind::LeS,
+            CmpKind::GtS,
+            CmpKind::GeS,
+        ] {
+            for imm in [i32::MIN, -1, 0, 1, i32::MAX] {
+                let mut function = delayed_immediate_branch(kind, imm);
+                function.verify_result().unwrap();
+                let before = emit::emit(&function, &assignment, 0).unwrap();
+                assert_eq!(fold_register_branch_predicates(&mut function), 1);
+                function.verify_result().unwrap();
+                let after = emit::emit(&function, &assignment, 0).unwrap();
+                assert!(after.text_size < before.text_size);
+                let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                let allocated = emit::emit(
+                    &function,
+                    &allocation.assignment,
+                    allocation.spill_frame_size,
+                )
+                .unwrap();
+                let before_jit = JitCode::new(&before.code).unwrap();
+                let after_jit = JitCode::new(&allocated.code).unwrap();
+                for input in [0u64, 1, u32::MAX as u64, i64::MAX as u64, 1 << 63, u64::MAX] {
+                    let rhs = imm as i64 as u64;
+                    let matched = match kind {
+                        CmpKind::Eq => input == rhs,
+                        CmpKind::Ne => input != rhs,
+                        CmpKind::LtU => input < rhs,
+                        CmpKind::LeU => input <= rhs,
+                        CmpKind::GtU => input > rhs,
+                        CmpKind::GeU => input >= rhs,
+                        CmpKind::LtS => (input as i64) < (rhs as i64),
+                        CmpKind::LeS => (input as i64) <= (rhs as i64),
+                        CmpKind::GtS => (input as i64) > (rhs as i64),
+                        CmpKind::GeS => (input as i64) >= (rhs as i64),
+                    };
+                    let mut original = vec![
+                        0u8;
+                        before
+                            .required_state_size
+                            .max(allocated.required_state_size)
+                            .max(8) as usize
+                    ];
+                    original[..8].copy_from_slice(&input.to_le_bytes());
+                    let mut optimized = original.clone();
+                    let expected = if matched { 1 } else { 2 };
+                    assert_eq!(unsafe { before_jit.call(&mut original) }, expected);
+                    assert_eq!(unsafe { after_jit.call(&mut optimized) }, expected);
+                    assert_eq!(&original[..8], &optimized[..8]);
+                    assert_eq!(
+                        u64::from_le_bytes(optimized[..8].try_into().unwrap()),
+                        input.wrapping_add(1)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
