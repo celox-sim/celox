@@ -1,5 +1,7 @@
 //! Real Veryl eligibility and execution experiments (optimizer defaults unchanged).
 //! `affine_veryl audit [elements=32] [dump-directory]`
+//! `affine_veryl scope [elements=32] [dump-directory]`
+//! `affine_veryl repo` audits four existing repository designs at their defaults.
 //! `affine_veryl bench [elements=32] [samples=15] [dump-directory]`
 
 use celox_design::{RegionedStateAddr, StateAddr};
@@ -21,7 +23,7 @@ fn main() {
         .unwrap_or(32);
     assert!(n >= 3);
     match mode {
-        "audit" => audit(n, args.get(2).map(String::as_str)),
+        "audit" | "scope" | "repo" => audit(n, args.get(2).map(String::as_str), mode),
         "bench" => bench(
             n,
             args.get(2)
@@ -30,21 +32,59 @@ fn main() {
             args.get(3).map(String::as_str),
         ),
         _ => panic!(
-            "usage: affine_veryl audit [elements] [dump-directory] | bench [elements] [samples]"
+            "usage: affine_veryl audit|scope [elements] [dump-directory] | repo | bench [elements] [samples]"
         ),
     }
 }
 
-fn audit(n: usize, dump: Option<&str>) {
-    let cases = affine_veryl_support::cases(n);
+fn audit(n: usize, dump: Option<&str>, mode: &str) {
+    let cases = if mode == "repo" {
+        vec![
+            (
+                "counters_1000",
+                include_str!("../testdata/veryl/top_n1000.veryl").to_string(),
+                "Top",
+            ),
+            (
+                "linear_sorter_8",
+                include_str!("../tests/macro_project/src/linear_sorter.veryl").to_string(),
+                "LinearSorter",
+            ),
+            (
+                "sorter_pull_100",
+                include_str!("../tests/fixtures/linear_sorter_pull_mre.veryl").to_string(),
+                "LinearSorterPullMreU16",
+            ),
+            (
+                "axi_lite_regs",
+                include_str!("../tests/fixtures/bitslice/axi_lite_reg_file.veryl").to_string(),
+                "AxiLiteRegFile",
+            ),
+        ]
+    } else {
+        let cases = if mode == "scope" {
+            affine_veryl_support::scope_cases(n)
+        } else {
+            affine_veryl_support::cases(n)
+        };
+        cases
+            .into_iter()
+            .map(|(name, code)| (name, code, "Top"))
+            .collect()
+    };
+    let elements = if mode == "repo" {
+        String::new()
+    } else {
+        n.to_string()
+    };
     let mut diagnostics = std::io::stderr().lock();
     println!(
         "case,n,four_state,phase,units,loops,loop_header_params,slt_arena_nodes,slt_folds,slt_groups,stores,canonical_eligible,recovered_eligible,compile_ms"
     );
-    for (name, code) in cases {
+    for (name, code, top) in cases {
         for four_state in [false, true] {
             let (program, trace, compile_ms) =
-                affine_veryl_support::compile_mode(&code, four_state);
+                affine_veryl_support::compile_top(&code, top, four_state);
             let objects = affine_veryl_support::objects(&program);
             let (nodes, folds, groups) = trace
                 .flattened_comb_blocks
@@ -139,7 +179,7 @@ fn audit(n: usize, dump: Option<&str>) {
                     .filter(|i| matches!(i, SIRInstruction::Store(..)))
                     .count();
                 println!(
-                    "{name},{n},{four_state},{phase},{},{loops},{parameters},{nodes},{folds},{groups},{stores},{eligible},{recovered},{compile_ms:.3}",
+                    "{name},{elements},{four_state},{phase},{},{loops},{parameters},{nodes},{folds},{groups},{stores},{eligible},{recovered},{compile_ms:.3}",
                     units.len()
                 );
             }

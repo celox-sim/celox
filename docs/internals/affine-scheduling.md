@@ -10,6 +10,9 @@ This page records the scheduling and first frontend experiments. The subsequent
 sharing-preserving partial unrolling, including fresh comparisons with ordinary
 optimized Veryl units.
 
+The later [coverage experiment](affine-scope.md) adds affine input strides and
+partial reads, measures a two-candidate policy, and audits existing designs.
+
 The measured result is an improvement in generated kernel execution, at an
 additional compilation cost. It is not a whole-simulator speedup claim.
 

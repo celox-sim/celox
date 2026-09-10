@@ -35,8 +35,17 @@ impl InterpMachine<RegionedStateAddr> for Machine {
         at: ResolvedAccess<'_>,
         bits: usize,
     ) -> Result<SIRValue, InterpError> {
-        assert_eq!(bits, 32);
-        Ok(self.0[a][index(at)].clone())
+        assert!((1..=32).contains(&bits));
+        let bit = match at.offset {
+            SIROffset::Static(offset) => offset % 32,
+            _ => 0,
+        };
+        let value = &self.0[a][index(at)];
+        let mask = (1u64 << bits) - 1;
+        Ok(SIRValue::new_four_state(
+            (value.payload.to_u64().unwrap() >> bit) & mask,
+            (value.mask.to_u64().unwrap() >> bit) & mask,
+        ))
     }
     fn store(
         &mut self,
@@ -118,7 +127,22 @@ impl InterpMachine<RegionedStateAddr> for Machine {
 #[test]
 fn real_frontend_regions_preserve_cells_masks_and_boundaries() {
     for n in [3, 7, 19] {
-        let mut cases = frontend::cases(n).into_iter().take(2).collect::<Vec<_>>();
+        let mut cases = frontend::scope_cases(n)
+            .into_iter()
+            .filter(|(name, _)| {
+                !["reduction", "ff_shift", "indexed_gather", "interleave"].contains(name)
+            })
+            .collect::<Vec<_>>();
+        cases.push((
+            "byte_swap",
+            format!(
+                r#"module Top (a: input logic<32>[{n}], y: output logic<32>[{n}]) {{
+                always_comb {{ for i in 0..{n} {{
+                    y[i] = {{a[i][7:0], a[i][15:8], a[i][23:16], a[i][31:24]}};
+                }} }}
+            }}"#
+            ),
+        ));
         cases.push((
             "late_lane",
             format!(
@@ -195,7 +219,15 @@ fn real_frontend_regions_preserve_cells_masks_and_boundaries() {
                                                 .wrapping_mul(2_654_435_761)
                                                 .wrapping_add(0x1234_5678),
                                             if unknown {
-                                                [0, u32::MAX, 0xaaaa_aaaa, 0x5555_5555][i % 4]
+                                                [
+                                                    0,
+                                                    u32::MAX,
+                                                    0xaaaa_aaaa,
+                                                    0x5555_5555,
+                                                    0x00000100,
+                                                    0xff000000,
+                                                    1,
+                                                ][i % 7]
                                             } else {
                                                 0
                                             },
@@ -219,7 +251,7 @@ fn real_frontend_regions_preserve_cells_masks_and_boundaries() {
                                 .iter()
                                 .map(|v| v.payload.to_u32().unwrap().wrapping_mul(3))
                                 .collect::<Vec<_>>();
-                            let mut y = b.clone();
+                            let mut y = b[..n].to_vec();
                             if name == "producer_consumer" {
                                 y[0] = 0;
                                 y[n - 1] = 0;
@@ -232,6 +264,63 @@ fn real_frontend_regions_preserve_cells_masks_and_boundaries() {
                                 );
                             } else if name == "late_lane" {
                                 y[n - 1] = a[n - 2].payload.to_u32().unwrap().wrapping_mul(5);
+                            } else if name == "fir5" {
+                                for (i, out) in y.iter_mut().enumerate() {
+                                    *out = [3, 5, 7, 5, 3].into_iter().enumerate().fold(
+                                        0u32,
+                                        |sum, (tap, coefficient)| {
+                                            sum.wrapping_add(
+                                                a[i + tap]
+                                                    .payload
+                                                    .to_u32()
+                                                    .unwrap()
+                                                    .wrapping_mul(coefficient),
+                                            )
+                                        },
+                                    );
+                                }
+                            } else if name == "strided_pair" {
+                                for (i, out) in y.iter_mut().enumerate() {
+                                    *out = a[2 * i]
+                                        .payload
+                                        .to_u32()
+                                        .unwrap()
+                                        .wrapping_mul(3)
+                                        .wrapping_add(
+                                            a[2 * i + 1].payload.to_u32().unwrap().wrapping_mul(5),
+                                        );
+                                }
+                            } else if name == "reverse" {
+                                y.reverse();
+                            } else if name == "broadcast" {
+                                let coeff = &initial[&address("coeff")];
+                                for (i, out) in y.iter_mut().enumerate() {
+                                    *out = a[i]
+                                        .payload
+                                        .to_u32()
+                                        .unwrap()
+                                        .wrapping_mul(coeff[0].payload.to_u32().unwrap())
+                                        .wrapping_add(coeff[3].payload.to_u32().unwrap());
+                                }
+                            } else if name == "lane_mux" {
+                                let rhs = &initial[&address("b")];
+                                for (i, out) in y.iter_mut().enumerate() {
+                                    let left = a[i].payload.to_u32().unwrap();
+                                    let right = rhs[i].payload.to_u32().unwrap();
+                                    *out = if left & 1 != 0 {
+                                        left.wrapping_add(right)
+                                    } else {
+                                        left ^ right
+                                    };
+                                }
+                            } else if name == "rotate" {
+                                for (i, out) in y.iter_mut().enumerate() {
+                                    *out = a[(i + 1) % n].payload.to_u32().unwrap();
+                                }
+                            } else if name == "byte_swap" {
+                                for (i, out) in y.iter_mut().enumerate() {
+                                    *out = a[i].payload.to_u32().unwrap().swap_bytes();
+                                }
                             }
                             assert_eq!(
                                 expected.0[&address("y")],
@@ -307,4 +396,20 @@ fn frontend_scalar_recurrence_does_not_become_independent_stores() {
     let objects = frontend::objects(&program);
     assert!(celox_sir::affine::extract(pre, &objects).is_err());
     assert!(recover_independent_stores(pre, &objects, &Default::default()).is_err());
+}
+
+#[test]
+fn indirect_inputs_and_fragmented_outputs_remain_bounded_rejections() {
+    for (name, code) in frontend::scope_cases(31) {
+        if !["indexed_gather", "interleave"].contains(&name) {
+            continue;
+        }
+        let (program, trace, _) = frontend::compile_mode(&code, true);
+        let pre = &trace.pre_optimized_sir.as_ref().unwrap().sir.eval_comb[0];
+        assert!(
+            recover_independent_stores(pre, &frontend::objects(&program), &Default::default())
+                .is_err(),
+            "{name}"
+        );
+    }
 }

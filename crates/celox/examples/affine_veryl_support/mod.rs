@@ -50,7 +50,66 @@ pub fn cases(n: usize) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Broader expression and access families, plus deliberately unsupported cases.
+#[allow(dead_code)] // Also included by the earlier, narrower tuning driver.
+pub fn scope_cases(n: usize) -> Vec<(&'static str, String)> {
+    let mut cases = cases(n);
+    for (name, inputs, body) in [
+        (
+            "fir5",
+            format!("a: input logic<32>[{}]", n + 4),
+            "y[i] = a[i] * 32'd3 + a[i+1] * 32'd5 + a[i+2] * 32'd7 + a[i+3] * 32'd5 + a[i+4] * 32'd3;".to_string(),
+        ),
+        (
+            "strided_pair",
+            format!("a: input logic<32>[{}]", 2 * n),
+            "y[i] = a[2*i] * 32'd3 + a[2*i+1] * 32'd5;".to_string(),
+        ),
+        (
+            "reverse",
+            format!("a: input logic<32>[{n}]"),
+            format!("y[i] = a[{}-i] * 32'd3;", n - 1),
+        ),
+        (
+            "broadcast",
+            format!("a: input logic<32>[{n}], coeff: input logic<32>[4]"),
+            "y[i] = a[i] * coeff[0] + coeff[3];".to_string(),
+        ),
+        (
+            "lane_mux",
+            format!("a: input logic<32>[{n}], b: input logic<32>[{n}]"),
+            "y[i] = if a[i][0] ? a[i] + b[i] : a[i] ^ b[i];".to_string(),
+        ),
+        (
+            "rotate",
+            format!("a: input logic<32>[{n}]"),
+            format!("y[i] = a[(i+1)%{n}];"),
+        ),
+        (
+            "indexed_gather",
+            format!("a: input logic<32>[{n}], idx: input logic<32>[{n}]"),
+            format!("y[i] = a[idx[i] % 32'd{n}];"),
+        ),
+        (
+            "interleave",
+            format!("a: input logic<32>[{n}]"),
+            "y[i] = if i % 2 == 0 ? a[i] * 32'd3 : a[i] * 32'd5;".to_string(),
+        ),
+    ] {
+        cases.push((name, format!("module Top ({inputs}, y: output logic<32>[{n}]) {{ always_comb {{ for i in 0..{n} {{ {body} }} }} }}")));
+    }
+    cases
+}
+
 pub fn compile_mode(code: &str, four_state: bool) -> (OptimizedSir, CompilationTrace, f64) {
+    compile_top(code, "Top", four_state)
+}
+
+pub fn compile_top(
+    code: &str,
+    top: &str,
+    four_state: bool,
+) -> (OptimizedSir, CompilationTrace, f64) {
     let mut trace = CompilationTrace::default();
     let options = TraceOptions {
         flattened_comb_blocks: true,
@@ -61,7 +120,7 @@ pub fn compile_mode(code: &str, four_state: bool) -> (OptimizedSir, CompilationT
     let start = Instant::now();
     let (program, _) = celox::compile_to_sir(
         &[(code, Path::new("affine_veryl.veryl"))],
-        "Top",
+        top,
         &[],
         &[],
         four_state,

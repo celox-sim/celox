@@ -8,6 +8,10 @@ execution throughput. The new experiment finds faster code for some
 frontend-compiled microkernels while retaining the existing optimized unit as
 the acceptance baseline. No compiler default or dependency changes.
 
+The subsequent [coverage and two-candidate experiment](affine-scope.md) widens
+input recovery, measures cheaper selection on additional families, and audits
+the remaining boundaries in existing repository designs.
+
 The most repeatable result is the four-state producer/consumer with all input
 values known: three independent searches at each size all passed a fresh
 comparison against the existing implementation. Throughput ratios were
