@@ -16,11 +16,11 @@ runtime is outside the useful scale of this comparison.
 The benchmark separates three questions:
 
 1. How long do the synchronous backends take to compile the design?
-2. How quickly does the generated simulator execute the complete workload?
+2. How long does the complete workload take to execute, including the testbench?
 3. How long does tiered execution take from startup through Linux completion
    while compilation overlaps simulation?
 
-Only the second measurement is used for generated-code throughput comparisons.
+Execution time includes the testbench for both simulators.
 Tiered results have separate charts for startup until simulation begins, execution
 with background compilation, and total time through Linux completion. The tiered
 execution interval includes time on the initial backend and must not be read as
