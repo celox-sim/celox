@@ -108,6 +108,7 @@ pub struct VcdWriter<W: Write = File> {
     plan: TracePlan,
     groups: fxhash::FxHashMap<usize, Vec<usize>>,
     selected: Vec<usize>,
+    /// Consumed groups retained after a failed dump; empty after success.
     activity: Vec<usize>,
     timestamp: u64,
     header_written: bool,
@@ -191,12 +192,27 @@ impl<W: Write> VcdWriter<W> {
         // Reject recoverable input errors before consuming pending writes.
         self.validate_external_count(external.len())?;
         let mut activity = std::mem::take(&mut self.activity);
-        let tracked = backend.take_vcd_activity(&mut activity);
+        let tracked = if activity.is_empty() {
+            backend.take_vcd_activity(&mut activity)
+        } else {
+            // Consumption clears its destination. Keep failed-dump activity
+            // and merge writes made since that attempt, including duplicates.
+            // Only this retry path needs a second allocation.
+            let mut new_activity = Vec::new();
+            let tracked = backend.take_vcd_activity(&mut new_activity);
+            activity.extend(new_activity);
+            activity.sort_unstable();
+            activity.dedup();
+            tracked
+        };
         let (ptr, size) = backend.memory_as_ptr();
         // SAFETY: the backend owns the image and cannot run during this dump.
         let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
         let result =
             self.dump_with_activity(timestamp, memory, external, tracked.then_some(&activity));
+        if result.is_ok() {
+            activity.clear();
+        }
         self.activity = activity;
         result
     }

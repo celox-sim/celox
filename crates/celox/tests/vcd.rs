@@ -283,6 +283,109 @@ mod activity {
         );
     }
 
+    #[test]
+    fn timestamp_errors_preserve_backend_activity_for_retry() {
+        #[derive(Default)]
+        struct FailWrites {
+            bytes: Vec<u8>,
+            failures: std::cell::Cell<usize>,
+        }
+        impl std::io::Write for FailWrites {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(remaining) = self.failures.get().checked_sub(1) {
+                    self.failures.set(remaining);
+                    return Err(std::io::ErrorKind::Other.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for failures in [1, 3] {
+            for new_activity in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                // Separate physical groups keep both the original write and a
+                // write between retries on the sparse comparison path.
+                let sim = SimulatorBuilder::new(
+                    "module Top (
+                        a: input logic<512>, b: input logic<512>,
+                        c: input logic<512>, d: input logic<512>,
+                        e: input logic<512>, f: input logic<512>,
+                    ) {}",
+                    "Top",
+                )
+                .vcd(dir.path().join("unused.vcd"))
+                .build_cranelift()
+                .unwrap();
+                let a = sim.signal("a");
+                let b = sim.signal("b");
+                let descs = sim.build_vcd_descs(false);
+                let mut backend = sim.into_backend();
+                let mut writer = VcdWriter::from_writer(FailWrites::default(), &descs);
+                let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+                writer.dump_backend(0, &mut backend, &[]).unwrap();
+                let (ptr, size) = backend.memory_as_ptr();
+                // SAFETY: backend owns this memory and is not mutated during the dump.
+                reference
+                    .dump(0, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
+                writer.flush().unwrap();
+                reference.flush().unwrap();
+
+                // Fill the 256 KiB output buffer exactly with timestamps. The
+                // next timestamp must flush it before accepting any new bytes,
+                // so a sink error occurs after consuming activity but before
+                // comparing or updating any cached signal values.
+                writer.dump_with_activity(10, &[], &[], Some(&[])).unwrap();
+                reference
+                    .dump_with_activity(10, &[], &[], Some(&[]))
+                    .unwrap();
+                for _ in 0..(256 * 1024 - 4) / 3 {
+                    writer.dump_with_activity(0, &[], &[], Some(&[])).unwrap();
+                    reference
+                        .dump_with_activity(0, &[], &[], Some(&[]))
+                        .unwrap();
+                }
+
+                backend.set_wide(a, BigUint::from(11u8));
+                writer.get_ref().failures.set(failures);
+                let before = writer.statistics().comparisons;
+                for attempt in 0..failures {
+                    let error = writer.dump_backend(20, &mut backend, &[]).unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                    assert_eq!(writer.statistics().comparisons, before);
+                    if new_activity {
+                        // Include repeated notifications as well as a different
+                        // group, without another write to the original group.
+                        backend.set_wide(b, BigUint::from(22 + attempt));
+                    }
+                }
+                writer.dump_backend(20, &mut backend, &[]).unwrap();
+                let (ptr, size) = backend.memory_as_ptr();
+                // SAFETY: backend owns this memory and is not mutated during the dump.
+                reference
+                    .dump(20, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
+                assert_eq!(
+                    writer.statistics().comparisons - before,
+                    1 + u64::from(new_activity),
+                    "retry must visit each pending group exactly once"
+                );
+                let after = writer.statistics().comparisons;
+                writer.dump_backend(20, &mut backend, &[]).unwrap();
+                assert_eq!(writer.statistics().comparisons, after);
+                assert_eq!(
+                    commands(&writer.into_inner().unwrap().bytes),
+                    commands(&reference.into_inner().unwrap()),
+                    "failures={failures}, new_activity={new_activity}"
+                );
+            }
+        }
+    }
+
     fn compare<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path, four_state: bool) {
         assert!(sim.layout().trace.is_some());
         let descs = sim.build_vcd_descs(four_state);
