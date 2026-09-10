@@ -218,7 +218,7 @@ fn elaborate_parameterized_top(
     context.inherit(&mut header);
     let (signature, override_map) = overrides?;
 
-    context.push_override(override_map);
+    context.push_override(symbol.found.inner_namespace(), override_map);
     let component = get_component(context, &signature, top_token).map_err(|_| {
         ParserError::illegal_context(
             "top-level parameter override",
