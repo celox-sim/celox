@@ -12,9 +12,10 @@ use veryl_analyzer::{Analyzer, AnalyzerError, Context};
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
 use veryl_simulator::Simulator as VerylSimulator;
-use veryl_simulator::ir::{Config, Event, ProtoModuleCache, build_ir_cached};
+use veryl_simulator::ir::{Config, ProtoModuleCache, build_ir_cached};
 use veryl_simulator::testbench::{
-    TestResult, build_clock_periods, build_event_map, convert_initial_to_testbench, run_testbench,
+    TestResult, build_clock_periods, build_event_map, convert_initial_to_testbench,
+    run_testbench_blocks,
 };
 
 #[derive(ClapParser)]
@@ -130,14 +131,25 @@ fn run() -> Result<(), VerylHeliodorError> {
     let mut sim = VerylSimulator::new(sim_ir, None);
     let event_map = build_event_map(&sim.ir.event_statements, &sim.ir.module_variables);
     let clock_periods = build_clock_periods(&sim.ir.event_statements);
-    let initial_stmts = sim
+    // Veryl keeps each initial block as a separate process, including blocks
+    // in instantiated modules. Preserve declaration order and run them together.
+    let mut initials: Vec<_> = sim
         .ir
         .event_statements
-        .get(&Event::Initial)
-        .ok_or_else(|| VerylHeliodorError::MissingInitialBlock {
-            module: module_name.clone(),
-        })?;
-    let testbench = convert_initial_to_testbench(initial_stmts, &event_map, &clock_periods, 3);
+        .iter()
+        .filter_map(|(event, stmts)| event.initial_index().map(|index| (index, stmts)))
+        .collect();
+    initials.sort_by_key(|(index, _)| *index);
+    if initials.is_empty() {
+        return Err(VerylHeliodorError::MissingInitialBlock {
+            module: module_name,
+        });
+    }
+    let testbenches: Vec<_> = initials
+        .iter()
+        .map(|(_, stmts)| convert_initial_to_testbench(stmts, &event_map, &clock_periods, 3))
+        .collect();
+    let blocks: Vec<_> = testbenches.iter().map(Vec::as_slice).collect();
     // In async mode this is startup until simulation can begin. C compilation
     // can continue during run_testbench, so it is not the full compile cost.
     let compile_elapsed = compile_start.elapsed();
@@ -159,7 +171,7 @@ fn run() -> Result<(), VerylHeliodorError> {
 
     let execute_cpu_start = process_cpu_time();
     let execute_start = Instant::now();
-    let result = run_testbench(&mut sim, &testbench);
+    let result = run_testbench_blocks(&mut sim, &blocks);
     let execute_elapsed = execute_start.elapsed();
     let execute_cpu_elapsed = process_cpu_time()
         .zip(execute_cpu_start)

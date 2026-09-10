@@ -68,13 +68,13 @@ celox-sv-analyzer       = { version = "=0.4.8", path = "crates/celox-sv-analyzer
 celox-testbench         = { version = "=0.4.8", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.4.8", path = "crates/celox-ts-gen" } # x-release-please-version
 
-veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b" }
-veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b" }
-veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b" }
-veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b", default-features = false }
-veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b" }
-veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b" }
-veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "afe81dc8d168b027491d481418f6f7c23113692b" }
+veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2" }
+veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2" }
+veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2" }
+veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2", default-features = false }
+veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2" }
+veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2" }
+veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "3945e9db61a8a772c71e69ff01abcaf1d9377cc2" }
 sv-parser = "0.13.5"
 
 bit-set         = "0.11"
