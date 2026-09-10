@@ -3155,15 +3155,11 @@ fn emit_inst_with_memory(
             memory,
         ),
         MInst::AndImm { dst, src, imm } if *src == memory_vreg => {
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            asm.mov(d, qword_ptr(memory))?;
-            emit_and_imm64(asm, d, *imm)?;
+            emit_and_memory_imm(asm, resolve(assignment, *dst), memory, *imm)?;
             Ok(true)
         }
         MInst::AndImm32 { dst, src, imm } if *src == memory_vreg => {
-            let d = preg_to_reg32(resolve(assignment, *dst));
-            asm.mov(d, dword_ptr(memory))?;
-            asm.and(d, *imm as i32)?;
+            emit_and_memory_imm(asm, resolve(assignment, *dst), memory, u64::from(*imm))?;
             Ok(true)
         }
         MInst::OrImm { dst, src, imm } if *src == memory_vreg => {
@@ -4545,20 +4541,20 @@ fn emit_inst(
 
         // Immediate ALU widths are explicit for the same reason as binary ALU.
         MInst::AndImm { dst, src, imm } => {
-            let d = preg_to_reg64(resolve(assignment, *dst));
-            let s = preg_to_reg64(resolve(assignment, *src));
-            if d != s {
-                asm.mov(d, s)?;
-            }
-            emit_and_imm64(asm, d, *imm)?;
+            emit_and_imm(
+                asm,
+                resolve(assignment, *dst),
+                resolve(assignment, *src),
+                *imm,
+            )?;
         }
         MInst::AndImm32 { dst, src, imm } => {
-            let d = preg_to_reg32(resolve(assignment, *dst));
-            let s = preg_to_reg32(resolve(assignment, *src));
-            if d != s {
-                asm.mov(d, s)?;
-            }
-            asm.and(d, *imm as i32)?;
+            emit_and_imm(
+                asm,
+                resolve(assignment, *dst),
+                resolve(assignment, *src),
+                u64::from(*imm),
+            )?;
         }
         MInst::OrImm { dst, src, imm } => {
             let d = preg_to_reg64(resolve(assignment, *dst));
@@ -5494,7 +5490,7 @@ fn emit_select_memory(
     Ok(false)
 }
 
-/// Emit AND with a potentially 64-bit immediate.
+/// Emit OR with a potentially 64-bit immediate.
 /// Uses the most efficient encoding available.
 fn emit_or_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result<(), IcedError> {
     if imm == 0 {
@@ -5510,38 +5506,68 @@ fn emit_or_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result<
     Ok(())
 }
 
-fn emit_and_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result<(), IcedError> {
-    if imm == u64::MAX {
-        // AND with all-ones is a no-op
-        return Ok(());
+/// Truncation masks can copy and clear the high bits in one instruction. MIR
+/// does not expose the flags written by AND, so MOVZX/MOV may replace it.
+fn emit_and_imm(
+    asm: &mut CodeAssembler,
+    dst: PhysReg,
+    src: PhysReg,
+    imm: u64,
+) -> Result<(), IcedError> {
+    let d32 = preg_to_reg32(dst);
+    match imm {
+        0 => asm.xor(d32, d32)?,
+        0xff => asm.movzx(d32, preg_to_reg8(src))?,
+        0xffff => asm.movzx(d32, preg_to_reg16(src))?,
+        0xffff_ffff => {
+            // Even a self-copy must clear the upper half of the register.
+            asm.mov(d32, preg_to_reg32(src))?;
+        }
+        1..=0xffff_fffe => {
+            if dst != src {
+                asm.mov(d32, preg_to_reg32(src))?;
+            }
+            asm.and(d32, imm as i32)?;
+        }
+        _ => {
+            let signed = imm as i64;
+            assert!(
+                i32::try_from(signed).is_ok(),
+                "AndImm {imm:#x} exceeds u32: ISel should emit LoadImm + And instead"
+            );
+            let d64 = preg_to_reg64(dst);
+            if dst != src {
+                asm.mov(d64, preg_to_reg64(src))?;
+            }
+            if imm != u64::MAX {
+                asm.and(d64, signed as i32)?;
+            }
+        }
     }
-    let signed = imm as i64;
-    if signed >= i32::MIN as i64 && signed <= i32::MAX as i64 {
-        // Fits in sign-extended imm32
-        asm.and(d, signed as i32)?;
-    } else if imm <= u32::MAX as u64 {
-        // Fits in zero-extended 32-bit: use 32-bit AND (clears upper 32 bits)
-        let d32 = match d {
-            _ if d == rax => eax,
-            _ if d == rcx => ecx,
-            _ if d == rdx => edx,
-            _ if d == rbx => ebx,
-            _ if d == rbp => ebp,
-            _ if d == rsi => esi,
-            _ if d == rdi => edi,
-            _ if d == r8 => r8d,
-            _ if d == r9 => r9d,
-            _ if d == r10 => r10d,
-            _ if d == r11 => r11d,
-            _ if d == r12 => r12d,
-            _ if d == r13 => r13d,
-            _ if d == r14 => r14d,
-            _ if d == r15 => r15d,
-            _ => unreachable!(),
-        };
-        asm.and(d32, imm as i32)?;
-    } else {
-        panic!("AndImm {imm:#x} exceeds u32: ISel should emit LoadImm + And instead");
+    Ok(())
+}
+
+fn emit_and_memory_imm(
+    asm: &mut CodeAssembler,
+    dst: PhysReg,
+    memory: AsmMemoryOperand,
+    imm: u64,
+) -> Result<(), IcedError> {
+    let d32 = preg_to_reg32(dst);
+    match imm {
+        0 => asm.xor(d32, d32)?,
+        0xff => asm.movzx(d32, byte_ptr(memory))?,
+        0xffff => asm.movzx(d32, word_ptr(memory))?,
+        0xffff_ffff => asm.mov(d32, dword_ptr(memory))?,
+        _ => {
+            // Only the low bytes contribute to a zero-extended u32 mask.
+            if imm <= u64::from(u32::MAX) {
+                asm.mov(d32, dword_ptr(memory))?;
+            } else {
+                asm.mov(preg_to_reg64(dst), qword_ptr(memory))?;
+            }
+            emit_and_imm(asm, dst, dst, imm)?;
+        }
     }
     Ok(())
 }
@@ -7017,16 +7043,177 @@ mod shift_encoding_tests {
     }
 
     #[test]
-    fn and_u32_immediate_supports_r15() {
-        let mut asm = CodeAssembler::new(64).unwrap();
-        emit_and_imm64(&mut asm, r15, u32::MAX as u64).unwrap();
-        let code = asm.assemble(0).unwrap();
-        let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
-        let instruction = decoder.decode();
+    fn truncation_masks_use_one_instruction_for_all_registers() {
+        use crate::native::regalloc::assignment::ALLOCATABLE_REGS;
+        use iced_x86::Code;
 
-        assert_eq!(instruction.mnemonic(), Mnemonic::And);
-        assert_eq!(instruction.op0_register(), Register::R15D);
-        assert!(!decoder.can_decode());
+        for &src in ALLOCATABLE_REGS {
+            for &dst in ALLOCATABLE_REGS {
+                for (mask, expected) in [
+                    (0xff, Code::Movzx_r32_rm8),
+                    (0xffff, Code::Movzx_r32_rm16),
+                    (0xffff_ffff, Code::Mov_r32_rm32),
+                ] {
+                    let mut asm = CodeAssembler::new(64).unwrap();
+                    emit_and_imm(&mut asm, dst, src, mask).unwrap();
+                    let code = asm.assemble(0).unwrap();
+                    let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
+                    let instruction = decoder.decode();
+                    // Register MOV has two interchangeable direction encodings.
+                    if mask == 0xffff_ffff {
+                        assert!(matches!(
+                            instruction.code(),
+                            Code::Mov_r32_rm32 | Code::Mov_rm32_r32
+                        ));
+                    } else {
+                        assert_eq!(instruction.code(), expected);
+                    }
+                    assert_eq!(
+                        instruction.op0_register(),
+                        Register::from(preg_to_reg32(dst))
+                    );
+                    assert_eq!(
+                        instruction.op1_register(),
+                        match mask {
+                            0xff => Register::from(preg_to_reg8(src)),
+                            0xffff => Register::from(preg_to_reg16(src)),
+                            _ => Register::from(preg_to_reg32(src)),
+                        }
+                    );
+                    assert!(!decoder.can_decode(), "{src:?} -> {dst:?}, mask={mask:#x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn folded_truncation_loads_read_only_the_required_bytes() {
+        use iced_x86::MemorySize;
+        for (mask, mnemonic, size) in [
+            (0xff, Mnemonic::Movzx, MemorySize::UInt8),
+            (0xffff, Mnemonic::Movzx, MemorySize::UInt16),
+            (0xffff_ffff, Mnemonic::Mov, MemorySize::UInt32),
+        ] {
+            let mut asm = CodeAssembler::new(64).unwrap();
+            emit_and_memory_imm(&mut asm, PhysReg::R12, ptr(r15 + 24), mask).unwrap();
+            let code = asm.assemble(0).unwrap();
+            let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
+            let instruction = decoder.decode();
+            assert_eq!(instruction.mnemonic(), mnemonic);
+            assert_eq!(instruction.memory_size(), size);
+            assert_eq!(instruction.memory_base(), Register::R15);
+            assert_eq!(instruction.memory_displacement64(), 24);
+            assert_eq!(instruction.op0_register(), Register::R12D);
+            assert!(!decoder.can_decode());
+        }
+    }
+
+    #[test]
+    fn immediate_masks_preserve_widths_aliases_and_folded_load_values() {
+        for word32 in [false, true] {
+            for folded_load in [false, true] {
+                // Include the REX-only low-byte names BPL/SIL and extended GPRs.
+                for source in [
+                    PhysReg::RAX,
+                    PhysReg::RBP,
+                    PhysReg::RSI,
+                    PhysReg::R8,
+                    PhysReg::R12,
+                ] {
+                    for destination in [source, PhysReg::R11] {
+                        for mask in [
+                            0,
+                            1,
+                            0xff,
+                            0xffff,
+                            0x7fff_ffff,
+                            0x8000_0000,
+                            0xffff_ffff,
+                            0xffff_ffff_8000_0000,
+                            u64::MAX,
+                        ] {
+                            if word32 && mask > u64::from(u32::MAX) {
+                                continue;
+                            }
+                            let mut vregs = VRegAllocator::new();
+                            let input = vregs.alloc();
+                            let output = vregs.alloc();
+                            let mut function =
+                                MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+                            function.target_features = X86Features::for_test(false);
+                            let mut block = MBlock::new(BlockId(0));
+                            block.push(MInst::Load {
+                                dst: input,
+                                base: BaseReg::SimState,
+                                offset: 0,
+                                size: OpSize::S64,
+                            });
+                            if !folded_load {
+                                // A second use prevents the load/AND memory fold.
+                                block.push(MInst::Store {
+                                    base: BaseReg::SimState,
+                                    offset: 16,
+                                    src: input,
+                                    size: OpSize::S64,
+                                });
+                            }
+                            block.push(if word32 {
+                                MInst::AndImm32 {
+                                    dst: output,
+                                    src: input,
+                                    imm: mask as u32,
+                                }
+                            } else {
+                                MInst::AndImm {
+                                    dst: output,
+                                    src: input,
+                                    imm: mask,
+                                }
+                            });
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: 8,
+                                src: output,
+                                size: OpSize::S64,
+                            });
+                            block.push(MInst::Return);
+                            function.push_block(block);
+                            let mut assignment = AssignmentMap::default();
+                            assignment.set(input, source);
+                            assignment.set(output, destination);
+                            let emitted = emit(&function, &assignment, 0).unwrap();
+                            let jit = JitCode::new(&emitted.code).unwrap();
+                            for value in [
+                                0u64,
+                                0xff,
+                                0xffff,
+                                0xffff_ffff,
+                                1 << 32,
+                                1 << 63,
+                                0xfedc_ba98_7654_3210,
+                                u64::MAX,
+                            ] {
+                                let mut state =
+                                    vec![0xffu8; emitted.required_state_size.max(24) as usize];
+                                state[..8].copy_from_slice(&value.to_le_bytes());
+                                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                                assert_eq!(
+                                    u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                                    value & mask,
+                                    "word32={word32}, folded={folded_load}, {source:?} -> {destination:?}, value={value:#x}, mask={mask:#x}"
+                                );
+                                if !folded_load {
+                                    assert_eq!(
+                                        u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                                        value
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ mod circular_scan;
 mod counted_loop;
 mod dead_code;
 mod exclusive_loop;
+mod gvn_liveness;
 mod known_bits;
 mod loop_guard;
 #[cfg(test)]
@@ -3007,7 +3008,7 @@ fn global_gvn(func: &mut MFunction) {
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
     let idom = compute_dominators(num_blocks, &preds, &succs);
     let load_versions = compute_gvn_load_versions(func, &preds, &idom).unwrap_or_default();
-    let (_, live_out) = compute_gvn_liveness(func, &block_id_to_idx, &succs);
+    let live_out = gvn_liveness::live_out(func, &block_id_to_idx, &preds);
     let last_uses = func
         .blocks
         .iter()
@@ -3205,121 +3206,6 @@ fn global_gvn(func: &mut MFunction) {
     for (bi, inst_idx, new_inst) in replacements {
         func.blocks[bi].insts[inst_idx] = new_inst;
     }
-}
-
-/// Compute conventional SSA block-entry and block-exit liveness for GVN's
-/// profitability check. Phi sources are uses on predecessor edges; phi
-/// destinations are definitions at the successor entry.
-fn compute_gvn_liveness(
-    func: &MFunction,
-    block_id_to_idx: &HashMap<BlockId, usize>,
-    succs: &[Vec<usize>],
-) -> (Vec<Vec<VReg>>, Vec<Vec<VReg>>) {
-    let block_count = func.blocks.len();
-    let mut uses = vec![HashSet::default(); block_count];
-    let mut defs = vec![HashSet::default(); block_count];
-
-    for (block_index, block) in func.blocks.iter().enumerate() {
-        defs[block_index].extend(block.phis.iter().map(|phi| phi.dst));
-        for inst in &block.insts {
-            for used in inst.uses() {
-                if !defs[block_index].contains(&used) {
-                    uses[block_index].insert(used);
-                }
-            }
-            if let Some(defined) = inst.def() {
-                defs[block_index].insert(defined);
-            }
-        }
-    }
-
-    let uses = uses
-        .into_iter()
-        .map(|set| {
-            let mut values = set.into_iter().collect::<Vec<_>>();
-            values.sort_unstable();
-            values
-        })
-        .collect::<Vec<_>>();
-
-    fn sorted_union(left: &[VReg], right: &[VReg]) -> Vec<VReg> {
-        let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
-        let (mut left_index, mut right_index) = (0usize, 0usize);
-        while left_index < left.len() && right_index < right.len() {
-            match left[left_index].cmp(&right[right_index]) {
-                std::cmp::Ordering::Less => {
-                    merged.push(left[left_index]);
-                    left_index += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    merged.push(left[left_index]);
-                    left_index += 1;
-                    right_index += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    merged.push(right[right_index]);
-                    right_index += 1;
-                }
-            }
-        }
-        merged.extend_from_slice(&left[left_index..]);
-        merged.extend_from_slice(&right[right_index..]);
-        merged
-    }
-
-    fn merged_successor_live(
-        func: &MFunction,
-        succs: &[Vec<usize>],
-        live_in: &[Vec<VReg>],
-        block_index: usize,
-    ) -> Vec<VReg> {
-        let block_id = func.blocks[block_index].id;
-        let mut live_out = Vec::new();
-        for &successor in &succs[block_index] {
-            let mut edge_uses = func.blocks[successor]
-                .phis
-                .iter()
-                .filter_map(|phi| {
-                    phi.sources
-                        .iter()
-                        .find(|(predecessor, _)| *predecessor == block_id)
-                        .map(|(_, source)| *source)
-                })
-                .collect::<Vec<_>>();
-            edge_uses.sort_unstable();
-            edge_uses.dedup();
-            let successor_live = sorted_union(&live_in[successor], &edge_uses);
-            live_out = sorted_union(&live_out, &successor_live);
-        }
-        live_out
-    }
-
-    let mut live_in = vec![Vec::new(); block_count];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block_index in (0..block_count).rev() {
-            let mut live_out = merged_successor_live(func, succs, &live_in, block_index);
-            live_out.retain(|value| !defs[block_index].contains(value));
-            let next = sorted_union(&uses[block_index], &live_out);
-            if next != live_in[block_index] {
-                live_in[block_index] = next;
-                changed = true;
-            }
-        }
-    }
-
-    let mut live_out = vec![Vec::new(); block_count];
-    for (block_index, values) in live_out.iter_mut().enumerate() {
-        *values = merged_successor_live(func, succs, &live_in, block_index);
-    }
-
-    debug_assert!(
-        func.blocks
-            .iter()
-            .all(|block| block_id_to_idx.contains_key(&block.id))
-    );
-    (live_in, live_out)
 }
 
 /// Compute immediate dominators using the iterative algorithm.
