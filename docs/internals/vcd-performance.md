@@ -41,12 +41,25 @@ JavaScript shared-memory views and components that receive writable raw memory.
 The buffered byte encoder still applies on these paths. Builds without VCD do
 not reserve activity storage or generate notification stores.
 
-The writer keeps previous value and mask planes as packed bytes. Padding above a
-signal's declared width is ignored. Four-state and external signals compare
-both planes; two-state memory signals compare only values because their previous
-mask stays zero for the writer's lifetime. Two-state memory signals of widths
-1 and 64 are classified when registering signals and use fixed-size integer
-comparisons and copies, including unaligned memory and previous-value offsets.
+The writer builds a trace plan at registration. Consecutive two-state one-bit
+signals, two-state 64-bit signals, and generic signals form separate runs in
+registration order. Fixed-width runs keep each memory offset, previous integer,
+and precomputed suffix together; header names and scopes stay outside the hot
+records. The initial snapshot has a separate loop specialization. Long fixed-width
+runs dispatch once; their comparisons do not check per-signal type, initialization
+flags, or previous-value offsets. The writer validates memory coverage once per
+dump before unaligned fixed-width loads. A sparse dump with a shorter slice
+validates only the selected ranges, and no selected signals means no memory access.
+Sparse candidates use a one-signal specialization without changing their order
+or alias IDs, avoiding a second traversal to rebuild runs from scattered indices.
+When full-scan runs average fewer than two entries, the writer instead visits
+registration entries with a one-signal specialization. This avoids setting up
+a variable-length inner loop for every signal in an alternating-type trace.
+
+Generic signals keep previous value and mask planes as packed bytes. Padding
+above a signal's declared width is ignored. Four-state and external signals
+compare both planes; two-state memory signals compare only values because their
+previous mask stays zero for the writer's lifetime.
 The one-bit path emits its ASCII digit directly. On x86-64 with SSE2 enabled,
 the 64-bit path duplicates all input bytes once, then shuffles each required
 pair into 16 output digits directly in spare capacity. Other targets retain
@@ -69,8 +82,10 @@ The block reserves capacity for 256 KiB plus the largest possible record,
 including fixed-store padding, at the first dump. No record grows the Vec;
 the allocation adds roughly 256 KiB compared with a single-record buffer.
 Header construction stays in a separate cold function. The pending change
-count belongs to the output block, so unchanged-signal comparisons need not
-carry a separate local accumulator through the loop.
+count belongs to the output block. Comparison statistics update once per run;
+an I/O error records exactly the visited prefix, including unchanged values.
+The initial snapshot is complete only after its value records are handed to
+`BufWriter`; a failed initial dump retries a full snapshot on the next dump.
 
 `VcdWriter::flush`, `Simulator::flush_vcd`, or `Simulation::flush_vcd` explicitly
 publishes pending bytes and reports I/O errors. Dropping the writer flushes
@@ -1276,6 +1291,179 @@ python3 scripts/compare-vcd-verilator.py \
   --patterns counter full_width --reuse-builds
 ```
 
+### Typed trace plans
+
+This stage starts from `15f179813046fbaf2ca974686232cd16b0fb3d7c`.
+The preceding 256-counter full-width dense comparison was 1.36 times Verilator's
+elapsed time. Its whole-process profile used 53.158 billion instructions,
+versus Verilator's 30.073 billion, with only 0.088% of Celox's branches missed.
+Correctly predicted branches still execute their surrounding loads, indexing,
+and bookkeeping. The generated Verilator trace calls fixed-offset, typed
+comparison primitives; the old Celox writer revisited signal kind, initialization,
+previous-plane offsets, and slice bounds on every comparison. This stage targets
+that repeated work without changing the write-notification ABI or generated
+simulation code.
+
+Registration now builds separate bit, 64-bit, and generic record arrays, plus
+a registration-order map and consecutive runs. On this x86-64 build, a fixed
+record's hot stride is 40 bytes instead of 104, and includes its previous integer.
+That is a hot-record measurement: header strings, the registration map, and run
+storage still occupy separate allocations. Generic records retain packed
+previous value/mask planes. Initial values have a separate loop specialization.
+Each dump checks memory coverage before fixed-width reads; sparse callers may
+still supply a slice covering only their selected signals. The plan retains
+scope/ID assignments, registration order, aliases, and external-value behavior.
+
+Two details matter for the generated loop. Comparison statistics accumulate
+once per completed run; a returned I/O error counts the visited prefix, including
+unchanged signals. Value encoding and suffix publication stay in the same
+inlined loop, allowing SIMD constants to remain in registers across records.
+A plain inline hint did not accomplish this in the first experiment. An empty
+selection returns after timestamp handling, avoiding additional idle traversal.
+
+The first run-based candidate regressed on alternating types: a 16,384-signal
+`1,64` dense scan took 714 versus 494 ms, and a full idle scan took 1,244 versus
+540 ms. Each one-record run paid for a call and a variable-length inner loop.
+Inlining only the run dispatcher subsequently outlined the fixed-width helper
+and retained much of that cost. The next candidate also inlines the
+fixed-width loop; when average run length is below two, it walks registration
+entries with a known one-record length. This candidate still coalesces sparse
+selections and uses long runs where available.
+
+Alternating-width controls use the same fixture source and compiler options
+for both writers, with width read per descriptor by the isolated stimulus
+function. The following are five rotated process medians on CPU 0, `/dev/null`,
+16,384 signals, 5,000 dense dumps or 20,000 full-scan idle dumps. Instruction
+counts include process construction; timings exclude initialization and include
+the final flush. These standalone mixed-width timings are separate from the
+Cargo writer benchmark and linked native comparison.
+
+| Width pattern | Mode/case | Previous ms | Plan ms | Previous instructions B | Plan instructions B |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1,64 | scan/dense | 506.558 | 448.520 | 12.177 | 10.294 |
+| 1,64 | dirty/dense | 564.828 | 463.015 | 12.919 | 11.036 |
+| 1,64 | scan/idle | 729.311 | 283.850 | 13.370 | 7.146 |
+| 1,9,64,65 | scan/dense | 1,281.307 | 1,238.415 | 22.117 | 21.053 |
+| 1,9,64,65 | dirty/dense | 1,100.067 | 1,062.876 | 22.902 | 21.839 |
+| 1,9,64,65 | scan/idle | 1,113.012 | 904.861 | 26.397 | 20.010 |
+
+Host timing variation remains substantial. The repeated instruction reductions
+are stronger evidence of removing work than any single elapsed-time ratio.
+Raw samples, rejected candidates, sources, and executables are retained under
+`target/vcd-plan-results/`; `v7-mixed-summary.json` records these mixed controls.
+The normal benchmark's stimulus remains exactly 278 instructions and 1,036 bytes
+in both builds after relocation normalization, so changing the trace plan did
+not change its per-signal input update loop.
+
+The first linked native comparison reached 1.009 times Verilator on full-width
+dense output (805.949 versus 798.525 ms; the previous writer took 1,124.583 ms).
+However, full-width idle rose from 205.309 to 217.424 ms and sparse from 260.209
+to 305.969 ms. Whole-process idle instructions increased from 9.830 to 10.550
+billion. This was not solely host timing noise and required a sparse-path fix.
+
+The actual clock home is byte 2,080. Its 64-byte group contains `clk`, `rst`,
+`en0` through `en29`, and `q252` through `q255`: 36 trace entries. Registration
+sorts names lexically, so `en10` is followed by `en100`, and most of the selected
+bit indices have gaps. Those 36 entries formed 25 runs. A uniform bit fixture
+did not reproduce the extra work because its selected indices were consecutive.
+The final sparse path visits each selected entry once with a known one-record
+length, removing both run reconstruction and dynamic loop setup at these gaps.
+
+The diagnostic exports the native fixture's real descriptors, initial memory,
+counter increments, and both half-cycle activity lists. A separate writer
+executable replays the same clock and counter updates with those activity lists;
+it excludes scheduling and activity collection. Five rotated process medians
+at one million full cycles give:
+
+| Native-layout replay | Previous ms | Coalescing candidate ms | Direct sparse ms | Previous instructions B | Direct sparse instructions B |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| idle | 218.716 | 263.995 | 174.662 | 5.541 | 4.178 |
+| sparse | 335.887 | 386.632 | 296.366 | 7.451 | 5.953 |
+| dense | 2,856.165 | 1,579.256 | 1,608.278 | 48.792 | 32.342 |
+
+The intermediate candidate and final sparse-path experiment are retained
+separately under `target/vcd-plan-results/` and
+`target/vcd-plan-sparse-results/`. The latter includes `capture-fixture.rs`,
+the three `native-*.json` fixtures, `replay.rs`, compiler commands, immutable
+executables, and `replay-summary.json`. All replay variants use the same input
+update function and fixture. Their comparison, change, and value-byte counts
+agree; replay elapsed times are not end-to-end simulation timings.
+
+The final library was rebuilt and linked into the native benchmark with the
+normal release/LTO settings. On the Ryzen 7 9800X3D/WSL host, the final paired
+comparison uses 256 counters, 500,000 full cycles, CPU 0, `/dev/null`, a 64 MiB
+stack, one warm process, and five rotated measured processes per engine/mode.
+Construction, reset, and the initial snapshot are excluded; the final flush is
+included. Both Verilator fixtures reuse binaries verified against the preceding
+manifest. The previous Celox executable is the unchanged `15f179813` baseline.
+
+| Pattern | VCD case | Previous ms | Final ms | Verilator ms | Final / Verilator |
+| --- | --- | ---: | ---: | ---: | ---: |
+| counter | idle | 214.647 | 199.438 | 298.732 | 0.668 |
+| counter | sparse | 281.895 | 251.754 | 318.834 | 0.790 |
+| counter | dense | 933.726 | 712.029 | 817.287 | 0.871 |
+| full_width | idle | 196.687 | 181.480 | 290.215 | 0.625 |
+| full_width | sparse | 262.491 | 227.740 | 308.605 | 0.738 |
+| full_width | dense | 1,055.644 | 788.720 | 815.000 | 0.968 |
+
+The full-width dense ratio is 1.295 before and 0.968 after in this comparison,
+a 25.3% reduction in Celox elapsed time. The previous 1.36 ratio came from an
+earlier run and should not be combined with these timings. Final dense samples
+range from 765.277 to 801.541 ms; Verilator ranges from 764.966 to 866.668 ms.
+These measurements support approximate parity on this fixture, not a stable
+3.2% lead across workloads. The two Celox versions emit exactly 8,842,888,899
+timed bytes in this case; Verilator emits 8,827,888,896. Counter-pattern output
+still benefits from leading-zero abbreviation and is a different volume control.
+
+Whole-process hardware counters at one million full-width cycles include
+construction, so their cycle ratios are not steady-state timing ratios. Five
+rotated repetitions of the old writer, intermediate candidate, final writer,
+and Verilator give these instruction medians:
+
+| Case | Previous B | Coalescing candidate B | Final B | Verilator B |
+| --- | ---: | ---: | ---: | ---: |
+| idle | 9.830 | 10.550 | 8.270 | 8.800 |
+| sparse | 11.785 | 12.530 | 10.103 | 8.966 |
+| dense | 53.158 | 36.933 | 35.535 | 30.073 |
+
+The final reductions from the previous writer are 15.9%, 14.3%, and 33.2%.
+The repeated instruction counts also verify that the sparse fix removes work
+from the real simulator. Timing variation remains visible in unchanged-code
+controls: full-width idle `off`, for example, moves from 63.195 to 67.221 ms.
+`off` and `instrumented` JIT captures remain byte-identical to the baseline;
+these control timings are not subtracted to estimate writer cost.
+
+The final writer-only checks cover 256 through 65,536 signals, widths 1/32/63/65/256,
+64-bit four-state values, mask-only changes, no changes, same-value stores, and
+sparse updates. All dense configurations reduce instructions relative to the
+previous writer; `collect` instruction counts change by less than 1%.
+Empty-selection instruction counts are within 0.2% of the previous writer in
+the 256/4,096/16,384/65,536 signal controls. Raw elapsed samples are retained,
+including controls whose medians increase despite similar instruction counts.
+
+Validation passes 15 runtime tests, 9 state-layout tests, 4 cross-backend VCD
+integration tests, formatting, Clippy on all runtime/state-layout targets, and
+the aarch64 runtime check. All 130 writer waveform/statistics comparisons pass.
+The native-layout replay matches both linked Celox executables byte-for-byte
+after the header, including comparison/change/value-byte counts, in all three
+cases. The three engines pass the waveform oracle at 256 and 4,096 counters;
+the larger native fixture is a correctness check only in this stage. Native
+old/new timed byte counts also agree in every measured case.
+
+Final artifacts and all commands are in `target/vcd-plan-sparse-results/`.
+`candidate-manifest.json`, `checks.json`, and `final-runs.json` record sources,
+executables, validation, and measurement commands. Reproduce the native matrix:
+
+```sh
+python3 scripts/compare-vcd-verilator.py \
+  --verilator target/verilator-v5.052/bin/verilator \
+  --celox target/vcd-plan-sparse-results/e2e-after \
+  --baseline-celox target/vcd-plan-sparse-results/e2e-before \
+  --output target/vcd-plan-sparse-results/paired-256 \
+  --signals 256 --steps 500000 --repeats 5 \
+  --patterns counter full_width --reuse-builds
+```
+
 ## Correctness
 
 `cargo test --locked -p celox-runtime -p celox-state-layout` checks byte encoding
@@ -1290,6 +1478,9 @@ small block sizes while retaining registration order and scope/ID mappings.
 The output tests cover
 output-block boundaries, records larger than a block, short writes,
 interrupted writes, partial I/O failures, and the final tail flushed by Drop.
+Trace-plan tests cover mixed typed/generic runs, external values, repeated
+timestamps, short selected-memory slices, rejected out-of-bounds ranges,
+initial-snapshot retries, and comparison counts at an I/O-error boundary.
 `cargo test --locked -p celox --test vcd` compares parsed incremental output with
 full scans of the same committed state across native, Cranelift, interpreter,
 Wasm, and tiered backends, with optimization and four-state mode on and off. It

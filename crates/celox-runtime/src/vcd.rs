@@ -1,5 +1,8 @@
-use celox_state_layout::{TRACE_GROUP_BYTES, get_byte_size};
+mod plan;
+
+use celox_state_layout::TRACE_GROUP_BYTES;
 use num_bigint::BigUint;
+use plan::TracePlan;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem::MaybeUninit;
@@ -33,22 +36,10 @@ pub struct VcdExternalSignalDesc {
     pub width: usize,
 }
 
-#[derive(Clone, Copy)]
-enum VcdWriterSource {
-    Memory { offset: usize, is_4state: bool },
-    External { index: usize },
-    // Classify once so the dump loop can use a fixed-width load and store.
-    MemoryBit { offset: usize },
-    Memory64 { offset: usize },
-}
-
-struct VcdWriterSignal {
-    suffix: VcdRecordSuffix,
+struct VcdHeaderSignal {
     scope: String,
     name: String,
     width: usize,
-    source: VcdWriterSource,
-    previous_offset: usize,
 }
 
 /// Finalized with the header: an optional space, the ID, and a newline.
@@ -112,21 +103,25 @@ pub struct VcdStatistics {
 }
 
 pub struct VcdWriter<W: Write = File> {
-    writer: BufWriter<W>,
-    signals: Vec<VcdWriterSignal>,
-    previous: Vec<u8>,
-    initialized: Vec<bool>,
+    output: VcdOutput<W>,
+    headers: Vec<VcdHeaderSignal>,
+    plan: TracePlan,
     groups: fxhash::FxHashMap<usize, Vec<usize>>,
     selected: Vec<usize>,
     activity: Vec<usize>,
+    timestamp: u64,
+    header_written: bool,
+    initial_values_written: bool,
+    external_count: usize,
+}
+
+struct VcdOutput<W: Write> {
+    writer: BufWriter<W>,
     /// Complete value records accumulated for a bulk write. Successful dumps
     /// always hand the tail to BufWriter so flush and Drop own pending output.
     encoded: Vec<u8>,
     encoded_changes: u64,
     stats: VcdStatistics,
-    timestamp: u64,
-    header_written: bool,
-    external_count: usize,
 }
 
 impl VcdWriter<File> {
@@ -137,64 +132,51 @@ impl VcdWriter<File> {
 
 impl<W: Write> VcdWriter<W> {
     pub fn from_writer(writer: W, descs: &[VcdSignalDesc]) -> Self {
-        let mut previous = Vec::new();
+        let mut plan = TracePlan::default();
         let mut groups: fxhash::FxHashMap<usize, Vec<usize>> = Default::default();
-        let signals = descs
+        let headers = descs
             .iter()
             .enumerate()
             .map(|(index, desc)| {
-                let previous_offset = previous.len();
-                previous.resize(previous.len() + get_byte_size(desc.width) * 2, 0);
+                plan.add_memory(desc);
                 let group = desc.offset / TRACE_GROUP_BYTES;
                 groups.entry(group).or_default().push(index);
-                VcdWriterSignal {
-                    suffix: VcdRecordSuffix::new(desc.width, ""),
+                VcdHeaderSignal {
                     scope: desc.scope.clone(),
                     name: desc.name.clone(),
                     width: desc.width,
-                    source: match (desc.width, desc.is_4state) {
-                        (1, false) => VcdWriterSource::MemoryBit {
-                            offset: desc.offset,
-                        },
-                        (64, false) => VcdWriterSource::Memory64 {
-                            offset: desc.offset,
-                        },
-                        _ => VcdWriterSource::Memory {
-                            offset: desc.offset,
-                            is_4state: desc.is_4state,
-                        },
-                    },
-                    previous_offset,
                 }
             })
             .collect::<Vec<_>>();
         Self {
-            writer: BufWriter::with_capacity(256 * 1024, writer),
-            initialized: vec![false; signals.len()],
-            signals,
-            previous,
+            output: VcdOutput {
+                writer: BufWriter::with_capacity(256 * 1024, writer),
+                encoded: Vec::new(),
+                encoded_changes: 0,
+                stats: VcdStatistics::default(),
+            },
+            headers,
+            plan,
             groups,
             selected: Vec::new(),
             activity: Vec::new(),
-            encoded: Vec::new(),
-            encoded_changes: 0,
-            stats: VcdStatistics::default(),
             timestamp: 0,
             header_written: false,
+            initial_values_written: false,
             external_count: 0,
         }
     }
 
     /// Publish buffered output, also reporting errors that Drop cannot report.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
+        self.output.writer.flush()
     }
 
     pub fn statistics(&self) -> VcdStatistics {
-        self.stats
+        self.output.stats
     }
     pub fn get_ref(&self) -> &W {
-        self.writer.get_ref()
+        self.output.writer.get_ref()
     }
 
     /// Dump as the backend's sole incremental waveform observer. Multiple
@@ -219,7 +201,10 @@ impl<W: Write> VcdWriter<W> {
 
     pub fn into_inner(mut self) -> std::io::Result<W> {
         self.flush()?;
-        self.writer.into_inner().map_err(|error| error.into_error())
+        self.output
+            .writer
+            .into_inner()
+            .map_err(|error| error.into_error())
     }
 
     /// Adds externally supplied signals before the first dump. VCD headers
@@ -229,10 +214,8 @@ impl<W: Write> VcdWriter<W> {
             return Ok(());
         }
         if self.external_count != 0 {
-            let existing = self
-                .signals
+            let existing = self.headers[self.headers.len() - self.external_count..]
                 .iter()
-                .filter(|signal| matches!(signal.source, VcdWriterSource::External { .. }))
                 .zip(descs)
                 .all(|(signal, desc)| {
                     signal.scope == desc.scope
@@ -252,39 +235,34 @@ impl<W: Write> VcdWriter<W> {
         for desc in descs {
             let index = self.external_count;
             self.external_count += 1;
-            self.signals.push(VcdWriterSignal {
-                suffix: VcdRecordSuffix::new(desc.width, ""),
+            self.headers.push(VcdHeaderSignal {
                 scope: desc.scope.clone(),
                 name: desc.name.clone(),
                 width: desc.width,
-                source: VcdWriterSource::External { index },
-                previous_offset: self.previous.len(),
             });
-            self.previous
-                .resize(self.previous.len() + get_byte_size(desc.width) * 2, 0);
-            self.initialized.push(false);
+            self.plan.add_external(index, desc.width);
         }
         Ok(())
     }
 
     #[cold]
     fn write_header(&mut self) -> std::io::Result<()> {
-        writeln!(self.writer, "$date")?;
+        writeln!(self.output.writer, "$date")?;
         writeln!(
-            self.writer,
+            self.output.writer,
             "  {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         )?;
-        writeln!(self.writer, "$end")?;
-        writeln!(self.writer, "$version")?;
-        writeln!(self.writer, "  celox")?;
-        writeln!(self.writer, "$end")?;
-        writeln!(self.writer, "$timescale 1ns $end")?;
+        writeln!(self.output.writer, "$end")?;
+        writeln!(self.output.writer, "$version")?;
+        writeln!(self.output.writer, "  celox")?;
+        writeln!(self.output.writer, "$end")?;
+        writeln!(self.output.writer, "$timescale 1ns $end")?;
 
         let mut scope_order = Vec::<String>::new();
         let mut scope_groups = Vec::<Vec<usize>>::new();
         let mut scope_idx = fxhash::FxHashMap::<String, usize>::default();
-        for (signal_index, signal) in self.signals.iter().enumerate() {
+        for (signal_index, signal) in self.headers.iter().enumerate() {
             if let Some(index) = scope_idx.get(&signal.scope).copied() {
                 scope_groups[index].push(signal_index);
             } else {
@@ -296,28 +274,31 @@ impl<W: Write> VcdWriter<W> {
         }
         let mut next_id = 0;
         for (scope, group) in scope_order.iter().zip(scope_groups) {
-            writeln!(self.writer, "$scope module {} $end", scope)?;
+            writeln!(self.output.writer, "$scope module {} $end", scope)?;
             for signal_index in group {
-                let signal = &mut self.signals[signal_index];
+                let signal = &mut self.headers[signal_index];
                 let id = Self::generate_vcd_id(next_id);
-                signal.suffix = VcdRecordSuffix::new(signal.width, &id);
+                *self.plan.suffix(signal_index) = VcdRecordSuffix::new(signal.width, &id);
                 next_id += 1;
                 writeln!(
-                    self.writer,
+                    self.output.writer,
                     "$var wire {} {} {} $end",
                     signal.width, id, signal.name
                 )?;
             }
-            writeln!(self.writer, "$upscope $end")?;
+            writeln!(self.output.writer, "$upscope $end")?;
         }
-        writeln!(self.writer, "$enddefinitions $end")?;
-        writeln!(self.writer, "$dumpvars")?;
-        writeln!(self.writer, "$end")?;
+        writeln!(self.output.writer, "$enddefinitions $end")?;
+        writeln!(self.output.writer, "$dumpvars")?;
+        writeln!(self.output.writer, "$end")?;
         if let Some(max_record) = self
-            .signals
+            .headers
             .iter()
-            .map(|signal| {
-                signal.width.max(1) + usize::from(signal.width != 1) + signal.suffix.capacity()
+            .enumerate()
+            .map(|(index, signal)| {
+                signal.width.max(1)
+                    + usize::from(signal.width != 1)
+                    + self.plan.suffix(index).capacity()
             })
             .max()
         {
@@ -325,7 +306,9 @@ impl<W: Write> VcdWriter<W> {
             // Include the short suffix's padding, even for scalar-only traces.
             // Integer SIMD stores also fit within the full declared width.
             // Reserve here so record encoding never needs to grow the Vec.
-            self.encoded.reserve(self.writer.capacity() + max_record);
+            self.output
+                .encoded
+                .reserve(self.output.writer.capacity() + max_record);
         }
         self.header_written = true;
         Ok(())
@@ -379,16 +362,16 @@ impl<W: Write> VcdWriter<W> {
                 ),
             ));
         }
-        let first_dump = !self.header_written;
-        if first_dump {
+        let first_dump = !self.initial_values_written;
+        if !self.header_written {
             self.write_header()?;
         }
         if timestamp > self.timestamp || timestamp == 0 {
-            writeln!(self.writer, "#{}", timestamp)?;
+            writeln!(self.output.writer, "#{}", timestamp)?;
             self.timestamp = timestamp;
         }
-        self.encoded.clear();
-        self.encoded_changes = 0;
+        self.output.encoded.clear();
+        self.output.encoded_changes = 0;
         self.selected.clear();
         // Dense activity is cheaper to walk directly in registration order.
         let sparse = activity
@@ -400,116 +383,47 @@ impl<W: Write> VcdWriter<W> {
                 }
             }
             self.selected
-                .extend(self.signals.len() - self.external_count..self.signals.len());
+                .extend(self.headers.len() - self.external_count..self.headers.len());
             // Preserve registration order even when homes are laid out differently.
             self.selected.sort_unstable();
             self.selected.dedup();
+            if self.selected.is_empty() {
+                return Ok(());
+            }
         }
-        let count = if sparse.is_some() {
-            self.selected.len()
+        if first_dump {
+            self.plan
+                .dump::<true, W>(memory, external, None, &mut self.output)?;
+            self.initial_values_written = true;
         } else {
-            self.signals.len()
-        };
-        for index in 0..count {
-            let i = if sparse.is_some() {
-                self.selected[index]
-            } else {
-                index
-            };
-            let sig = &self.signals[i];
-            self.stats.comparisons += 1;
-            let value_len = match sig.source {
-                VcdWriterSource::Memory { .. } | VcdWriterSource::External { .. } => {
-                    let size = get_byte_size(sig.width);
-                    // The memory path borrows bytes directly. External component values
-                    // retain their existing BigUint ABI and are converted only here.
-                    let external_bytes;
-                    let (value, mask, track_mask): (&[u8], &[u8], bool) = match sig.source {
-                        VcdWriterSource::MemoryBit { .. } | VcdWriterSource::Memory64 { .. } => {
-                            unreachable!()
-                        }
-                        VcdWriterSource::Memory { offset, is_4state } => (
-                            &memory[offset..offset + size],
-                            if is_4state {
-                                &memory[offset + size..offset + size * 2]
-                            } else {
-                                &[]
-                            },
-                            is_4state,
-                        ),
-                        VcdWriterSource::External { index } => {
-                            external_bytes = (
-                                external[index].0.to_bytes_le(),
-                                external[index].1.to_bytes_le(),
-                            );
-                            (&external_bytes.0, &external_bytes.1, true)
-                        }
-                    };
-                    let old =
-                        &mut self.previous[sig.previous_offset..sig.previous_offset + size * 2];
-                    if self.initialized[i]
-                        && plane_equal(&old[..size], value, sig.width)
-                        && (!track_mask || plane_equal(&old[size..], mask, sig.width))
-                    {
-                        continue;
-                    }
-                    copy_plane(&mut old[..size], value, sig.width);
-                    // A two-state memory signal's previous mask stays zero for the
-                    // writer's lifetime. External values can change between X/Z and
-                    // known values, so their masks always participate.
-                    if track_mask {
-                        copy_plane(&mut old[size..], mask, sig.width);
-                    }
-                    self.initialized[i] = true;
-                    encode_value(
-                        self.encoded.spare_capacity_mut(),
-                        sig.width,
-                        &old[..size],
-                        if track_mask { &old[size..] } else { &[] },
-                    )
-                }
-                VcdWriterSource::MemoryBit { offset } => {
-                    let value = memory[offset] & 1;
-                    let old = &mut self.previous[sig.previous_offset];
-                    if self.initialized[i] && *old == value {
-                        continue;
-                    }
-                    *old = value;
-                    self.initialized[i] = true;
-                    self.encoded.spare_capacity_mut()[0].write(b'0' + value);
-                    1
-                }
-                VcdWriterSource::Memory64 { offset } => {
-                    let value: [u8; 8] = memory[offset..offset + 8].try_into().unwrap();
-                    let old: &mut [u8; 8] = (&mut self.previous
-                        [sig.previous_offset..sig.previous_offset + 8])
-                        .try_into()
-                        .unwrap();
-                    if self.initialized[i] && u64::from_ne_bytes(*old) == u64::from_ne_bytes(value)
-                    {
-                        continue;
-                    }
-                    *old = value;
-                    self.initialized[i] = true;
-                    encode_u64(self.encoded.spare_capacity_mut(), u64::from_le_bytes(value))
-                }
-            };
-            let suffix_len = sig
-                .suffix
-                .encode(&mut self.encoded.spare_capacity_mut()[value_len..]);
-            // SAFETY: the encoders initialize their returned lengths in checked
-            // slices of spare capacity. Publish only the complete record, once;
-            // any SIMD/suffix padding stays outside the Vec's visible length.
-            unsafe {
-                self.encoded
-                    .set_len(self.encoded.len() + value_len + suffix_len);
-            }
-            self.encoded_changes += 1;
-            if self.encoded.len() >= self.writer.capacity() {
-                self.write_encoded()?;
-            }
+            self.plan.dump::<false, W>(
+                memory,
+                external,
+                sparse.map(|_| self.selected.as_slice()),
+                &mut self.output,
+            )?;
         }
-        self.write_encoded()
+        Ok(())
+    }
+}
+
+impl<W: Write> VcdOutput<W> {
+    // Keep suffix publication with the value encoder so SIMD constants and
+    // output state can stay in registers between records.
+    #[inline(always)]
+    fn finish_record(&mut self, value_len: usize, suffix: &VcdRecordSuffix) -> std::io::Result<()> {
+        let suffix_len = suffix.encode(&mut self.encoded.spare_capacity_mut()[value_len..]);
+        // SAFETY: both encoders initialize their returned lengths in checked
+        // spare capacity. SIMD/suffix padding stays outside the visible length.
+        unsafe {
+            self.encoded
+                .set_len(self.encoded.len() + value_len + suffix_len);
+        }
+        self.encoded_changes += 1;
+        if self.encoded.len() >= self.writer.capacity() {
+            self.write_encoded()?;
+        }
+        Ok(())
     }
 
     fn write_encoded(&mut self) -> std::io::Result<()> {
@@ -863,7 +777,7 @@ mod encoding_tests {
                 .collect::<Vec<_>>();
             for capacity in [1, 3, 7, 8, 9, 16, 64, 71, 72, 73] {
                 let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
-                writer.writer = BufWriter::with_capacity(capacity, Vec::new());
+                writer.output.writer = BufWriter::with_capacity(capacity, Vec::new());
                 for (time, value) in [0xff, 0, 0, 0xff].into_iter().enumerate() {
                     writer.dump(time as u64, &[value; 800]).unwrap();
                 }
@@ -1036,6 +950,251 @@ mod encoding_tests {
                     "width={width} four_state={four_state}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn typed_sparse_runs_preserve_aliases_external_values_and_order() {
+        let descs = [
+            (512, 64, false),
+            (0, 1, false),
+            (128, 64, false),
+            (256, 64, true),
+            (512, 64, false),
+            (640, 1, false),
+            (768, 33, true),
+            (896, 64, false),
+            (0, 1, false),
+            (1024, 9, false),
+            (1152, 64, false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (offset, width, is_4state))| VcdSignalDesc {
+            scope: format!("scope{}", index % 2),
+            name: format!("s{index}"),
+            offset,
+            width,
+            is_4state,
+        })
+        .collect::<Vec<_>>();
+        let external_descs = [1, 64, 65]
+            .into_iter()
+            .enumerate()
+            .map(|(index, width)| VcdExternalSignalDesc {
+                scope: "component".into(),
+                name: format!("e{index}"),
+                width,
+            })
+            .collect::<Vec<_>>();
+        let mut sparse = VcdWriter::from_writer(Vec::new(), &descs);
+        let mut full = VcdWriter::from_writer(Vec::new(), &descs);
+        sparse.add_external_signals(&external_descs).unwrap();
+        full.add_external_signals(&external_descs).unwrap();
+        let mut memory = vec![0; 1216];
+        for (step, groups) in [
+            vec![],
+            vec![8, 0, 8],
+            vec![4, 2],
+            vec![12, 10],
+            vec![16, 14],
+            vec![18, 0],
+            vec![],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for &group in &groups {
+                for (index, byte) in memory[group * 64..][..64].iter_mut().enumerate() {
+                    *byte = (step * 19 + index) as u8;
+                }
+            }
+            let external = external_descs
+                .iter()
+                .map(|desc| {
+                    (
+                        (BigUint::from(step) << desc.width.saturating_sub(1))
+                            + BigUint::from(step % 2),
+                        BigUint::from(step % 3) << desc.width.saturating_sub(1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            sparse
+                .dump_with_activity((step / 2) as u64, &memory, &external, Some(&groups))
+                .unwrap();
+            full.dump_with_external((step / 2) as u64, &memory, &external)
+                .unwrap();
+        }
+        // Re-registering the same external descriptors remains idempotent.
+        sparse.add_external_signals(&external_descs).unwrap();
+        assert!(sparse.statistics().comparisons < full.statistics().comparisons);
+        let parse = |bytes: Vec<u8>| {
+            let mut parser = vcd::Parser::new(bytes.as_slice());
+            parser.parse_header().unwrap();
+            parser.map(Result::unwrap).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse(sparse.into_inner().unwrap()),
+            parse(full.into_inner().unwrap())
+        );
+    }
+
+    #[test]
+    fn typed_plan_checks_each_dump_and_only_requires_selected_memory() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let descs = [
+            (0, 64, false),
+            (64, 1, false),
+            (128, 64, false),
+            (192, 64, true),
+            (256, 65, false),
+            (320, 64, false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (offset, width, is_4state))| VcdSignalDesc {
+            scope: "top".into(),
+            name: format!("s{index}"),
+            offset,
+            width,
+            is_4state,
+        })
+        .collect::<Vec<_>>();
+        let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+        writer
+            .dump_with_activity(0, &[0; 328], &[], Some(&[]))
+            .unwrap();
+        writer.dump_with_activity(1, &[], &[], Some(&[])).unwrap();
+        writer
+            .dump_with_activity(2, &[1; 8], &[], Some(&[0]))
+            .unwrap();
+        writer
+            .dump_with_activity(3, &[1; 65], &[], Some(&[1]))
+            .unwrap();
+        assert_eq!(writer.statistics().comparisons, 8);
+        for (group, short_len) in [(0, 7), (1, 64), (2, 135), (3, 207), (4, 264)] {
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    writer
+                        .dump_with_activity(4, &vec![0; short_len], &[], Some(&[group]))
+                        .unwrap();
+                }))
+                .is_err()
+            );
+        }
+        assert!(catch_unwind(AssertUnwindSafe(|| writer.dump(5, &[0; 327]).unwrap())).is_err());
+        let overflowing = VcdSignalDesc {
+            offset: usize::MAX,
+            ..descs[0].clone()
+        };
+        assert!(catch_unwind(|| VcdWriter::from_writer(Vec::new(), &[overflowing])).is_err());
+    }
+
+    #[test]
+    fn initial_snapshot_is_retried_after_a_record_write_error() {
+        #[derive(Default)]
+        struct FailRecordOnce {
+            bytes: Vec<u8>,
+            fail: bool,
+        }
+        impl Write for FailRecordOnce {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.fail
+                    && self.bytes.last() == Some(&b'\n')
+                    && matches!(bytes.first(), Some(b'0' | b'1' | b'b'))
+                {
+                    self.fail = false;
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let descs = [64, 1, 9, 64]
+            .into_iter()
+            .enumerate()
+            .map(|(index, width)| VcdSignalDesc {
+                scope: "top".into(),
+                name: format!("s{index}"),
+                offset: index * 64,
+                width,
+                is_4state: false,
+            })
+            .collect::<Vec<_>>();
+        let mut writer = VcdWriter::from_writer(FailRecordOnce::default(), &descs);
+        writer.output.writer = BufWriter::with_capacity(1, FailRecordOnce::default());
+        writer.write_header().unwrap();
+        writer.flush().unwrap();
+        writer.output.writer.get_mut().fail = true;
+        assert!(
+            writer
+                .dump_with_activity(1, &[0; 200], &[], Some(&[]))
+                .is_err()
+        );
+        assert!(!writer.initial_values_written);
+        writer
+            .dump_with_activity(2, &[0; 200], &[], Some(&[]))
+            .unwrap();
+        assert!(writer.initial_values_written);
+        assert_eq!(writer.statistics().changes, 4);
+        assert_eq!(writer.statistics().comparisons, 5);
+        assert_eq!(
+            changes(&writer.into_inner().unwrap().bytes),
+            vec![(2, "0".into()); 4]
+        );
+    }
+
+    #[test]
+    fn comparison_statistics_count_the_visited_prefix_on_io_error() {
+        #[derive(Default)]
+        struct FailAfterRecord {
+            bytes: Vec<u8>,
+            remaining: Option<usize>,
+        }
+        impl Write for FailAfterRecord {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.bytes.last() == Some(&b'\n')
+                    && matches!(bytes.first(), Some(b'0' | b'1' | b'b'))
+                    && let Some(remaining) = &mut self.remaining
+                {
+                    if *remaining == 0 {
+                        self.remaining = None;
+                        return Err(std::io::ErrorKind::BrokenPipe.into());
+                    }
+                    *remaining -= 1;
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for width in [1, 64, 9] {
+            let descs = (0..8)
+                .map(|index| VcdSignalDesc {
+                    scope: "top".into(),
+                    name: format!("s{index}"),
+                    offset: index * 16,
+                    width,
+                    is_4state: false,
+                })
+                .collect::<Vec<_>>();
+            let mut writer = VcdWriter::from_writer(FailAfterRecord::default(), &descs);
+            writer.output.writer = BufWriter::with_capacity(1, FailAfterRecord::default());
+            let mut memory = [0; 128];
+            writer.dump(0, &memory).unwrap();
+            writer.flush().unwrap();
+            memory[0] = 1;
+            memory[4 * 16] = 1;
+            writer.output.writer.get_mut().remaining = Some(1);
+            assert!(writer.dump(1, &memory).is_err());
+            // Visit indices 0 through 4, including the three unchanged values.
+            assert_eq!(writer.statistics().comparisons, 8 + 5, "width={width}");
+            assert_eq!(writer.statistics().changes, 8 + 1, "width={width}");
         }
     }
 
