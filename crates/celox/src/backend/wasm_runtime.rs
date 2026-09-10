@@ -106,6 +106,9 @@ impl super::traits::SimBackend for WasmBackend {
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         WasmBackend::memory_as_mut_ptr(self)
     }
+    fn vcd_tracking_enabled(&self) -> bool {
+        !self.raw_view_exposed
+    }
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         WasmBackend::runtime_event_buffer_as_ptr(self)
     }
@@ -142,6 +145,7 @@ impl super::traits::SimBackend for WasmBackend {
 pub struct WasmBackend {
     store: Store<()>,
     memory: Memory,
+    raw_view_exposed: bool,
     comb_func: TypedFunc<(), i64>,
     event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
@@ -373,6 +377,7 @@ impl WasmBackend {
         Ok(Self {
             store,
             memory,
+            raw_view_exposed: false,
             comb_func,
             event_funcs,
             eval_only_funcs,
@@ -574,7 +579,7 @@ impl WasmBackend {
     }
 
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        celox_runtime::backend::SimBackend::disable_vcd_tracking(self);
+        self.raw_view_exposed = true;
         let data = self.memory.data_mut(&mut self.store);
         (data.as_mut_ptr(), self.layout.merged_total_size)
     }

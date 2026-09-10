@@ -934,9 +934,8 @@ impl JitBackend {
 
     /// Returns a mutable raw pointer to the JIT memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        celox_runtime::backend::SimBackend::disable_vcd_tracking(self);
         let size = self.shared.layout.merged_total_size;
-        (self.memory.as_mut_ptr() as *mut u8, size)
+        (self.memory.expose_mut_ptr() as *mut u8, size)
     }
 
     pub fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
@@ -1120,6 +1119,10 @@ impl super::SimBackend for JitBackend {
 
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         Some(self.memory.owner())
+    }
+
+    fn vcd_tracking_enabled(&self) -> bool {
+        self.memory.vcd_tracking_enabled()
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {

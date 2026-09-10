@@ -621,7 +621,10 @@ fn apply_options<'a, T>(
     builder = builder.four_state(opts.four_state);
     builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.cranelift_options(opts.cranelift_options);
-    // VCD is handled separately after build — not passed to SimulatorBuilder
+    // VCD changes the layout and generated stores, so enable it before building.
+    if let Some(path) = opts.vcd.as_deref() {
+        builder = builder.vcd(path);
+    }
     for (from, to) in &opts.false_loops {
         builder = builder.false_loop(from.clone(), to.clone());
     }
@@ -680,6 +683,7 @@ struct CacheKey {
     sources: Vec<(String, String)>,
     top: String,
     four_state: bool,
+    vcd_tracking: bool,
     sir_optimization: SirOptimizationCacheKey,
     cranelift_opt_level: u8,
     regalloc_algorithm: u8,
@@ -753,6 +757,7 @@ fn build_cache_key(
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,
+        vcd_tracking: opts.vcd.is_some(),
         sir_optimization: SirOptimizationCacheKey::from(&opts.optimize_options),
         cranelift_opt_level: opts.cranelift_options.opt_level as u8,
         regalloc_algorithm: opts.cranelift_options.regalloc_algorithm as u8,
@@ -879,13 +884,6 @@ impl HandleBackend {
                 let event = backend.id_to_event_slice()[event_id];
                 backend.eval_apply_ff_at(event)
             }
-        }
-    }
-
-    fn memory_as_ptr(&self) -> (*const u8, usize) {
-        match self {
-            Self::Default(backend) => backend.memory_as_ptr(),
-            Self::Tiered(backend) => backend.memory_as_ptr(),
         }
     }
 
@@ -1171,13 +1169,7 @@ impl NativeSimulatorHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
-        // Forward VCD before building: tiered layout selection must know that
-        // recording was requested so it picks the packed layout the VCD
-        // descriptors require (see `build_and_cache_tiered`).
-        if let Some(path) = opts.vcd.as_deref() {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1207,16 +1199,10 @@ impl NativeSimulatorHandle {
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
-        let mut builder = apply_options(
+        let builder = apply_options(
             celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
-        // Forward VCD before building: tiered layout selection must know that
-        // recording was requested so it picks the packed layout the VCD
-        // descriptors require (see `build_and_cache_tiered`).
-        if let Some(path) = opts.vcd.as_deref() {
-            builder = builder.vcd(path);
-        }
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1386,14 +1372,18 @@ impl NativeSimulatorHandle {
     pub fn dump(&mut self, timestamp: f64) -> Result<()> {
         let b = self
             .backend
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         if let Some(ref mut writer) = self.vcd_writer {
-            let (ptr, size) = b.memory_as_ptr();
-            let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
-            writer
-                .dump(timestamp as u64, memory)
-                .map_err(|e| Error::from_reason(format!("VCD write error: {}", e)))?;
+            match b {
+                HandleBackend::Default(backend) => {
+                    writer.dump_backend(timestamp as u64, backend, &[])
+                }
+                HandleBackend::Tiered(backend) => {
+                    writer.dump_backend(timestamp as u64, backend.as_mut(), &[])
+                }
+            }
+            .map_err(|e| Error::from_reason(format!("VCD write error: {}", e)))?;
         }
         Ok(())
     }
@@ -1463,10 +1453,7 @@ impl NativeSimulationHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1510,10 +1497,7 @@ impl NativeSimulationHandle {
         let opts = parse_options(&options)?;
         let artifact = celox::FrontendArtifact::from_json(&artifact_json)
             .map_err(|error| Error::from_reason(error.to_string()))?;
-        let mut builder = apply_options(celox::Simulation::from_frontend(artifact), &opts);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulation::from_frontend(artifact), &opts);
         let sim = builder
             .build()
             .map_err(|error| Error::from_reason(error.to_string()))?;
@@ -1562,13 +1546,10 @@ impl NativeSimulationHandle {
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
-        let mut builder = apply_options(
+        let builder = apply_options(
             celox::Simulation::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -3327,6 +3308,76 @@ mod tests {
     }
 
     #[test]
+    fn native_handle_dumps_consume_activity_until_memory_is_exposed() {
+        let source = "module Top (
+            clk: input clock, q: output logic<64>,
+            a: input logic<512>, b: input logic<512>, c: input logic<512>,
+        ) { always_ff (clk) { q += 1; } }";
+        let dir = tempfile::tempdir().unwrap();
+        // Warm the uninstrumented cache first. A traced build must not reuse it.
+        NativeSimulatorHandle::new(napi_sources(source), "Top".into(), None)
+            .unwrap()
+            .dispose()
+            .unwrap();
+        for mode in ["fresh", "cached", "tiered"] {
+            let path = dir.path().join(format!("{mode}.vcd"));
+            let options = Some(NapiOptions {
+                vcd: Some(path.to_str().unwrap().to_owned()),
+                four_state: None,
+                opt_level: None,
+                pass_overrides: None,
+                optimize: None,
+                optimize_options: None,
+                cranelift_opt_level: None,
+                regalloc_algorithm: None,
+                enable_alias_analysis: None,
+                enable_verifier: None,
+                false_loops: None,
+                true_loops: None,
+                clock_type: None,
+                reset_type: None,
+                extra_source: None,
+                parameters: None,
+                dead_store_policy: None,
+            });
+            let mut handle = if mode == "tiered" {
+                NativeSimulatorHandle::new_tiered(napi_sources(source), "Top".into(), options)
+            } else {
+                NativeSimulatorHandle::new(napi_sources(source), "Top".into(), options)
+            }
+            .unwrap();
+            handle.dump(0.0).unwrap();
+            let initial = handle.vcd_writer.as_ref().unwrap().statistics();
+            assert!(initial.comparisons > 0);
+            handle.dump(1.0).unwrap();
+            assert_eq!(
+                handle.vcd_writer.as_ref().unwrap().statistics().comparisons,
+                initial.comparisons,
+                "{mode}: idle dumps must not rescan memory"
+            );
+            handle.tick(0).unwrap();
+            handle.dump(2.0).unwrap();
+            let changed = handle.vcd_writer.as_ref().unwrap().statistics();
+            assert!(changed.changes > initial.changes);
+            assert!(changed.comparisons - initial.comparisons < initial.comparisons);
+            handle.dump(3.0).unwrap();
+            assert_eq!(
+                handle.vcd_writer.as_ref().unwrap().statistics().comparisons,
+                changed.comparisons
+            );
+            // shared_memory() obtains its pointer through this same dispatch.
+            handle.backend.as_mut().unwrap().memory_as_mut_ptr();
+            handle.dump(4.0).unwrap();
+            assert_eq!(
+                handle.vcd_writer.as_ref().unwrap().statistics().comparisons,
+                changed.comparisons + initial.comparisons
+            );
+            handle.dispose().unwrap();
+            assert!(std::fs::read_to_string(path).unwrap().contains("\nb1 "));
+        }
+    }
+
+    #[test]
     fn standard_event_metadata_is_dense_and_valid_ids_still_work() {
         let mut simulator =
             NativeSimulatorHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
@@ -3593,13 +3644,18 @@ mod tests {
     }
 
     #[test]
-    fn non_compilation_options_ignored() {
+    fn vcd_paths_share_compiled_code_but_tracing_modes_do_not() {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        // VCD path doesn't affect compilation
+        // VCD instrumentation affects compilation, but its destination does not.
         o1.common.vcd = None;
         o2.common.vcd = Some("/tmp/dump.vcd".into());
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
+        );
+        o1.common.vcd = Some("/tmp/another.vcd".into());
         assert_eq!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),

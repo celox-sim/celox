@@ -2685,12 +2685,18 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        celox_runtime::backend::SimBackend::disable_vcd_tracking(self);
-        (self.mem_mut_ptr(), self.memory.len_words() * 8)
+        (
+            self.memory.expose_mut_ptr().cast(),
+            self.memory.len_words() * 8,
+        )
     }
 
     fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         Some(self.memory.owner())
+    }
+
+    fn vcd_tracking_enabled(&self) -> bool {
+        self.memory.vcd_tracking_enabled()
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {

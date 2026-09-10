@@ -118,9 +118,13 @@ pub struct VcdWriter<W: Write = File> {
 
 struct VcdOutput<W: Write> {
     writer: BufWriter<W>,
-    /// Complete value records accumulated for a bulk write. Successful dumps
-    /// always hand the tail to BufWriter so flush and Drop own pending output.
+    /// Complete records accepted by the encoder. Retained on I/O errors because
+    /// the trace plan already caches their values. Headers and timestamps also
+    /// use this queue, and are drained before any value records are appended.
+    /// Successful dumps hand the tail to BufWriter so Drop owns pending output.
     encoded: Vec<u8>,
+    /// Bytes already accepted by BufWriter, including short writes before an error.
+    written: usize,
     encoded_changes: u64,
     stats: VcdStatistics,
 }
@@ -153,6 +157,7 @@ impl<W: Write> VcdWriter<W> {
             output: VcdOutput {
                 writer: BufWriter::with_capacity(256 * 1024, writer),
                 encoded: Vec::new(),
+                written: 0,
                 encoded_changes: 0,
                 stats: VcdStatistics::default(),
             },
@@ -170,6 +175,7 @@ impl<W: Write> VcdWriter<W> {
 
     /// Publish buffered output, also reporting errors that Drop cannot report.
     pub fn flush(&mut self) -> std::io::Result<()> {
+        self.output.write_encoded()?;
         self.output.writer.flush()
     }
 
@@ -265,17 +271,17 @@ impl<W: Write> VcdWriter<W> {
 
     #[cold]
     fn write_header(&mut self) -> std::io::Result<()> {
-        writeln!(self.output.writer, "$date")?;
+        writeln!(self.output.encoded, "$date")?;
         writeln!(
-            self.output.writer,
+            self.output.encoded,
             "  {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         )?;
-        writeln!(self.output.writer, "$end")?;
-        writeln!(self.output.writer, "$version")?;
-        writeln!(self.output.writer, "  celox")?;
-        writeln!(self.output.writer, "$end")?;
-        writeln!(self.output.writer, "$timescale 1ns $end")?;
+        writeln!(self.output.encoded, "$end")?;
+        writeln!(self.output.encoded, "$version")?;
+        writeln!(self.output.encoded, "  celox")?;
+        writeln!(self.output.encoded, "$end")?;
+        writeln!(self.output.encoded, "$timescale 1ns $end")?;
 
         let mut scope_order = Vec::<String>::new();
         let mut scope_groups = Vec::<Vec<usize>>::new();
@@ -292,24 +298,24 @@ impl<W: Write> VcdWriter<W> {
         }
         let mut next_id = 0;
         for (scope, group) in scope_order.iter().zip(scope_groups) {
-            writeln!(self.output.writer, "$scope module {} $end", scope)?;
+            writeln!(self.output.encoded, "$scope module {} $end", scope)?;
             for signal_index in group {
                 let signal = &mut self.headers[signal_index];
                 let id = Self::generate_vcd_id(next_id);
                 *self.plan.suffix(signal_index) = VcdRecordSuffix::new(signal.width, &id);
                 next_id += 1;
                 writeln!(
-                    self.output.writer,
+                    self.output.encoded,
                     "$var wire {} {} {} $end",
                     signal.width, id, signal.name
                 )?;
             }
-            writeln!(self.output.writer, "$upscope $end")?;
+            writeln!(self.output.encoded, "$upscope $end")?;
         }
-        writeln!(self.output.writer, "$enddefinitions $end")?;
-        writeln!(self.output.writer, "$dumpvars")?;
-        writeln!(self.output.writer, "$end")?;
-        if let Some(max_record) = self
+        writeln!(self.output.encoded, "$enddefinitions $end")?;
+        writeln!(self.output.encoded, "$dumpvars")?;
+        writeln!(self.output.encoded, "$end")?;
+        let record_capacity = self
             .headers
             .iter()
             .enumerate()
@@ -319,16 +325,22 @@ impl<W: Write> VcdWriter<W> {
                     + self.plan.suffix(index).capacity()
             })
             .max()
-        {
+            .map(|max_record| self.output.writer.capacity() + max_record);
+        if let Some(capacity) = record_capacity {
             // A block can cross the writer's capacity by one complete record.
             // Include the short suffix's padding, even for scalar-only traces.
             // Integer SIMD stores also fit within the full declared width.
             // Reserve here so record encoding never needs to grow the Vec.
             self.output
                 .encoded
-                .reserve(self.output.writer.capacity() + max_record);
+                .reserve(capacity.saturating_sub(self.output.encoded.len()));
         }
         self.header_written = true;
+        self.output.write_encoded()?;
+        if let Some(capacity) = record_capacity {
+            // A large header must not permanently enlarge the value buffer.
+            self.output.encoded.shrink_to(capacity);
+        }
         Ok(())
     }
 
@@ -384,16 +396,18 @@ impl<W: Write> VcdWriter<W> {
         activity: Option<&[usize]>,
     ) -> std::io::Result<()> {
         self.validate_external_count(external.len())?;
+        // Finish the previous attempt before starting a new timestamp or
+        // consulting caches that include its queued value records.
+        self.output.write_encoded()?;
         let first_dump = !self.initial_values_written;
         if !self.header_written {
             self.write_header()?;
         }
         if timestamp > self.timestamp || timestamp == 0 {
-            writeln!(self.output.writer, "#{}", timestamp)?;
+            writeln!(self.output.encoded, "#{}", timestamp)?;
             self.timestamp = timestamp;
+            self.output.write_encoded()?;
         }
-        self.output.encoded.clear();
-        self.output.encoded_changes = 0;
         self.selected.clear();
         // Dense activity is cheaper to walk directly in registration order.
         let sparse = activity
@@ -448,17 +462,42 @@ impl<W: Write> VcdOutput<W> {
         Ok(())
     }
 
+    #[inline]
     fn write_encoded(&mut self) -> std::io::Result<()> {
         if !self.encoded.is_empty() {
             // Full blocks bypass BufWriter's internal copy. A dump's final
             // partial block stays buffered with the timestamps and header.
-            self.writer.write_all(&self.encoded)?;
-            self.stats.changes += self.encoded_changes;
-            self.stats.value_bytes += self.encoded.len() as u64;
+            // Unlike write_all, retain progress if a later short write fails.
+            let remaining = &self.encoded[self.written..];
+            match self.writer.write(remaining) {
+                Ok(count) if count == remaining.len() => {}
+                result => self.finish_short_write(result)?,
+            }
+            if self.encoded_changes != 0 {
+                self.stats.changes += self.encoded_changes;
+                self.stats.value_bytes += self.encoded.len() as u64;
+            }
             self.encoded.clear();
+            self.written = 0;
             self.encoded_changes = 0;
         }
         Ok(())
+    }
+
+    #[cold]
+    fn finish_short_write(&mut self, mut result: std::io::Result<usize>) -> std::io::Result<()> {
+        loop {
+            match result {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(count) => self.written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+            if self.written == self.encoded.len() {
+                return Ok(());
+            }
+            result = self.writer.write(&self.encoded[self.written..]);
+        }
     }
 }
 
@@ -1161,11 +1200,16 @@ mod encoding_tests {
             .dump_with_activity(2, &[0; 200], &[], Some(&[]))
             .unwrap();
         assert!(writer.initial_values_written);
-        assert_eq!(writer.statistics().changes, 4);
+        // Finish the accepted record at its original time, then repeat the
+        // incomplete initial snapshot in full at the retry's timestamp.
+        assert_eq!(writer.statistics().changes, 5);
         assert_eq!(writer.statistics().comparisons, 5);
         assert_eq!(
             changes(&writer.into_inner().unwrap().bytes),
-            vec![(2, "0".into()); 4]
+            [(1, "0".into())]
+                .into_iter()
+                .chain(vec![(2, "0".into()); 4])
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1307,6 +1351,137 @@ mod encoding_tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_value_blocks_resume_without_losing_cached_transitions() {
+        for width in [1usize, 64, 9, 65, 256 * 1024 + 17] {
+            for four_state in [false, true] {
+                for capacity in [1, 64] {
+                    for accepted in [0, 1, 31] {
+                        let count = if width > 1024 { 2 } else { 80 };
+                        let stride = width.div_ceil(8) * if four_state { 2 } else { 1 };
+                        let descs = (0..count)
+                            .map(|index| VcdSignalDesc {
+                                scope: "top".into(),
+                                name: format!("s{index}"),
+                                offset: index * stride,
+                                width,
+                                is_4state: four_state,
+                            })
+                            .collect::<Vec<_>>();
+                        let mut memory = vec![0; count * stride];
+                        let mut writer = VcdWriter::from_writer(ShortWrites::default(), &descs);
+                        writer.output.writer =
+                            BufWriter::with_capacity(capacity, ShortWrites::default());
+                        let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+                        writer.dump(0, &memory).unwrap();
+                        writer.flush().unwrap();
+                        reference.dump(0, &memory).unwrap();
+
+                        // Fail before accepting a value block, or after a short
+                        // prefix of it. A block may contain several cache updates.
+                        let limit = writer.get_ref().bytes.len() + b"#1\n".len() + accepted;
+                        writer.output.writer.get_mut().fail_after = Some(limit);
+                        memory.fill(0xff);
+                        for _ in 0..2 {
+                            assert_eq!(
+                                writer.dump(1, &memory).unwrap_err().kind(),
+                                std::io::ErrorKind::BrokenPipe
+                            );
+                        }
+                        writer.output.writer.get_mut().fail_after = None;
+                        writer.dump(1, &memory).unwrap();
+                        reference.dump(1, &memory).unwrap();
+                        // Also check that recovery leaves the caches current.
+                        writer.dump(2, &memory).unwrap();
+                        reference.dump(2, &memory).unwrap();
+                        assert_eq!(writer.statistics().changes, reference.statistics().changes);
+                        assert_eq!(
+                            writer.statistics().value_bytes,
+                            reference.statistics().value_bytes
+                        );
+                        assert_eq!(
+                            changes(&writer.into_inner().unwrap().bytes),
+                            changes(&reference.into_inner().unwrap()),
+                            "width={width}, four_state={four_state}, capacity={capacity}, accepted={accepted}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_value_records_finish_before_the_next_timestamp() {
+        for flush_first in [false, true] {
+            let descs = (0..4)
+                .map(|index| VcdSignalDesc {
+                    scope: "top".into(),
+                    name: format!("s{index}"),
+                    offset: index * 8,
+                    width: 64,
+                    is_4state: false,
+                })
+                .collect::<Vec<_>>();
+            let mut writer = VcdWriter::from_writer(ShortWrites::default(), &descs);
+            // Keep the unwritten suffix larger than BufWriter's capacity so it
+            // cannot accept another record before surfacing the injected error.
+            writer.output.writer = BufWriter::with_capacity(1, ShortWrites::default());
+            writer.dump(0, &[0; 32]).unwrap();
+            writer.flush().unwrap();
+            let limit = writer.get_ref().bytes.len() + b"#1\n".len() + 7;
+            writer.output.writer.get_mut().fail_after = Some(limit);
+            assert!(writer.dump(1, &[0xff; 32]).is_err());
+            writer.output.writer.get_mut().fail_after = None;
+            if flush_first {
+                writer.flush().unwrap();
+            }
+            // The memory has changed again since the failed attempt. The old
+            // queued record must finish at #1, followed by the new value at #2.
+            writer.dump(2, &[0; 32]).unwrap();
+            let mut expected = vec![(0, "0".to_owned()); 4];
+            expected.extend([(1, "1".repeat(64)), (2, "0".into())]);
+            assert_eq!(changes(&writer.into_inner().unwrap().bytes), expected);
+        }
+    }
+
+    #[test]
+    fn header_and_timestamp_resume_after_partial_writes() {
+        let desc = VcdSignalDesc {
+            scope: "top".into(),
+            name: "q".into(),
+            offset: 0,
+            width: 64,
+            is_4state: false,
+        };
+        for accepted in [0, 1, 17] {
+            let mut writer =
+                VcdWriter::from_writer(ShortWrites::default(), std::slice::from_ref(&desc));
+            writer.output.writer = BufWriter::with_capacity(
+                1,
+                ShortWrites {
+                    fail_after: Some(accepted),
+                    ..Default::default()
+                },
+            );
+            assert!(writer.dump(0, &[0; 8]).is_err());
+            writer.output.writer.get_mut().fail_after = None;
+            writer.dump(0, &[0; 8]).unwrap();
+            writer.flush().unwrap();
+            let limit = writer.get_ref().bytes.len() + 2;
+            writer.output.writer.get_mut().fail_after = Some(limit);
+            assert!(writer.dump(123, &[1; 8]).is_err());
+            writer.output.writer.get_mut().fail_after = None;
+            writer.dump(123, &[1; 8]).unwrap();
+            assert_eq!(
+                changes(&writer.into_inner().unwrap().bytes),
+                [
+                    (0, "0".to_owned()),
+                    (123, format!("{:b}", u64::from_le_bytes([1; 8])))
+                ],
+            );
         }
     }
 

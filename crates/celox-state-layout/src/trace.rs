@@ -13,9 +13,6 @@ pub struct TraceLayout {
     pub group_count: usize,
     pub summary_offset: usize,
     pub summary_count: usize,
-    /// Nonzero after a mutable raw view escapes. Such views can change without
-    /// any generated notification, so observers must keep scanning all values.
-    pub untracked_offset: usize,
     /// Disjoint physical homes, including both planes and element padding.
     homes: Vec<(usize, usize)>,
 }
@@ -40,13 +37,12 @@ impl TraceLayout {
             group_count,
             summary_offset: offset + group_count,
             summary_count,
-            untracked_offset: offset + group_count + summary_count,
             homes: merged,
         }
     }
 
     pub fn end_offset(&self) -> usize {
-        self.untracked_offset + 1
+        self.summary_offset + self.summary_count
     }
 
     pub fn validate(
@@ -59,8 +55,10 @@ impl TraceLayout {
             && self.summary_count == self.group_count.div_ceil(GROUPS_PER_SUMMARY)
             && self.flags_offset >= metadata_start
             && self.flags_offset.checked_add(self.group_count) == Some(self.summary_offset)
-            && self.summary_offset.checked_add(self.summary_count) == Some(self.untracked_offset)
-            && self.untracked_offset < scratch_start
+            && self
+                .summary_offset
+                .checked_add(self.summary_count)
+                .is_some_and(|end| end <= scratch_start)
             && self
                 .homes
                 .iter()
@@ -112,9 +110,8 @@ impl TraceLayout {
 
     /// Consume only nonempty groups. Clock trigger clearing never touches this
     /// region. The caller owns the reusable result allocation.
-    pub fn take(&self, memory: &mut [u8], groups: &mut Vec<usize>) -> bool {
+    pub fn take(&self, memory: &mut [u8], groups: &mut Vec<usize>) {
         groups.clear();
-        let tracked = memory[self.untracked_offset] == 0;
         let (prefix, summaries) = memory.split_at_mut(self.summary_offset);
         let flags = &mut prefix[self.flags_offset..][..self.group_count];
         take_nonzero(&mut summaries[..self.summary_count], |summary| {
@@ -123,7 +120,6 @@ impl TraceLayout {
             let len = flags.len().min(GROUPS_PER_SUMMARY);
             take_nonzero(&mut flags[..len], |index| groups.push(start + index));
         });
-        tracked
     }
 }
 
@@ -220,7 +216,6 @@ mod tests {
                         memory[trace.summary_offset] = 0xff;
                         memory[trace.summary_offset + 1] = 0;
                     }
-                    memory[trace.untracked_offset] = (pattern % 2) as u8;
                     let mut expected_memory = memory.clone();
                     let mut expected_groups = vec![];
                     for summary in 0..trace.summary_count {
@@ -238,13 +233,13 @@ mod tests {
                         }
                     }
                     let mut groups = vec![usize::MAX];
-                    assert_eq!(trace.take(&mut memory, &mut groups), pattern % 2 == 0);
+                    trace.take(&mut memory, &mut groups);
                     assert_eq!(groups, expected_groups);
                     // This also checks untouched state/clock bytes and the byte
                     // immediately following the last (possibly partial) group.
                     assert_eq!(memory, expected_memory);
                     groups.push(usize::MAX);
-                    assert_eq!(trace.take(&mut memory, &mut groups), pattern % 2 == 0);
+                    trace.take(&mut memory, &mut groups);
                     assert!(groups.is_empty());
                     assert_eq!(memory, expected_memory);
                 }
@@ -267,12 +262,9 @@ mod tests {
             trace.mark_home(memory.as_mut_ptr(), 4096);
         }
         let mut groups = vec![];
-        assert!(trace.take(&mut memory, &mut groups));
+        trace.take(&mut memory, &mut groups);
         assert_eq!(groups, [0, 8, 64]);
-        assert!(trace.take(&mut memory, &mut groups));
+        trace.take(&mut memory, &mut groups);
         assert!(groups.is_empty());
-        memory[trace.untracked_offset] = 1;
-        assert!(!trace.take(&mut memory, &mut groups));
-        assert!(!trace.take(&mut memory, &mut groups));
     }
 }

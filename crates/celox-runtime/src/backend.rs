@@ -79,6 +79,8 @@ pub trait SimBackend {
 
     // ── memory / layout ─────────────────────────────────────────
     fn memory_as_ptr(&self) -> (*const u8, usize);
+    /// Exposing a retained writable view must permanently disable sparse VCD
+    /// tracking in backend-owned state outside the returned memory range.
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
     /// Return an opaque owner that keeps the memory allocation alive.
     ///
@@ -109,10 +111,19 @@ pub trait SimBackend {
     fn mark_triggered_bit(&mut self, id: usize);
     fn get_triggered_bits(&self) -> bit_set::BitSet;
 
+    /// Opt into generated write notifications only while no raw mutable view
+    /// has escaped. The default keeps other backend implementations correct.
+    fn vcd_tracking_enabled(&self) -> bool {
+        false
+    }
+
     /// Consume waveform activity independently of clock trigger processing.
     /// Returns false when full scanning is required (including raw host views).
     fn take_vcd_activity(&mut self, groups: &mut Vec<usize>) -> bool {
         groups.clear();
+        if !self.vcd_tracking_enabled() {
+            return false;
+        }
         let Some(trace) = self.layout().trace.as_ref() else {
             return false;
         };
@@ -120,7 +131,8 @@ pub trait SimBackend {
         // SAFETY: &mut self excludes execution/host access during consumption;
         // the backend memory contract exposes this same writable state image.
         let memory = unsafe { std::slice::from_raw_parts_mut(ptr.cast_mut(), size) };
-        trace.take(memory, groups)
+        trace.take(memory, groups);
+        true
     }
 
     /// Called by host setters, which share the generated-store notification ABI.
@@ -134,17 +146,6 @@ pub trait SimBackend {
             // SAFETY: layout homes and metadata fit in the writable state image.
             unsafe {
                 trace.mark_range(ptr.cast_mut(), signal.offset, len);
-            }
-        }
-    }
-
-    /// Raw mutable views can outlive this call and bypass every store observer.
-    fn disable_vcd_tracking(&mut self) {
-        if let Some(trace) = self.layout().trace.as_ref() {
-            let (ptr, _) = self.memory_as_ptr();
-            // SAFETY: &mut self excludes execution; the offset is layout-owned.
-            unsafe {
-                *ptr.cast_mut().add(trace.untracked_offset) = 1;
             }
         }
     }

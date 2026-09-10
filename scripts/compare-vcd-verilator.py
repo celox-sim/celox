@@ -200,6 +200,68 @@ def validate_waveform(path, expected):
             "file_bytes": path.stat().st_size}
 
 
+def validate_reused_builds(previous, current):
+    # Compare the complete recorded build context, including the runner that
+    # selects flags. Timing-only options may change without relabeling a build.
+    for key in ("source_sha256", "verilator", "cxx", "rustc", "git_head",
+                "git_status", "git_diff_sha256", "environment", "build_commands"):
+        if key not in previous or previous[key] != current[key]:
+            raise ValueError(f"cached {key} differs; omit --reuse-builds")
+    for key in ("signals", "celox", "baseline_celox"):
+        if previous.get("options", {}).get(key) != current["options"][key]:
+            raise ValueError(f"cached {key} differs; omit --reuse-builds")
+    commands = [build["command"] for build in previous.get("builds", [])]
+    if commands != current["build_commands"] or not previous.get("binaries"):
+        raise ValueError("cached build history is incomplete or differs; omit --reuse-builds")
+    for binary, expected_hash in previous["binaries"].items():
+        if not Path(binary).is_file() or digest(Path(binary)) != expected_hash:
+            raise ValueError(f"{binary} changed; omit --reuse-builds")
+
+
+def plan_builds(args, verilator, output):
+    commands = {}
+    if not args.celox:
+        commands["build-celox"] = ["cargo", "bench", "--locked", "-p", "celox", "--bench", "vcd",
+                                   "--no-run", "--message-format=json"]
+    for pattern in args.patterns:
+        folder = output / pattern
+        for traced in (False, True):
+            label = f"{pattern}-{'traced' if traced else 'off'}"
+            obj = folder / ("obj_traced" if traced else "obj_off")
+            command = [verilator, "--cc", "-O3", "--threads", "1", "--top-module", "Top",
+                       "--Mdir", str(obj), "--exe", str(HARNESS), str(folder / "Top.sv"),
+                       "-CFLAGS", f"-O3 -flto -I{folder}", "-LDFLAGS", "-flto"]
+            if traced:
+                command.extend(("--trace-vcd", "--no-trace-top", "--no-trace-params"))
+            commands[f"generate-{label}"] = command
+            commands[f"build-{label}"] = ["make", "-C", str(obj), "-f", "VTop.mk", f"-j{args.jobs}",
+                                          "OPT_FAST=-O3", "OPT_SLOW=-O3", "OPT_GLOBAL=-O3"]
+    return commands
+
+
+def build_environment(environment):
+    names = {"RUST_MIN_STACK", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS",
+             "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTUP_TOOLCHAIN",
+             "CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "CC", "CXX", "AR", "CFLAGS", "CXXFLAGS",
+             "CPPFLAGS", "LDFLAGS", "MAKEFLAGS", "VERILATOR_ROOT", "VERILATOR_BIN"}
+    return {key: value for key, value in environment.items()
+            if key in names or key.startswith("CARGO_PROFILE_BENCH_")
+            or (key.startswith("CARGO_TARGET_") and key.endswith(("_RUSTFLAGS", "_LINKER", "_AR")))}
+
+
+def source_digests():
+    sources = {HARNESS, RUST_BENCH, Path(__file__).resolve()}
+    # The git diff below covers tracked edits. Include untracked build inputs
+    # too: changing their contents need not change `git status --porcelain`.
+    untracked = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--",
+         "crates", "vendor", ".cargo", "benches/verilator", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"],
+        cwd=ROOT,
+    )
+    sources.update(ROOT / os.fsdecode(path) for path in untracked.split(b"\0") if path)
+    return {str(path.relative_to(ROOT)): digest(path) for path in sorted(sources) if path.is_file()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verilator", default=shutil.which("verilator"))
@@ -230,6 +292,7 @@ def main():
     environment = {key: value for key, value in os.environ.items() if not key.startswith("VCD_")}
     # Large generated port lists also need more stack in frontend worker threads.
     environment["RUST_MIN_STACK"] = str(args.stack_mib * 1024 * 1024)
+    planned = plan_builds(args, verilator, output)
     manifest = {
         "options": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         "kernel": os.uname().release,
@@ -239,37 +302,40 @@ def main():
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
         "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "git_status": subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True),
-        "source_sha256": {str(path.relative_to(ROOT)): digest(path) for path in (HARNESS, RUST_BENCH, Path(__file__))},
+        "git_diff_sha256": hashlib.sha256(subprocess.check_output(
+            ["git", "diff", "HEAD", "--binary"], cwd=ROOT)).hexdigest(),
+        "source_sha256": source_digests(),
         "timing_scope": "steady-state execution and final flush; excludes construction, reset and initial snapshot",
-        "environment": {"RUST_MIN_STACK": environment["RUST_MIN_STACK"]},
+        "environment": build_environment(environment),
+        "build_commands": list(planned.values()),
         "builds": [], "validation": {}, "binaries": {}, "runs": [],
     }
 
-    def build(command, label):
+    def build(label):
+        command = planned[label]
         start = time.monotonic_ns()
         with (output / f"{label}.log").open("w") as log:
             subprocess.run(command, cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
         manifest["builds"].append({"command": command, "elapsed_ns": time.monotonic_ns() - start})
         write_json(output / "manifest.json", manifest)
 
-    if previous:
-        if previous["options"]["signals"] != args.signals or previous["verilator"] != manifest["verilator"]:
-            raise ValueError("cached build settings differ; omit --reuse-builds")
-        for source in (HARNESS, RUST_BENCH):
-            name = str(source.relative_to(ROOT))
-            if previous["source_sha256"][name] != digest(source):
-                raise ValueError(f"{name} changed; omit --reuse-builds")
-        for binary, expected_hash in previous["binaries"].items():
-            if digest(Path(binary)) != expected_hash:
-                raise ValueError(f"{binary} changed; omit --reuse-builds")
+    if previous is not None:
+        validate_reused_builds(previous, manifest)
         manifest["builds"] = previous["builds"]
         manifest["reused_builds"] = True
-        celox = args.celox.resolve() if args.celox else output / "celox-vcd"
+        # Reuse the verified snapshots, including a baseline whose original
+        # source may have aliased celox-vcd before that file was replaced.
+        celox_engines = {"celox": output / "celox-vcd"}
+        if args.baseline_celox:
+            celox_engines["baseline_celox"] = output / "celox-before"
+        for binary in celox_engines.values():
+            if str(binary) not in previous["binaries"]:
+                raise ValueError(f"no verified cached build for {binary}; omit --reuse-builds")
     elif args.celox:
         celox = args.celox.resolve()
     else:
         print("Building the Celox benchmark", flush=True)
-        build(["cargo", "bench", "--locked", "-p", "celox", "--bench", "vcd", "--no-run", "--message-format=json"], "build-celox")
+        build("build-celox")
         artifacts = []
         for line in (output / "build-celox.log").read_text().splitlines():
             if line.startswith("{"):
@@ -279,7 +345,8 @@ def main():
         if len(artifacts) != 1:
             raise ValueError("could not identify the Celox benchmark executable")
         celox = Path(artifacts[0])
-    celox_engines = cache_celox_binaries(output, celox, args.baseline_celox)
+    if previous is None:
+        celox_engines = cache_celox_binaries(output, celox, args.baseline_celox)
     for binary in celox_engines.values():
         manifest["binaries"][str(binary)] = digest(binary)
     engines = (*celox_engines, "verilator")
@@ -287,26 +354,20 @@ def main():
     for pattern in args.patterns:
         folder = output / pattern
         folder.mkdir(exist_ok=True)
-        generate_fixture(folder, args.signals, pattern == "full_width", verify_only=bool(previous))
+        generate_fixture(folder, args.signals, pattern == "full_width", verify_only=previous is not None)
         for traced in (False, True):
             label = f"{pattern}-{'traced' if traced else 'off'}"
             obj = folder / ("obj_traced" if traced else "obj_off")
             binary = obj / "VTop"
-            if previous:
+            if previous is not None:
                 if str(binary) not in previous["binaries"]:
                     raise ValueError(f"no verified cached build for {binary}; omit --reuse-builds")
                 verilated[pattern, traced] = binary
                 manifest["binaries"][str(binary)] = digest(binary)
                 continue
             print(f"Building Verilator {label}", flush=True)
-            command = [verilator, "--cc", "-O3", "--threads", "1", "--top-module", "Top",
-                       "--Mdir", str(obj), "--exe", str(HARNESS), str(folder / "Top.sv"),
-                       "-CFLAGS", f"-O3 -flto -I{folder}", "-LDFLAGS", "-flto"]
-            if traced:
-                command.extend(("--trace-vcd", "--no-trace-top", "--no-trace-params"))
-            build(command, f"generate-{label}")
-            build(["make", "-C", str(obj), "-f", "VTop.mk", f"-j{args.jobs}",
-                   "OPT_FAST=-O3", "OPT_SLOW=-O3", "OPT_GLOBAL=-O3"], f"build-{label}")
+            build(f"generate-{label}")
+            build(f"build-{label}")
             binary = obj / "VTop"
             verilated[pattern, traced] = binary
             manifest["binaries"][str(binary)] = digest(binary)

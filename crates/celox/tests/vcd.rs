@@ -455,6 +455,56 @@ mod activity {
     }
 
     #[test]
+    fn restoring_raw_memory_cannot_reenable_sparse_tracking() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path) {
+            let a = sim.signal("a");
+            let descs = sim.build_vcd_descs(false);
+            let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+            sim.dump(0);
+            let (ptr, size) = sim.memory_as_ptr();
+            // SAFETY: the backend is idle and owns the complete state image.
+            let snapshot = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+            reference.dump(0, &snapshot).unwrap();
+            let (raw, writable_size) = sim.memory_as_mut_ptr();
+            assert_eq!(size, writable_size);
+            // Restore every exposed byte, including activity metadata. Retain
+            // the same pointer for later unnotified writes, as a host may do.
+            unsafe {
+                std::ptr::copy_nonoverlapping(snapshot.as_ptr(), raw, writable_size);
+            }
+            for time in 1..4 {
+                unsafe {
+                    *raw.add(a.offset) = time as u8;
+                }
+                sim.dump(time);
+                reference
+                    .dump(time, unsafe { std::slice::from_raw_parts(raw, size) })
+                    .unwrap();
+            }
+            sim.flush_vcd().unwrap();
+            assert_eq!(
+                commands(&std::fs::read(path).unwrap()),
+                commands(&reference.into_inner().unwrap())
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw-restore.vcd");
+        let builder = || {
+            SimulatorBuilder::new(
+                "module Top (a: input logic<512>, b: input logic<512>, c: input logic<512>) {}",
+                "Top",
+            )
+            .vcd(&path)
+        };
+        check(builder().build().unwrap(), &path);
+        check(builder().build_cranelift().unwrap(), &path);
+        check(builder().build_interpreter().unwrap(), &path);
+        check(builder().build_wasm().unwrap(), &path);
+        check(builder().build_tiered().unwrap(), &path);
+    }
+
+    #[test]
     fn generated_notifications_match_full_scan_across_backends() {
         let dir = tempfile::tempdir().unwrap();
         for optimized in [false, true] {

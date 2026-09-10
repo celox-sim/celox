@@ -1,6 +1,7 @@
 """Guard against accepting unlike VCD workloads as a valid comparison."""
 
 import importlib.util
+import copy
 from pathlib import Path
 import tempfile
 import unittest
@@ -97,6 +98,91 @@ class WaveformComparisonTests(unittest.TestCase):
             )
             self.assertEqual(swapped["celox"].read_bytes(), b"before")
             self.assertEqual(swapped["baseline_celox"].read_bytes(), b"after")
+
+
+class BuildReuseTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        binary = Path(self.temporary.name) / "celox-vcd"
+        binary.write_bytes(b"cached executable")
+        self.binary = binary
+        self.manifest = {
+            "options": {"signals": 256, "celox": None, "baseline_celox": None, "steps": 100},
+            "source_sha256": {str(path.relative_to(BENCH.ROOT)): BENCH.digest(path)
+                              for path in (BENCH.HARNESS, BENCH.RUST_BENCH, SCRIPT)},
+            "rustc": "rustc version 1", "cxx": "g++ version 1", "verilator": "Verilator version 1",
+            "git_head": "revision", "git_status": "", "git_diff_sha256": "clean",
+            "environment": {"RUST_MIN_STACK": "67108864"},
+            "build_commands": [["cargo", "bench", "--locked"]],
+            "builds": [{"command": ["cargo", "bench", "--locked"], "elapsed_ns": 1}],
+            "binaries": {str(binary): BENCH.digest(binary)},
+        }
+
+    def test_unchanged_builds_allow_different_measurement_options(self):
+        current = copy.deepcopy(self.manifest)
+        current["options"].update(steps=1000, repeats=7, cpu=1, cases=["idle"])
+        BENCH.validate_reused_builds(self.manifest, current)
+
+    def test_changed_recorded_build_inputs_are_rejected(self):
+        for field in ("rustc", "cxx", "verilator", "git_head", "git_status", "git_diff_sha256"):
+            with self.subTest(field=field):
+                current = copy.deepcopy(self.manifest)
+                current[field] += " changed"
+                with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+                    BENCH.validate_reused_builds(self.manifest, current)
+        for source in self.manifest["source_sha256"]:
+            with self.subTest(source=source):
+                current = copy.deepcopy(self.manifest)
+                current["source_sha256"][source] = "changed"
+                with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+                    BENCH.validate_reused_builds(self.manifest, current)
+        for field, replacement in (("build_commands", [["cargo", "bench", "--release"]]),
+                                   ("environment", {"RUSTFLAGS": "-C target-cpu=native"})):
+            with self.subTest(field=field):
+                current = copy.deepcopy(self.manifest)
+                current[field] = replacement
+                with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+                    BENCH.validate_reused_builds(self.manifest, current)
+
+    def test_changed_build_options_are_rejected(self):
+        for option, value in (("signals", 512), ("celox", "/another/binary"),
+                              ("baseline_celox", "/another/baseline")):
+            with self.subTest(option=option):
+                current = copy.deepcopy(self.manifest)
+                current["options"][option] = value
+                with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+                    BENCH.validate_reused_builds(self.manifest, current)
+
+    def test_incomplete_or_changed_build_history_is_rejected(self):
+        for history in ([], [{"command": ["cargo", "bench", "--different-flags"]}]):
+            with self.subTest(history=history):
+                previous = copy.deepcopy(self.manifest)
+                previous["builds"] = history
+                with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+                    BENCH.validate_reused_builds(previous, self.manifest)
+
+    def test_changed_cached_binary_is_rejected(self):
+        self.binary.write_bytes(b"different executable")
+        with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+            BENCH.validate_reused_builds(self.manifest, self.manifest)
+
+    def test_old_manifests_and_missing_binaries_are_rejected(self):
+        previous = copy.deepcopy(self.manifest)
+        del previous["build_commands"]
+        with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+            BENCH.validate_reused_builds(previous, self.manifest)
+        self.binary.unlink()
+        with self.assertRaisesRegex(ValueError, "omit --reuse-builds"):
+            BENCH.validate_reused_builds(self.manifest, self.manifest)
+
+    def test_compiler_environment_is_recorded_without_credentials(self):
+        environment = {"RUSTFLAGS": "-C target-cpu=native", "CXXFLAGS": "-O2",
+                       "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C opt-level=2",
+                       "CARGO_PROFILE_BENCH_LTO": "false", "RUST_MIN_STACK": "67108864",
+                       "CARGO_REGISTRY_TOKEN": "private", "UNRELATED_SECRET": "private"}
+        actual = BENCH.build_environment(environment)
+        self.assertEqual(actual, {key: value for key, value in environment.items() if value != "private"})
 
 
 if __name__ == "__main__":

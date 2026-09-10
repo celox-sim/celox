@@ -28,6 +28,7 @@ struct Run {
 struct FixedSignal {
     suffix: VcdRecordSuffix,
     offset: usize,
+    /// Last encoded value; VcdOutput retains its record until the write succeeds.
     previous: u64,
 }
 
@@ -50,6 +51,7 @@ pub(super) struct TracePlan {
     bits: Vec<FixedSignal>,
     words: Vec<FixedSignal>,
     generic: Vec<GenericSignal>,
+    /// Includes values queued in VcdOutput, even after a partial write fails.
     previous: Vec<u8>,
     memory_required: usize,
 }

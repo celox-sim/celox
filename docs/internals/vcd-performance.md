@@ -38,6 +38,13 @@ Host setters use the same notification layout. Obtaining a mutable raw memory
 view permanently selects full scanning for that memory image, since a retained
 view can write at any later time without a setter notification. This includes
 JavaScript shared-memory views and components that receive writable raw memory.
+The permanent fallback lives in backend-owned state outside the exposed image,
+so restoring or clearing every exposed byte cannot re-enable sparse tracking.
+Tier promotion transfers that state with the allocation. Internal testbench
+expression reads do not expose a retained view; VM stores notify the same trace
+groups as setters. Native JavaScript handles consume backend activity until a
+shared-memory view escapes, and their compiled-code cache distinguishes builds
+with and without VCD instrumentation.
 The buffered byte encoder still applies on these paths. Builds without VCD do
 not reserve activity storage or generate notification stores.
 
@@ -86,6 +93,11 @@ count belongs to the output block. Comparison statistics update once per run;
 an I/O error records exactly the visited prefix, including unchanged values.
 The initial snapshot is complete only after its value records are handed to
 `BufWriter`; a failed initial dump retries a full snapshot on the next dump.
+Cached values include complete records queued by the encoder. An I/O error
+retains that queue and the number of bytes already accepted, so the next dump
+or explicit flush resumes the unwritten suffix before emitting a new timestamp.
+This also covers partial header and timestamp writes. Backend activity consumed
+by a failed dump remains pending and is merged with writes made before retrying.
 
 `VcdWriter::flush`, `Simulator::flush_vcd`, or `Simulation::flush_vcd` explicitly
 publishes pending bytes and reports I/O errors. Dropping the writer flushes
@@ -400,8 +412,14 @@ counters, 100,000 full cycles, five independent processes per combination, and
 the first available CPU. `--signals`, `--steps`, `--repeats`, and `--cpu` override
 those settings. `--check-only` builds and validates without collecting timings.
 `--reuse-builds` reruns validation and measurements using binaries checked
-against the preceding manifest, without recompiling the C++ models. Pass
-`--celox` with this option to replace the cached Celox executable. The runner
+against the preceding manifest, without recompiling. Reuse requires identical
+runner/harness/benchmark sources, checkout state, compiler versions, build
+commands, compiler environment, and cached executable hashes. Old manifests
+without the complete build context are rejected. Timing options such as steps,
+repeats, cases, modes, and CPU may change; changing a build input or selecting a
+different `--celox` executable requires a fresh build without `--reuse-builds`.
+Reused Celox and baseline executables come from the verified snapshots, rather
+than copying the original input paths again. The runner
 sets a 64 MiB process and Rust worker stack (`--stack-mib`); the 4,096-counter
 fixture overflowed a frontend worker's default stack during construction.
 `--baseline-celox PATH` adds an earlier Celox executable to the same validation
