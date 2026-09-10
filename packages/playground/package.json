@@ -23,10 +23,10 @@
     "vite": "^8.0.0",
     "vite-plugin-monaco-editor": "^1.1.0",
     "vite-plugin-monaco-editor-nls": "^3.0.1",
-    "vitest": "^4.0.0"
+    "vitest": "^5.0.0"
   },
   "dependencies": {
-    "@vitest/expect": "^4.1.1",
+    "@vitest/expect": "^5.0.0",
     "@vitest/runner": "^4.1.1",
     "coi-serviceworker": "^0.1.7"
   }
