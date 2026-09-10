@@ -5,6 +5,11 @@ scheduling, with SLT and SIR adapters and executable x86 experiments. It
 synthesizes statement schedules from dependence constraints and generates tiled
 SIR. Normal compiler pipelines do not invoke it yet.
 
+This page records the scheduling and first frontend experiments. The subsequent
+[numeric tuning experiment](affine-tuning.md) adds coordinate search and
+sharing-preserving partial unrolling, including fresh comparisons with ordinary
+optimized Veryl units.
+
 The measured result is an improvement in generated kernel execution, at an
 additional compilation cost. It is not a whole-simulator speedup claim.
 
@@ -13,8 +18,8 @@ additional compilation cost. It is not a whole-simulator speedup claim.
 [Verma et al., 2026](https://arxiv.org/html/2609.03114v1), sections 3.1–3.4,
 uses Pluto to select the transformation structure and seed. Coordinate-wise
 hill climbing then tunes numeric parameters within that structure. Its CPU
-evaluation tunes tile sizes. A few hand-selected tile sizes, as evaluated here,
-are not an implementation of that search or its statistical stopping rule.
+evaluation tunes tile sizes. The hand-selected tile sizes on this page preceded
+the [coordinate search and statistical stopping rule](affine-tuning.md).
 
 This experiment implements the prerequisite scheduling stage, following the
 distance objective, independent schedule rows, permutable bands, and SCC
@@ -158,8 +163,8 @@ a statistical significance claim or comparison to C compilers/Pluto.
 
 The following experiment checks the frontend integration assumption with actual
 Veryl source. Parameter tuning should follow a stable schedule/code-generation
-baseline and should account for compilation cost. The 2026 paper's coordinate
-search remains a separate, unimplemented stage.
+baseline and should account for compilation cost. The separate
+[numeric tuning follow-up](affine-tuning.md) now implements coordinate search.
 
 ## Veryl frontend experiment, 2026-09-11
 
@@ -269,8 +274,9 @@ and preserve or deliberately trade off existing cross-iteration sharing and
 unrolling when generating a schedule. A profitability/search layer must retain
 the existing optimized unit as a candidate. The synthetic Jacobi result does
 not justify enabling recovered scalar loops by default. This bridge and endpoint
-partitioning are integration/code-generation experiments, not the 2026 paper's
-coordinate-wise parameter search.
+partitioning are integration/code-generation experiments. The
+[subsequent parameter search](affine-tuning.md) builds on them and addresses
+sharing while keeping the existing optimized unit as the acceptance baseline.
 
 Artifacts: [eligibility CSV](../benchmarks/data/affine-veryl-2026-09-11/audit-32.csv),
 [rejection details](../benchmarks/data/affine-veryl-2026-09-11/audit-32.txt),

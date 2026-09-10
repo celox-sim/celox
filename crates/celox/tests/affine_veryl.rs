@@ -150,6 +150,20 @@ fn real_frontend_regions_preserve_cells_masks_and_boundaries() {
                     kernel.lower(&chosen, None, WORK).unwrap(),
                     kernel.lower(&chosen, Some(&tile), WORK).unwrap(),
                 ];
+                for unroll in [2, 7, 32] {
+                    let options = celox_sir::affine::CodegenOptions {
+                        unroll,
+                        ..Default::default()
+                    };
+                    for tile in [None, Some(&tile)] {
+                        units.push(
+                            kernel
+                                .lower_with_options(&chosen, tile, &options, WORK)
+                                .unwrap(),
+                        );
+                    }
+                }
+                let generated_count = units.len();
                 // Also compare native baseline output with the interpreter.
                 #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
                 units.push(program.sir.eval_comb[0].clone());
@@ -224,7 +238,7 @@ fn real_frontend_regions_preserve_cells_masks_and_boundaries() {
                                 y.into_iter().map(SIRValue::new).collect::<Vec<_>>()
                             );
                         }
-                        if variant < 3 {
+                        if variant < generated_count {
                             let mut actual = Machine(initial.clone());
                             celox::execute_unit(unit, &mut actual, &[], four_state).unwrap();
                             assert_eq!(

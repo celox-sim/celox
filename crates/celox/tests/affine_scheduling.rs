@@ -180,11 +180,25 @@ fn slt_and_cfg_schedules_preserve_memory_and_unknown_bits() {
                         vec![2, 5]
                     };
                     let tile = Tile { band: 0, sizes };
-                    for unit in [
+                    let mut units = vec![
                         kernel.lower_original(WORK).unwrap(),
                         kernel.lower(&scheduled, None, WORK).unwrap(),
                         kernel.lower(&scheduled, Some(&tile), WORK).unwrap(),
-                    ] {
+                    ];
+                    for unroll in [2, 7] {
+                        let options = celox_sir::affine::CodegenOptions {
+                            unroll,
+                            ..Default::default()
+                        };
+                        for tile in [None, Some(&tile)] {
+                            units.push(
+                                kernel
+                                    .lower_with_options(&scheduled, tile, &options, WORK)
+                                    .unwrap(),
+                            );
+                        }
+                    }
+                    for unit in units {
                         let mut actual = Machine(initial.clone());
                         celox::execute_unit(&unit, &mut actual, &[], four_state).unwrap();
                         assert_eq!(
@@ -276,7 +290,13 @@ fn negative_time_tiles_and_disjoint_statement_interiors_preserve_results() {
                 band: 0,
                 sizes: vec![size; chosen.bands[0].len()],
             };
-            let unit = kernel.lower(&chosen, Some(&tile), WORK).unwrap();
+            let options = celox_sir::affine::CodegenOptions {
+                unroll: 7,
+                ..Default::default()
+            };
+            let unit = kernel
+                .lower_with_options(&chosen, Some(&tile), &options, WORK)
+                .unwrap();
             let mut actual = Machine(initial.clone());
             celox::execute_unit(&unit, &mut actual, &[], true).unwrap();
             assert_eq!(actual.0, expected.0, "{kind:?}, tile={size}");

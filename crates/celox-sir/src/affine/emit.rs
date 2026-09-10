@@ -1,14 +1,142 @@
-use super::{Result, StatementBody};
+use super::{CodegenOptions, Result, StatementBody};
 use crate::{
-    BinaryOp, BlockId, ExecutionUnit, HashMap, RegisterId, SIRBuilder, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, UnaryOp,
+    BinaryOp, BlockId, ExecutionUnit, HashMap, RegisterId, RegisterType, SIRBuilder,
+    SIRInstruction, SIROffset, SIRTerminator, SIRValue, UnaryOp,
 };
-use celox_analysis::polyhedral::{Affine, Bound, Error, ScanPlan};
+use celox_analysis::polyhedral::{Access, Affine, Bound, Error, Region, ScanPlan};
+use std::{hash::Hash, ops::Deref};
 
 #[derive(Clone, Copy)]
 struct Value {
     register: RegisterId,
     constant: Option<i64>,
+    /// Exact base + displacement for generated integer coordinates.
+    origin: Option<(RegisterId, i64)>,
+}
+
+#[derive(Clone)]
+struct Body<'a, A> {
+    source: &'a StatementBody<A>,
+    accesses: &'a [Access],
+}
+
+impl<A> Deref for Body<'_, A> {
+    type Target = StatementBody<A>;
+    fn deref(&self) -> &Self::Target {
+        self.source
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct IndexKey {
+    terms: Vec<(RegisterId, i64)>,
+    constant: i64,
+}
+
+/// One straight-line batch. Canonical integer addresses expose equal loads
+/// across unrolled lanes; typed value numbering retains their expression DAG.
+/// A store invalidates every cached load of its object, including other cells.
+/// No availability crosses a loop backedge or a control-flow boundary.
+struct Sharing<A> {
+    indices: HashMap<IndexKey, RegisterId>,
+    values: HashMap<(RegisterType, SIRInstruction<A>), RegisterId>,
+}
+
+impl<A: Clone + Eq + Hash> Sharing<A> {
+    fn new() -> Self {
+        Self {
+            indices: HashMap::default(),
+            values: HashMap::default(),
+        }
+    }
+
+    fn index(
+        &mut self,
+        builder: &mut SIRBuilder<A>,
+        source: &Affine,
+        values: &[Value],
+    ) -> Result<RegisterId> {
+        let mut terms = HashMap::<RegisterId, i128>::default();
+        let mut constant = i128::from(source.constant);
+        for (&coefficient, value) in source.coefficients.iter().zip(values) {
+            if coefficient == 0 {
+                continue;
+            }
+            let displacement = if let Some(c) = value.constant {
+                c
+            } else {
+                let (base, offset) = value.origin.unwrap_or((value.register, 0));
+                let term = terms.entry(base).or_default();
+                *term = term
+                    .checked_add(i128::from(coefficient))
+                    .ok_or(Error::ArithmeticOverflow)?;
+                offset
+            };
+            constant = constant
+                .checked_add(i128::from(coefficient) * i128::from(displacement))
+                .ok_or(Error::ArithmeticOverflow)?;
+        }
+        let mut terms = terms
+            .into_iter()
+            .filter(|(_, c)| *c != 0)
+            .map(|(r, c)| Ok((r, i64::try_from(c).map_err(|_| Error::ArithmeticOverflow)?)))
+            .collect::<Result<Vec<_>>>()?;
+        terms.sort_unstable();
+        let key = IndexKey {
+            terms,
+            constant: i64::try_from(constant).map_err(|_| Error::ArithmeticOverflow)?,
+        };
+        if let Some(&register) = self.indices.get(&key) {
+            return Ok(register);
+        }
+        let affine = Affine::new(
+            key.terms.iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            key.constant,
+        );
+        let coordinates = key
+            .terms
+            .iter()
+            .map(|&(register, _)| Value {
+                register,
+                constant: None,
+                origin: Some((register, 0)),
+            })
+            .collect::<Vec<_>>();
+        let value = expression(builder, &affine, &coordinates)?;
+        self.indices.insert(key, value.register);
+        Ok(value.register)
+    }
+
+    fn emit(
+        &mut self,
+        builder: &mut SIRBuilder<A>,
+        instruction: SIRInstruction<A>,
+    ) -> Option<RegisterId> {
+        if let SIRInstruction::Store(address, ..) = &instruction {
+            self.values.retain(|(_, key), _| !matches!(key, SIRInstruction::Load(_, loaded, ..) if loaded == address));
+        }
+        let destination = instruction.defined_register();
+        if let Some(destination) = destination {
+            let mut key = instruction.clone();
+            match &mut key {
+                SIRInstruction::Imm(dst, _)
+                | SIRInstruction::Binary(dst, ..)
+                | SIRInstruction::Unary(dst, ..)
+                | SIRInstruction::Load(dst, ..)
+                | SIRInstruction::Concat(dst, ..)
+                | SIRInstruction::Slice(dst, ..)
+                | SIRInstruction::Mux(dst, ..) => *dst = RegisterId(0),
+                _ => unreachable!("only validated statement instructions are emitted"),
+            }
+            let key = (builder.register(&destination).clone(), key);
+            if let Some(&canonical) = self.values.get(&key) {
+                return Some(canonical);
+            }
+            self.values.insert(key, destination);
+        }
+        builder.emit(instruction);
+        destination
+    }
 }
 
 fn immediate<A>(builder: &mut SIRBuilder<A>, value: i64) -> Value {
@@ -17,6 +145,7 @@ fn immediate<A>(builder: &mut SIRBuilder<A>, value: i64) -> Value {
     Value {
         register,
         constant: Some(value),
+        origin: None,
     }
 }
 
@@ -54,9 +183,25 @@ fn binary<A>(
         op,
         right.register,
     ));
+    let translate = |value: Value, delta: i64| -> Result<_> {
+        let (base, offset) = value.origin.unwrap_or((value.register, 0));
+        Ok(Some((
+            base,
+            offset.checked_add(delta).ok_or(Error::ArithmeticOverflow)?,
+        )))
+    };
+    let origin = match (op, left.constant, right.constant) {
+        (BinaryOp::Add, None, Some(c)) => translate(left, c)?,
+        (BinaryOp::Add, Some(c), None) => translate(right, c)?,
+        (BinaryOp::Sub, None, Some(c)) => {
+            translate(left, c.checked_neg().ok_or(Error::ArithmeticOverflow)?)?
+        }
+        _ => None,
+    };
     Ok(Value {
         register,
         constant: None,
+        origin,
     })
 }
 
@@ -77,6 +222,7 @@ fn select<A>(builder: &mut SIRBuilder<A>, condition: Value, yes: Value, no: Valu
         Value {
             register,
             constant: value.constant,
+            origin: value.origin,
         }
     };
     let yes = widen(builder, yes);
@@ -91,6 +237,7 @@ fn select<A>(builder: &mut SIRBuilder<A>, condition: Value, yes: Value, no: Valu
     Value {
         register,
         constant: None,
+        origin: None,
     }
 }
 
@@ -241,9 +388,9 @@ fn offset(offset: &SIROffset, registers: &HashMap<RegisterId, RegisterId>) -> SI
     }
 }
 
-fn body<A: Clone>(
+fn body<A: Clone + Eq + Hash>(
     builder: &mut SIRBuilder<A>,
-    source: &StatementBody<A>,
+    source: &Body<'_, A>,
     coordinates: &[Affine],
     prefix: &[Value],
 ) -> Result<()> {
@@ -251,26 +398,29 @@ fn body<A: Clone>(
         .iter()
         .map(|coordinate| expression(builder, coordinate, prefix))
         .collect::<Result<Vec<_>>>()?;
-    body_values(builder, source, &values)
+    body_values(builder, source, &values, None)
 }
 
-fn body_values<A: Clone>(
+fn body_values<A: Clone + Eq + Hash>(
     builder: &mut SIRBuilder<A>,
-    source: &StatementBody<A>,
+    source: &Body<'_, A>,
     values: &[Value],
+    mut shared: Option<&mut Sharing<A>>,
 ) -> Result<()> {
     let mut registers = HashMap::default();
+    let mut access_index = 0;
     for (&old, value) in source.induction.iter().zip(values) {
         let new = builder.alloc_reg(source.register_types[&old].clone());
         builder.emit(SIRInstruction::Unary(new, UnaryOp::Ident, value.register));
         registers.insert(old, new);
     }
     for instruction in &source.instructions {
+        let old_destination = instruction.defined_register();
         if let Some(old) = instruction.defined_register() {
             registers.insert(old, builder.alloc_reg(source.register_types[&old].clone()));
         }
         let r = |reg: &RegisterId| registers[reg];
-        let instruction = match instruction {
+        let mut instruction = match instruction {
             SIRInstruction::Imm(dst, value) => SIRInstruction::Imm(r(dst), value.clone()),
             SIRInstruction::Binary(dst, left, op, right) => {
                 SIRInstruction::Binary(r(dst), r(left), *op, r(right))
@@ -300,7 +450,36 @@ fn body_values<A: Clone>(
             }
             _ => return Err(Error::Invalid("unvalidated SIR body")),
         };
-        builder.emit(instruction);
+        if matches!(
+            instruction,
+            SIRInstruction::Load(..) | SIRInstruction::Store(..)
+        ) {
+            if let Some(shared) = shared.as_mut() {
+                let expression = &source.accesses[access_index].subscripts[0];
+                let index = shared.index(builder, expression, values)?;
+                match &mut instruction {
+                    SIRInstruction::Load(_, _, at, width)
+                    | SIRInstruction::Store(_, at, width, ..) => {
+                        *at = SIROffset::Element {
+                            index,
+                            element_width: *width,
+                            bit_offset: 0,
+                            dynamic_bit_offset: None,
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            access_index += 1;
+        }
+        if let Some(shared) = shared.as_mut() {
+            let canonical = shared.emit(builder, instruction);
+            if let (Some(old), Some(canonical)) = (old_destination, canonical) {
+                registers.insert(old, canonical);
+            }
+        } else {
+            builder.emit(instruction);
+        }
     }
     Ok(())
 }
@@ -335,13 +514,14 @@ fn magnitude(row: &Affine, bounds: &[(i64, i64)]) -> Result<i128> {
 /// slope. Compute all inverse-map translations in the preheader. In a skewed
 /// nest this emits an ordinary spatial induction variable, rather than
 /// repeatedly reconstructing i = x - 2*t inside every statement instance.
-fn interior_loop<A: Clone>(
+fn interior_loop<A: Clone + Eq + Hash>(
     builder: &mut SIRBuilder<A>,
     plan: &ScanPlan,
-    bodies: &[StatementBody<A>],
+    bodies: &[Body<'_, A>],
     prefix: &[Value],
     start: Value,
     end: Value,
+    options: &CodegenOptions,
 ) -> Result<()> {
     let axis = prefix.len();
     let mut translation = Affine::constant(axis, 0);
@@ -358,6 +538,7 @@ fn interior_loop<A: Clone>(
             i128::from(plan.coordinate_bounds[axis].0)
                 .abs()
                 .max(i128::from(plan.coordinate_bounds[axis].1).abs())
+                + options.unroll as i128
                 + 2,
         )
         .ok_or(Error::ArithmeticOverflow)?;
@@ -394,23 +575,26 @@ fn interior_loop<A: Clone>(
     }
     let mut order = (0..bodies.len()).collect::<Vec<_>>();
     order.sort_by_key(|&s| plan.statements[s].fixed_coordinates[axis + 1..].to_vec());
-    point_loop(builder, start, end, |builder, value| {
-        for &s in &order {
-            let mut iterators = Vec::new();
-            for &(coefficient, intercept) in &prepared[s] {
-                let value = match coefficient {
-                    0 => intercept,
-                    1 if intercept.constant == Some(0) => value,
-                    1 => binary(builder, value, BinaryOp::Add, intercept)?,
-                    _ => {
-                        let coefficient = immediate(builder, coefficient);
-                        let product = binary(builder, value, BinaryOp::Mul, coefficient)?;
-                        binary(builder, product, BinaryOp::Add, intercept)?
-                    }
-                };
-                iterators.push(value);
+    chunk_loop(builder, start, end, options.unroll, |builder, points| {
+        let mut shared = (options.unroll > 1).then(Sharing::new);
+        for &value in points {
+            for &s in &order {
+                let mut iterators = Vec::new();
+                for &(coefficient, intercept) in &prepared[s] {
+                    let value = match coefficient {
+                        0 => intercept,
+                        1 if intercept.constant == Some(0) => value,
+                        1 => binary(builder, value, BinaryOp::Add, intercept)?,
+                        _ => {
+                            let coefficient = immediate(builder, coefficient);
+                            let product = binary(builder, value, BinaryOp::Mul, coefficient)?;
+                            binary(builder, product, BinaryOp::Add, intercept)?
+                        }
+                    };
+                    iterators.push(value);
+                }
+                body_values(builder, &bodies[s], &iterators, shared.as_mut())?;
             }
-            body_values(builder, &bodies[s], &iterators)?;
         }
         Ok(())
     })
@@ -425,10 +609,20 @@ fn point_loop<A>(
     if lower.constant.is_some() && lower.constant == upper.constant {
         return emit(builder, lower);
     }
-    if let (Some(lower), Some(upper)) = (lower.constant, upper.constant)
-        && lower > upper
+    stepped_loop(builder, lower, upper, 1, emit).map(|_| ())
+}
+
+fn stepped_loop<A>(
+    builder: &mut SIRBuilder<A>,
+    lower: Value,
+    upper: Value,
+    step: i64,
+    emit: impl FnOnce(&mut SIRBuilder<A>, Value) -> Result<()>,
+) -> Result<Value> {
+    if let (Some(lower_value), Some(upper_value)) = (lower.constant, upper.constant)
+        && lower_value > upper_value
     {
-        return Ok(());
+        return Ok(lower);
     }
     let induction = builder.alloc_bit(64, true);
     let header = builder.new_block_with(vec![induction]);
@@ -439,6 +633,7 @@ fn point_loop<A>(
     let value = Value {
         register: induction,
         constant: None,
+        origin: Some((induction, 0)),
     };
     let condition = binary(builder, value, BinaryOp::LeS, upper)?;
     builder.seal_block(SIRTerminator::Branch {
@@ -448,11 +643,63 @@ fn point_loop<A>(
     });
     builder.switch_to_block(enter);
     emit(builder, value)?;
-    let one = immediate(builder, 1);
-    let next = binary(builder, value, BinaryOp::Add, one)?;
+    let step = immediate(builder, step);
+    let next = binary(builder, value, BinaryOp::Add, step)?;
     builder.seal_block(SIRTerminator::Jump(header, vec![next.register]));
     builder.switch_to_block(exit);
-    Ok(())
+    Ok(value)
+}
+
+/// Preserve lexicographic point order, emitting one contiguous batch at a time.
+/// Full batches never speculate beyond the proven interval; a separate tail
+/// handles the remainder. The caller has proved room for the cutoff arithmetic.
+fn chunk_loop<A>(
+    builder: &mut SIRBuilder<A>,
+    lower: Value,
+    upper: Value,
+    factor: usize,
+    mut emit: impl FnMut(&mut SIRBuilder<A>, &[Value]) -> Result<()>,
+) -> Result<()> {
+    if factor == 1 {
+        return point_loop(builder, lower, upper, |builder, v| emit(builder, &[v]));
+    }
+    let static_range = lower.constant.zip(upper.constant);
+    if let Some((start, end)) = static_range {
+        let length = i128::from(end) - i128::from(start) + 1;
+        if length <= 0 {
+            return Ok(());
+        }
+        if length <= factor as i128 {
+            let values = (start..=end)
+                .map(|i| immediate(builder, i))
+                .collect::<Vec<_>>();
+            return emit(builder, &values);
+        }
+    }
+    let adjustment = immediate(builder, factor as i64 - 1);
+    let cutoff = binary(builder, upper, BinaryOp::Sub, adjustment)?;
+    let next = stepped_loop(builder, lower, cutoff, factor as i64, |builder, base| {
+        let mut values = Vec::new();
+        for lane in 0..factor {
+            let offset = immediate(builder, lane as i64);
+            values.push(binary(builder, base, BinaryOp::Add, offset)?);
+        }
+        emit(builder, &values)
+    })?;
+    if let Some((start, end)) = static_range {
+        let length = i128::from(end) - i128::from(start) + 1;
+        let remainder = (length % factor as i128) as i64;
+        if remainder > 0 {
+            let first = end - (remainder - 1);
+            let values = (first..=end)
+                .map(|i| immediate(builder, i))
+                .collect::<Vec<_>>();
+            emit(builder, &values)?;
+        }
+        Ok(())
+    } else {
+        point_loop(builder, next, upper, |builder, v| emit(builder, &[v]))
+    }
 }
 
 /// Partition a statically bounded innermost coordinate at every statement's
@@ -460,13 +707,14 @@ fn point_loop<A>(
 /// domains empty and force guards on every iteration of a large interior.
 /// There are at most twice as many pieces as statements, independent of the
 /// trip count. Dynamic-prefix domains continue to use the general scanner.
-fn static_pieces<A: Clone>(
+fn static_pieces<A: Clone + Eq + Hash>(
     builder: &mut SIRBuilder<A>,
     plan: &ScanPlan,
-    bodies: &[StatementBody<A>],
+    bodies: &[Body<'_, A>],
     prefix: &[Value],
     lower: Value,
     upper: Value,
+    options: &CodegenOptions,
 ) -> Result<bool> {
     let (Some(lower), Some(upper)) = (lower.constant, upper.constant) else {
         return Ok(false);
@@ -547,7 +795,7 @@ fn static_pieces<A: Clone>(
             .collect::<Vec<_>>();
         let start = immediate(builder, pair[0]);
         let end = immediate(builder, pair[1] - 1);
-        interior_loop(builder, &piece, &sources, prefix, start, end)?;
+        interior_loop(builder, &piece, &sources, prefix, start, end, options)?;
     }
     Ok(true)
 }
@@ -556,13 +804,14 @@ fn static_pieces<A: Clone>(
 /// shared interval needs no per-instance guards; only its two boundary pieces
 /// use the general union scanner. This derives bounds from the scattering
 /// polyhedra and also works with skewed, shifted and partially filled tiles.
-fn interior<A: Clone>(
+fn interior<A: Clone + Eq + Hash>(
     builder: &mut SIRBuilder<A>,
     plan: &ScanPlan,
-    bodies: &[StatementBody<A>],
+    bodies: &[Body<'_, A>],
     prefix: &mut Vec<Value>,
     lower: Value,
     upper: Value,
+    options: &CodegenOptions,
 ) -> Result<()> {
     let axis = prefix.len();
     let zero = immediate(builder, 0);
@@ -618,25 +867,26 @@ fn interior<A: Clone>(
     let before = binary(builder, start, BinaryOp::Sub, one)?;
     point_loop(builder, lower, before, |builder, value| {
         prefix.push(value);
-        walk(builder, plan, bodies, prefix)?;
+        walk(builder, plan, bodies, prefix, options)?;
         prefix.pop();
         Ok(())
     })?;
-    interior_loop(builder, plan, bodies, prefix, start, end)?;
+    interior_loop(builder, plan, bodies, prefix, start, end, options)?;
     let after = binary(builder, end, BinaryOp::Add, one)?;
     point_loop(builder, after, upper, |builder, value| {
         prefix.push(value);
-        walk(builder, plan, bodies, prefix)?;
+        walk(builder, plan, bodies, prefix, options)?;
         prefix.pop();
         Ok(())
     })
 }
 
-fn walk<A: Clone>(
+fn walk<A: Clone + Eq + Hash>(
     builder: &mut SIRBuilder<A>,
     plan: &ScanPlan,
-    bodies: &[StatementBody<A>],
+    bodies: &[Body<'_, A>],
     prefix: &mut Vec<Value>,
+    options: &CodegenOptions,
 ) -> Result<()> {
     if prefix.len() == plan.dimensions.len() {
         for (source, statement) in bodies.iter().zip(&plan.statements) {
@@ -667,40 +917,53 @@ fn walk<A: Clone>(
             let condition = select(builder, low, high, zero);
             prefix.push(value);
             guarded(builder, condition, |builder| {
-                walk(builder, plan, bodies, prefix)
+                walk(builder, plan, bodies, prefix, options)
             })?;
             prefix.pop();
         }
         return Ok(());
     }
-    if plan.statements.len() > 1
+    if (plan.statements.len() > 1 || options.unroll > 1)
         && plan.statements.iter().all(|s| {
             s.fixed_coordinates[prefix.len() + 1..]
                 .iter()
                 .all(Option::is_some)
         })
     {
-        if static_pieces(builder, plan, bodies, prefix, lower, upper)? {
+        if static_pieces(builder, plan, bodies, prefix, lower, upper, options)? {
             return Ok(());
         }
-        return interior(builder, plan, bodies, prefix, lower, upper);
+        return interior(builder, plan, bodies, prefix, lower, upper, options);
     }
     point_loop(builder, lower, upper, |builder, value| {
         prefix.push(value);
-        walk(builder, plan, bodies, prefix)?;
+        walk(builder, plan, bodies, prefix, options)?;
         prefix.pop();
         Ok(())
     })
 }
 
-pub(super) fn lower<A: Clone>(
+pub(super) fn lower<A: Clone + Eq + Hash>(
     bodies: &[StatementBody<A>],
+    region: &Region,
     plan: &ScanPlan,
+    options: &CodegenOptions,
 ) -> Result<ExecutionUnit<A>> {
+    let bodies = bodies
+        .iter()
+        .zip(&region.statements)
+        .map(|(source, statement)| Body {
+            source,
+            accesses: &statement.accesses,
+        })
+        .collect::<Vec<_>>();
     let mut builder = SIRBuilder::new();
-    walk(&mut builder, plan, bodies, &mut Vec::new())?;
+    walk(&mut builder, plan, &bodies, &mut Vec::new(), options)?;
     builder.seal_block(SIRTerminator::Return);
     let (blocks, register_map, _) = builder.drain();
+    if blocks.values().map(|b| b.instructions.len()).sum::<usize>() > options.max_instructions {
+        return Err(Error::WorkLimit);
+    }
     let unit = ExecutionUnit {
         blocks,
         register_map,

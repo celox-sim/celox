@@ -20,6 +20,7 @@ mod integer;
 mod rational;
 mod scan;
 mod schedule;
+pub mod tuning;
 
 use std::ops::Range;
 

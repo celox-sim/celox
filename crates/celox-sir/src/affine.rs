@@ -16,8 +16,8 @@ use crate::{
     BinaryOp, ExecutionUnit, HashMap, RegisterId, RegisterType, SIRInstruction, SIROffset, UnaryOp,
 };
 use celox_analysis::polyhedral::{
-    Access, AccessKind, Affine, Domain, Error, Region, ScanPlan, Schedule, ScheduleStats,
-    Statement, Tile, scan,
+    Access, AccessKind, Affine, Domain, Error, Region, Schedule, ScheduleStats, Statement, Tile,
+    scan,
 };
 use num_traits::{ToPrimitive, Zero};
 use std::hash::Hash;
@@ -25,6 +25,23 @@ use std::hash::Hash;
 pub use extract::extract;
 pub use unrolled::{UnrolledOptions, recover_independent_stores};
 type Result<T> = std::result::Result<T, Error>;
+
+/// Numeric code-generation parameters for an already verified schedule.
+#[derive(Clone, Debug)]
+pub struct CodegenOptions {
+    /// Consecutive points of the innermost scan coordinate per loop iteration.
+    pub unroll: usize,
+    pub max_instructions: usize,
+}
+
+impl Default for CodegenOptions {
+    fn default() -> Self {
+        Self {
+            unroll: 1,
+            max_instructions: 100_000,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct MemoryObject {
@@ -189,8 +206,32 @@ impl<A: Clone + Eq + Hash> Kernel<A> {
         tile: Option<&Tile>,
         max_work: usize,
     ) -> Result<ExecutionUnit<A>> {
+        self.lower_with_options(schedule, tile, &CodegenOptions::default(), max_work)
+    }
+
+    pub fn lower_with_options(
+        &self,
+        schedule: &Schedule,
+        tile: Option<&Tile>,
+        options: &CodegenOptions,
+        max_work: usize,
+    ) -> Result<ExecutionUnit<A>> {
+        if !(1..=64).contains(&options.unroll) {
+            return Err(Error::Invalid("affine unroll factor must be in 1..=64"));
+        }
+        let instructions = self
+            .bodies
+            .iter()
+            .map(|b| b.instructions.len())
+            .sum::<usize>();
+        if instructions
+            .checked_mul(options.unroll)
+            .is_none_or(|n| n > options.max_instructions)
+        {
+            return Err(Error::WorkLimit);
+        }
         let plan = scan(&self.region, schedule, tile, max_work)?;
-        self.lower_plan(&plan)
+        emit::lower(&self.bodies, &self.region, &plan, options)
     }
 
     pub fn lower_original(&self, max_work: usize) -> Result<ExecutionUnit<A>> {
@@ -216,10 +257,6 @@ impl<A: Clone + Eq + Hash> Kernel<A> {
             stats: ScheduleStats::default(),
         };
         self.lower(&original, None, max_work)
-    }
-
-    fn lower_plan(&self, plan: &ScanPlan) -> Result<ExecutionUnit<A>> {
-        emit::lower(&self.bodies, plan)
     }
 }
 
@@ -562,5 +599,31 @@ mod tests {
         let (mut body, objects) = sample(0);
         body.register_types.remove(&RegisterId(3));
         assert!(Kernel::from_bodies(vec![body], &objects).is_err());
+    }
+
+    #[test]
+    fn code_generation_parameters_and_size_are_bounded() {
+        let (body, objects) = sample(0);
+        let kernel = Kernel::from_bodies(vec![body], &objects).unwrap();
+        let schedule =
+            celox_analysis::polyhedral::schedule(kernel.region(), &Default::default()).unwrap();
+        for unroll in [0, 65] {
+            let options = CodegenOptions {
+                unroll,
+                ..Default::default()
+            };
+            assert!(matches!(
+                kernel.lower_with_options(&schedule, None, &options, 2_000_000),
+                Err(Error::Invalid(_))
+            ));
+        }
+        let options = CodegenOptions {
+            unroll: 2,
+            max_instructions: 1,
+        };
+        assert!(matches!(
+            kernel.lower_with_options(&schedule, None, &options, 2_000_000),
+            Err(Error::WorkLimit)
+        ));
     }
 }
