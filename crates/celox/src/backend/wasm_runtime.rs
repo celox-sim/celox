@@ -106,6 +106,9 @@ impl super::traits::SimBackend for WasmBackend {
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         WasmBackend::memory_as_mut_ptr(self)
     }
+    fn vcd_tracking_enabled(&self) -> bool {
+        !self.raw_view_exposed
+    }
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {
         WasmBackend::runtime_event_buffer_as_ptr(self)
     }
@@ -142,6 +145,7 @@ impl super::traits::SimBackend for WasmBackend {
 pub struct WasmBackend {
     store: Store<()>,
     memory: Memory,
+    raw_view_exposed: bool,
     comb_func: TypedFunc<(), i64>,
     event_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
     eval_only_funcs: HashMap<AbsoluteAddr, Vec<TypedFunc<(), i64>>>,
@@ -373,6 +377,7 @@ impl WasmBackend {
         Ok(Self {
             store,
             memory,
+            raw_view_exposed: false,
             comb_func,
             event_funcs,
             eval_only_funcs,
@@ -458,6 +463,7 @@ impl WasmBackend {
     }
 
     pub fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         assert!(provided_size <= allocated_size);
@@ -481,6 +487,7 @@ impl WasmBackend {
     }
 
     pub fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut bytes = value.to_bytes_le();
         bytes.resize(allocated_size, 0u8);
@@ -497,6 +504,7 @@ impl WasmBackend {
     }
 
     pub fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut v_bytes = value.to_bytes_le();
         v_bytes.resize(allocated_size, 0u8);
@@ -571,6 +579,7 @@ impl WasmBackend {
     }
 
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+        self.raw_view_exposed = true;
         let data = self.memory.data_mut(&mut self.store);
         (data.as_mut_ptr(), self.layout.merged_total_size)
     }

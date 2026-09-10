@@ -90,6 +90,11 @@ tempfile.workspace = true
 veryl-std = { workspace = true }
 veryl-emitter = { workspace = true }
 veryl-simulator = { workspace = true }
+vcd = "0.7"
+
+[[bench]]
+name = "vcd"
+harness = false
 
 [[bench]]
 name = "simulation"

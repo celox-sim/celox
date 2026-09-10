@@ -202,6 +202,10 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.dump(timestamp);
     }
 
+    pub fn flush_vcd(&mut self) -> std::io::Result<()> {
+        self.simulator.flush_vcd()
+    }
+
     /// Resolves a signal path into a performance-optimized [`SignalRef`].
     pub fn signal(&self, path: &str) -> SignalRef {
         self.simulator.signal(path)
