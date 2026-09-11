@@ -82,7 +82,9 @@ nightly とプロファイルを取らない手動実行では、次の 11 ケ�
 
 Heliodor のリビジョンは `6285682fa0a514077da9d17fee385c7841160025` に固定します。
 Linux バージョンはシミュレーション内で起動するゲストのもので、ホスト OS の違いではありません。
-各実行のタイムアウトは 1 時間です。未完了・失敗は計測値として公開せず、
+バックエンドごとに別ホストのジョブで測定し、全体で 88 ジョブを実行します。
+比較時に確認できるよう、各ホストの CPU とメモリ情報を成果物に記録します。
+各実行のタイムアウトは 1・2 hart が 1 時間、4 hart が 3 時間、8 hart が 4 時間です。未完了・失敗は計測値として公開せず、
 両アーキテクチャの全ケースが成功した場合に nightly の結果を公開します。
 
 ダッシュボードにはカーネルと hart 数を区別して表示します。設計リビジョンが異なるため、
@@ -95,6 +97,16 @@ Linux 6.6 の 4 hart をローカルで実行する例:
 HELIODOR_REF=6285682fa0a514077da9d17fee385c7841160025 \
 HELIODOR_TESTS=test_soc_66_smp_linux_boot_4hart \
 HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered" \
-HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=3600 \
+HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=10800 \
 bash scripts/run-heliodor-bench.sh run
+```
+
+一部の構成だけを再実行する場合は、手動実行の `suite_test`、`suite_runner`、
+`suite_arch` を指定します。空欄なら全構成が対象です。絞り込み実行では従来の gate を
+実行せず、ダッシュボードの履歴も更新しません。例:
+
+```bash
+gh workflow run heliodor-bench.yml --ref <branch> \
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner=celox -f suite_arch=aarch64
 ```

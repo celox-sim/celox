@@ -5,7 +5,8 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
     pub path: String,
-    pub text: String,
+    /// Shared file contents: per-variable locations must not copy whole files.
+    pub text: std::sync::Arc<str>,
     pub span: miette::SourceSpan,
 }
 

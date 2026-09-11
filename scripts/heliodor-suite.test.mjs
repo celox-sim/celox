@@ -1,0 +1,46 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { matrix, mergeArtifacts } from "./heliodor-suite.mjs";
+
+test("suite isolates all 88 backend runs and reserves time for large designs", () => {
+  const jobs = matrix().include;
+  assert.equal(jobs.length, 88);
+  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.runner}`)).size, 88);
+  for (const job of jobs) {
+    assert.ok(job.timeout_sec < 300 * 60);
+    if (job.test.endsWith("4hart") || job.test.endsWith("8hart")) assert.ok(job.timeout_sec > 3600);
+  }
+  assert.deepEqual(matrix({ test: "test_soc_66_smp_linux_boot_4hart", runner: "celox", arch: "aarch64" }).include,
+    jobs.filter(j => j.test === "test_soc_66_smp_linux_boot_4hart" && j.runner === "celox" && j.arch === "aarch64"));
+  for (const field of ["test", "runner", "arch"]) assert.throws(() => matrix({ [field]: "invalid" }), /Unknown suite/);
+});
+
+test("publication requires one successful matching result from every backend", () => {
+  const root = mkdtempSync(join(tmpdir(), "heliodor-suite-"));
+  try {
+    const files = [];
+    for (const job of matrix().include) {
+      const dir = join(root, `heliodor-suite-${job.arch}-${job.test}-${job.runner}`, "target/heliodor/results");
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, "results.tsv");
+      const content = `runner\ttest\texit_status\tsemantic_status\n${job.runner}\t${job.test}\t0\tpass\n`;
+      writeFileSync(file, content);
+      files.push([file, content]);
+    }
+    const output = join(root, "suite");
+    mergeArtifacts(root, output);
+    for (const arch of ["x86_64", "aarch64"]) assert.equal(readFileSync(`${output}-${arch}.tsv`, "utf8").trim().split("\n").length, 45);
+    const [file, content] = files[0];
+    for (const invalid of [content.replace("\tpass", "\tfail"), content.replace("\t0\t", "\t124\t"), content.replace("veryl-cc-sync\t", "celox\t"), content + content.split("\n")[1] + "\n"]) {
+      writeFileSync(file, invalid);
+      assert.throws(() => mergeArtifacts(root, output));
+    }
+    rmSync(file);
+    assert.throws(() => mergeArtifacts(root, output), /ENOENT/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

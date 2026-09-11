@@ -88,7 +88,11 @@ x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backend
 
 These 11 workloads use Heliodor revision
 `6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
-simulated guest, not the benchmark host OS. Each runner has a one-hour timeout;
+simulated guest, not the benchmark host OS. Backends run in separate jobs (88 jobs
+for the complete suite). These jobs use separate hosted machines; their CPU and
+memory details are retained in each artifact for interpreting comparisons.
+Each runner has a one-hour timeout for 1/2 harts,
+three hours for 4 harts, and four hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
 The nightly publisher requires the complete suite on both architectures.
 
@@ -103,6 +107,16 @@ For example, to run the Linux 6.6 four-hart workload locally:
 HELIODOR_REF=6285682fa0a514077da9d17fee385c7841160025 \
 HELIODOR_TESTS=test_soc_66_smp_linux_boot_4hart \
 HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered" \
-HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=3600 \
+HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=10800 \
 bash scripts/run-heliodor-bench.sh run
+```
+
+For a focused manual rerun, set `suite_test`, `suite_runner`, and/or `suite_arch`
+in the workflow dispatch inputs. Empty inputs select the complete suite. Filtered
+runs skip the historical gate and never publish dashboard history. For example:
+
+```bash
+gh workflow run heliodor-bench.yml --ref <branch> \
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner=celox -f suite_arch=aarch64
 ```
