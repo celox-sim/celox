@@ -66,3 +66,35 @@ CI の固定 `gate` は x86-64 で `veryl-cc-sync`、`celox`、`celox-tiered`、
 マシンと構成を使ってください。
 
 公開結果は[ベンチマークダッシュボード](./index.md)の **Heliodor Linux** に掲載します。
+
+## 大規模・Linux バージョン別の測定
+
+nightly とプロファイルを取らない手動実行では、次の 11 ケースを x86-64
+（`ubuntu-24.04`）と AArch64（`ubuntu-24.04-arm`）で測定します。
+各ケースで前述の 4 バックエンドを実行します。
+
+| ゲスト Linux カーネル | hart 数 |
+| --- | --- |
+| 5.15 | 1、2、4、8 |
+| 6.6 | 1、2、4 |
+| 7.1 | 1、2、4 |
+| 7.1（ベクトル有効） | 1 |
+
+Heliodor のリビジョンは `6285682fa0a514077da9d17fee385c7841160025` に固定します。
+Linux バージョンはシミュレーション内で起動するゲストのもので、ホスト OS の違いではありません。
+各実行のタイムアウトは 1 時間です。未完了・失敗は計測値として公開せず、
+両アーキテクチャの全ケースが成功した場合に nightly の結果を公開します。
+
+ダッシュボードにはカーネルと hart 数を区別して表示します。設計リビジョンが異なるため、
+従来の固定 gate とは別の履歴です。コンパイル・実行・tiered の時間の定義は共通です。
+大規模ケースは PR ごとには実行しません。
+
+Linux 6.6 の 4 hart をローカルで実行する例:
+
+```bash
+HELIODOR_REF=6285682fa0a514077da9d17fee385c7841160025 \
+HELIODOR_TESTS=test_soc_66_smp_linux_boot_4hart \
+HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered" \
+HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=3600 \
+bash scripts/run-heliodor-bench.sh run
+```

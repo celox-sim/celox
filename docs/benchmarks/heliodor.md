@@ -73,3 +73,36 @@ and timings. Use the same machine and configuration for before/after comparisons
 
 Published results appear in the **Heliodor Linux** section of the
 [benchmark dashboard](./index.md).
+
+## Expanded Linux suite
+
+Nightly and non-profiling manual runs also measure the following workloads on
+x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backends:
+
+| Guest Linux kernel | Hart counts |
+| --- | --- |
+| 5.15 | 1, 2, 4, 8 |
+| 6.6 | 1, 2, 4 |
+| 7.1 | 1, 2, 4 |
+| 7.1 with vector enabled | 1 |
+
+These 11 workloads use Heliodor revision
+`6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
+simulated guest, not the benchmark host OS. Each runner has a one-hour timeout;
+timeouts and incomplete runs fail the job and are not published as timings.
+The nightly publisher requires the complete suite on both architectures.
+
+The dashboard labels each kernel and hart count separately. Expanded results
+use separate history from the older fixed gate because the design revision is
+different. Each chart retains the same compilation, execution, and tiered timing
+definitions described above. These large jobs do not run on pull requests.
+
+For example, to run the Linux 6.6 four-hart workload locally:
+
+```bash
+HELIODOR_REF=6285682fa0a514077da9d17fee385c7841160025 \
+HELIODOR_TESTS=test_soc_66_smp_linux_boot_4hart \
+HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered" \
+HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=3600 \
+bash scripts/run-heliodor-bench.sh run
+```

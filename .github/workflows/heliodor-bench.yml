@@ -416,13 +416,83 @@ jobs:
             target/heliodor-arm64/results/profile-ir/native_optimized.sir
             heliodor-arm64-host.txt
 
+  linux-suite:
+    name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }})
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !inputs.arm64_profile
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        test:
+          - test_soc_linux_boot
+          - test_soc_smp_linux_boot_2hart
+          - test_soc_smp_linux_boot_4hart
+          - test_soc_smp_linux_boot_8hart
+          - test_soc_66_linux_boot
+          - test_soc_66_smp_linux_boot_2hart
+          - test_soc_66_smp_linux_boot_4hart
+          - test_soc_71_linux_boot
+          - test_soc_71_smp_linux_boot_2hart
+          - test_soc_71_smp_linux_boot_4hart
+          - test_soc_71v_linux_boot
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 300
+    env:
+      # Keep expanded workloads separate from the historical fixed gate.
+      HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025
+      HELIODOR_TESTS: ${{ matrix.test }}
+      HELIODOR_RUNNERS: veryl-cc-sync celox celox-tiered veryl-cc-tiered
+      HELIODOR_TIMEOUT_SEC: "3600"
+      HELIODOR_CELOX_CARGO_PROFILE: release
+      CELOX_OPT_LEVEL: O2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Record host
+        run: |
+          uname -a > heliodor-suite-host.txt
+          lscpu >> heliodor-suite-host.txt
+      - name: Run complete workload
+        shell: bash
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
+      - name: Verify tiered promotion
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          logs=(target/heliodor/results/*_celox-tiered_*.log)
+          test "${#logs[@]}" -eq 1
+          validate_gate_tiered_stats "${logs[0]}" "$HELIODOR_TESTS"
+      - name: Upload workload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-suite-${{ matrix.arch }}-${{ matrix.test }}
+          path: |
+            heliodor-suite-host.txt
+            heliodor-suite-output.txt
+            target/heliodor/results/results.tsv
+            target/heliodor/results/*.log
+
   publish-linux-boot:
     name: Publish Linux boot benchmarks
     if: >-
+      !cancelled() &&
+      needs.heliodor.result == 'success' &&
+      needs.arm64-linux-boot-full.result == 'success' &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
       !inputs.arm64_profile &&
       github.ref == 'refs/heads/master'
-    needs: [heliodor, arm64-linux-boot-full]
+    needs: [heliodor, arm64-linux-boot-full, linux-suite]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -455,6 +525,32 @@ jobs:
           node scripts/convert-heliodor-bench.mjs \
             "$native_results" heliodor-published.json \
             --arm64-results "$arm64_results" --require-tiered
+
+      - uses: actions/download-artifact@v8
+        if: needs.linux-suite.result == 'success'
+        with:
+          pattern: heliodor-suite-*
+          path: artifacts/suite
+
+      - name: Convert expanded Linux suite
+        if: needs.linux-suite.result == 'success'
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          for arch in ("x86_64", "aarch64"):
+              files = sorted(Path("artifacts/suite").glob(f"heliodor-suite-{arch}-*/target/heliodor/results/results.tsv"))
+              if len(files) != 11:
+                  raise SystemExit(f"Expected 11 workloads for {arch}, found {len(files)}")
+              lines = [file.read_text().splitlines() for file in files]
+              Path(f"suite-{arch}.tsv").write_text("\n".join(lines[0][:1] + [row for result in lines for row in result[1:]]) + "\n")
+          PYTHON
+          node scripts/convert-heliodor-bench.mjs suite-x86_64.tsv heliodor-suite.json --arm64-results suite-aarch64.tsv --require-tiered --suite
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+            writeFileSync("heliodor-published.json", JSON.stringify([...read("heliodor-published.json"), ...read("heliodor-suite.json")]));
+          '
 
       - name: Store Heliodor benchmark history
         uses: benchmark-action/github-action-benchmark@v1
