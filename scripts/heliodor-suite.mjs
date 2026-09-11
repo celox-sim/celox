@@ -19,7 +19,10 @@ export const workloads = [
 export const runners = ["veryl-cc-sync", "celox", "celox-tiered", "veryl-cc-tiered"];
 const hosts = { x86_64: "ubuntu-24.04", aarch64: "ubuntu-24.04-arm" };
 
-export function matrix({ test = "", runner = "", arch = "" } = {}) {
+export function matrix({ test = "", runner = "", arch = "", profile = false } = {}) {
+  if (profile && (test || runner || arch)) {
+    throw new Error("arm64_profile cannot be combined with suite_test, suite_runner, or suite_arch");
+  }
   for (const [label, value, choices] of [
     ["test", test, workloads], ["runner", runner, runners], ["arch", arch, Object.keys(hosts)],
   ]) {
@@ -57,11 +60,12 @@ export function mergeArtifacts(root, outputPrefix) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (process.argv[2] === "matrix") {
-    console.log(JSON.stringify(matrix({ test: process.env.SUITE_TEST, runner: process.env.SUITE_RUNNER, arch: process.env.SUITE_ARCH })));
+  if (process.argv[2] === "matrix" || process.argv[2] === "validate") {
+    const result = matrix({ test: process.env.SUITE_TEST, runner: process.env.SUITE_RUNNER, arch: process.env.SUITE_ARCH, profile: process.env.ARM64_PROFILE === "true" });
+    if (process.argv[2] === "matrix") console.log(JSON.stringify(result));
   } else if (process.argv[2] === "merge" && process.argv.length === 5) {
     mergeArtifacts(process.argv[3], process.argv[4]);
   } else {
-    throw new Error("Usage: heliodor-suite.mjs matrix | merge <artifact-dir> <output-prefix>");
+    throw new Error("Usage: heliodor-suite.mjs validate | matrix | merge <artifact-dir> <output-prefix>");
   }
 }

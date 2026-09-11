@@ -63,6 +63,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-dispatch:
+    name: Validate dispatch inputs
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Reject conflicting or invalid inputs
+        env:
+          ARM64_PROFILE: ${{ inputs.arm64_profile }}
+          SUITE_TEST: ${{ inputs.suite_test }}
+          SUITE_RUNNER: ${{ inputs.suite_runner }}
+          SUITE_ARCH: ${{ inputs.suite_arch }}
+        run: node scripts/heliodor-suite.mjs validate
+
   # PRs use this gate to avoid spending a dedicated ARM runner on unrelated
   # Rust changes. Detection failures fail open in arm64-linux-boot below.
   arm64-changes:
@@ -582,7 +601,8 @@ jobs:
     name: Heliodor HEAD compatibility
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop')
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' &&
+       !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch)
     permissions:
       contents: read
     runs-on: ubuntu-latest

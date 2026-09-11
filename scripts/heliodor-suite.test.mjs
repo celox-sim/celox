@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { matrix, mergeArtifacts } from "./heliodor-suite.mjs";
 
 test("suite isolates all 88 backend runs and reserves time for large designs", () => {
@@ -43,4 +44,25 @@ test("publication requires one successful matching result from every backend", (
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("dispatch validation rejects profile/filter conflicts instead of succeeding without work", () => {
+  const validate = (inputs) => spawnSync(process.execPath, ["scripts/heliodor-suite.mjs", "validate"], {
+    encoding: "utf8",
+    env: { ...process.env, ARM64_PROFILE: "", SUITE_TEST: "", SUITE_RUNNER: "", SUITE_ARCH: "", ...inputs },
+  });
+  for (const filter of [
+    { SUITE_TEST: "test_soc_66_smp_linux_boot_4hart" },
+    { SUITE_RUNNER: "celox" },
+    { SUITE_ARCH: "aarch64" },
+  ]) {
+    const conflict = validate({ ...filter, ARM64_PROFILE: "true" });
+    assert.notEqual(conflict.status, 0);
+    assert.match(conflict.stderr, /arm64_profile cannot be combined/);
+    assert.equal(validate(filter).status, 0);
+    assert.equal(validate({ ...filter, ARM64_PROFILE: "false" }).status, 0);
+  }
+  assert.equal(validate({}).status, 0);
+  assert.equal(validate({ ARM64_PROFILE: "true" }).status, 0);
+  assert.notEqual(validate({ SUITE_ARCH: "invalid" }).status, 0);
 });
