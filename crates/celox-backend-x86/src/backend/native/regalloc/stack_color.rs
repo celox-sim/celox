@@ -486,6 +486,65 @@ fn build_planned_stack_program(
     build_planned_stack_program_from_events(func, cfg, events, homes)
 }
 
+// Homes have independent liveness and iterated dominance frontiers. Process
+// one home at a time so transient relations scale with the CFG, rather than
+// the product of all live homes and blocks.
+fn planned_phi_relations(
+    events: &[Vec<PlannedStackEvent>],
+    cfg: &NormalizedCfg,
+) -> Vec<(SpillHome, usize)> {
+    let mut rows = BTreeMap::<SpillHome, (Vec<usize>, Vec<usize>)>::new();
+    for (block, block_events) in events.iter().enumerate() {
+        let mut locally_defined = HashSet::default();
+        for event in block_events {
+            match event.kind {
+                PlannedStackEventKind::Store => {
+                    if locally_defined.insert(event.home) {
+                        rows.entry(event.home).or_default().0.push(block);
+                    }
+                }
+                PlannedStackEventKind::Reload => {
+                    if !locally_defined.contains(&event.home) {
+                        let uses = &mut rows.entry(event.home).or_default().1;
+                        if uses.last() != Some(&block) {
+                            uses.push(block);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut ordered_phis = Vec::new();
+    for (home, (definitions, upward_uses)) in rows {
+        let definitions = definitions.into_iter().collect::<HashSet<_>>();
+        let mut live_in = upward_uses.iter().copied().collect::<HashSet<_>>();
+        let mut live_work = VecDeque::from(upward_uses);
+        while let Some(block) = live_work.pop_front() {
+            for &predecessor in &cfg.predecessors[block] {
+                if !definitions.contains(&predecessor) && live_in.insert(predecessor) {
+                    live_work.push_back(predecessor);
+                }
+            }
+        }
+        let mut phis = HashSet::default();
+        let mut queued = definitions.clone();
+        let mut phi_work = definitions.into_iter().collect::<Vec<_>>();
+        while let Some(block) = phi_work.pop() {
+            for &frontier in &cfg.dominance_frontier[block] {
+                if frontier == 0 || !live_in.contains(&frontier) || !phis.insert(frontier) {
+                    continue;
+                }
+                if queued.insert(frontier) {
+                    phi_work.push(frontier);
+                }
+            }
+        }
+        ordered_phis.extend(phis.into_iter().map(|block| (home, block)));
+    }
+    ordered_phis.sort_unstable_by_key(|(home, block)| (*block, *home));
+    ordered_phis
+}
+
 fn build_planned_stack_program_from_events(
     func: &MFunction,
     cfg: &NormalizedCfg,
@@ -520,57 +579,9 @@ fn build_planned_stack_program_from_events(
         ));
     }
 
-    // Sparse pruned MemorySSA.  `definitions` and `live_in` contain only
-    // relations which actually occur; no home-by-block matrix is built.
-    let mut definitions = HashSet::<(SpillHome, usize)>::default();
-    let mut upward_uses = HashSet::<(SpillHome, usize)>::default();
-    for (block, block_events) in events.iter().enumerate() {
-        let mut locally_defined = HashSet::<SpillHome>::default();
-        for event in block_events {
-            match event.kind {
-                PlannedStackEventKind::Store => {
-                    locally_defined.insert(event.home);
-                    definitions.insert((event.home, block));
-                }
-                PlannedStackEventKind::Reload => {
-                    if !locally_defined.contains(&event.home) {
-                        upward_uses.insert((event.home, block));
-                    }
-                }
-            }
-        }
-    }
-    let mut live_in = upward_uses.clone();
-    let mut live_work = upward_uses.iter().copied().collect::<VecDeque<_>>();
-    while let Some((home, block)) = live_work.pop_front() {
-        for &predecessor in &cfg.predecessors[block] {
-            let relation = (home, predecessor);
-            if !definitions.contains(&relation) && live_in.insert(relation) {
-                live_work.push_back(relation);
-            }
-        }
-    }
-
-    let mut phi_relations = HashSet::<(SpillHome, usize)>::default();
-    let mut queued = definitions.clone();
-    let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
-    while let Some((home, block)) = phi_work.pop() {
-        for &frontier in &cfg.dominance_frontier[block] {
-            let relation = (home, frontier);
-            if frontier == 0 || !live_in.contains(&relation) || !phi_relations.insert(relation) {
-                continue;
-            }
-            if queued.insert(relation) {
-                phi_work.push(relation);
-            }
-        }
-    }
-
     let mut version_homes = Vec::<SpillHome>::new();
     let mut phis_by_block = vec![Vec::<PlannedStackPhi>::new(); func.blocks.len()];
-    let mut ordered_phis = phi_relations.into_iter().collect::<Vec<_>>();
-    ordered_phis.sort_unstable_by_key(|(home, block)| (*block, *home));
-    for (home, block) in ordered_phis {
+    for (home, block) in planned_phi_relations(&events, cfg) {
         let destination = allocate_planned_version(&mut version_homes, home)?;
         phis_by_block[block].push(PlannedStackPhi {
             home,
@@ -855,11 +866,11 @@ fn color_planned_stack_program(
     }
     let phase = timing.then(crate::timing::now);
     let ranges = merge_home_segments(&intervals, &program.version_homes, &homes)?;
-    let bundle_homes = homes.iter().copied().collect::<Vec<_>>();
-    let mut bundle_ranges = Vec::with_capacity(bundle_homes.len());
-    for &home in &bundle_homes {
-        bundle_ranges.push(ranges[&home].clone());
-    }
+    // The merged ranges own everything coloring needs. Release MemorySSA
+    // and its intervals before constructing the interval matrix.
+    drop(intervals);
+    drop(program);
+    let (bundle_homes, bundle_ranges): (Vec<_>, Vec<_>) = ranges.into_iter().unzip();
 
     // General live-range unions are not necessarily chordal after all
     // MemorySSA versions of a physical home are coalesced. Largest ranges
@@ -1099,6 +1110,107 @@ mod tests {
         function
     }
 
+    fn reference_phi_relations(
+        events: &[Vec<PlannedStackEvent>],
+        cfg: &NormalizedCfg,
+    ) -> Vec<(SpillHome, usize)> {
+        let mut definitions = HashSet::<(SpillHome, usize)>::default();
+        let mut upward_uses = HashSet::<(SpillHome, usize)>::default();
+        for (block, block_events) in events.iter().enumerate() {
+            let mut locally_defined = HashSet::<SpillHome>::default();
+            for event in block_events {
+                match event.kind {
+                    PlannedStackEventKind::Store => {
+                        locally_defined.insert(event.home);
+                        definitions.insert((event.home, block));
+                    }
+                    PlannedStackEventKind::Reload => {
+                        if !locally_defined.contains(&event.home) {
+                            upward_uses.insert((event.home, block));
+                        }
+                    }
+                }
+            }
+        }
+        let mut live_in = upward_uses.clone();
+        let mut live_work = upward_uses.iter().copied().collect::<VecDeque<_>>();
+        while let Some((home, block)) = live_work.pop_front() {
+            for &predecessor in &cfg.predecessors[block] {
+                let relation = (home, predecessor);
+                if !definitions.contains(&relation) && live_in.insert(relation) {
+                    live_work.push_back(relation);
+                }
+            }
+        }
+
+        let mut phi_relations = HashSet::<(SpillHome, usize)>::default();
+        let mut queued = definitions.clone();
+        let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
+        while let Some((home, block)) = phi_work.pop() {
+            for &frontier in &cfg.dominance_frontier[block] {
+                let relation = (home, frontier);
+                if frontier == 0 || !live_in.contains(&relation) || !phi_relations.insert(relation)
+                {
+                    continue;
+                }
+                if queued.insert(relation) {
+                    phi_work.push(relation);
+                }
+            }
+        }
+
+        let mut result = phi_relations.into_iter().collect::<Vec<_>>();
+        result.sort_unstable_by_key(|(home, block)| (*block, *home));
+        result
+    }
+
+    #[test]
+    fn per_home_phis_match_global_dataflow() {
+        use PlannedStackEventKind::{Reload as R, Store as S};
+        let patterns: &[&[PlannedStackEventKind]] =
+            &[&[], &[S], &[R], &[S, R], &[R, S], &[R, S, R]];
+        for loop_back in [false, true] {
+            let mut func = diamond_function();
+            if loop_back {
+                func.blocks[0].insts.pop();
+                func.blocks[0].push(MInst::Jump { target: BlockId(1) });
+                func.blocks[1].insts = vec![MInst::Branch {
+                    cond: VReg(0),
+                    true_bb: BlockId(2),
+                    false_bb: BlockId(3),
+                }];
+                func.blocks[2].insts = vec![MInst::Jump { target: BlockId(1) }];
+            }
+            let cfg = cfg::normalize(&mut func).unwrap();
+            for mut pattern in 0usize..patterns.len().pow(4) {
+                let mut events = vec![Vec::new(); func.blocks.len()];
+                for row in &mut events {
+                    let choice = pattern % patterns.len();
+                    pattern /= patterns.len();
+                    // Sparse, unrelated home IDs also exercise independence.
+                    for (home, kinds) in [
+                        (SpillHome(3), patterns[choice]),
+                        (SpillHome(10001), patterns[patterns.len() - 1 - choice]),
+                    ] {
+                        for &kind in kinds {
+                            row.push(PlannedStackEvent {
+                                instruction: row.len(),
+                                sequence: row.len(),
+                                home,
+                                kind,
+                                definition: None,
+                                reaching: None,
+                            });
+                        }
+                    }
+                }
+                assert_eq!(
+                    planned_phi_relations(&events, &cfg),
+                    reference_phi_relations(&events, &cfg)
+                );
+            }
+        }
+    }
     #[test]
     fn production_sequential_homes_reuse_one_slot() {
         let mut source = function(0, vec![MInst::Return]);
