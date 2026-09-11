@@ -34,3 +34,46 @@ sv_backends! {
     assert_eq!(sim.get(z), 0xdau8.into());
     }
 }
+
+sv_backends! {
+    fn preserves_intervening_reads_when_merging_conditional_writes(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic c,
+            input logic d,
+            output logic x,
+            output logic y
+        );
+            always_comb begin
+                x = d;
+                y = x;
+                if (c) x = 1'b1;
+            end
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("always_comb_order.sv"))], "Top");
+
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+    }
+}

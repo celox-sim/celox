@@ -56,6 +56,177 @@ fn rejects_same_vector_slice_read_before_write_in_always_comb() {
 }
 
 #[test]
+fn rejects_self_reads_hidden_in_comb_function_calls() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic c, output logic x);
+            function automatic logic read_x();
+                return x;
+            endfunction
+            always_comb begin
+                if (c)
+                    x = read_x();
+                else
+                    x = 1'b0;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_block_local_declarations_inside_always_comb() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic c, a, b, output logic t, y);
+            always_comb begin
+                t = 1'b0;
+                if (c) begin
+                    logic t;
+                    t = a;
+                    y = t;
+                end else begin
+                    y = b;
+                end
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("block-local declaration inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn substitutes_prior_comb_values_into_function_bodies() {
+    let source = r#"
+        module Top(input logic c, output logic x, y);
+            function automatic logic read_x();
+                return x;
+            endfunction
+            always_comb begin
+                x = 1'b0;
+                y = read_x();
+                if (c)
+                    x = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("blocking_read_inside_function.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn substitutes_blocking_values_inside_dynamic_select_indices() {
+    let source = r#"
+        module Top(
+            input logic c, a, b,
+            input logic [7:0] lut[2],
+            output logic x,
+            output logic [7:0] y
+        );
+            always_comb begin
+                x = a;
+                y = lut[x];
+                if (c)
+                    x = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("blocking_dynamic_select_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let lut = sim.signal("lut");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+        io.set(lut, 0xaa55u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0xaau8.into());
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 0u8);
+        io.set(b, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 0x55u8.into());
+}
+
+#[test]
+fn substitutes_blocking_values_inside_dynamic_write_indices() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [1:0] a,
+            input logic [1:0] d,
+            output logic [3:0] y
+        );
+            logic bits[4];
+            logic [1:0] index;
+            always_comb begin
+                bits = '0;
+                index = a;
+                bits[index] = 1'b1;
+                if (c)
+                    index = d;
+            end
+            assign y = {bits[3], bits[2], bits[1], bits[0]};
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("blocking_dynamic_write_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let d = sim.signal("d");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, 1u8);
+        io.set(d, 3u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0b0010u8.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, 0u8);
+        io.set(d, 2u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0b0001u8.into());
+}
+
+#[test]
 fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
@@ -1381,6 +1552,114 @@ fn composes_dynamic_array_writes_after_whole_array_assignments() {
 }
 
 #[test]
+fn preserves_dynamic_selected_writes_before_conditional_whole_writes() {
+    let source = r#"
+        module Top(
+            input logic [1:0] index,
+            input logic data,
+            input logic replace,
+            output logic [3:0] value
+        );
+            always_comb begin
+                value = '0;
+                value[index] = data;
+                if (replace) value = '1;
+            end
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("dynamic_select_before_conditional_whole_write.sv"),
+        )],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let index = sim.signal("index");
+    let data = sim.signal("data");
+    let replace = sim.signal("replace");
+    let value = sim.signal("value");
+
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(data, true);
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0b0100u8.into());
+
+    sim.modify(|io| io.set(replace, true)).unwrap();
+    assert_eq!(sim.get(value), 0b1111u8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(index, BigUint::default(), BigUint::from(0b11u8));
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::default(), BigUint::default())
+    );
+}
+
+#[test]
+fn preserves_dynamic_array_writes_before_conditional_whole_writes() {
+    let source = r#"
+        module Top(
+            input logic [1:0] index,
+            input logic [7:0] data,
+            input logic replace,
+            output logic [7:0] value
+        );
+            logic [7:0] values[4];
+            always_comb begin
+                values = '0;
+                values[index] = data;
+                if (replace) values = '1;
+            end
+            assign value = values[2];
+        endmodule
+        "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("dynamic_array_before_conditional_whole_write.sv"),
+        )],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let index = sim.signal("index");
+    let data = sim.signal("data");
+    let replace = sim.signal("replace");
+    let value = sim.signal("value");
+
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(data, 0xa5u8);
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(value), 0xa5u8.into());
+
+    sim.modify(|io| io.set(replace, true)).unwrap();
+    assert_eq!(sim.get(value), 0xffu8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(index, BigUint::default(), BigUint::from(0b11u8));
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(value),
+        (BigUint::default(), BigUint::default())
+    );
+}
+
+#[test]
 fn ignores_unknown_dynamic_array_write_indices() {
     let source = r#"
         module Top(
@@ -2119,6 +2398,52 @@ fn produces_unknown_for_four_state_division_by_zero() {
 }
 
 #[test]
+fn rejects_incomplete_cases_for_potential_two_state_division_by_zero() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit a, b, output logic y);
+            always_comb begin
+                case (a / b)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn recognizes_complete_cases_for_nonzero_two_state_divisors() {
+    let source = r#"
+        module Top(input bit a, output logic y);
+            always_comb begin
+                case (a / 1'b1)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nonzero_two_state_case_divisor.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, false)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+    sim.modify(|io| io.set(a, true)).unwrap();
+    assert_eq!(sim.get(y), true.into());
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -2265,6 +2590,1762 @@ fn merges_overlapping_writes_inside_always_comb() {
     assert_eq!(sim.get(y), 1u8.into());
     sim.modify(|io| io.set(a, 0u8)).unwrap();
     assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn preserves_prior_conditional_writes_across_overlapping_comb_slices() {
+    let source = r#"
+        module Top(input logic c, d, output logic [3:0] x);
+            always_comb begin
+                x = '0;
+                if (c) x[3:1] = 3'b111;
+                if (d) x[2:0] = 3'b000;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_overlapping_slice_fallback.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0b1110u8.into());
+}
+
+#[test]
+fn later_exhaustive_comb_chain_overrides_an_earlier_chain() {
+    let source = r#"
+        module Top(input logic c, d, a, b, e, f, output logic x);
+            always_comb begin
+                if (c) x = a;
+                else x = b;
+                if (d) x = e;
+                else x = f;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_consecutive_exhaustive_chains.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let e = sim.signal("e");
+    let f = sim.signal("f");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 0u8);
+        io.set(a, 1u8);
+        io.set(b, 1u8);
+        io.set(e, 1u8);
+        io.set(f, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn preserves_selected_values_before_conditional_whole_comb_writes() {
+    let source = r#"
+        module Top(input logic c, a, output logic [7:0] x);
+            always_comb begin
+                x = '0;
+                x[0] = a;
+                if (c) x = 8'hff;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_selected_then_whole.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn reads_values_assigned_earlier_on_each_comb_branch() {
+    let source = r#"
+        module Top(input logic c, output logic x, y);
+            always_comb begin
+                if (c) begin
+                    x = 1'b1;
+                    y = x;
+                end else begin
+                    x = 1'b0;
+                    y = x;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("comb_path_local_read.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn freezes_comb_branch_guards_before_predicate_writes() {
+    let source = r#"
+        module Top(input logic en, output logic t, y);
+            always_comb begin
+                t = en;
+                y = 1'b0;
+                if (t) begin
+                    t = 1'b0;
+                    y = 1'b1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("comb_frozen_predicate.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let en = sim.signal("en");
+    let t = sim.signal("t");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(en, 1u8)).unwrap();
+    assert_eq!(sim.get(t), 0u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn freezes_all_sibling_comb_guards_before_branch_writes() {
+    let source = r#"
+        module Top(input logic en, output logic s, y);
+            always_comb begin
+                s = en;
+                y = 1'b0;
+                if (s)
+                    s = 1'b0;
+                else if (!s)
+                    y = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_sibling_frozen_predicate.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let en = sim.signal("en");
+    let s = sim.signal("s");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(en, 1u8)).unwrap();
+    assert_eq!(sim.get(s), 0u8.into());
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(en, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn propagates_nested_comb_writes_to_the_enclosing_path() {
+    let source = r#"
+        module Top(input logic c, d, output logic [1:0] x, y);
+            always_comb begin
+                if (c) begin
+                    x = 2'd1;
+                    if (d) x = 2'd2;
+                    y = x;
+                end else begin
+                    x = 2'd0;
+                    y = x;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_nested_path_value.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    assert_eq!(sim.get(y), 2u8.into());
+}
+
+#[test]
+fn substitutes_whole_vector_reads_after_selected_comb_writes() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic [7:0] x, y);
+            always_comb begin
+                x = '0;
+                x[0] = a;
+                y = x;
+                if (c) x[0] = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_selected_then_whole_read.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn reevaluates_constant_casts_after_parameter_overrides() {
+    let source = r#"
+        module Top #(parameter A = 3) (output logic [7:0] y);
+            typedef logic [7:0] byte_t;
+            localparam B = byte_t'(A);
+            assign y = B;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parameter_dependent_cast.sv"))],
+        "Top",
+    )
+    .param("A", 4)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 4u8.into());
+}
+
+#[test]
+fn resolves_typedefs_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            typedef logic [7:0] byte_t;
+            localparam P = $bits(byte_t)'(16'h1ff);
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typedef_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
+fn resolves_parameterized_direct_types_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            parameter W = 8;
+            localparam Q = $bits(logic [W'(7):0])'(8'hff);
+            assign y = Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("direct_type_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
+fn infers_parameter_expression_widths_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            parameter logic [7:0] P = 0;
+            localparam Q = $bits(P)'(4'hf);
+            assign y = Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("expression_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x0fu8.into());
+}
+
+#[test]
+fn infers_variable_widths_in_size_function_cast_targets() {
+    let source = r#"
+        module Top(
+            input logic [7:0] a,
+            output logic [7:0] port_bits,
+            output logic [7:0] port_size,
+            output logic [31:0] signal_bits,
+            output logic [7:0] signal_size
+        );
+            logic [7:0] internal [0:3];
+            localparam PB = $bits(a)'(12'h1ff);
+            localparam PS = $size(a)'(12'h1ff);
+            localparam SB = $bits(internal)'(40'h1fffffffff);
+            localparam SS = $size(internal)'(8'h1f);
+            assign port_bits = PB;
+            assign port_size = PS;
+            assign signal_bits = SB;
+            assign signal_size = SS;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("variable_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("port_bits")), 0xffu8.into());
+    assert_eq!(sim.get(sim.signal("port_size")), 0xffu8.into());
+    assert_eq!(sim.get(sim.signal("signal_bits")), 0xffff_ffffu32.into());
+    assert_eq!(sim.get(sim.signal("signal_size")), 0x0fu8.into());
+}
+
+#[test]
+fn recognizes_exhaustive_comb_coverage_across_selected_writes() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic [1:0] x);
+            always_comb begin
+                if (c)
+                    x = 2'b00;
+                else begin
+                    x[1] = a;
+                    x[0] = b;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_overlapping_branch_coverage.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn reevaluates_constant_casts_with_enum_operands() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            typedef logic [7:0] byte_t;
+            typedef enum logic [1:0] { N = 2 } E;
+            localparam B = byte_t'(N);
+            assign y = B;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("enum_dependent_cast.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn coerces_each_guarded_rhs_before_building_a_mux() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] x);
+            always_comb begin
+                if (c)
+                    x = 1'sb1;
+                else
+                    x = 8'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comb_guarded_assignment_coercion.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0xffu8.into());
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn coerces_unconditional_fallbacks_before_building_a_mux() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] x);
+            always_comb begin
+                x = 1'sb1;
+                if (c)
+                    x = 8'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("comb_unconditional_assignment_coercion.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0xffu8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn sizes_unpacked_array_type_function_cast_targets() {
+    let source = r#"
+        module Top(output logic [31:0] bits_y, output logic [7:0] size_y);
+            typedef logic [7:0] bytes_t [0:3];
+            localparam B = $bits(bytes_t)'(40'h1fffffffff);
+            localparam S = $size(bytes_t)'(8'h1f);
+            assign bits_y = B;
+            assign size_y = S;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unpacked_typedef_size_function_cast.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("bits_y")), 0xffff_ffffu32.into());
+    assert_eq!(sim.get(sim.signal("size_y")), 0x0fu8.into());
+}
+
+#[test]
+fn resolves_parameter_ranges_with_enum_constants() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            typedef enum logic [1:0] { W = 2 } E;
+            localparam logic signed [W-1:0] P = 2'b11;
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("enum_dependent_parameter_range.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
+fn resolves_named_casts_in_function_return_ranges() {
+    let source = r#"
+        module Top #(parameter W = 8) (output logic [7:0] y);
+            function automatic logic [W'(7):0] f();
+                return 8'hff;
+            endfunction
+            always_comb y = f();
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("named_cast_function_return_range.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffu8.into());
+}
+
+#[test]
+fn context_sizes_wide_unbased_fills_in_conditional_writes() {
+    let source = r#"
+        module Top(input logic c, output logic [63:0] y);
+            always_comb begin
+                if (c) y = '1;
+                else y = '0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("wide_conditional_unbased_fill.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.set(sim.signal("c"), 1u8);
+    assert_eq!(sim.get(sim.signal("y")), u64::MAX.into());
+    sim.set(sim.signal("c"), 0u8);
+    assert_eq!(sim.get(sim.signal("y")), 0u64.into());
+}
+
+#[test]
+fn preserves_enum_dependent_parameters_in_instance_overrides() {
+    let source = r#"
+        module Child #(parameter Q = 0) (output logic [1:0] y);
+            assign y = Q;
+        endmodule
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 2 } E;
+            localparam P = A;
+            Child #(.Q(P)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("enum_dependent_instance_parameter.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn translates_declared_packed_indices_when_composing_whole_writes() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic b,
+            input logic [3:0] descending_value,
+            input logic [3:0] ascending_value,
+            output logic [4:1] descending_x,
+            output logic [1:4] ascending_x
+        );
+            always_comb begin
+                descending_x = descending_value;
+                if (c)
+                    descending_x[2] = b;
+            end
+            always_comb begin
+                ascending_x = ascending_value;
+                if (c)
+                    ascending_x[1] = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("declared_packed_comb_coordinates.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let b = sim.signal("b");
+    let descending_value = sim.signal("descending_value");
+    let ascending_value = sim.signal("ascending_value");
+    let descending_x = sim.signal("descending_x");
+    let ascending_x = sim.signal("ascending_x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(b, 0u8);
+        io.set(descending_value, 0b0010u8);
+        io.set(ascending_value, 0b1000u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(descending_x), 0b0010u8.into());
+    assert_eq!(sim.get(ascending_x), 0b1000u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(descending_x), 0u8.into());
+    assert_eq!(sim.get(ascending_x), 0u8.into());
+}
+
+#[test]
+fn types_earlier_enum_members_in_later_initializers() {
+    let source = r#"
+        module Top(output logic y);
+            typedef enum logic signed [1:0] {
+                A = 2'b10,
+                B = (A < 0)
+            } E;
+            assign y = B;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typed_enum_member_initializer.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn converts_two_state_blocking_writes_before_intervening_reads() {
+    let source = r#"
+        module Top(input logic c, output logic y);
+            bit x;
+            always_comb begin
+                x = 1'bx;
+                y = x;
+                if (c)
+                    x = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("two_state_intervening_comb_read.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn accepts_constant_true_always_comb_guards() {
+    let source = r#"
+        module Top(input logic a, output logic x);
+            always_comb
+                if (1'b1)
+                    x = a;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_true_comb_guard.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn recognizes_constant_true_nested_comb_guards_as_definite() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic y);
+            always_comb begin
+                if (c) begin
+                    if (1'b1)
+                        y = a;
+                end else begin
+                    y = b;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_true_nested_comb_guard.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, false);
+        io.set(b, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn treats_constant_unknown_nested_comb_guards_as_false() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic y);
+            always_comb begin
+                if (c) begin
+                    if (1'bx)
+                        ;
+                    else
+                        y = a;
+                end else begin
+                    y = b;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_unknown_nested_comb_guard.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, false);
+        io.set(b, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn recognizes_complementary_guarded_writes_as_definite() {
+    let source = r#"
+        module Top(
+            input logic c, a, b, e,
+            input bit d,
+            output logic x
+        );
+            always_comb begin
+                if (c)
+                    x = a;
+                else begin
+                    if (d)
+                        x = b;
+                    if (!d)
+                        x = e;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complementary_guarded_comb_writes.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let e = sim.signal("e");
+    let x = sim.signal("x");
+
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, true);
+        io.set(b, false);
+        io.set(d, false);
+        io.set(e, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), true.into());
+
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(d, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), false.into());
+
+    sim.modify(|io| {
+        io.set(d, false);
+        io.set(e, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), true.into());
+}
+
+#[test]
+fn does_not_combine_guards_across_condition_writes() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit s, input logic a, b, output logic x);
+            bit d;
+            always_comb begin
+                d = s;
+                if (d)
+                    x = a;
+                d = !d;
+                if (!d)
+                    x = b;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn registers_enum_types_with_aliased_bases() {
+    let source = r#"
+        module Top(output logic [1:0] y);
+            typedef logic [1:0] base_t;
+            typedef enum base_t { A = 2'd2 } E;
+            E state;
+            always_comb state = A;
+            assign y = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("aliased_enum_base_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn collects_enum_constants_from_parameterized_aliased_bases() {
+    let source = r#"
+        module Top #(parameter W = 2) (output logic [1:0] y);
+            typedef logic [W'(1):0] B;
+            typedef enum B { A = 2'b10 } E;
+            assign y = A;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parameterized_aliased_enum_base.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn collects_enum_constants_from_parameterized_direct_bases() {
+    let source = r#"
+        module Top #(parameter W = 2) (output logic [3:0] y);
+            typedef enum logic [W'(2'd3):0] { A = 4'b1010 } E;
+            assign y = A;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parameterized_direct_enum_base.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xau8.into());
+}
+
+#[test]
+fn preserves_masks_in_compound_constant_cast_operands() {
+    let source = r#"
+        module Top(output logic [3:0] y);
+            localparam logic [3:0] Q = 4'(2'bx1 | 2'b00);
+            assign y = Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("compound_masked_constant_cast.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("y")),
+        (BigUint::from(0b0011u8), BigUint::from(0b0010u8))
+    );
+}
+
+#[test]
+fn preserves_body_parameter_overrides_during_enum_collection() {
+    let source = r#"
+        module Child(output logic y);
+            parameter P = 0;
+            typedef enum logic { A = P } E;
+            assign y = A;
+        endmodule
+        module Top(output logic y);
+            Child #(.P(1)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("body_parameter_override_enum.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), true.into());
+}
+
+#[test]
+fn coerces_selected_writes_before_whole_vector_normalization() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] x);
+            always_comb begin
+                x = '0;
+                x[3:1] = 1'sb1;
+                if (c)
+                    x = 8'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("selected_write_before_whole_normalization.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let x = sim.signal("x");
+    sim.modify(|io| io.set(c, 0u8)).unwrap();
+    assert_eq!(sim.get(x), 0x0eu8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn preserves_four_state_masks_through_constant_casts() {
+    let source = r#"
+        module Top(output logic y);
+            typedef logic [1:0] two_t;
+            localparam logic [1:0] PX = two_t'(1'bx);
+            localparam logic [1:0] PZ = two_t'(1'bz);
+            assign y = (PX === 2'b0x) && (PZ === 2'b0z);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("four_state_constant_cast.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn expands_unbased_fill_literals_to_constant_cast_widths() {
+    let source = r#"
+        module Top(output logic y);
+            typedef logic [63:0] wide_t;
+            localparam logic [63:0] P1 = wide_t'('1);
+            localparam logic [63:0] PX = wide_t'('x);
+            localparam logic [63:0] PZ = wide_t'('z);
+            assign y = (P1 === 64'hffffffffffffffff)
+                    && (PX === 64'hxxxxxxxxxxxxxxxx)
+                    && (PZ === 64'hzzzzzzzzzzzzzzzz);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unbased_fill_constant_cast.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn accepts_selected_writes_killed_by_later_whole_writes() {
+    let source = r#"
+        module Top(input logic c, a, output logic [1:0] x);
+            always_comb begin
+                if (c)
+                    x[0] = a;
+                x = '0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("killed_selected_comb_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+}
+
+#[test]
+fn recognizes_complete_cases_over_two_state_selectors() {
+    let source = r#"
+        module Top(input bit s, output logic y);
+            always_comb begin
+                case (s)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_two_state_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let s = sim.signal("s");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(s, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(s, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn recognizes_complete_cases_over_constant_selectors() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            localparam logic P = 1'b0;
+            always_comb begin
+                case (P)
+                    1'b0: y = a;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_constant_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, true)).unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(a, false)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn recognizes_identical_two_state_conditional_case_arms() {
+    let source = r#"
+        module Top(input logic c, a, output logic y);
+            always_comb begin
+                case (c ? 1'b0 : 1'b0)
+                    1'b0: y = a;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("identical_conditional_case_arms.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+}
+
+#[test]
+fn recognizes_complete_cases_over_two_state_function_results() {
+    let source = r#"
+        module Top(input bit s, input logic a, b, output logic y);
+            function automatic bit select();
+                return s;
+            endfunction
+            always_comb begin
+                case (select())
+                    1'b0: y = a;
+                    1'b1: y = b;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_two_state_function_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(s, false);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, true)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn skips_unreachable_duplicate_items_in_complete_two_state_cases() {
+    let source = r#"
+        module Top(input bit s, input logic a, b, output logic y);
+            always_comb begin
+                case (s)
+                    1'b0: y = a;
+                    1'b1: y = b;
+                    1'b0: ;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unreachable_duplicate_case_item.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(s, false);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, true)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit [1:0] a, input bit [2:0] i, output logic y);
+            always_comb begin
+                case (a[i])
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn regroups_comb_targets_after_dynamic_index_substitution() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic c, a, b,
+            output logic [1:0] x
+        );
+            logic i;
+            always_comb begin
+                if (c) begin
+                    i = 1'b0;
+                    x[i] = a;
+                end else begin
+                    i = 1'b1;
+                    x[i] = b;
+                end
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn recognizes_complete_cases_over_two_state_expressions() {
+    let source = r#"
+        module Top(input bit a, b, output logic y);
+            always_comb begin
+                case ({a, b})
+                    2'b00: y = 1'b0;
+                    2'b01: y = 1'b1;
+                    2'b10: y = 1'b1;
+                    2'b11: y = 1'b0;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("complete_two_state_expression_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(a, 0u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(b, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn respects_signed_case_item_sizing_when_checking_coverage() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit signed [1:0] s, output logic y);
+            always_comb begin
+                case (s)
+                    0: y = 1'b0;
+                    1: y = 1'b1;
+                    2: y = 1'b0;
+                    3: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn recognizes_complete_signed_cases_with_sized_labels() {
+    let source = r#"
+        module Top(input bit signed [1:0] s, output logic y);
+            always_comb begin
+                case (s)
+                    2'sb00: y = 1'b0;
+                    2'sb01: y = 1'b1;
+                    2'sb10: y = 1'b0;
+                    2'sb11: y = 1'b1;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("complete_signed_case.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let s = sim.signal("s");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(s, 2u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(s, 3u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn recognizes_nested_complete_cases_as_definite_assignments() {
+    let source = r#"
+        module Top(input logic c, input bit s, output logic x);
+            always_comb begin
+                if (c)
+                    case (s)
+                        1'b0: x = 1'b0;
+                        1'b1: x = 1'b1;
+                    endcase
+                else
+                    x = 1'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nested_complete_two_state_case.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let s = sim.signal("s");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(s, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0u8.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn excludes_unreachable_case_arms_from_definite_assignments() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input bit s,
+            input logic a, b, d,
+            output logic y
+        );
+            always_comb begin
+                if (c)
+                    case (s)
+                        1'b0: y = a;
+                        1'b1: y = b;
+                        2'b10: ;
+                        default: ;
+                    endcase
+                else
+                    y = d;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("nested_complete_case_unreachable_arms.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(s, false);
+        io.set(a, true);
+        io.set(b, false);
+        io.set(d, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, true)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(d, true);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+}
+
+#[test]
+fn registers_enum_types_with_default_bases() {
+    let source = r#"
+        module Top(output logic [31:0] y);
+            typedef enum { Idle = 0, Run = 1 } State;
+            State state;
+            always_comb state = Run;
+            assign y = state;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("default_enum_base_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn substitutes_enum_members_after_expanding_instance_connection_functions() {
+    let source = r#"
+        module Child(input logic [1:0] x, output logic [1:0] y);
+            assign y = x;
+        endmodule
+
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 2'b10 } E;
+            function automatic logic [1:0] f();
+                return A;
+            endfunction
+            Child child(.x(f()), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("enum_function_instance_connection.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn rejects_ranged_enum_members_instead_of_registering_the_base_name() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [31:0] y);
+            typedef enum int { S[2] = 4 } E;
+            assign y = S0;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("ranged enum member"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_enum_initializers_that_do_not_fit_the_base_type() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic [1:0] y);
+            typedef enum logic [1:0] { A = 3'd4 } E;
+            assign y = A;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("enum member `A` value does not fit its base type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_masked_parameter_guards_before_latch_detection() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            localparam logic [1:0] S = 2'bx1;
+            always_comb begin
+                case (S)
+                    2'bx1: y = a;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("masked_parameter_case_guard.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn coerces_whole_unpacked_array_writes_to_the_flattened_width() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic signed [7:0] a[2], b[2],
+            output logic [7:0] x[2]
+        );
+            always_comb begin
+                if (c)
+                    x = a;
+                else
+                    x = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("whole_unpacked_array_comb_write.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 0x2211u16);
+        io.set(b, 0x4433u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0x4433u16.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0x2211u16.into());
+}
+
+#[test]
+fn normalizes_element_writes_before_conditional_whole_array_writes() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [7:0] a, b,
+            input logic [7:0] d[2],
+            output logic [7:0] x[2]
+        );
+            always_comb begin
+                x[0] = a;
+                x[1] = b;
+                if (c)
+                    x = d;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("mixed_unpacked_array_comb_writes.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 0x11u8);
+        io.set(b, 0x22u8);
+        io.set(d, 0x4433u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 0x2211u16.into());
+    sim.modify(|io| io.set(c, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 0x4433u16.into());
+}
+
+#[test]
+fn merges_exhaustive_writes_across_different_slice_partitions() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [1:0] a,
+            input logic b, d,
+            output logic [1:0] x
+        );
+            always_comb begin
+                if (c)
+                    x[1:0] = a;
+                else begin
+                    x[1] = b;
+                    x[0] = d;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("exhaustive_slice_partitions.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, 0u8);
+        io.set(a, 0u8);
+        io.set(b, 1u8);
+        io.set(d, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    sim.modify(|io| {
+        io.set(c, 1u8);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn merges_exhaustive_slice_partitions_within_a_wider_vector() {
+    let source = r#"
+        module Top(
+            input logic c,
+            input logic [1:0] a,
+            input logic b, d,
+            output logic [3:0] x
+        );
+            always_comb begin
+                if (c)
+                    x[1:0] = a;
+                else begin
+                    x[1] = b;
+                    x[0] = d;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("partial_exhaustive_slice_partitions.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let d = sim.signal("d");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(c, false);
+        io.set(a, 0u8);
+        io.set(b, true);
+        io.set(d, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+}
+
+#[test]
+fn rejects_incomplete_slice_partitions_within_a_wider_vector() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic c, input logic [1:0] a, input logic b, output logic [3:0] x);
+            always_comb begin
+                if (c)
+                    x[1:0] = a;
+                else
+                    x[0] = b;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn does_not_treat_wildcard_equality_as_inherently_two_state() {
+    let error = four_state_cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y);
+            always_comb begin
+                case (a ==? 1'b0)
+                    1'b0: y = 1'b0;
+                    1'b1: y = 1'b1;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_reads_before_a_later_definite_fallback_write() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic c, d, a, b, e,
+            output logic x, y
+        );
+            always_comb begin
+                y = 1'b0;
+                if (c)
+                    x = a;
+                else begin
+                    if (d)
+                        x = b;
+                    y = x;
+                    x = e;
+                end
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("inside always_comb"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -2485,6 +4566,33 @@ fn treats_unknown_procedural_conditions_as_false() {
     sim.tick(clk).unwrap();
     assert_eq!(
         sim.get_four_state(q),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn takes_always_comb_else_branch_for_unknown_predicates() {
+    let source = r#"
+        module Top(input logic sel, output logic y);
+            always_comb begin
+                if (sel) y = 1'b1;
+                else y = 1'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unknown_always_comb_else.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let sel = sim.signal("sel");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set_four_state(sel, BigUint::from(1u8), BigUint::from(1u8)))
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
         (BigUint::from(0u8), BigUint::from(0u8))
     );
 }
@@ -3097,14 +5205,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "control flow inside always_comb",
-            r#"
-            module Top(input logic s, a, b, output logic y);
-                always_comb if (s) y = a; else y = b;
-            endmodule
-        "#,
-        ),
-        (
             "unsupported statement inside always_comb",
             r#"
             module Top(input logic a, output logic y);
@@ -3447,7 +5547,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "procedural local data declaration",
+            "block-local declaration inside always_comb",
             r#"
             module Top(input logic a, output logic y);
                 always_comb begin logic tmp; tmp = a; y = tmp; end
@@ -3685,14 +5785,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return value;
                 endfunction
                 assign y = f(side, a);
-            endmodule
-        "#,
-        ),
-        (
-            "dependent repeated assignment inside always_comb",
-            r#"
-            module Top(input logic b, d, output logic a, c);
-                always_comb begin a = b; c = a; a = d; end
             endmodule
         "#,
         ),
@@ -5543,6 +7635,714 @@ fn rejects_function_writes_outside_the_inlined_scope() {
         error.contains("function assignment target outside local scope `side`"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn handles_wide_two_state_cases_without_enumerating_the_selector_domain() {
+    let source = r#"
+        module Top(input bit [31:0] s, input logic a, b, output logic y);
+            always_comb begin
+                case (s)
+                    32'd0: y = a;
+                    default: y = b;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("wide_two_state_case.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(s, 0u32);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(s, 1u32)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn treats_nonempty_static_for_loops_as_definite_assignments() {
+    let source = r#"
+        module Top(input logic c, a, b, output logic y);
+            always_comb begin
+                if (c)
+                    y = a;
+                else
+                    for (int i = 0; i < 1; i++)
+                        y = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("definite_static_for_loop.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(c, true);
+        io.set(a, true);
+        io.set(b, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), true.into());
+    sim.modify(|io| io.set(c, false)).unwrap();
+    assert_eq!(sim.get(y), false.into());
+}
+
+#[test]
+fn rejects_unmatched_constant_cases_that_would_infer_latches() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y);
+            always_comb begin
+                case (1'b0)
+                    1'b1: y = a;
+                endcase
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("latch inference inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn sign_extends_function_calls_in_conditional_assignments() {
+    let source = r#"
+        module Top(input logic c, output logic [7:0] y);
+            function automatic logic signed [3:0] f();
+                return -1;
+            endfunction
+            always_comb begin
+                if (c)
+                    y = f();
+                else
+                    y = 8'h00;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(
+            source,
+            Path::new("signed_function_conditional_assignment.sv"),
+        )],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let c = sim.signal("c");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(c, true)).unwrap();
+    assert_eq!(sim.get(y), 0xffu8.into());
+    sim.modify(|io| io.set(c, false)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn coerces_function_returns_in_procedural_lvalue_indices() {
+    let source = r#"
+        module Top(
+            input bit [1:0] index,
+            input logic data,
+            input logic replace,
+            output logic [1:0] x
+        );
+            function automatic bit idx();
+                return index;
+            endfunction
+            always_comb begin
+                x = '0;
+                x[idx()] = data;
+                if (replace)
+                    x = '1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("function_typed_lvalue_index.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let index = sim.signal("index");
+    let data = sim.signal("data");
+    let replace = sim.signal("replace");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(data, true);
+        io.set(replace, false);
+    })
+    .unwrap();
+    assert_eq!(sim.get(x), 1u8.into());
+    sim.modify(|io| io.set(index, 1u8)).unwrap();
+    assert_eq!(sim.get(x), 2u8.into());
+}
+
+#[test]
+fn rejects_indexed_part_selects_in_comb_write_groups() {
+    for select in ["index +: 2", "index -: 2"] {
+        let source = format!(
+            "module Top(input int index, input logic replace, output logic [7:0] value); \
+             always_comb begin value = '0; value[{select}] = 2'b11; \
+             if (replace) value = '1; end endmodule"
+        );
+        let error = cranelift_build_error(&source);
+        assert!(error.contains("indexed part-select"), "{error}");
+    }
+}
+
+sv_backends! {
+    fn preserves_use_site_dimensions_in_parameter_alias_types(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter N = 2)(
+                    output logic [7:0] p, l, filled,
+                    output logic [15:0] signed_y, sized_y);
+                    typedef logic [3:0] nibble_t;
+                    typedef logic signed [3:0] signed_nibble_t;
+                    parameter nibble_t [1:0] P = 8'hab;
+                    localparam nibble_t [2:1] L = P;
+                    localparam nibble_t [1:0] F = '1;
+                    localparam signed_nibble_t [1:0] S = 8'hab;
+                    parameter nibble_t [N-1:0] R = 16'hcdef;
+                    always_comb begin
+                        p = P;
+                        l = L;
+                        filled = F;
+                        signed_y = S;
+                        sized_y = R;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("parameter_alias_use_site_dimensions.sv"))], "Top"
+        ).param("P", 0xcd).param("N", 4);
+        for (name, expected) in [("p", 0xcdu16), ("l", 0xcd), ("filled", 0xff), ("signed_y", 0xffab), ("sized_y", 0xcdef)] {
+            assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+        }
+    }
+
+    fn preserves_four_state_arithmetic_case_constants(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (1'bx + 1'b0) 1'bx: y0 = a; endcase
+                        case (2'b1z - 4'b0001) 4'bxxxx: y1 = a; endcase
+                        case (4'b0000 * 2'b1x) 4'bxxxx: y2 = a; endcase
+                        case (2'b1z / 2'b01) 2'bxx: y3 = a; endcase
+                        case (2'b1x % 2'b01) 2'bxx: y4 = a; endcase
+                        case (-(2'b1z)) 2'bxx: y5 = a; endcase
+                        case ((2'b11 + 2'b01) + 2'b0x) 2'bxx: y6 = a; endcase
+                        case ((2'b1x + 2'b01) & 2'b00) 2'b00: y7 = a; endcase
+                        case (1'bx) (1'bx + 1'b0): y8 = a; endcase
+                        case (2'b01 / 2'b1x) 2'bxx: y9 = a; endcase
+                        case (2'b01 % 2'b1z) 2'bxx: y10 = a; endcase
+                        case (+(2'b1z)) 2'bxx: y11 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_arithmetic_case_constants.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for &output in &outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn preserves_four_state_reduction_case_constants(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (&1'bx) 1'bx: y0 = a; endcase
+                        case (|1'bz) 1'bx: y1 = a; endcase
+                        case (^2'b1x) 1'bx: y2 = a; endcase
+                        case (&3'b1z0) 1'b0: y3 = a; endcase
+                        case (|3'b0z1) 1'b1: y4 = a; endcase
+                        case (~&2'b1z) 1'bx: y5 = a; endcase
+                        case (~|2'b0x) 1'bx: y6 = a; endcase
+                        case (~^2'b1z) 1'bx: y7 = a; endcase
+                        case (^~2'b1x) 1'bx: y8 = a; endcase
+                        case (1'bx) (&1'bx): y9 = a; endcase
+                        case (^'1) 1'b1: y10 = a; endcase
+                        case (&'z) 1'bx: y11 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_reduction_case_constants.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for &output in &outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn preserves_use_site_dimensions_in_function_alias_types(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter W = 4)(input logic [7:0] data,
+                    output logic [7:0] constant_y, echo_y,
+                    output logic [3:0] high_y, low_y, ascending_y, inherited_y,
+                    output logic [15:0] signed_y, sizes);
+                    typedef logic [3:0] nibble_t;
+                    typedef logic signed [3:0] signed_nibble_t;
+                    function automatic nibble_t [1:0] constant_value();
+                        return 8'hab;
+                    endfunction
+                    function automatic nibble_t [W'(2):W'(1)] echo(
+                        input nibble_t [W'(2):W'(1)] x);
+                        return x;
+                    endfunction
+                    function automatic nibble_t high(input nibble_t [2:1] x);
+                        return x[2];
+                    endfunction
+                    function automatic nibble_t low;
+                        input nibble_t [2:1] x;
+                        return x[1];
+                    endfunction
+                    function automatic nibble_t ascending(input nibble_t [1:2] x);
+                        return x[1];
+                    endfunction
+                    function automatic nibble_t inherited(input nibble_t [2:1] x, z);
+                        return z[2];
+                    endfunction
+                    function automatic signed_nibble_t [1:0] signed_echo(
+                        input signed_nibble_t [1:0] x);
+                        return x;
+                    endfunction
+                    localparam BITS = $bits(constant_value())'(16'hffff);
+                    localparam SIZE = $size(constant_value())'(8'hff);
+                    always_comb begin
+                        constant_y = constant_value();
+                        echo_y = echo(data);
+                        high_y = high(data);
+                        low_y = low(data);
+                        ascending_y = ascending(data);
+                        inherited_y = inherited('0, data);
+                        signed_y = signed_echo(data);
+                        sizes = {BITS, SIZE};
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("function_alias_use_site_dimensions.sv"))], "Top"
+        ).four_state(true);
+        let data = sim.signal("data");
+        let constant_y = sim.signal("constant_y");
+        let echo_y = sim.signal("echo_y");
+        let high_y = sim.signal("high_y");
+        let low_y = sim.signal("low_y");
+        let ascending_y = sim.signal("ascending_y");
+        let inherited_y = sim.signal("inherited_y");
+        let signed_y = sim.signal("signed_y");
+        let sizes = sim.signal("sizes");
+        for value in [0xabu8, 0x80, 0x12, 0xff, 0] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(constant_y), 0xabu8.into());
+            assert_eq!(sim.get(echo_y), value.into());
+            assert_eq!(sim.get(high_y), (value >> 4).into());
+            assert_eq!(sim.get(low_y), (value & 0xf).into());
+            assert_eq!(sim.get(ascending_y), (value >> 4).into());
+            assert_eq!(sim.get(inherited_y), (value >> 4).into());
+            assert_eq!(sim.get(signed_y), (value as i8 as i16 as u16).into());
+            assert_eq!(sim.get(sizes), 0x3ffu16.into());
+        }
+    }
+
+    fn preserves_four_state_relational_case_selectors(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3);
+                    always_comb begin
+                        case (1'bx < 1'b1) 1'bx: y0 = a; endcase
+                        case (1'bz <= 1'b0) 1'bx: y1 = a; endcase
+                        case (2'b1x > 2'b00) 1'bx: y2 = a; endcase
+                        case (2'b0z >= 2'b10) 1'bx: y3 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_relational_case_selectors.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = ["y0", "y1", "y2", "y3"].map(|name| sim.signal(name));
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for output in outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn folds_compound_four_state_case_labels(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic s, a, b,
+                    output logic constant_y, concat_y, function_y, dynamic_y);
+                    function automatic logic label(); return 1'bx | 1'b0; endfunction
+                    always_comb begin
+                        case (1'bx) (1'bx | 1'b0): constant_y = a; endcase
+                        case (2'bxz) {1'bx, 1'bz}: concat_y = a; endcase
+                        case (1'bx) label(): function_y = a; endcase
+                        case (s)
+                            (1'b0 & 1'b1): dynamic_y = a;
+                            (1'b1 | 1'b0): dynamic_y = b;
+                            (1'bx | 1'b0): dynamic_y = a ^ b;
+                            (1'bx ? 1'bz : 1'bz): dynamic_y = ~a;
+                        endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("compound_four_state_case_labels.sv"))], "Top"
+        ).four_state(true);
+        let s = sim.signal("s");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let constant_outputs = ["constant_y", "concat_y", "function_y"].map(|name| sim.signal(name));
+        let dynamic_y = sim.signal("dynamic_y");
+        for inputs in 0u8..4 {
+            let a_value = inputs & 1 != 0;
+            let b_value = inputs & 2 != 0;
+            for (value, mask, expected) in [
+                (0u8, 0u8, a_value),
+                (1, 0, b_value),
+                (1, 1, a_value ^ b_value),
+                (0, 1, !a_value),
+            ] {
+                sim.modify(|io| {
+                    io.set(a, a_value);
+                    io.set(b, b_value);
+                    io.set_four_state(s, BigUint::from(value), BigUint::from(mask));
+                }).unwrap();
+                for output in constant_outputs {
+                    assert_eq!(sim.get(output), a_value.into());
+                }
+                assert_eq!(sim.get(dynamic_y), expected.into());
+            }
+        }
+    }
+
+    fn preserves_four_state_equality_case_selectors(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a,
+                    output logic y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11);
+                    always_comb begin
+                        case (1'bx == 1'bx) 1'bx: y0 = a; endcase
+                        case (1'bz != 1'b0) 1'bx: y1 = a; endcase
+                        case (2'b0x == 2'b1x) 1'b0: y2 = a; endcase
+                        case (2'b0z != 2'b1x) 1'b1: y3 = a; endcase
+                        case (!(1'bx == 1'b0)) 1'bx: y4 = a; endcase
+                        case ((1'bx != 1'bz) && 1'b1) 1'bx: y5 = a; endcase
+                        case ((1'bx && 1'b1) == 1'bx) 1'bx: y6 = a; endcase
+                        case ((1'bx == 1'bx) ? 1'b0 : 1'b1) 1'bx: y7 = a; endcase
+                        case ((1'bx == 1'bx) ? 1'bz : 1'bz) 1'bz: y8 = a; endcase
+                        case (1'sbx == 2'b1x) 1'b0: y9 = a; endcase
+                        case (1'sbx != 2'sb1x) 1'bx: y10 = a; endcase
+                        case (8'hff == '1) 1'b1: y11 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("four_state_equality_case_selectors.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..12).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for output in &outputs {
+                assert_eq!(sim.get(*output), value.into());
+            }
+        }
+    }
+
+    fn preserves_constant_case_selector_context(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
+                    always_comb begin
+                        case (1'bx && 1'b1) 1'bx: y0 = a; endcase
+                        case (1'b0 || 1'bz) 1'bx: y1 = a; endcase
+                        case (1'b1 ? 1'sb1 : 2'sb00) 2'b11: y2 = a; endcase
+                        case (1'b0 ? 2'sb00 : 1'sb1) 2'b11: y3 = a; endcase
+                        case (1'b1 ? 1'sb1 : 2'b00) 2'b01: y4 = a; endcase
+                        case (1'b1 ? 1'sbx : 2'sb00) 2'bxx: y5 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("constant_case_context.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = ["y0", "y1", "y2", "y3", "y4", "y5"].map(|name| sim.signal(name));
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for output in outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [7:0] data,
+                    output logic [$bits(f())'(7):0] y, output logic [7:0] sizes);
+                    function automatic logic [7:0] f(); return '0; endfunction
+                    logic [$size(f())'(7):0] value;
+                    logic [1:0][3:0] a[2];
+                    localparam P = $size(a[0])'(8'hff);
+                    localparam Q = $size(a[0][0])'(8'hff);
+                    always_comb begin
+                        value = data;
+                        y = value;
+                        sizes = {P, Q, 2'b00};
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("size_cast_dimensions.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let y = sim.signal("y");
+        let sizes = sim.signal("sizes");
+        for value in [0x80u8, 1, 0x55, 0xff, 0] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(y), value.into());
+            assert_eq!(sim.get(sizes), 0xfcu8.into());
+        }
+    }
+
+    fn resolves_generate_local_alias_casts_for_all_processes(sim) {
+        @setup {
+            let source = r#"
+                module Buffer(input logic a, output logic y);
+                    assign y = a;
+                endmodule
+                module Top(input logic clk, data, output logic comb_y, ff_y);
+                    typedef logic [1:0] select_t;
+                    if (1) begin : enabled
+                        localparam S = select_t'(4);
+                        localparam select_t WIDTH = 1;
+                        logic [WIDTH-1:0] connected;
+                        Buffer u(.a(data), .y(connected));
+                        if (S) begin : disabled
+                            assign comb_y = 1'b0;
+                            always_ff @(posedge clk) ff_y <= 1'b0;
+                        end else begin : selected
+                            always_comb comb_y = connected;
+                            always_ff @(posedge clk) ff_y <= connected;
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("generate_local_alias_casts.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let comb_y = sim.signal("comb_y");
+        let ff_y = sim.signal("ff_y");
+        let clk = sim.event("clk");
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(comb_y), value.into());
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(ff_y), value.into());
+        }
+    }
+
+    fn covers_single_bit_bitwise_complementary_guards(sim) {
+        @setup {
+            let source = r#"
+                module Top(input bit s, input logic outer, a, b, output logic y);
+                    always_comb if (outer) begin
+                        if (s) y = a;
+                        if (~s) y = b;
+                    end else y = a;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("bitwise_complementary_guards.sv"))], "Top"
+        ).four_state(true);
+        let s = sim.signal("s");
+        let outer = sim.signal("outer");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let y = sim.signal("y");
+        for inputs in 0u8..16 {
+            sim.modify(|io| {
+                io.set(s, inputs & 1 != 0);
+                io.set(outer, inputs & 2 != 0);
+                io.set(a, inputs & 4 != 0);
+                io.set(b, inputs & 8 != 0);
+            }).unwrap();
+            let expected = if inputs & 2 == 0 || inputs & 1 != 0 {
+                inputs & 4 != 0
+            } else {
+                inputs & 8 != 0
+            };
+            assert_eq!(sim.get(y), expected.into());
+        }
+    }
+
+    fn normalizes_function_parameter_cast_dimensions(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter W = 5)(
+                    input logic [7:0] data,
+                    output logic [5:0] y
+                );
+                    typedef logic [3:0] index_t;
+                    typedef logic [W'(8):W'(1)] byte_t;
+                    function automatic logic ansi(input logic [W'(8):W'(1)] x);
+                        return x[7];
+                    endfunction
+                    function automatic logic nonansi;
+                        input logic [W'(8):W'(1)] x;
+                        return x[7];
+                    endfunction
+                    function automatic logic ascending(input logic [W'(1):W'(8)] x);
+                        return x[2];
+                    endfunction
+                    function automatic logic inherited(input logic [W'(8):W'(1)] x, z);
+                        return z[7];
+                    endfunction
+                    function automatic logic typecast(input logic [index_t'(8):index_t'(1)] x);
+                        return x[7];
+                    endfunction
+                    function automatic logic alias_range(input byte_t x);
+                        return x[7];
+                    endfunction
+                    always_comb begin
+                        y[0] = ansi(data);
+                        y[1] = nonansi(data);
+                        y[2] = ascending(data);
+                        y[3] = inherited('0, data);
+                        y[4] = typecast(data);
+                        y[5] = alias_range(data);
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("function_parameter_cast_dimensions.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let y = sim.signal("y");
+        for value in [0x40u8, 0x80, 0, 0xff] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(y), if value & 0x40 != 0 { 0x3fu8 } else { 0 }.into());
+        }
+    }
+
+    fn lowers_parameter_casts_in_conditional_generate(sim) {
+        @setup {
+            let source = r#"
+                module Buffer(input logic a, output logic y);
+                    assign y = a;
+                endmodule
+                module Top #(parameter W = 2)(
+                    input logic clk, data,
+                    output logic comb_y, ff_y
+                );
+                    typedef logic [W-1:0] select_t;
+                    if (W'(1)) begin : enabled
+                        logic connected;
+                        Buffer u(.a(data), .y(connected));
+                        if (select_t'(4)) begin : disabled
+                            assign comb_y = 1'b0;
+                            always_ff @(posedge clk) ff_y <= 1'b0;
+                        end else begin : selected
+                            always_comb comb_y = connected;
+                            always_ff @(posedge clk) ff_y <= connected;
+                        end
+                    end else begin : disabled
+                        assign comb_y = 1'b0;
+                        always_ff @(posedge clk) ff_y <= 1'b0;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("conditional_generate_casts.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let comb_y = sim.signal("comb_y");
+        let ff_y = sim.signal("ff_y");
+        let clk = sim.event("clk");
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(comb_y), value.into());
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(ff_y), value.into());
+        }
+    }
+
+    fn lowers_parameter_casts_in_loop_generate(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter W = 3)(
+                    input logic [3:0] data,
+                    output logic [3:0] y
+                );
+                    typedef logic [W-1:0] index_t;
+                    for (genvar i = W'(8); i < index_t'(4); i += W'(1)) begin : bits
+                        if (W'(1)) begin : enabled
+                            assign y[i] = data[i];
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("loop_generate_casts.sv"))], "Top"
+        );
+        let data = sim.signal("data");
+        let y = sim.signal("y");
+        for value in [1u8, 2, 4, 8, 0xf, 0] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(y), value.into());
+        }
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
