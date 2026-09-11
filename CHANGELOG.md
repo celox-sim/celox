@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 (2026-09-11)
+
+## What's Changed
+* chore(deps): update pnpm to v12.3.3 by @renovate[bot] in https://github.com/celox-sim/celox/pull/815
+* fix(compiler)!: reduce resource use for large Heliodor benchmarks by @tignear in https://github.com/celox-sim/celox/pull/817
+* chore(deps): update pnpm to v12.3.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/818
+* fix(ci): prevent duplicate npm platform publication by @tignear in https://github.com/celox-sim/celox/pull/820
+* fix(compiler): reduce resource use for large Linux workloads by @tignear in https://github.com/celox-sim/celox/pull/819
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.5.0...v0.6.0
+
 ## 0.5.0 (2026-09-11)
 
 ## What's Changed
