@@ -192,7 +192,8 @@ const overviewTabs: TabDef[] = [
   {
     key: "heliodor",
     label: "Heliodor Linux",
-    match: (n) => n.startsWith("heliodor_linux_boot_"),
+    match: (n) =>
+      n.startsWith("heliodor_linux_boot_") || n.startsWith("heliodor_suite_"),
     sections: heliodorSections,
   },
 ];
@@ -382,6 +383,24 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/_top_n1000/, "");
   // Strip optimize prefix patterns
   s = s.replace(/^optimize_/, "");
+  s = s.replace(
+    /^heliodor_suite_(?:(66|71|71v)_)?(smp_)?linux_boot(?:_([248])hart)?_(.+)$/,
+    (_match, version, _smp, harts, metric) => {
+      const kernels: Record<string, string> = {
+        "66": "6.6",
+        "71": "7.1",
+        "71v": "7.1 (vector)",
+      };
+      const labels: Record<string, string> = {
+        compilation: "compilation (synchronous)",
+        execution: "execution (after compilation)",
+        startup: "tiered startup",
+        end_to_end: "tiered end to end",
+        tiered_execution: "tiered execution (includes background compilation)",
+      };
+      return `Linux ${kernels[version] ?? "5.15"} / ${harts ?? "1"} hart / ${labels[metric] ?? metric}`;
+    },
+  );
   s = s.replace(/^heliodor_linux_boot_execution$/, "Linux boot execution (after compilation)");
   s = s.replace(/^heliodor_linux_boot_compilation$/, "Linux boot compilation (synchronous)");
   s = s.replace(/^heliodor_linux_boot_startup$/, "Tiered startup until simulation begins");
@@ -441,8 +460,11 @@ const allSeries = computed<Series[]>(() => {
         let benchName = normalizeBenchName(stripPrefix(b.name));
         // Historical Celox tiered points also include background compilation.
         // Keep their history, but do not mix them with post-compile throughput.
-        if (seriesRuntime.includes("tiered") && benchName === "heliodor_linux_boot_execution") {
-          benchName = "heliodor_linux_boot_tiered_execution";
+        if (
+          seriesRuntime.includes("tiered") &&
+          /^heliodor_(?:linux_boot|suite_.+)_execution$/.test(benchName)
+        ) {
+          benchName = benchName.replace(/_execution$/, "_tiered_execution");
         }
         const key = `${seriesRuntime}/${benchName}`;
         let series = seriesByKey.get(key);
@@ -474,7 +496,8 @@ const allSeries = computed<Series[]>(() => {
 function isPrimaryBench(benchName: string): boolean {
   return PRIMARY_COUNTER_BENCHES.has(benchName)
     || PRIMARY_STDLIB_BENCHES.has(benchName)
-    || benchName.startsWith("heliodor_linux_boot_");
+    || benchName.startsWith("heliodor_linux_boot_")
+    || benchName.startsWith("heliodor_suite_");
 }
 
 // --- Computed: tabs with chart cards ---

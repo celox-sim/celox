@@ -1311,6 +1311,16 @@ test_source_files() {
         echo "error: could not canonicalize test source $tb_file" >&2
         return 1
     fi
+    # Versioned SMP benches instantiate the shared harness from the 5.15 file.
+    case "$test" in
+        test_soc_66_smp_linux_boot_*|test_soc_71_smp_linux_boot_*)
+            if [[ ! -f "$HELIODOR_DIR/tb/test_soc_smp_linux_boot.veryl" ]]; then
+                echo "error: missing shared SMP Linux boot harness" >&2
+                return 1
+            fi
+            source_output+=$'\n'"tb/test_soc_smp_linux_boot.veryl"
+            ;;
+    esac
     printf '%s\n%s\n' "$source_output" "$relative_tb"
 }
 
@@ -1345,9 +1355,9 @@ fallback_timeout_sec() {
     local test="$1"
     case "$test" in
         test_soc_smp_linux_boot_8hart) printf '%s\n' 3600 ;;
-        test_soc_smp_linux_boot_4hart|test_soc_smp_linux_boot_66_4hart|test_soc_smp_linux_boot_71_4hart) printf '%s\n' 1800 ;;
-        test_soc_smp_linux_boot_2hart|test_soc_smp_linux_boot_66_2hart|test_soc_smp_linux_boot_71_2hart) printf '%s\n' 600 ;;
-        test_soc_linux_boot|test_soc_linux_boot_66|test_soc_linux_boot_71|test_soc_linux_boot_71v) printf '%s\n' 300 ;;
+        test_soc_smp_linux_boot_4hart|test_soc_66_smp_linux_boot_4hart|test_soc_71_smp_linux_boot_4hart) printf '%s\n' 1800 ;;
+        test_soc_smp_linux_boot_2hart|test_soc_66_smp_linux_boot_2hart|test_soc_71_smp_linux_boot_2hart) printf '%s\n' 600 ;;
+        test_soc_linux_boot|test_soc_66_linux_boot|test_soc_71_linux_boot|test_soc_71v_linux_boot) printf '%s\n' 300 ;;
         test_soc_hvlinux) printf '%s\n' 900 ;;
         *) printf '%s\n' 600 ;;
     esac

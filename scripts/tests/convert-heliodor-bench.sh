@@ -117,3 +117,27 @@ for source in results arm64-results; do
 done
 
 echo "convert-heliodor-bench fixture test: PASS"
+
+# Multiple kernels and hart counts must remain separate series on both hosts.
+for arch in results arm64-results; do
+    cp "$TMP/$arch.tsv" "$TMP/suite-$arch.tsv"
+    for test in test_soc_66_linux_boot test_soc_71_smp_linux_boot_4hart test_soc_smp_linux_boot_8hart; do
+        tail -n +2 "$TMP/$arch.tsv" | sed "s/test_soc_linux_boot/$test/g" >> "$TMP/suite-$arch.tsv"
+    done
+done
+node "$ROOT/scripts/convert-heliodor-bench.mjs" "$TMP/suite-results.tsv" "$TMP/suite.json" \
+    --arm64-results "$TMP/suite-arm64-results.tsv" --require-tiered --suite >/dev/null
+node - "$TMP/suite.json" <<'JS'
+const assert = require("node:assert/strict");
+const rows = require(process.argv[2]);
+assert.equal(rows.length, 25 * 4);
+assert.equal(new Set(rows.map(row => row.name)).size, rows.length);
+assert.equal(rows.find(row => row.name === "heliodor-native-aarch64/heliodor_suite_71_smp_linux_boot_4hart_execution").value, 8);
+JS
+sed '/test_soc_smp_linux_boot_8hart/d' "$TMP/suite-arm64-results.tsv" > "$TMP/missing.tsv"
+if node "$ROOT/scripts/convert-heliodor-bench.mjs" "$TMP/suite-results.tsv" "$TMP/bad.json" \
+    --arm64-results "$TMP/missing.tsv" --suite >/dev/null 2>&1; then
+    echo "accepted mismatched architecture workloads" >&2
+    exit 1
+fi
+echo "convert-heliodor-bench suite fixtures: PASS"

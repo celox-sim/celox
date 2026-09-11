@@ -18,6 +18,176 @@ pub struct FlattenedModule {
     pub pre_atomized_comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
 }
 
+/// A recovered loop may bundle independent reductions into one atomic node.
+/// Its union of inputs can invent feedback through another combinational
+/// process. Split only groups on such cycles: keeping acyclic groups intact
+/// preserves their shared loop control and the existing scheduler's choices.
+pub(super) fn refine_cyclic_fold_groups(
+    paths: &mut [LogicPath<AbsoluteAddr>],
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) -> Result<(), SLTNodeFactsError> {
+    // Other graph errors (for example multiple drivers) are diagnosed by the
+    // ordinary scheduler with source information, not by this refinement.
+    let Ok(cyclic) = celox_slt::scheduler::cyclic_logic_paths(paths) else {
+        return Ok(());
+    };
+    let mut groups = BTreeSet::new();
+    for index in cyclic {
+        if let Some((group, _)) = fold_projection(paths[index].expr, arena) {
+            groups.insert(group);
+        }
+    }
+    let mut replacements = HashMap::default();
+    for group in groups {
+        let SLTNode::ForFoldGroup {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            step,
+            trip_count,
+            entry_guard,
+            states,
+        } = arena.get(group).clone()
+        else {
+            unreachable!();
+        };
+        let sources = states
+            .iter()
+            .map(|state| {
+                let mut inputs = crate::HashSet::default();
+                collect_inputs(state.update, arena, &mut inputs);
+                inputs
+            })
+            .collect::<Vec<_>>();
+        let depends_on = |from: usize, to: usize| {
+            sources[from].iter().any(|input| {
+                input.id == states[to].target.id && input.access.overlaps(&states[to].target.access)
+            })
+        };
+        // Weak components retain one-way and transitive carried-state
+        // recurrences. Initial expressions remain external inputs, since they
+        // execute before the loop's local state bindings exist.
+        let mut seen = vec![false; states.len()];
+        let mut components = Vec::new();
+        for seed in 0..states.len() {
+            if seen[seed] {
+                continue;
+            }
+            seen[seed] = true;
+            let mut pending = vec![seed];
+            let mut component = Vec::new();
+            while let Some(index) = pending.pop() {
+                component.push(index);
+                for (other, visited) in seen.iter_mut().enumerate() {
+                    if !*visited && (depends_on(index, other) || depends_on(other, index)) {
+                        *visited = true;
+                        pending.push(other);
+                    }
+                }
+            }
+            component.sort_unstable();
+            components.push(component);
+        }
+        if components.len() < 2 {
+            continue;
+        }
+        let mut offsets = Vec::new();
+        let mut offset = get_width(group, arena);
+        for state in &states {
+            let width = state.target.access.msb - state.target.access.lsb + 1;
+            offset -= width;
+            offsets.push(BitAccess::new(offset, offset + width - 1));
+        }
+        let mut fragments = Vec::new();
+        for component in components {
+            let split = arena.alloc(SLTNode::ForFoldGroup {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start: start.clone(),
+                step: step.clone(),
+                trip_count,
+                entry_guard,
+                states: component.iter().map(|&i| states[i].clone()).collect(),
+            })?;
+            let mut offset = get_width(split, arena);
+            for index in component {
+                let original = offsets[index];
+                let width = original.msb - original.lsb + 1;
+                offset -= width;
+                let projection = arena.alloc(SLTNode::Slice {
+                    expr: split,
+                    access: BitAccess::new(offset, offset + width - 1),
+                })?;
+                fragments.push((original, projection));
+            }
+        }
+        fragments.sort_by_key(|(access, _)| std::cmp::Reverse(access.lsb));
+        replacements.insert(group, fragments);
+    }
+    for path in paths {
+        // These recipes carry additional source/statement-position semantics.
+        // Leave them intact rather than infer new masks from only `expr`.
+        if !path.local_inputs.is_empty()
+            || !path.pre_lower_nodes.is_empty()
+            || !path.previous_sources.is_empty()
+            || !path.address_sources.is_empty()
+            || path.target.var().is_none()
+        {
+            continue;
+        }
+        let Some((group, access)) = fold_projection(path.expr, arena) else {
+            continue;
+        };
+        let Some(fragments) = replacements.get(&group) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        for &(original, projection) in fragments {
+            if !access.overlaps(&original) {
+                continue;
+            }
+            let lsb = access.lsb.max(original.lsb) - original.lsb;
+            let msb = access.msb.min(original.msb) - original.lsb;
+            let part = arena.alloc(SLTNode::Slice {
+                expr: projection,
+                access: BitAccess::new(lsb, msb),
+            })?;
+            parts.push((part, msb - lsb + 1));
+        }
+        let expr = if parts.len() == 1 {
+            parts[0].0
+        } else {
+            arena.alloc(SLTNode::Concat(parts))?
+        };
+        let mut inputs = crate::HashSet::default();
+        collect_inputs(expr, arena, &mut inputs);
+        let original_ids: crate::HashSet<_> = path.sources.iter().map(|source| source.id).collect();
+        inputs.retain(|input| original_ids.contains(&input.id));
+        path.expr = expr;
+        path.sources = inputs;
+    }
+    Ok(())
+}
+
+fn fold_projection(
+    node: NodeId,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+) -> Option<(NodeId, BitAccess)> {
+    match arena.get(node) {
+        SLTNode::ForFoldGroup { .. } => Some((node, BitAccess::new(0, get_width(node, arena) - 1))),
+        SLTNode::Slice { expr, access } => {
+            let (group, parent) = fold_projection(*expr, arena)?;
+            Some((
+                group,
+                BitAccess::new(parent.lsb + access.lsb, parent.lsb + access.msb),
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub fn flatten_module(
     module: &SimModule,
     path: &InstancePath,
@@ -769,4 +939,174 @@ fn convert_glue_block(
         res.push(convert_logic_path(abb, arena, target_arena, cache, cv)?);
     }
     Ok(res)
+}
+
+#[cfg(test)]
+mod fold_refinement_tests {
+    use super::*;
+    use celox_slt::SLTForFoldGroupState;
+
+    fn addr(id: u32) -> AbsoluteAddr {
+        AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: SourceVarId(id),
+        }
+    }
+
+    fn atom(id: u32) -> VarAtomBase<AbsoluteAddr> {
+        VarAtomBase {
+            id: addr(id),
+            access: BitAccess::new(0, 0),
+        }
+    }
+
+    fn input(id: u32, arena: &mut SLTNodeArena<AbsoluteAddr>) -> NodeId {
+        arena
+            .alloc(SLTNode::Input {
+                variable: addr(id),
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap()
+    }
+
+    fn path(id: u32, expr: NodeId, arena: &SLTNodeArena<AbsoluteAddr>) -> LogicPath<AbsoluteAddr> {
+        let mut sources = crate::HashSet::default();
+        collect_inputs(expr, arena, &mut sources);
+        LogicPath {
+            target: LogicPathTarget::Var(atom(id)),
+            sources,
+            previous_sources: Default::default(),
+            address_sources: Default::default(),
+            local_inputs: Vec::new(),
+            order_before: Default::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr,
+        }
+    }
+
+    // a reduces an external input; b reduces c. Connecting c to a creates
+    // artificial feedback only because the atomic group gives a a read of c.
+    fn fixture(coupled: bool) -> (SLTNodeArena<AbsoluteAddr>, Vec<LogicPath<AbsoluteAddr>>) {
+        let mut arena = SLTNodeArena::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 1, false))
+            .unwrap();
+        let one = arena
+            .alloc(SLTNode::Constant(1u8.into(), 0u8.into(), 1, false))
+            .unwrap();
+        let a = input(0, &mut arena);
+        let b = input(1, &mut arena);
+        let c = input(2, &mut arena);
+        let external = input(3, &mut arena);
+        let update_a = arena
+            .alloc(SLTNode::Binary(a, BinaryOp::Or, external))
+            .unwrap();
+        let update_b = arena
+            .alloc(SLTNode::Binary(
+                b,
+                BinaryOp::Or,
+                if coupled { a } else { c },
+            ))
+            .unwrap();
+        let group = arena
+            .alloc(SLTNode::ForFoldGroup {
+                loop_var: addr(4),
+                loop_width: 2,
+                loop_signed: false,
+                start: 0.into(),
+                step: 1.into(),
+                trip_count: 2,
+                entry_guard: one,
+                states: vec![
+                    SLTForFoldGroupState {
+                        target: atom(0),
+                        initial: zero,
+                        update: update_a,
+                    },
+                    SLTForFoldGroupState {
+                        target: atom(1),
+                        initial: zero,
+                        update: update_b,
+                    },
+                ],
+            })
+            .unwrap();
+        let a_result = arena
+            .alloc(SLTNode::Slice {
+                expr: group,
+                access: BitAccess::new(1, 1),
+            })
+            .unwrap();
+        let b_result = arena
+            .alloc(SLTNode::Slice {
+                expr: group,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let paths = vec![path(0, a_result, &arena), path(1, b_result, &arena)];
+        (arena, paths)
+    }
+
+    #[test]
+    fn acyclic_groups_keep_exact_expression_and_arena_identity() {
+        let (mut arena, mut paths) = fixture(false);
+        let original = paths.clone();
+        let nodes = arena.len();
+        refine_cyclic_fold_groups(&mut paths, &mut arena).unwrap();
+        assert_eq!(paths, original);
+        assert_eq!(arena.len(), nodes);
+    }
+
+    #[test]
+    fn independent_groups_remove_only_artificial_feedback() {
+        let (mut arena, mut paths) = fixture(false);
+        let a = input(0, &mut arena);
+        paths.push(path(2, a, &arena));
+        assert!(
+            !celox_slt::scheduler::cyclic_logic_paths(&paths)
+                .unwrap()
+                .is_empty()
+        );
+        refine_cyclic_fold_groups(&mut paths, &mut arena).unwrap();
+        assert!(
+            celox_slt::scheduler::cyclic_logic_paths(&paths)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(paths[0].sources, [atom(3)].into_iter().collect());
+        assert_eq!(paths[1].sources, [atom(2)].into_iter().collect());
+    }
+
+    #[test]
+    fn actual_feedback_remains_a_cycle_after_refinement() {
+        let (mut arena, mut paths) = fixture(false);
+        let b = input(1, &mut arena);
+        paths.push(path(2, b, &arena));
+        refine_cyclic_fold_groups(&mut paths, &mut arena).unwrap();
+        assert_eq!(
+            celox_slt::scheduler::cyclic_logic_paths(&paths).unwrap(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn coupled_recurrences_are_not_split_to_hide_feedback() {
+        let (mut arena, mut paths) = fixture(true);
+        let b = input(1, &mut arena);
+        paths.push(path(3, b, &arena));
+        let original = paths.clone();
+        let nodes = arena.len();
+        refine_cyclic_fold_groups(&mut paths, &mut arena).unwrap();
+        assert_eq!(paths, original);
+        assert_eq!(arena.len(), nodes);
+        assert!(
+            !celox_slt::scheduler::cyclic_logic_paths(&paths)
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

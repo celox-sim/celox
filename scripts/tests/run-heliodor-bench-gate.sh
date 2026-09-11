@@ -415,6 +415,15 @@ assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutraliza
         $'src/dummy.veryl\ntb/test.veryl' \
         "source enumeration without ripgrep"
     PATH="$saved_path"
+    printf '#[test(test_soc_66_smp_linux_boot_2hart)]\n' >"$HELIODOR_DIR/tb/linux66.veryl"
+    if test_source_files test_soc_66_smp_linux_boot_2hart >/dev/null 2>&1; then
+        fail "accepted versioned SMP without shared harness"
+    fi
+    touch "$HELIODOR_DIR/tb/test_soc_smp_linux_boot.veryl"
+    assert_eq "$(test_source_files test_soc_66_smp_linux_boot_2hart)" \
+        $'src/dummy.veryl\ntb/test_soc_smp_linux_boot.veryl\ntb/linux66.veryl' \
+        "versioned SMP includes its shared harness"
+
     mkdir -p "$HELIODOR_DIR/tb/duplicate"
     printf '%s\n' '#[test(test_soc_linux_boot)]' \
         >"$HELIODOR_DIR/tb/duplicate/test.veryl"

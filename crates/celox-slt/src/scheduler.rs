@@ -693,6 +693,30 @@ where
     })
 }
 
+/// Paths participating in a semantic dependency cycle, including self loops.
+/// Frontends can use this before scheduling to refine atomic pure expressions
+/// without perturbing the representation of already acyclic logic.
+pub fn cyclic_logic_paths<Addr>(
+    input: &[LogicPath<Addr>],
+) -> Result<Vec<usize>, SchedulerError<Addr>>
+where
+    Addr: Copy + Ord + Hash + Eq + Display + Debug,
+{
+    let memory = build_logic_path_memory_ssa(input)?;
+    let edges = &memory.dependencies.users;
+    let components = component_map(edges);
+    Ok(edges
+        .iter()
+        .enumerate()
+        .filter_map(|(source, targets)| {
+            targets
+                .iter()
+                .any(|&target| components[source] == components[target])
+                .then_some(source)
+        })
+        .collect())
+}
+
 pub(crate) fn plan_ff_comb_schedule<Addr>(
     input: &[LogicPath<Addr>],
     ff: &[FfAccessSummary<Addr>],
