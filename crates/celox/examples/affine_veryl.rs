@@ -79,7 +79,7 @@ fn audit(n: usize, dump: Option<&str>, mode: &str) {
     };
     let mut diagnostics = std::io::stderr().lock();
     println!(
-        "case,n,four_state,phase,units,loops,loop_header_params,slt_arena_nodes,slt_folds,slt_groups,stores,canonical_eligible,recovered_eligible,compile_ms"
+        "case,n,four_state,phase,units,loops,loop_header_params,slt_arena_nodes,slt_folds,slt_groups,stores,canonical_eligible,recovered_eligible,compile_ms,region_eligible_units,regions,region_stores,region_ms"
     );
     for (name, code, top) in cases {
         for four_state in [false, true] {
@@ -130,8 +130,33 @@ fn audit(n: usize, dump: Option<&str>, mode: &str) {
                 let mut parameters = 0;
                 let mut eligible = 0;
                 let mut recovered = 0;
+                let mut region_units = 0;
+                let mut regions = 0;
+                let mut region_stores = 0;
+                let mut region_ms = 0.0;
                 let mut rejected = std::collections::BTreeMap::<String, usize>::new();
                 for unit in &units {
+                    let start = std::time::Instant::now();
+                    match celox_sir::affine::recover_independent_regions(
+                        unit,
+                        &objects,
+                        &Default::default(),
+                    ) {
+                        Ok(found) => {
+                            region_units += usize::from(!found.is_empty());
+                            regions += found.len();
+                            region_stores += found.store_count();
+                            for rejection in &found.rejections {
+                                *rejected
+                                    .entry(format!("region: {}", rejection.reason))
+                                    .or_default() += 1;
+                            }
+                        }
+                        Err(error) => {
+                            *rejected.entry(format!("regions: {error}")).or_default() += 1
+                        }
+                    }
+                    region_ms += start.elapsed().as_secs_f64() * 1e3;
                     let cfg = SirCfg::analyze_forward_structure(unit).unwrap();
                     loops += cfg.loops.len();
                     // Includes induction and countdown parameters, not just
@@ -179,7 +204,7 @@ fn audit(n: usize, dump: Option<&str>, mode: &str) {
                     .filter(|i| matches!(i, SIRInstruction::Store(..)))
                     .count();
                 println!(
-                    "{name},{elements},{four_state},{phase},{},{loops},{parameters},{nodes},{folds},{groups},{stores},{eligible},{recovered},{compile_ms:.3}",
+                    "{name},{elements},{four_state},{phase},{},{loops},{parameters},{nodes},{folds},{groups},{stores},{eligible},{recovered},{compile_ms:.3},{region_units},{regions},{region_stores},{region_ms:.3}",
                     units.len()
                 );
             }

@@ -1,0 +1,17 @@
+case,n,four_state,phase,units,loops,loop_header_params,slt_arena_nodes,slt_folds,slt_groups,stores,canonical_eligible,recovered_eligible,compile_ms,region_eligible_units,regions,region_stores,region_ms
+counters_1000,,false,pre,9,0,0,1,0,0,12001,0,0,137.436,6,12,12000,23.007
+counters_1000,,false,post,9,0,0,1,0,0,3001,0,0,137.436,0,0,0,10.368
+counters_1000,,true,pre,9,0,0,1,0,0,12001,0,0,105.507,6,12,12000,21.112
+counters_1000,,true,post,9,0,0,1,0,0,3001,0,0,105.507,0,0,0,5.147
+linear_sorter_8,,false,pre,37,0,0,68,0,0,161,0,0,18.117,0,0,0,0.709
+linear_sorter_8,,false,post,37,0,0,68,0,0,147,0,0,18.117,0,0,0,0.660
+linear_sorter_8,,true,pre,37,0,0,68,0,0,161,0,0,11.213,0,0,0,0.766
+linear_sorter_8,,true,post,37,0,0,68,0,0,147,0,0,11.213,0,0,0,0.715
+sorter_pull_100,,false,pre,405,0,0,925,0,0,5807,0,0,570.933,0,0,0,12.051
+sorter_pull_100,,false,post,405,0,0,925,0,0,5520,0,0,570.933,0,0,0,19.557
+sorter_pull_100,,true,pre,405,0,0,925,0,0,5807,0,0,342.698,0,0,0,11.628
+sorter_pull_100,,true,post,405,0,0,925,0,0,5520,0,0,342.698,0,0,0,14.340
+axi_lite_regs,,false,pre,9,3,9,151,0,1,573,0,0,57.118,6,12,132,2.687
+axi_lite_regs,,false,post,9,3,9,151,0,1,400,0,0,57.118,0,0,0,2.134
+axi_lite_regs,,true,pre,9,3,9,151,0,1,558,0,0,24.677,6,12,132,2.264
+axi_lite_regs,,true,post,9,3,9,151,0,1,387,0,0,24.677,0,0,0,1.955

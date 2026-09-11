@@ -203,7 +203,11 @@ The [audit CSV](../benchmarks/data/affine-scope-2026-09-11/repository-audit.csv)
 and [rejection log](../benchmarks/data/affine-scope-2026-09-11/repository-audit.txt)
 record both phases and both state modes.
 
-The next adoption priority is therefore extracting useful subregions while
+The [subsequent region experiment](affine-regions.md) now extracts and verifies
+smaller regions in the counter and AXI designs, and measures a complete counter
+clock unit. The whole-unit results above remain unchanged.
+
+The next adoption priority from this audit was extracting useful subregions while
 preserving their live values, branch predicates, and ordered effects. Earlier
 SLT retention of array iteration/access provenance is still needed to avoid
 paying for expansion first. This change extends the SIR bridge; it does not

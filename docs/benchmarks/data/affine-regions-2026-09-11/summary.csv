@@ -1,0 +1,13 @@
+policy,four_state,masks,path,trials,accepted,speedup_min,speedup_median,speedup_max,decision_ms_min,decision_ms_median,decision_ms_max,accepted_payback_evals_min,accepted_payback_evals_max
+all,false,known,increment,3,0,0.626,0.630,0.800,84.645,85.902,97.159,,
+all,false,known,reset,3,0,0.350,0.356,0.356,88.585,91.778,100.316,,
+all,true,known,increment,3,3,1.068,1.408,1.440,56.810,59.384,81.484,184824,1133296
+all,true,known,reset,3,0,0.372,0.467,0.481,64.734,66.073,86.668,,
+all,true,mixed,increment,3,2,0.745,1.142,1.183,58.937,63.142,72.788,439500,572457
+all,true,mixed,reset,3,0,0.363,0.425,0.465,65.642,68.587,94.794,,
+readers,false,known,increment,3,0,0.628,0.644,0.664,82.926,92.114,106.346,,
+readers,false,known,reset,3,0,0.995,1.002,1.002,83.847,90.344,92.943,,
+readers,true,known,increment,3,3,1.141,1.195,1.197,65.085,67.427,68.852,458023,623659
+readers,true,known,reset,3,2,1.031,1.032,1.037,64.935,66.064,72.881,8281932,9049863
+readers,true,mixed,increment,3,3,1.193,1.369,1.414,66.586,67.234,74.652,247438,459214
+readers,true,mixed,reset,3,0,0.999,1.005,1.039,69.445,70.416,75.122,,

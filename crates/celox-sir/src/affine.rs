@@ -10,6 +10,7 @@
 
 mod emit;
 mod extract;
+mod regions;
 mod unrolled;
 
 use crate::{
@@ -23,6 +24,7 @@ use num_traits::{ToPrimitive, Zero};
 use std::hash::Hash;
 
 pub use extract::extract;
+pub use regions::{RecoveredRegions, RegionOptions, RegionRejection, recover_independent_regions};
 pub use unrolled::{UnrolledOptions, recover_independent_stores};
 type Result<T> = std::result::Result<T, Error>;
 

@@ -101,6 +101,7 @@ pub fn scope_cases(n: usize) -> Vec<(&'static str, String)> {
     cases
 }
 
+#[allow(dead_code)] // Audit-only builds call compile_top directly.
 pub fn compile_mode(code: &str, four_state: bool) -> (OptimizedSir, CompilationTrace, f64) {
     compile_top(code, "Top", four_state)
 }

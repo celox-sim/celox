@@ -128,7 +128,7 @@ fn load_models(first: &Lane, next: Option<&Lane>) -> Result<Vec<Affine>> {
         .collect()
 }
 
-fn cell<A: Eq + Hash>(
+pub(super) fn cell<A: Eq + Hash>(
     address: &A,
     offset: &SIROffset,
     width: usize,
@@ -163,7 +163,7 @@ fn cell<A: Eq + Hash>(
 
 /// A pure read may cover part of one cell. Load that proven in-bounds cell
 /// and retain the original slice; cross-cell reads remain unsupported.
-fn read_cell<A: Eq + Hash>(
+pub(super) fn read_cell<A: Eq + Hash>(
     address: &A,
     offset: &SIROffset,
     width: usize,
