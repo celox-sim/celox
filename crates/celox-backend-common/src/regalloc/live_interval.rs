@@ -4,9 +4,12 @@
 //! control-flow, SSA definitions, uses, and phi edges exported at the
 //! allocation boundary.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::Hash;
+use std::sync::OnceLock;
 
 use super::FunctionAllocationFacts;
 
@@ -77,12 +80,22 @@ impl<V> LiveInterval<V> {
 }
 
 /// Exact SSA liveness reconstructed from allocation facts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LiveIntervals<V> {
     intervals: BTreeMap<V, LiveInterval<V>>,
-    live_in: Vec<BTreeSet<V>>,
-    live_out: Vec<BTreeSet<V>>,
+    // Most allocators only query intervals. Materialize the legacy block-set
+    // views on demand, without making every analysis retain them twice.
+    live_in: Vec<OnceLock<BTreeSet<V>>>,
+    live_out: Vec<OnceLock<BTreeSet<V>>>,
+    block_exits: Vec<u64>,
 }
+
+impl<V: PartialEq> PartialEq for LiveIntervals<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.intervals == other.intervals && self.block_exits == other.block_exits
+    }
+}
+impl<V: Eq> Eq for LiveIntervals<V> {}
 
 impl<V: Ord> LiveIntervals<V> {
     pub fn get(&self, value: &V) -> Option<&LiveInterval<V>> {
@@ -92,13 +105,39 @@ impl<V: Ord> LiveIntervals<V> {
     pub fn iter(&self) -> impl Iterator<Item = (&V, &LiveInterval<V>)> {
         self.intervals.iter()
     }
+}
 
+impl<V: Copy + Ord> LiveIntervals<V> {
     pub fn live_in(&self, block: usize) -> Option<&BTreeSet<V>> {
-        self.live_in.get(block)
+        self.live_in.get(block).map(|cache| {
+            cache.get_or_init(|| {
+                self.intervals
+                    .iter()
+                    .filter_map(|(&value, interval)| {
+                        interval
+                            .segment_in_block(block)
+                            .filter(|segment| segment.start == 0)
+                            .map(|_| value)
+                    })
+                    .collect()
+            })
+        })
     }
 
     pub fn live_out(&self, block: usize) -> Option<&BTreeSet<V>> {
-        self.live_out.get(block)
+        self.live_out.get(block).map(|cache| {
+            cache.get_or_init(|| {
+                self.intervals
+                    .iter()
+                    .filter_map(|(&value, interval)| {
+                        interval
+                            .segment_in_block(block)
+                            .filter(|segment| segment.end == self.block_exits[block])
+                            .map(|_| value)
+                    })
+                    .collect()
+            })
+        })
     }
 }
 
@@ -148,12 +187,14 @@ impl<V: fmt::Debug> fmt::Display for LiveIntervalError<V> {
 
 impl<V: fmt::Debug> std::error::Error for LiveIntervalError<V> {}
 
+#[cfg(test)]
 struct BlockFacts<V> {
     definitions: BTreeSet<V>,
     upward_uses: BTreeSet<V>,
     last_use: BTreeMap<V, u64>,
 }
 
+#[cfg(test)]
 impl<V> Default for BlockFacts<V> {
     fn default() -> Self {
         Self {
@@ -167,7 +208,9 @@ impl<V> Default for BlockFacts<V> {
 struct ModelFacts<V> {
     definitions: BTreeMap<V, DefinitionSite>,
     uses: BTreeMap<V, Vec<UseSite>>,
+    #[cfg(test)]
     blocks: Vec<BlockFacts<V>>,
+    #[cfg(test)]
     edge_uses: BTreeMap<(usize, usize), BTreeSet<V>>,
 }
 
@@ -241,6 +284,7 @@ where
 {
     let mut definitions = BTreeMap::new();
     let mut uses = BTreeMap::<V, Vec<UseSite>>::new();
+    #[cfg(test)]
     let mut blocks = (0..facts.blocks.len())
         .map(|_| BlockFacts::default())
         .collect::<Vec<_>>();
@@ -253,9 +297,11 @@ where
                 slot: slots[block_index].phi_def,
             };
             record_definition(&mut definitions, phi.destination, site)?;
+            #[cfg(test)]
             blocks[block_index].definitions.insert(phi.destination);
         }
 
+        #[cfg(test)]
         let mut seen_definitions = blocks[block_index].definitions.clone();
         for (instruction_index, instruction) in block.instructions.iter().enumerate() {
             let use_slot = instruction_use_slot(instruction_index).ok_or_else(|| {
@@ -277,14 +323,17 @@ where
                     slot: use_slot,
                 };
                 uses.entry(value).or_default().push(site);
-                if !seen_definitions.contains(&value) {
-                    blocks[block_index].upward_uses.insert(value);
+                #[cfg(test)]
+                {
+                    if !seen_definitions.contains(&value) {
+                        blocks[block_index].upward_uses.insert(value);
+                    }
+                    blocks[block_index]
+                        .last_use
+                        .entry(value)
+                        .and_modify(|current| *current = (*current).max(use_slot))
+                        .or_insert(use_slot);
                 }
-                blocks[block_index]
-                    .last_use
-                    .entry(value)
-                    .and_modify(|current| *current = (*current).max(use_slot))
-                    .or_insert(use_slot);
             }
             let def_slot = instruction_def_slot(instruction_index).ok_or_else(|| {
                 LiveIntervalError::new(
@@ -302,12 +351,16 @@ where
                     slot: def_slot,
                 };
                 record_definition(&mut definitions, value, site)?;
-                blocks[block_index].definitions.insert(value);
-                seen_definitions.insert(value);
+                #[cfg(test)]
+                {
+                    blocks[block_index].definitions.insert(value);
+                    seen_definitions.insert(value);
+                }
             }
         }
     }
 
+    #[cfg(test)]
     let mut edge_uses = BTreeMap::<(usize, usize), BTreeSet<V>>::new();
     for (successor, block) in facts.blocks.iter().enumerate() {
         for phi in &block.phis {
@@ -328,15 +381,18 @@ where
                     slot: slots[source.predecessor].exit,
                 };
                 uses.entry(source.value).or_default().push(site);
-                edge_uses
-                    .entry((source.predecessor, successor))
-                    .or_default()
-                    .insert(source.value);
-                blocks[source.predecessor]
-                    .last_use
-                    .entry(source.value)
-                    .and_modify(|current| *current = (*current).max(site.slot))
-                    .or_insert(site.slot);
+                #[cfg(test)]
+                {
+                    edge_uses
+                        .entry((source.predecessor, successor))
+                        .or_default()
+                        .insert(source.value);
+                    blocks[source.predecessor]
+                        .last_use
+                        .entry(source.value)
+                        .and_modify(|current| *current = (*current).max(site.slot))
+                        .or_insert(site.slot);
+                }
             }
             if seen_predecessors.len() != predecessors[successor].len() {
                 return Err(LiveIntervalError::new(
@@ -357,11 +413,14 @@ where
     Ok(ModelFacts {
         definitions,
         uses,
+        #[cfg(test)]
         blocks,
+        #[cfg(test)]
         edge_uses,
     })
 }
 
+#[cfg(test)]
 fn solve_liveness<V: Copy + Ord, R>(
     facts: &FunctionAllocationFacts<V, R>,
     predecessors: &[Vec<usize>],
@@ -550,103 +609,42 @@ where
     let dominators = compute_dominators(facts.entry, &successors, &predecessors)?;
     let slots = block_slots(facts)?;
     let model = collect_model(facts, &predecessors, &slots)?;
-    let (live_in, live_out) = solve_liveness(facts, &predecessors, &model);
-    let mut segments = BTreeMap::<V, Vec<LiveSegment>>::new();
-
-    for block in 0..facts.blocks.len() {
-        let mut values = BTreeSet::new();
-        values.extend(live_in[block].iter().copied());
-        values.extend(live_out[block].iter().copied());
-        values.extend(model.blocks[block].definitions.iter().copied());
-        values.extend(model.blocks[block].last_use.keys().copied());
-        for value in values {
-            let Some(definition) = model.definitions.get(&value).copied() else {
-                return Err(LiveIntervalError::new(
-                    "LIVE_INTERVAL.MISSING_DEFINITION",
-                    Some(block),
-                    None,
-                    vec![value],
-                    "live or used value has no target-MIR definition",
-                ));
-            };
-            if definition.block == block && live_in[block].contains(&value) {
-                return Err(LiveIntervalError::new(
-                    "LIVE_INTERVAL.USE_BEFORE_DEFINITION",
-                    Some(block),
-                    definition.instruction,
-                    vec![value],
-                    "value is live at entry of its defining block",
-                ));
-            }
-            let start = if definition.block == block {
-                definition.slot
-            } else {
-                0
-            };
-            let end = if live_out[block].contains(&value) {
-                slots[block].exit.checked_add(1)
-            } else if let Some(last_use) = model.blocks[block].last_use.get(&value) {
-                last_use.checked_add(1)
-            } else if definition.block == block {
-                definition.slot.checked_add(1)
-            } else {
-                None
-            }
-            .ok_or_else(|| {
+    let block_exits = slots
+        .iter()
+        .map(|slot| {
+            slot.exit.checked_add(1).ok_or_else(|| {
                 LiveIntervalError::new(
                     "LIVE_INTERVAL.SLOT_RANGE",
-                    Some(block),
                     None,
-                    vec![value],
-                    "live segment end overflows or has no local reason to exist",
+                    None,
+                    Vec::new(),
+                    "block exit overflows",
                 )
-            })?;
-            if start >= end {
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut intervals = BTreeMap::new();
+    // Walk backwards from each SSA use, stopping at its definition. Keep only
+    // the final sparse segments, rather than two complete block/value sets in
+    // addition to those segments. Scratch space is reused for every value.
+    let mut ends = vec![0_u64; facts.blocks.len()];
+    let mut touched = Vec::new();
+    let mut pending = Vec::new();
+    for (&value, &definition) in &model.definitions {
+        ends[definition.block] = definition.slot + 1;
+        touched.push(definition.block);
+        for site in model.uses.get(&value).into_iter().flatten() {
+            if definition.block == site.block && definition.slot >= site.slot {
                 return Err(LiveIntervalError::new(
-                    "LIVE_INTERVAL.EMPTY_SEGMENT",
-                    Some(block),
-                    None,
+                    "LIVE_INTERVAL.USE_BEFORE_DEFINITION",
+                    Some(site.block),
+                    site.instruction,
                     vec![value],
-                    format!("segment {start}..{end} is empty or reversed"),
+                    "value is used before its definition",
                 ));
             }
-            segments
-                .entry(value)
-                .or_default()
-                .push(LiveSegment { block, start, end });
-        }
-    }
-
-    let mut intervals = BTreeMap::new();
-    for (&value, &definition) in &model.definitions {
-        let mut value_segments = segments.remove(&value).unwrap_or_default();
-        value_segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
-        let interval = LiveInterval {
-            value,
-            segments: value_segments,
-        };
-        if !interval
-            .segment_in_block(definition.block)
-            .is_some_and(|segment| segment.contains(definition.slot))
-        {
-            return Err(LiveIntervalError::new(
-                "LIVE_INTERVAL.DEFINITION_COVERAGE",
-                Some(definition.block),
-                definition.instruction,
-                vec![value],
-                "definition is not covered by its live interval",
-            ));
-        }
-        for site in model.uses.get(&value).into_iter().flatten() {
-            let covered = interval
-                .segment_in_block(site.block)
-                .is_some_and(|segment| segment.contains(site.slot));
-            let dominated = if definition.block == site.block {
-                definition.slot < site.slot
-            } else {
-                dominators.dominates(definition.block, site.block)
-            };
-            if !covered || !dominated {
+            if definition.block != site.block && !dominators.dominates(definition.block, site.block)
+            {
                 return Err(LiveIntervalError::new(
                     "LIVE_INTERVAL.DEFINITION_DOMINANCE",
                     Some(site.block),
@@ -655,8 +653,36 @@ where
                     "definition does not dominate the target-MIR use",
                 ));
             }
+            pending.push((site.block, site.slot + 1));
         }
-        intervals.insert(value, interval);
+        while let Some((block, end)) = pending.pop() {
+            let first_visit = ends[block] == 0;
+            if first_visit {
+                touched.push(block);
+            }
+            ends[block] = ends[block].max(end);
+            if first_visit && block != definition.block {
+                pending.extend(
+                    predecessors[block]
+                        .iter()
+                        .map(|&predecessor| (predecessor, block_exits[predecessor])),
+                );
+            }
+        }
+        touched.sort_unstable();
+        let segments = touched
+            .drain(..)
+            .map(|block| LiveSegment {
+                block,
+                start: if block == definition.block {
+                    definition.slot
+                } else {
+                    0
+                },
+                end: std::mem::take(&mut ends[block]),
+            })
+            .collect();
+        intervals.insert(value, LiveInterval { value, segments });
     }
     if let Some((&value, sites)) = model
         .uses
@@ -671,11 +697,11 @@ where
             "used value has no target-MIR definition",
         ));
     }
-
     Ok(LiveIntervals {
         intervals,
-        live_in,
-        live_out,
+        live_in: (0..facts.blocks.len()).map(|_| OnceLock::new()).collect(),
+        live_out: (0..facts.blocks.len()).map(|_| OnceLock::new()).collect(),
+        block_exits,
     })
 }
 
@@ -736,6 +762,7 @@ mod tests {
             ],
         };
 
+        assert_matches_dataflow(&facts);
         let intervals = analyze_live_intervals(&facts).unwrap();
         assert!(
             !intervals
@@ -746,6 +773,174 @@ mod tests {
         assert!(intervals.live_out(1).unwrap().contains(&1));
         assert!(intervals.live_out(2).unwrap().contains(&2));
         assert!(!intervals.live_in(3).unwrap().contains(&1));
+    }
+
+    fn assert_matches_dataflow(facts: &FunctionAllocationFacts<u32, ()>) {
+        let actual = analyze_live_intervals(facts).unwrap();
+        let unqueried = actual.clone();
+        assert!(actual.live_in.iter().all(|cache| cache.get().is_none()));
+        assert!(actual.live_out.iter().all(|cache| cache.get().is_none()));
+        let mut predecessors = vec![Vec::new(); facts.blocks.len()];
+        for (block, facts) in facts.blocks.iter().enumerate() {
+            for &successor in &facts.successors {
+                predecessors[successor].push(block);
+            }
+        }
+        let slots = block_slots(facts).unwrap();
+        let model = collect_model(facts, &predecessors, &slots).unwrap();
+        let (live_in, live_out) = solve_liveness(facts, &predecessors, &model);
+        for block in 0..facts.blocks.len() {
+            assert_eq!(actual.live_in(block).unwrap(), &live_in[block]);
+            assert_eq!(actual.live_out(block).unwrap(), &live_out[block]);
+            for (&value, definition) in &model.definitions {
+                let expected = if live_in[block].contains(&value)
+                    || live_out[block].contains(&value)
+                    || model.blocks[block].definitions.contains(&value)
+                    || model.blocks[block].last_use.contains_key(&value)
+                {
+                    Some(LiveSegment {
+                        block,
+                        start: if definition.block == block {
+                            definition.slot
+                        } else {
+                            0
+                        },
+                        end: if live_out[block].contains(&value) {
+                            slots[block].exit + 1
+                        } else {
+                            model.blocks[block]
+                                .last_use
+                                .get(&value)
+                                .copied()
+                                .unwrap_or(definition.slot)
+                                + 1
+                        },
+                    })
+                } else {
+                    None
+                };
+                assert_eq!(
+                    actual.get(&value).unwrap().segment_in_block(block),
+                    expected
+                );
+            }
+        }
+        assert_eq!(
+            actual, unqueried,
+            "queries must not change interval equality"
+        );
+    }
+
+    #[test]
+    fn backward_segments_match_dataflow_across_loops_and_branches() {
+        let mut random = 123_u64;
+        for _ in 0..32 {
+            let mut blocks = Vec::new();
+            for block in 0..16 {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let mut successors = if block < 15 {
+                    vec![block + 1]
+                } else {
+                    Vec::new()
+                };
+                let target = 1 + ((random >> 32) as usize % 15);
+                if target != block && !successors.contains(&target) {
+                    successors.push(target);
+                }
+                let uses = if block == 0 {
+                    Vec::new()
+                } else {
+                    (0..8).filter(|bit| (random >> bit) & 1 != 0).collect()
+                };
+                blocks.push(BlockAllocationFacts {
+                    successors,
+                    phis: Vec::new(),
+                    instructions: vec![instruction(
+                        uses,
+                        if block == 0 {
+                            (0..8).collect()
+                        } else {
+                            vec![8 + block as u32]
+                        },
+                    )],
+                });
+            }
+            assert_matches_dataflow(&FunctionAllocationFacts { entry: 0, blocks });
+        }
+    }
+
+    #[test]
+    fn backward_segments_match_loop_carried_phi_lifetimes() {
+        assert_matches_dataflow(&FunctionAllocationFacts {
+            entry: 0,
+            blocks: vec![
+                BlockAllocationFacts {
+                    successors: vec![1],
+                    phis: Vec::new(),
+                    instructions: vec![instruction(Vec::new(), vec![0])],
+                },
+                BlockAllocationFacts {
+                    successors: vec![2, 3],
+                    phis: vec![PhiAllocationFacts {
+                        destination: 1,
+                        sources: vec![
+                            PhiSource {
+                                predecessor: 0,
+                                value: 0,
+                            },
+                            PhiSource {
+                                predecessor: 2,
+                                value: 2,
+                            },
+                        ],
+                    }],
+                    instructions: Vec::new(),
+                },
+                BlockAllocationFacts {
+                    successors: vec![1],
+                    phis: Vec::new(),
+                    instructions: vec![instruction(vec![1], vec![2])],
+                },
+                BlockAllocationFacts {
+                    successors: Vec::new(),
+                    phis: Vec::new(),
+                    instructions: vec![instruction(vec![1], Vec::new())],
+                },
+            ],
+        });
+    }
+
+    #[test]
+    fn long_live_ranges_do_not_materialize_block_sets() {
+        let blocks = (0..512)
+            .map(|block| BlockAllocationFacts {
+                successors: if block < 511 {
+                    vec![block + 1]
+                } else {
+                    Vec::new()
+                },
+                phis: Vec::new(),
+                instructions: if block == 0 {
+                    vec![instruction(Vec::new(), (0..256).collect())]
+                } else if block == 511 {
+                    vec![instruction((0..256).collect(), Vec::new())]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect();
+        let intervals =
+            analyze_live_intervals(&FunctionAllocationFacts { entry: 0, blocks }).unwrap();
+        assert_eq!(
+            intervals
+                .iter()
+                .map(|(_, interval)| interval.segments.len())
+                .sum::<usize>(),
+            512 * 256
+        );
+        assert!(intervals.live_in.iter().all(|cache| cache.get().is_none()));
+        assert!(intervals.live_out.iter().all(|cache| cache.get().is_none()));
+        assert_eq!(intervals.live_in(256).unwrap().len(), 256);
     }
 
     #[test]
