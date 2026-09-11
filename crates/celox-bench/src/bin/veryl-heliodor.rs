@@ -12,7 +12,7 @@ use veryl_analyzer::{Analyzer, AnalyzerError, Context};
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
 use veryl_simulator::Simulator as VerylSimulator;
-use veryl_simulator::ir::{Config, ProtoModuleCache, build_ir_cached};
+use veryl_simulator::ir::{BuildSession, Config, ProtoModuleCache, build_ir_cached};
 use veryl_simulator::testbench::{
     TestResult, build_clock_periods, build_event_map, convert_initial_to_testbench,
     run_testbench_blocks,
@@ -125,8 +125,9 @@ fn run() -> Result<(), VerylHeliodorError> {
         aot_c_min_stmts: 0,
         ..Config::default()
     };
-    let mut cache = ProtoModuleCache::default();
-    let sim_ir = build_ir_cached(&analyzer_ir, top, &config, &mut cache)?;
+    let session = BuildSession::new(&analyzer_ir, &config, &[top]);
+    let mut cache = ProtoModuleCache::new(&session);
+    let sim_ir = build_ir_cached(top, &mut cache)?;
     let module_name = sim_ir.name.to_string();
     let mut sim = VerylSimulator::new(sim_ir, None);
     let event_map = build_event_map(&sim.ir.event_statements, &sim.ir.module_variables);
