@@ -3050,74 +3050,6 @@ fn global_gvn(func: &mut MFunction) {
     // subtrees see exactly the expression scope at their common dominator.
     // Load validity is carried by the structural MemorySSA version in its key,
     // rather than by a path-local store invalidation side table.
-    fn gvn_dfs(
-        node: usize,
-        dom_children: &[Vec<usize>],
-        func: &MFunction,
-        value_numbers: &mut [ValueNumber],
-        value_leaders: &mut [VReg],
-        leader_blocks: &mut [Option<usize>],
-        live_out: &[Vec<VReg>],
-        last_uses: &[HashMap<VReg, usize>],
-        load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
-        value_table: &mut HashMap<GvnKey, ValueNumber>,
-        table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
-        leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
-        replacements: &mut Vec<(usize, usize, MInst)>,
-    ) {
-        let checkpoint = table_changes.len();
-        let leader_checkpoint = leader_changes.len();
-        let block = &func.blocks[node];
-
-        process_gvn_block(
-            node,
-            block,
-            value_numbers,
-            value_leaders,
-            leader_blocks,
-            &live_out[node],
-            &last_uses[node],
-            load_versions,
-            value_table,
-            table_changes,
-            leader_changes,
-            replacements,
-        );
-
-        for &child in &dom_children[node] {
-            gvn_dfs(
-                child,
-                dom_children,
-                func,
-                value_numbers,
-                value_leaders,
-                leader_blocks,
-                live_out,
-                last_uses,
-                load_versions,
-                value_table,
-                table_changes,
-                leader_changes,
-                replacements,
-            );
-        }
-
-        while leader_changes.len() > leader_checkpoint {
-            let (number, leader, leader_block) = leader_changes.pop().unwrap();
-            value_leaders[number as usize] = leader;
-            leader_blocks[number as usize] = leader_block;
-        }
-
-        while table_changes.len() > checkpoint {
-            let (key, previous) = table_changes.pop().unwrap();
-            if let Some(previous) = previous {
-                value_table.insert(key, previous);
-            } else {
-                value_table.remove(&key);
-            }
-        }
-    }
-
     fn process_gvn_block(
         node: usize,
         block: &MBlock,
@@ -3183,21 +3115,65 @@ fn global_gvn(func: &mut MFunction) {
         }
     }
 
-    gvn_dfs(
-        0,
-        &dom_children,
-        func,
-        &mut value_numbers,
-        &mut value_leaders,
-        &mut leader_blocks,
-        &live_out,
-        &last_uses,
-        &load_versions,
-        &mut value_table,
-        &mut table_changes,
-        &mut leader_changes,
-        &mut replacements,
-    );
+    enum GvnAction {
+        Enter(usize),
+        Exit {
+            table_checkpoint: usize,
+            leader_checkpoint: usize,
+        },
+    }
+    // Deep dominator chains in large designs must not consume the compiler
+    // thread's call stack. Preserve recursive DFS order and undo checkpoints.
+    let mut actions = vec![GvnAction::Enter(0)];
+    while let Some(action) = actions.pop() {
+        let node = match action {
+            GvnAction::Exit {
+                table_checkpoint,
+                leader_checkpoint,
+            } => {
+                while leader_changes.len() > leader_checkpoint {
+                    let (number, leader, leader_block) = leader_changes.pop().unwrap();
+                    value_leaders[number as usize] = leader;
+                    leader_blocks[number as usize] = leader_block;
+                }
+                while table_changes.len() > table_checkpoint {
+                    let (key, previous) = table_changes.pop().unwrap();
+                    if let Some(previous) = previous {
+                        value_table.insert(key, previous);
+                    } else {
+                        value_table.remove(&key);
+                    }
+                }
+                continue;
+            }
+            GvnAction::Enter(node) => node,
+        };
+        actions.push(GvnAction::Exit {
+            table_checkpoint: table_changes.len(),
+            leader_checkpoint: leader_changes.len(),
+        });
+        process_gvn_block(
+            node,
+            &func.blocks[node],
+            &mut value_numbers,
+            &mut value_leaders,
+            &mut leader_blocks,
+            &live_out[node],
+            &last_uses[node],
+            &load_versions,
+            &mut value_table,
+            &mut table_changes,
+            &mut leader_changes,
+            &mut replacements,
+        );
+        actions.extend(
+            dom_children[node]
+                .iter()
+                .rev()
+                .copied()
+                .map(GvnAction::Enter),
+        );
+    }
     debug_assert!(value_table.is_empty());
     debug_assert!(table_changes.is_empty());
     debug_assert!(leader_changes.is_empty());
@@ -13497,6 +13473,34 @@ mod tests {
                 size: OpSize::S64,
             }
         ));
+    }
+
+    #[test]
+    fn global_gvn_handles_deep_dominators_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                const BLOCKS: u32 = 10_000;
+                let mut func = make_func(Vec::new(), BLOCKS + 1);
+                func.blocks.clear();
+                for index in 0..BLOCKS {
+                    let mut block = MBlock::new(BlockId(index));
+                    if index == 0 {
+                        block.push(MInst::LoadImm { dst: VReg(0), value: 1 });
+                    }
+                    block.push(MInst::AddImm { dst: VReg(index + 1), src: VReg(0), imm: index as i32 });
+                    block.push(if index + 1 < BLOCKS {
+                        MInst::Jump { target: BlockId(index + 1) }
+                    } else { MInst::Return });
+                    func.blocks.push(block);
+                }
+                global_gvn(&mut func);
+                assert_eq!(func.blocks.len(), BLOCKS as usize);
+                for (index, block) in func.blocks.iter().enumerate() {
+                    assert!(block.insts.iter().any(|inst| matches!(inst, MInst::AddImm { dst, .. } if *dst == VReg(index as u32 + 1))));
+                }
+            })
+            .unwrap().join().unwrap();
     }
 
     #[test]
