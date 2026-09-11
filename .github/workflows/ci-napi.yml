@@ -358,7 +358,9 @@ jobs:
           if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
             echo "$package_name@$package_version is already published; skipping."
           else
-            npm publish --provenance --access public --tag "$NPM_TAG"
+            # Prepublish already ran explicitly above. The package's
+            # prepublishOnly hook would publish the platform packages again.
+            npm publish --ignore-scripts --provenance --access public --tag "$NPM_TAG"
           fi
 
   publish-js:
