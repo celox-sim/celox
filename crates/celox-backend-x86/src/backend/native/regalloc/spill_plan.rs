@@ -7,7 +7,7 @@ use crate::HashMap;
 use crate::native::mir::{BlockId, MFunction, MInst, PackedStateHome, VReg};
 
 use super::cfg::NormalizedCfg;
-use super::next_use::{NextUseAnalysis, NextUseDistance};
+use super::next_use::{DistanceMap, NextUseAnalysis, NextUseDistance};
 use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis, ResolvedRecipe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -2060,7 +2060,7 @@ struct RemainingBlockUses<'a> {
     block: BlockId,
     preferred_rank: Vec<usize>,
     remaining: HashMap<LogicalValue, RemainingUses>,
-    exit: &'a HashMap<VReg, NextUseDistance>,
+    exit: &'a DistanceMap,
     exit_reload_costs: &'a HashMap<LogicalValue, u32>,
     emitted: Vec<bool>,
     emitted_count: usize,
@@ -2218,7 +2218,7 @@ impl<'a> RemainingBlockUses<'a> {
             };
         }
         let remaining_instructions = self.emitted.len().saturating_sub(self.emitted_count);
-        match self.exit.get(&VReg(value.0)).copied() {
+        match self.exit.get(&VReg(value.0)) {
             Some(NextUseDistance::Finite {
                 loop_exits,
                 instructions,

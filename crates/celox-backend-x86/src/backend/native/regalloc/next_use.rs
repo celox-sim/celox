@@ -8,6 +8,9 @@ use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 
+mod distance_map;
+pub(super) use distance_map::DistanceMap;
+
 /// Lexicographic next-use distance.
 ///
 /// Exiting any loop region is more expensive than every instruction-only path,
@@ -89,8 +92,8 @@ impl PartialOrd for NextUseDistance {
 
 #[derive(Debug)]
 pub(super) struct NextUseAnalysis {
-    pub entry: Vec<HashMap<VReg, NextUseDistance>>,
-    pub exit: Vec<HashMap<VReg, NextUseDistance>>,
+    pub entry: Vec<DistanceMap>,
+    pub exit: Vec<DistanceMap>,
     anticipated_after_phis: Vec<HashSet<VReg>>,
     pub block_max_pressure: Vec<usize>,
     pub loop_regions: Vec<LoopRegionFacts>,
@@ -194,18 +197,17 @@ pub(super) fn analyze(
     let phi_uses = phi_edge_uses(func, cfg)?;
     let region_topology = RegionTopology::build(cfg)?;
     let edge_loop_exits = &region_topology.edge_exits;
-    let mut entry: Vec<HashMap<VReg, NextUseDistance>> =
-        vec![HashMap::default(); func.blocks.len()];
-    let mut exit: Vec<HashMap<VReg, NextUseDistance>> = vec![HashMap::default(); func.blocks.len()];
+    let mut entry = vec![DistanceMap::default(); func.blocks.len()];
+    let mut exit = vec![DistanceMap::default(); func.blocks.len()];
     let mut anticipated_after_phis = vec![HashSet::<VReg>::default(); func.blocks.len()];
     let mut queue = (0..func.blocks.len()).rev().collect::<VecDeque<_>>();
     let mut queued = vec![true; func.blocks.len()];
     while let Some(block) = queue.pop_front() {
         queued[block] = false;
-        let mut next_exit = HashMap::<VReg, NextUseDistance>::default();
+        let mut next_exit = DistanceMap::default();
         for (edge, &successor) in cfg.successors[block].iter().enumerate() {
             let edge_exits = edge_loop_exits[block][edge];
-            for (&value, &distance) in &entry[successor] {
+            for (&value, distance) in &entry[successor] {
                 let Some(distance) = distance.checked_across_edge(edge_exits) else {
                     return Err(NextUseError::new(
                         "NEXT_USE.DISTANCE_RANGE",
@@ -215,25 +217,19 @@ pub(super) fn analyze(
                         "loop-region exit distance exceeds addressable CFG size",
                     ));
                 };
-                next_exit
-                    .entry(value)
-                    .and_modify(|current| *current = (*current).min(distance))
-                    .or_insert(distance);
+                next_exit.insert_min(value, distance);
             }
             for &value in &phi_uses[block][edge] {
                 let distance = NextUseDistance::Finite {
                     loop_exits: edge_exits,
                     instructions: 0,
                 };
-                next_exit
-                    .entry(value)
-                    .and_modify(|current| *current = (*current).min(distance))
-                    .or_insert(distance);
+                next_exit.insert_min(value, distance);
             }
         }
         let transfer = &transfers[block];
-        let mut next_entry = HashMap::default();
-        for (&value, &distance) in &next_exit {
+        let mut next_entry = DistanceMap::default();
+        for (&value, distance) in &next_exit {
             if !transfer.definitions.contains(&value) {
                 let Some(distance) = distance.checked_prepend_instructions(transfer.length) else {
                     return Err(NextUseError::new(
@@ -394,7 +390,7 @@ impl NextUseAnalysis {
                     ));
                 }
             }
-            for (&value, &distance) in self.entry[block].iter().chain(&self.exit[block]) {
+            for (&value, distance) in self.entry[block].iter().chain(&self.exit[block]) {
                 if distance.is_dead() {
                     return Err(NextUseError::new(
                         "NEXT_USE.DATAFLOW_EQUATION",
@@ -737,7 +733,7 @@ fn verify_dataflow_equations(
         let mut expected_exit = HashMap::<VReg, NextUseDistance>::default();
         for (edge, &successor) in cfg.successors[block].iter().enumerate() {
             let loop_exits = edge_loop_exits[edge];
-            for (&value, &successor_distance) in &analysis.entry[successor] {
+            for (&value, successor_distance) in &analysis.entry[successor] {
                 let Some(distance) = successor_distance.checked_across_edge(loop_exits) else {
                     return Err(NextUseError::new(
                         "NEXT_USE.DISTANCE_RANGE",
@@ -917,10 +913,14 @@ fn verify_distance_map(
     block: BlockId,
     instruction: usize,
     boundary: &'static str,
-    actual: &HashMap<VReg, NextUseDistance>,
+    actual: &DistanceMap,
     expected: &HashMap<VReg, NextUseDistance>,
 ) -> Result<(), NextUseError> {
-    if actual == expected {
+    if actual.len() == expected.len()
+        && actual
+            .iter()
+            .all(|(key, value)| expected.get(key).copied() == Some(value))
+    {
         return Ok(());
     }
     let values = actual
@@ -930,7 +930,7 @@ fn verify_distance_map(
         .collect::<BTreeSet<_>>();
     let value = values
         .into_iter()
-        .find(|value| actual.get(value) != expected.get(value));
+        .find(|value| actual.get(value) != expected.get(value).copied());
     let detail = value.map_or_else(
         || "no differing value could be identified".to_string(),
         |value| {
@@ -1130,7 +1130,7 @@ struct RegionAggregationWork {
 /// Scan every block once to obtain both inputs of loop-region aggregation.
 fn block_region_summaries(
     func: &MFunction,
-    exit: &[HashMap<VReg, NextUseDistance>],
+    exit: &[DistanceMap],
 ) -> Result<(Vec<BlockRegionSummary>, RegionAggregationWork), NextUseError> {
     if exit.len() != func.blocks.len() {
         return Err(NextUseError::new(
@@ -2415,14 +2415,16 @@ mod tests {
         let header = cfg.block_index[&BlockId(1)];
         analysis.verify(&func, &cfg).unwrap();
         assert!(matches!(
-            analysis.exit[header][&value],
+            analysis.exit[header].get(&value).unwrap(),
             NextUseDistance::Finite {
                 loop_exits: 1..,
                 ..
             }
         ));
 
-        let NextUseDistance::Finite { instructions, .. } = analysis.exit[header][&value] else {
+        let NextUseDistance::Finite { instructions, .. } =
+            analysis.exit[header].get(&value).unwrap()
+        else {
             unreachable!("loop-exit value must have a finite distance")
         };
         analysis.exit[header].insert(
