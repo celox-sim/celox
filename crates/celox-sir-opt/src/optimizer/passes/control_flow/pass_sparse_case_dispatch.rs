@@ -225,6 +225,11 @@ fn find_sparse_case_plans(
                 nonmaximal_same_selector_muxes(eu, block, &local_defs, &def_sites, &use_counts);
             let dense_lookup_indices =
                 dense_constant_lookup_mux_indices(eu, block, &local_defs, &def_sites, &deferred);
+            // The CFG is unchanged during discovery. Reuse producer-block
+            // dominance proofs across candidates for this target block; each
+            // proof otherwise walks the whole CFG again. Clear the cache for
+            // each target so storage stays bounded by the block count.
+            let mut dominance = HashMap::<BlockId, bool>::default();
             let mut best: Option<SparseCasePlan> = None;
             for (root_index, inst) in block.instructions.iter().enumerate() {
                 if !matches!(inst, SIRInstruction::Mux(..))
@@ -242,6 +247,7 @@ fn find_sparse_case_plans(
                     &def_sites,
                     &use_counts,
                     stable_alias_class,
+                    &mut dominance,
                 ) else {
                     continue;
                 };
@@ -411,6 +417,7 @@ fn recognize_sparse_case_chain(
     def_sites: &HashMap<RegisterId, DefSite>,
     use_counts: &HashMap<RegisterId, usize>,
     stable_alias_class: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    dominance: &mut HashMap<BlockId, bool>,
 ) -> Option<SparseCasePlan> {
     let SIRInstruction::Mux(result, _, _, _) = &block.instructions[root_index] else {
         return None;
@@ -615,6 +622,7 @@ fn recognize_sparse_case_chain(
         &reachable_arms,
         use_counts,
         def_sites,
+        dominance,
     )?;
     let profitability = sparse_case_profitability(
         eu,
@@ -1255,6 +1263,7 @@ fn cross_block_exact_dead_defs_after_rewrite(
     reachable_arms: &[usize],
     use_counts: &HashMap<RegisterId, usize>,
     def_sites: &HashMap<RegisterId, DefSite>,
+    dominance: &mut HashMap<BlockId, bool>,
 ) -> Option<HashSet<DefSite>> {
     // Matching proves the shape of every condition, but the definitions can
     // live in a predecessor after an earlier CFG rewrite.  Restrict the
@@ -1272,7 +1281,6 @@ fn cross_block_exact_dead_defs_after_rewrite(
         );
     }
 
-    let mut dominance = HashMap::<BlockId, bool>::default();
     for &reg in &candidates {
         let site = def_sites.get(&reg)?;
         if site.block != block.id

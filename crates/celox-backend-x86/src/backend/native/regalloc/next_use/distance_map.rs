@@ -1,7 +1,8 @@
 //! Compact storage for live next-use rows, with lossless wide fallback.
 //!
-//! Ordinary rows contain only finite distances that fit two u32 values. On
-//! 64-bit targets this shrinks each key/distance pair from 32 to 12 bytes.
+//! Ordinary rows pack 8 bits of loop exits and 24 bits of instructions into
+//! one u32. Rows needing more range fall back to two u32 values or usize.
+//! On 64-bit targets the ordinary key/distance pair shrinks from 32 to 8 bytes.
 //! Keep the usize-based distance API: a row that needs greater range promotes
 //! to the original representation, without saturation or a new compiler limit.
 
@@ -11,8 +12,28 @@ use crate::native::mir::VReg;
 
 #[derive(Debug, Clone)]
 pub(in crate::native::regalloc) enum DistanceMap {
+    Packed(HashMap<VReg, u32>),
     Compact(HashMap<VReg, [u32; 2]>),
     Wide(HashMap<VReg, NextUseDistance>),
+}
+
+const PACKED_INSTRUCTION_BITS: u32 = 24;
+const PACKED_INSTRUCTION_MASK: u32 = (1 << PACKED_INSTRUCTION_BITS) - 1;
+
+fn pack(distance: NextUseDistance) -> Option<u32> {
+    let [loop_exits, instructions] = compact(distance)?;
+    if loop_exits <= u8::MAX as u32 && instructions <= PACKED_INSTRUCTION_MASK {
+        Some((loop_exits << PACKED_INSTRUCTION_BITS) | instructions)
+    } else {
+        None
+    }
+}
+
+fn unpack(value: u32) -> NextUseDistance {
+    expand([
+        value >> PACKED_INSTRUCTION_BITS,
+        value & PACKED_INSTRUCTION_MASK,
+    ])
 }
 
 fn compact(distance: NextUseDistance) -> Option<[u32; 2]> {
@@ -34,13 +55,14 @@ fn expand([loop_exits, instructions]: [u32; 2]) -> NextUseDistance {
 
 impl Default for DistanceMap {
     fn default() -> Self {
-        Self::Compact(HashMap::default())
+        Self::Packed(HashMap::default())
     }
 }
 
 impl PartialEq for DistanceMap {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::Packed(left), Self::Packed(right)) => left == right,
             (Self::Compact(left), Self::Compact(right)) => left == right,
             (Self::Wide(left), Self::Wide(right)) => left == right,
             _ => {
@@ -57,6 +79,7 @@ impl Eq for DistanceMap {}
 impl DistanceMap {
     pub(in crate::native::regalloc) fn len(&self) -> usize {
         match self {
+            Self::Packed(map) => map.len(),
             Self::Compact(map) => map.len(),
             Self::Wide(map) => map.len(),
         }
@@ -64,6 +87,7 @@ impl DistanceMap {
 
     pub(in crate::native::regalloc) fn get(&self, key: &VReg) -> Option<NextUseDistance> {
         match self {
+            Self::Packed(map) => map.get(key).copied().map(unpack),
             Self::Compact(map) => map.get(key).copied().map(expand),
             Self::Wide(map) => map.get(key).copied(),
         }
@@ -78,6 +102,25 @@ impl DistanceMap {
         key: VReg,
         value: NextUseDistance,
     ) -> Option<NextUseDistance> {
+        if let Self::Packed(map) = self {
+            if let Some(value) = pack(value) {
+                return map.insert(key, value).map(unpack);
+            }
+            *self = Self::Compact(
+                std::mem::take(map)
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            key,
+                            [
+                                value >> PACKED_INSTRUCTION_BITS,
+                                value & PACKED_INSTRUCTION_MASK,
+                            ],
+                        )
+                    })
+                    .collect(),
+            );
+        }
         if let Self::Compact(map) = self {
             if let Some(value) = compact(value) {
                 return map.insert(key, value).map(expand);
@@ -106,6 +149,7 @@ impl DistanceMap {
     #[cfg(test)]
     pub(in crate::native::regalloc) fn remove(&mut self, key: &VReg) -> Option<NextUseDistance> {
         match self {
+            Self::Packed(map) => map.remove(key).map(unpack),
             Self::Compact(map) => map.remove(key).map(expand),
             Self::Wide(map) => map.remove(key),
         }
@@ -113,6 +157,7 @@ impl DistanceMap {
 
     pub(in crate::native::regalloc) fn iter(&self) -> Iter<'_> {
         match self {
+            Self::Packed(map) => Iter::Packed(map.iter()),
             Self::Compact(map) => Iter::Compact(map.iter()),
             Self::Wide(map) => Iter::Wide(map.iter()),
         }
@@ -124,6 +169,7 @@ impl DistanceMap {
 }
 
 pub(in crate::native::regalloc) enum Iter<'a> {
+    Packed(std::collections::hash_map::Iter<'a, VReg, u32>),
     Compact(std::collections::hash_map::Iter<'a, VReg, [u32; 2]>),
     Wide(std::collections::hash_map::Iter<'a, VReg, NextUseDistance>),
 }
@@ -132,6 +178,7 @@ impl<'a> Iterator for Iter<'a> {
     type Item = (&'a VReg, NextUseDistance);
     fn next(&mut self) -> Option<Self::Item> {
         match self {
+            Self::Packed(iter) => iter.next().map(|(key, value)| (key, unpack(*value))),
             Self::Compact(iter) => iter.next().map(|(key, value)| (key, expand(*value))),
             Self::Wide(iter) => iter.next().map(|(key, value)| (key, *value)),
         }
@@ -149,6 +196,34 @@ impl<'a> IntoIterator for &'a DistanceMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_boundaries_fall_back_independently_without_changing_rows() {
+        for overflow in [
+            NextUseDistance::Finite {
+                loop_exits: 256,
+                instructions: 0,
+            },
+            NextUseDistance::Finite {
+                loop_exits: 0,
+                instructions: 1 << 24,
+            },
+            NextUseDistance::Dead,
+        ] {
+            let mut row = DistanceMap::default();
+            let boundary = NextUseDistance::Finite {
+                loop_exits: 255,
+                instructions: (1 << 24) - 1,
+            };
+            row.insert(VReg(0), boundary);
+            assert!(matches!(row, DistanceMap::Packed(_)));
+            let packed = row.clone();
+            row.insert(VReg(1), overflow);
+            assert_eq!(row.get(&VReg(0)), Some(boundary));
+            assert_eq!(row.remove(&VReg(1)), Some(overflow));
+            assert_eq!(row, packed);
+        }
+    }
 
     #[test]
     fn compact_rows_preserve_boundaries_and_promote_without_truncation() {
@@ -175,7 +250,9 @@ mod tests {
             let key = VReg(index as u32);
             row.insert(key, distance);
             expected.insert(key, distance);
-            if index < 2 {
+            if index == 0 {
+                assert!(matches!(row, DistanceMap::Packed(_)));
+            } else if index == 1 {
                 assert!(matches!(row, DistanceMap::Compact(_)));
             }
             assert_eq!(
