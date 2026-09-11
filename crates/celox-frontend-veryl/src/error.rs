@@ -35,7 +35,7 @@ impl From<celox_frontend_core::SourceLocation> for SourceLocation {
     fn from(location: celox_frontend_core::SourceLocation) -> Self {
         Self {
             source: MultiSources {
-                sources: vec![Source::new(location.path, location.text)],
+                sources: vec![Source::new(location.path, location.text.to_string())],
             },
             span: location.span,
         }

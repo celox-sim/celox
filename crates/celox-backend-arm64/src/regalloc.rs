@@ -6,7 +6,7 @@
 //! analyses and algorithms are shared.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 
 use celox_backend_common::regalloc::{
@@ -482,16 +482,39 @@ fn select_spill_batch(
     let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(4);
     let mut selected = BTreeSet::new();
     let mut peak = Vec::new();
-    let mut block_segments = vec![Vec::new(); function.blocks.len()];
-    for (&value, interval) in intervals.iter() {
-        for segment in &interval.segments {
-            block_segments[segment.block].push((segment.start, segment.end, value));
+    // Merge the already block-sorted intervals one block at a time. Building
+    // a second copy of every segment can consume gigabytes on large designs.
+    let interval_segments = intervals
+        .iter()
+        .map(|(&value, interval)| (value, interval.segments.as_slice()))
+        .collect::<Vec<_>>();
+    let mut next_segments = interval_segments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, segments))| {
+            segments
+                .first()
+                .map(|segment| Reverse((segment.block, index, 0)))
+        })
+        .collect::<BinaryHeap<_>>();
+    let mut segments = Vec::new();
+    while let Some(&Reverse((block, _, _))) = next_segments.peek() {
+        segments.clear();
+        while let Some(&Reverse((next_block, index, position))) = next_segments.peek() {
+            if next_block != block {
+                break;
+            }
+            next_segments.pop();
+            let (value, interval) = interval_segments[index];
+            let segment = interval[position];
+            segments.push((segment.start, segment.end, value));
+            if let Some(next) = interval.get(position + 1) {
+                next_segments.push(Reverse((next.block, index, position + 1)));
+            }
         }
-    }
-    for mut segments in block_segments {
         segments.sort_unstable();
         let mut active = Vec::<(u64, VReg)>::new();
-        for (start, end, value) in segments {
+        for &(start, end, value) in &segments {
             active.retain(|(active_end, active_value)| {
                 *active_end > start && !selected.contains(active_value)
             });
