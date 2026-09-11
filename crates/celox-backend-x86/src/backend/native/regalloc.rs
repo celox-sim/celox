@@ -444,8 +444,8 @@ fn run_regalloc_in_place(
     let allocation = ssa::allocate(
         func,
         &normalized_cfg,
-        &next_use,
-        &planning_recipes,
+        next_use,
+        planning_recipes,
         &allocation_constraints,
         trace,
         timing,

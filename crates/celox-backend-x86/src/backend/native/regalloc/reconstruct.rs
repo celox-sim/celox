@@ -10,7 +10,6 @@ use crate::native::mir::{
 
 use super::cfg::NormalizedCfg;
 use super::materialized_state_home::{MaterializedStateReload, MaterializedStateStore};
-use super::next_use::NextUseAnalysis;
 use super::reload::{
     ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, ReloadRecipeAnalysis, ResolvedBase,
     ResolvedRecipe, materialize_pure_step,
@@ -149,7 +148,6 @@ pub(super) fn reconstruct(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
     plan: &SpillPlan,
-    _next_use: &NextUseAnalysis,
     reload_recipes: &ReloadRecipeAnalysis,
     timing: bool,
     verify: bool,
@@ -2675,7 +2673,7 @@ mod tests {
         plan.verify(&func, &cfg, registers).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
-        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes, false, true).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &recipes, false, true).unwrap();
         let rebuilt_cfg = (!result.shared_reload_blocks.is_empty())
             .then(|| super::super::cfg::normalize(&mut func).unwrap());
         let cfg = rebuilt_cfg.as_ref().unwrap_or(&cfg);
@@ -2762,7 +2760,7 @@ mod tests {
         plan.verify(&func, &cfg, 2).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
-        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes, false, true).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &recipes, false, true).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
             &func,
             &cfg,
@@ -3038,7 +3036,7 @@ mod tests {
         plan.verify(&func, &cfg, 2).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
-        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes, false, true).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &recipes, false, true).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
             &func,
             &cfg,

@@ -881,16 +881,9 @@ mod tests {
 
         let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let ordinary_recipes = reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
-        let result = reconstruct::reconstruct(
-            &mut func,
-            &cfg,
-            &plan,
-            &next_use,
-            &ordinary_recipes,
-            false,
-            true,
-        )
-        .unwrap();
+        let result =
+            reconstruct::reconstruct(&mut func, &cfg, &plan, &ordinary_recipes, false, true)
+                .unwrap();
         assert_eq!(result.frame_size, 0);
         assert!(func.blocks[0].insts.iter().any(|inst| {
             matches!(
@@ -996,16 +989,9 @@ mod tests {
         assert!(plan.state_reload_recipes.is_empty());
         let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let ordinary_recipes = reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
-        let result = reconstruct::reconstruct(
-            &mut func,
-            &cfg,
-            &plan,
-            &next_use,
-            &ordinary_recipes,
-            false,
-            true,
-        )
-        .unwrap();
+        let result =
+            reconstruct::reconstruct(&mut func, &cfg, &plan, &ordinary_recipes, false, true)
+                .unwrap();
         assert_eq!(result.frame_size, 8);
         assert!(func.blocks[0].insts.iter().any(|inst| {
             matches!(
