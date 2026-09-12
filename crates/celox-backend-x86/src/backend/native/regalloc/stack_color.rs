@@ -1024,7 +1024,7 @@ fn color_planned_stack_program(
     }
 
     let phase = timing.then(crate::timing::now);
-    let mut matrix = DynamicIntervalMatrix::new(cfg)
+    let mut matrix = DynamicIntervalMatrix::with_block_ends(cfg, &ends)
         .map_err(|error| planned_union_error(error, &bundle_homes))?;
     for &bundle in &order {
         let segments = if verify {
@@ -1058,7 +1058,7 @@ fn color_planned_stack_program(
         // Rebuild from the final immutable assignment, independently of the
         // mutation order used by first-fit coloring. This is a diagnostic
         // proof of the already-computed assignment, not part of coloring.
-        let mut rebuilt = DynamicIntervalMatrix::new(cfg)
+        let mut rebuilt = DynamicIntervalMatrix::with_block_ends(cfg, &ends)
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
         let mut rebuild_order = (0..bundle_homes.len())
             .map(|bundle| {
