@@ -1,7 +1,7 @@
 //! Braun--Hack sections 4.2 and 4.3: W/S states and coupling plan.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::HashMap;
 use crate::native::mir::{BlockId, MFunction, MInst, PackedStateHome, VReg};
@@ -14,8 +14,8 @@ use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis, Re
 pub(super) struct LogicalValue(pub u32);
 
 /// Mutable W/S frontiers stay sorted; completed large S rows use indexed
-/// 16-bit offsets. They keep exact ascending iteration and membership without
-/// retaining four bytes for every live value in every CFG row.
+/// 16-bit offsets or a dense bitmap, whichever is smaller. Both preserve exact
+/// ascending iteration and membership without a full value per CFG row.
 #[derive(Debug, Clone)]
 pub(super) enum LogicalSet {
     Mutable(Vec<LogicalValue>),
@@ -25,9 +25,20 @@ pub(super) enum LogicalSet {
 #[derive(Debug)]
 pub(super) struct FrozenLogicalSet {
     values: std::sync::Arc<[LogicalValue]>,
-    // Each chunk contains at most 64 ascending values within a u16 span.
-    chunks: Box<[(u32, u32)]>, // (base value, first offset index)
-    offsets: Box<[u16]>,
+    storage: FrozenLogicalStorage,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FrozenLogicalStorage {
+    Sparse {
+        // Each chunk contains at most 64 values within a u16 span.
+        chunks: Box<[(u32, u32)]>, // (base value, first offset index)
+        offsets: Box<[u16]>,
+    },
+    Dense {
+        words: Box<[u64]>,
+        len: usize,
+    },
 }
 
 impl Default for LogicalSet {
@@ -40,9 +51,7 @@ impl PartialEq for LogicalSet {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Mutable(left), Self::Mutable(right)) => left == right,
-            (Self::Frozen(left), Self::Frozen(right)) => {
-                left.chunks == right.chunks && left.offsets == right.offsets
-            }
+            (Self::Frozen(left), Self::Frozen(right)) if left.storage == right.storage => true,
             _ => self.len() == other.len() && self.iter().eq(other.iter()),
         }
     }
@@ -80,13 +89,29 @@ impl LogicalSet {
             }
             offsets.push((value.0 - base) as u16);
         }
-        if offsets.len() * 2 + chunks.len() * 8 >= values.len() * 4 {
+        let sparse_bytes = offsets.len() * 2 + chunks.len() * 8;
+        let word_count = values.last().unwrap().0 as usize / 64 + 1;
+        let dense_bytes = word_count * std::mem::size_of::<u64>();
+        let storage = if dense_bytes < sparse_bytes && dense_bytes < values.len() * 4 {
+            let mut words = vec![0u64; word_count];
+            for value in values.iter() {
+                words[value.0 as usize / 64] |= 1u64 << (value.0 % 64);
+            }
+            FrozenLogicalStorage::Dense {
+                words: words.into_boxed_slice(),
+                len: values.len(),
+            }
+        } else if sparse_bytes < values.len() * 4 {
+            FrozenLogicalStorage::Sparse {
+                chunks: chunks.into_boxed_slice(),
+                offsets: offsets.into_boxed_slice(),
+            }
+        } else {
             return;
-        }
+        };
         *self = Self::Frozen(std::sync::Arc::new(FrozenLogicalSet {
             values: std::sync::Arc::clone(pool),
-            chunks: chunks.into_boxed_slice(),
-            offsets: offsets.into_boxed_slice(),
+            storage,
         }));
     }
 
@@ -108,26 +133,27 @@ impl LogicalSet {
     pub(super) fn contains(&self, value: &LogicalValue) -> bool {
         match self {
             Self::Mutable(values) => values.binary_search(value).is_ok(),
-            Self::Frozen(row) => {
-                let Some(chunk) = row
-                    .chunks
-                    .partition_point(|&(base, _)| base <= value.0)
-                    .checked_sub(1)
-                else {
-                    return false;
-                };
-                let (base, start) = row.chunks[chunk];
-                let Ok(offset) = u16::try_from(value.0 - base) else {
-                    return false;
-                };
-                let end = row
-                    .chunks
-                    .get(chunk + 1)
-                    .map_or(row.offsets.len(), |&(_, end)| end as usize);
-                row.offsets[start as usize..end]
-                    .binary_search(&offset)
-                    .is_ok()
-            }
+            Self::Frozen(row) => match &row.storage {
+                FrozenLogicalStorage::Dense { words, .. } => words
+                    .get(value.0 as usize / 64)
+                    .is_some_and(|word| word & (1u64 << (value.0 % 64)) != 0),
+                FrozenLogicalStorage::Sparse { chunks, offsets } => {
+                    let Some(chunk) = chunks
+                        .partition_point(|&(base, _)| base <= value.0)
+                        .checked_sub(1)
+                    else {
+                        return false;
+                    };
+                    let (base, start) = chunks[chunk];
+                    let Ok(offset) = u16::try_from(value.0 - base) else {
+                        return false;
+                    };
+                    let end = chunks
+                        .get(chunk + 1)
+                        .map_or(offsets.len(), |&(_, end)| end as usize);
+                    offsets[start as usize..end].binary_search(&offset).is_ok()
+                }
+            },
         }
     }
 
@@ -152,7 +178,10 @@ impl LogicalSet {
     fn len(&self) -> usize {
         match self {
             Self::Mutable(values) => values.len(),
-            Self::Frozen(row) => row.offsets.len(),
+            Self::Frozen(row) => match &row.storage {
+                FrozenLogicalStorage::Sparse { offsets, .. } => offsets.len(),
+                FrozenLogicalStorage::Dense { len, .. } => *len,
+            },
         }
     }
     fn is_empty(&self) -> bool {
@@ -163,6 +192,7 @@ impl LogicalSet {
             set: self,
             position: 0,
             chunk: 0,
+            remaining_word: 0,
         }
     }
     fn retain(&mut self, keep: impl FnMut(&LogicalValue) -> bool) {
@@ -177,6 +207,7 @@ pub(super) struct LogicalIter<'a> {
     set: &'a LogicalSet,
     position: usize,
     chunk: usize,
+    remaining_word: u64,
 }
 
 impl<'a> Iterator for LogicalIter<'a> {
@@ -184,17 +215,27 @@ impl<'a> Iterator for LogicalIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let value = match self.set {
             LogicalSet::Mutable(values) => values.get(self.position)?,
-            LogicalSet::Frozen(row) => {
-                let offset = *row.offsets.get(self.position)?;
-                if row
-                    .chunks
-                    .get(self.chunk + 1)
-                    .is_some_and(|&(_, start)| self.position == start as usize)
-                {
-                    self.chunk += 1;
+            LogicalSet::Frozen(row) => match &row.storage {
+                FrozenLogicalStorage::Sparse { chunks, offsets } => {
+                    let offset = *offsets.get(self.position)?;
+                    if chunks
+                        .get(self.chunk + 1)
+                        .is_some_and(|&(_, start)| self.position == start as usize)
+                    {
+                        self.chunk += 1;
+                    }
+                    &row.values[(chunks[self.chunk].0 + u32::from(offset)) as usize]
                 }
-                &row.values[(row.chunks[self.chunk].0 + u32::from(offset)) as usize]
-            }
+                FrozenLogicalStorage::Dense { words, .. } => {
+                    while self.remaining_word == 0 {
+                        self.remaining_word = *words.get(self.chunk)?;
+                        self.chunk += 1;
+                    }
+                    let bit = self.remaining_word.trailing_zeros() as usize;
+                    self.remaining_word &= self.remaining_word - 1;
+                    &row.values[(self.chunk - 1) * 64 + bit]
+                }
+            },
         };
         self.position += 1;
         Some(value)
@@ -2146,21 +2187,57 @@ fn init_loop_region(
             format!("next-use analysis references absent loop region {region}"),
         ));
     };
-    let (mut candidates, mut live_through): (Vec<_>, Vec<_>) = alive
-        .into_iter()
-        .partition(|value| next_use.used_in_region(region, VReg(value.0)));
-    candidates.sort_by_key(|value| logical_entry_distance(func, next_use, block, *value));
-    if candidates.len() >= registers {
-        return Ok(candidates.into_iter().take(registers).collect());
+    let mut candidates = BinaryHeap::new();
+    let mut live_through_count = 0;
+    for &value in &alive {
+        if next_use.used_in_region(region, VReg(value.0)) {
+            let distance = logical_entry_distance(func, next_use, block, value);
+            retain_closest(&mut candidates, registers, (distance, value));
+        } else {
+            live_through_count += 1;
+        }
     }
-    let internal_pressure = facts.max_pressure.saturating_sub(live_through.len());
+    if candidates.len() >= registers {
+        return Ok(candidates
+            .into_sorted_vec()
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect());
+    }
+    let internal_pressure = facts.max_pressure.saturating_sub(live_through_count);
     let free_loop = registers.saturating_sub(internal_pressure);
-    live_through.sort_by_key(|value| logical_entry_distance(func, next_use, block, *value));
+    let mut live_through = BinaryHeap::new();
+    if free_loop > 0 {
+        for value in alive {
+            if !next_use.used_in_region(region, VReg(value.0)) {
+                let distance = logical_entry_distance(func, next_use, block, value);
+                retain_closest(&mut live_through, free_loop, (distance, value));
+            }
+        }
+    }
     Ok(candidates
+        .into_sorted_vec()
         .into_iter()
-        .chain(live_through.into_iter().take(free_loop))
+        .chain(live_through.into_sorted_vec().into_iter().take(free_loop))
         .take(registers)
+        .map(|(_, value)| value)
         .collect())
+}
+
+/// Keep only the register-sized prefix of the distance ordering. Logical IDs
+/// break ties exactly as stable sorting the original ascending set did.
+fn retain_closest(
+    closest: &mut BinaryHeap<(NextUseDistance, LogicalValue)>,
+    limit: usize,
+    candidate: (NextUseDistance, LogicalValue),
+) {
+    if closest.len() < limit {
+        closest.push(candidate);
+    } else if let Some(mut furthest) = closest.peek_mut()
+        && candidate < *furthest
+    {
+        *furthest = candidate;
+    }
 }
 
 trait FutureUses {
@@ -3351,6 +3428,78 @@ impl SpillPlan {
 mod tests {
     use super::*;
     use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator};
+
+    #[test]
+    fn bounded_loop_candidates_match_stable_distance_order() {
+        let values = (0..4096)
+            .map(|id| {
+                let distance = if id % 13 == 0 {
+                    NextUseDistance::Dead
+                } else {
+                    NextUseDistance::Finite {
+                        loop_exits: (id % 3) as usize,
+                        instructions: (id % 17) as usize,
+                    }
+                };
+                (distance, LogicalValue(id))
+            })
+            .collect::<Vec<_>>();
+        let mut expected = values.clone();
+        expected.sort_by_key(|&(distance, _)| distance);
+        for limit in [0, 1, 8, 16, 4096, 4097] {
+            let mut closest = BinaryHeap::new();
+            for &candidate in &values {
+                retain_closest(&mut closest, limit, candidate);
+                assert!(closest.len() <= limit);
+            }
+            assert_eq!(
+                closest.into_sorted_vec(),
+                expected[..limit.min(expected.len())]
+            );
+        }
+    }
+
+    #[test]
+    fn dense_spill_sets_match_sparse_encoding_across_empty_words() {
+        let pool = (0..2048).map(LogicalValue).collect::<std::sync::Arc<[_]>>();
+        let expected = (64..192)
+            .chain(1024..1152)
+            .map(LogicalValue)
+            .collect::<Vec<_>>();
+        let mut dense = expected.iter().copied().collect::<LogicalSet>();
+        dense.freeze(&pool);
+        let LogicalSet::Frozen(row) = &dense else {
+            panic!("expected frozen set")
+        };
+        let FrozenLogicalStorage::Dense { words, len } = &row.storage else {
+            panic!("expected dense set")
+        };
+        assert_eq!(*len, 256);
+        assert_eq!(words.len(), 18);
+        let sparse = LogicalSet::Frozen(std::sync::Arc::new(FrozenLogicalSet {
+            values: pool,
+            storage: FrozenLogicalStorage::Sparse {
+                chunks: vec![(64, 0), (128, 64), (1024, 128), (1088, 192)].into_boxed_slice(),
+                offsets: (0u16..64).cycle().take(256).collect(),
+            },
+        }));
+        assert_eq!(dense, sparse);
+        assert_eq!(sparse, dense);
+        for value in (0..2048).chain([u32::MAX]).map(LogicalValue) {
+            assert_eq!(
+                dense.contains(&value),
+                expected.binary_search(&value).is_ok()
+            );
+        }
+        let mut iter = dense.iter();
+        for (position, value) in expected.iter().enumerate() {
+            assert_eq!(iter.len(), expected.len() - position);
+            assert_eq!(iter.next(), Some(value));
+        }
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
 
     #[test]
     fn frozen_spill_sets_preserve_membership_order_and_mutation() {
