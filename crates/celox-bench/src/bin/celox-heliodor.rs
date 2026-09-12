@@ -80,7 +80,7 @@ enum CeloxHeliodorError {
     Metadata(#[from] veryl_metadata::MetadataError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("Celox build failed: {source:?}")]
+    #[error("Celox build failed: {source}")]
     Build {
         #[from]
         #[source]
