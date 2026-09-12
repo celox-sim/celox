@@ -18,6 +18,7 @@ use crate::native::mir::VReg;
 pub(in crate::native::regalloc) enum DistanceMap {
     Packed(HashMap<VReg, u32>),
     Frozen(Arc<FrozenRow>),
+    Relative(Arc<RelativeRow>),
     Compact(HashMap<VReg, [u32; 2]>),
     Wide(HashMap<VReg, NextUseDistance>),
 }
@@ -79,6 +80,18 @@ impl PartialEq for DistanceMap {
                     && FrozenIter::new(row, 0, row.len)
                         .all(|(key, value)| map.get(key).copied() == Some(value))
             }
+            (Self::Packed(map), Self::Relative(row)) | (Self::Relative(row), Self::Packed(map)) => {
+                map.len() == row.len
+                    && RelativeIter::new(row)
+                        .all(|(key, value)| map.get(key).copied() == Some(value))
+            }
+            (Self::Relative(left), Self::Relative(right))
+                if Arc::ptr_eq(&left.base, &right.base)
+                    && left.instruction_delta == right.instruction_delta
+                    && left.overrides == right.overrides =>
+            {
+                true
+            }
             (Self::Compact(left), Self::Compact(right)) => left == right,
             (Self::Wide(left), Self::Wide(right)) => left == right,
             _ => {
@@ -114,6 +127,7 @@ impl DistanceMap {
         }
         let mut data = Vec::new();
         let mut index = Vec::new();
+        let mut max_instructions = 0;
         for chunk in sorted.chunks(CHUNK_SIZE) {
             let Ok(offset) = u32::try_from(data.len()) else {
                 return;
@@ -122,6 +136,7 @@ impl DistanceMap {
             let mut previous_key = 0;
             let mut previous_value = 0i64;
             for &(key, value) in chunk {
+                max_instructions = max_instructions.max(value & PACKED_INSTRUCTION_MASK);
                 write_varint(&mut data, u64::from(key.0 - previous_key));
                 let delta = i64::from(value) - previous_value;
                 write_varint(&mut data, ((delta << 1) ^ (delta >> 63)) as u64);
@@ -137,12 +152,90 @@ impl DistanceMap {
         *self = Self::Frozen(Arc::new(FrozenRow {
             values: Arc::clone(values),
             len: sorted.len(),
+            max_instructions,
             data: data.into_boxed_slice(),
             index: index.into_boxed_slice(),
         }));
     }
 
+    /// Freeze an entry already computed by the block transfer. Only the
+    /// supplied definitions/local uses can differ from the uniformly shifted
+    /// exit row, so inspect those keys instead of sorting/scanning the full row.
+    pub(super) fn freeze_block_entry(
+        &mut self,
+        base: &Self,
+        instructions: usize,
+        definitions: &crate::HashSet<VReg>,
+        local_uses: &[(VReg, usize)],
+    ) -> bool {
+        let (Self::Packed(map), Self::Frozen(base)) = (&*self, base) else {
+            return false;
+        };
+        let Ok(instruction_delta) = u32::try_from(instructions) else {
+            return false;
+        };
+        if map.len() < CHUNK_SIZE
+            || definitions.len().saturating_add(local_uses.len()) > 32
+            || instruction_delta > PACKED_INSTRUCTION_MASK
+            || base.max_instructions > PACKED_INSTRUCTION_MASK - instruction_delta
+        {
+            return false;
+        }
+        let mut changed = definitions
+            .iter()
+            .copied()
+            .chain(local_uses.iter().map(|&(key, _)| key))
+            .collect::<Vec<_>>();
+        changed.sort_unstable();
+        changed.dedup();
+        let mut overrides = Vec::new();
+        let mut len = base.len;
+        for key in changed {
+            if key.0 as usize >= base.values.len() {
+                return false;
+            }
+            let old = base.get(key);
+            let actual = map.get(&key).copied();
+            match (old, actual) {
+                (None, Some(_)) => len += 1,
+                (Some(_), None) => len -= 1,
+                _ => {}
+            }
+            if actual != old.and_then(|value| prepend_packed(value, instruction_delta)) {
+                overrides.push((key, actual));
+            }
+        }
+        if len != map.len() {
+            return false;
+        }
+        if instruction_delta == 0 && overrides.is_empty() {
+            *self = Self::Frozen(Arc::clone(base));
+            return true;
+        }
+        // An ordinary frozen row needs at least two encoded bytes per entry.
+        if std::mem::size_of::<RelativeRow>()
+            + overrides.len() * std::mem::size_of::<(VReg, Option<u32>)>()
+            >= map.len() * 2
+        {
+            return false;
+        }
+        *self = Self::Relative(Arc::new(RelativeRow {
+            base: Arc::clone(base),
+            instruction_delta,
+            overrides: overrides.into_boxed_slice(),
+            len,
+        }));
+        true
+    }
+
     fn thaw(&mut self) {
+        if let Self::Relative(row) = self {
+            *self = Self::Packed(
+                RelativeIter::new(row)
+                    .map(|(&key, value)| (key, value))
+                    .collect(),
+            );
+        }
         if let Self::Frozen(row) = self {
             let map = FrozenIter::new(row, 0, row.len)
                 .map(|(&key, value)| (key, value))
@@ -155,6 +248,7 @@ impl DistanceMap {
         match self {
             Self::Packed(map) => map.len(),
             Self::Frozen(row) => row.len,
+            Self::Relative(row) => row.len,
             Self::Compact(map) => map.len(),
             Self::Wide(map) => map.len(),
         }
@@ -164,6 +258,7 @@ impl DistanceMap {
         match self {
             Self::Packed(map) => map.get(key).copied().map(unpack),
             Self::Frozen(row) => row.get(*key).map(unpack),
+            Self::Relative(row) => row.get(*key).map(unpack),
             Self::Compact(map) => map.get(key).copied().map(expand),
             Self::Wide(map) => map.get(key).copied(),
         }
@@ -227,7 +322,7 @@ impl DistanceMap {
     pub(in crate::native::regalloc) fn remove(&mut self, key: &VReg) -> Option<NextUseDistance> {
         self.thaw();
         match self {
-            Self::Frozen(_) => unreachable!(),
+            Self::Frozen(_) | Self::Relative(_) => unreachable!(),
             Self::Packed(map) => map.remove(key).map(unpack),
             Self::Compact(map) => map.remove(key).map(expand),
             Self::Wide(map) => map.remove(key),
@@ -238,6 +333,7 @@ impl DistanceMap {
         match self {
             Self::Packed(map) => Iter::Packed(map.iter()),
             Self::Frozen(row) => Iter::Frozen(FrozenIter::new(row, 0, row.len)),
+            Self::Relative(row) => Iter::Relative(RelativeIter::new(row)),
             Self::Compact(map) => Iter::Compact(map.iter()),
             Self::Wide(map) => Iter::Wide(map.iter()),
         }
@@ -250,6 +346,7 @@ impl DistanceMap {
 
 pub(in crate::native::regalloc) enum Iter<'a> {
     Frozen(FrozenIter<'a>),
+    Relative(RelativeIter<'a>),
     Packed(std::collections::hash_map::Iter<'a, VReg, u32>),
     Compact(std::collections::hash_map::Iter<'a, VReg, [u32; 2]>),
     Wide(std::collections::hash_map::Iter<'a, VReg, NextUseDistance>),
@@ -261,6 +358,7 @@ impl<'a> Iterator for Iter<'a> {
         match self {
             Self::Packed(iter) => iter.next().map(|(key, value)| (key, unpack(*value))),
             Self::Frozen(iter) => iter.next().map(|(key, value)| (key, unpack(value))),
+            Self::Relative(iter) => iter.next().map(|(key, value)| (key, unpack(value))),
             Self::Compact(iter) => iter.next().map(|(key, value)| (key, expand(*value))),
             Self::Wide(iter) => iter.next().map(|(key, value)| (key, *value)),
         }
@@ -282,8 +380,82 @@ pub(in crate::native::regalloc) struct FrozenRow {
     // Shared dense identity table preserves the borrowed-key iterator API.
     values: Arc<[VReg]>,
     len: usize,
+    max_instructions: u32,
     data: Box<[u8]>,
     index: Box<[(VReg, u32)]>,
+}
+
+fn prepend_packed(value: u32, instructions: u32) -> Option<u32> {
+    let distance = (value & PACKED_INSTRUCTION_MASK).checked_add(instructions)?;
+    (distance <= PACKED_INSTRUCTION_MASK).then_some((value & !PACKED_INSTRUCTION_MASK) | distance)
+}
+
+#[derive(Debug)]
+pub(in crate::native::regalloc) struct RelativeRow {
+    base: Arc<FrozenRow>,
+    instruction_delta: u32,
+    overrides: Box<[(VReg, Option<u32>)]>,
+    len: usize,
+}
+
+impl RelativeRow {
+    fn get(&self, key: VReg) -> Option<u32> {
+        if let Ok(index) = self.overrides.binary_search_by_key(&key, |&(key, _)| key) {
+            return self.overrides[index].1;
+        }
+        self.base
+            .get(key)
+            .and_then(|value| prepend_packed(value, self.instruction_delta))
+    }
+}
+
+pub(in crate::native::regalloc) struct RelativeIter<'a> {
+    row: &'a RelativeRow,
+    base: std::iter::Peekable<FrozenIter<'a>>,
+    position: usize,
+}
+
+impl<'a> RelativeIter<'a> {
+    fn new(row: &'a RelativeRow) -> Self {
+        Self {
+            row,
+            base: FrozenIter::new(&row.base, 0, row.base.len).peekable(),
+            position: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for RelativeIter<'a> {
+    type Item = (&'a VReg, u32);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let base = self.base.peek().copied();
+            let change = self.row.overrides.get(self.position).copied();
+            match (base, change) {
+                (Some((key, value)), change)
+                    if change.is_none_or(|(changed, _)| *key < changed) =>
+                {
+                    self.base.next();
+                    return Some((
+                        key,
+                        prepend_packed(value, self.row.instruction_delta)
+                            .expect("relative row validated distance"),
+                    ));
+                }
+                (base, Some((key, value))) => {
+                    if base.is_some_and(|(base_key, _)| *base_key == key) {
+                        self.base.next();
+                    }
+                    self.position += 1;
+                    if let Some(value) = value {
+                        return Some((&self.row.base.values[key.0 as usize], value));
+                    }
+                }
+                (None, None) => return None,
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 fn write_varint(data: &mut Vec<u8>, mut value: u64) {
@@ -372,6 +544,190 @@ impl<'a> Iterator for FrozenIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_entry_shares_the_frozen_exit_directly() {
+        let pool = (0..256).map(VReg).collect::<Arc<[_]>>();
+        let mut base = DistanceMap::default();
+        for id in 0..256 {
+            base.insert(VReg(id), NextUseDistance::local(id as usize));
+        }
+        let mut entry = base.clone();
+        base.freeze(&pool);
+        assert!(entry.freeze_block_entry(&base, 0, &crate::HashSet::default(), &[]));
+        let (DistanceMap::Frozen(base), DistanceMap::Frozen(entry)) = (&base, &entry) else {
+            panic!("expected shared frozen rows")
+        };
+        assert!(Arc::ptr_eq(base, entry));
+    }
+
+    #[test]
+    fn relative_rows_preserve_transfer_edits_order_and_mutation() {
+        let pool = (0..4096).map(VReg).collect::<Arc<[_]>>();
+        let mut base = DistanceMap::default();
+        for id in 1..1001 {
+            base.insert(
+                VReg(id * 3),
+                NextUseDistance::Finite {
+                    loop_exits: (id % 7) as usize,
+                    instructions: (id % 101) as usize,
+                },
+            );
+        }
+        base.freeze(&pool);
+        let mut entry = base
+            .iter()
+            .map(|(&key, distance)| (key, distance.checked_prepend_instructions(17).unwrap()))
+            .fold(DistanceMap::default(), |mut row, (key, distance)| {
+                row.insert(key, distance);
+                row
+            });
+        for id in [3, 1500, 3000] {
+            entry.remove(&VReg(id));
+        }
+        for id in [0, 9, 1501, 4095] {
+            entry.insert(VReg(id), NextUseDistance::local(2));
+        }
+        let expected = entry.clone();
+        assert!(entry.freeze_block_entry(
+            &base,
+            17,
+            &[VReg(3), VReg(1500), VReg(3000)].into_iter().collect(),
+            &[(VReg(0), 2), (VReg(9), 2), (VReg(1501), 2), (VReg(4095), 2)]
+        ));
+        assert!(matches!(entry, DistanceMap::Relative(_)));
+        assert_eq!(entry, expected);
+        assert_eq!(expected, entry);
+        let mut oracle = expected
+            .iter()
+            .map(|(&key, distance)| (key, distance))
+            .collect::<Vec<_>>();
+        oracle.sort_by_key(|&(key, _)| key);
+        assert_eq!(
+            entry
+                .iter()
+                .map(|(&key, distance)| (key, distance))
+                .collect::<Vec<_>>(),
+            oracle
+        );
+        for key in pool.iter().chain([VReg(u32::MAX)].iter()) {
+            assert_eq!(entry.get(key), expected.get(key));
+        }
+        let saved = entry.clone();
+        let mut changed = expected.clone();
+        assert_eq!(entry.remove(&VReg(1501)), changed.remove(&VReg(1501)));
+        let wide = NextUseDistance::Finite {
+            loop_exits: usize::MAX,
+            instructions: usize::MAX,
+        };
+        assert_eq!(entry.insert(VReg(0), wide), changed.insert(VReg(0), wide));
+        assert_eq!(entry, changed);
+        assert_eq!(saved, expected);
+    }
+
+    #[test]
+    fn relative_rows_handle_packed_boundaries_and_fallbacks() {
+        let pool = (0..1024).map(VReg).collect::<Arc<[_]>>();
+        let mut base = DistanceMap::default();
+        for id in 0..256 {
+            base.insert(
+                VReg(id),
+                NextUseDistance::Finite {
+                    loop_exits: 255,
+                    instructions: PACKED_INSTRUCTION_MASK as usize,
+                },
+            );
+        }
+        base.freeze(&pool);
+        let mut entry = base.clone();
+        entry.remove(&VReg(0));
+        entry.insert(VReg(1), NextUseDistance::local(0));
+        let expected = entry.clone();
+        assert!(entry.freeze_block_entry(
+            &base,
+            0,
+            &[VReg(0)].into_iter().collect(),
+            &[(VReg(1), 0)]
+        ));
+        assert_eq!(entry, expected);
+        assert!(
+            !expected
+                .clone()
+                .freeze_block_entry(&base, 1, &crate::HashSet::default(), &[])
+        );
+        assert!(!expected.clone().freeze_block_entry(
+            &base,
+            usize::MAX,
+            &crate::HashSet::default(),
+            &[]
+        ));
+        assert!(
+            !expected
+                .clone()
+                .freeze_block_entry(&entry, 0, &crate::HashSet::default(), &[])
+        );
+        let mut many_edits = base.clone();
+        for id in 0..33 {
+            many_edits.remove(&VReg(id));
+        }
+        let unchanged = many_edits.clone();
+        assert!(!many_edits.freeze_block_entry(&base, 0, &(0..33).map(VReg).collect(), &[]));
+        assert_eq!(many_edits, unchanged);
+        many_edits.freeze(&pool);
+        assert_eq!(many_edits, unchanged);
+        let mut wide = base.clone();
+        wide.insert(VReg(2), NextUseDistance::Dead);
+        assert!(!wide.freeze_block_entry(&base, 0, &crate::HashSet::default(), &[]));
+        assert_eq!(wide.get(&VReg(2)), Some(NextUseDistance::Dead));
+    }
+
+    #[test]
+    fn relative_rows_fall_back_when_removed_values_would_overflow_shift() {
+        let pool = (0..256).map(VReg).collect::<Arc<[_]>>();
+        let mut base = DistanceMap::default();
+        let mut entry = DistanceMap::default();
+        for id in 0..256 {
+            base.insert(
+                VReg(id),
+                NextUseDistance::Finite {
+                    loop_exits: 255,
+                    instructions: if id < 2 {
+                        PACKED_INSTRUCTION_MASK as usize
+                    } else {
+                        id as usize
+                    },
+                },
+            );
+            if id != 0 {
+                entry.insert(
+                    VReg(id),
+                    if id == 1 {
+                        NextUseDistance::local(0)
+                    } else {
+                        NextUseDistance::Finite {
+                            loop_exits: 255,
+                            instructions: id as usize + 1,
+                        }
+                    },
+                );
+            }
+        }
+        base.freeze(&pool);
+        let expected = entry.clone();
+        assert!(!entry.freeze_block_entry(
+            &base,
+            1,
+            &[VReg(0)].into_iter().collect(),
+            &[(VReg(1), 0)]
+        ));
+        entry.freeze(&pool);
+        assert_eq!(entry, expected);
+        assert_eq!(expected, entry);
+        assert_eq!(entry.iter().count(), 255);
+        for key in &*pool {
+            assert_eq!(entry.get(key), expected.get(key));
+        }
+    }
 
     #[test]
     fn frozen_rows_preserve_lookup_iteration_and_mutation() {

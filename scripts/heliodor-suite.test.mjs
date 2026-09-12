@@ -11,7 +11,7 @@ test("suite isolates all 72 backend runs and reserves time for large designs", (
   assert.equal(jobs.length, 72);
   assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.runner}`)).size, 72);
   for (const job of jobs) {
-    assert.ok(job.timeout_sec < 300 * 60);
+    assert.ok(job.timeout_sec + 30 * 60 <= 330 * 60);
     if (job.test.endsWith("4hart") || job.test.endsWith("8hart")) assert.ok(job.timeout_sec > 3600);
   }
   assert.deepEqual(matrix({ test: "test_soc_66_smp_linux_boot_4hart", runner: "celox", arch: "aarch64" }).include,

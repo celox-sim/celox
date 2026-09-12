@@ -32,7 +32,9 @@ export function matrix({ test = "", runner = "", arch = "", profile = false } = 
   return { include: Object.entries(hosts).flatMap(([a, os]) =>
     workloads.flatMap(t => runners.map(r => ({
       arch: a, os, test: t, runner: r,
-      timeout_sec: t.endsWith("8hart") ? 14400 : t.endsWith("4hart") ? 10800 : 3600,
+      // ARM N=8 reference tiering reaches ~42M cycles in four hours;
+      // allow the measured ~44.3M-cycle boot to finish with headroom.
+      timeout_sec: t.endsWith("8hart") ? 18000 : t.endsWith("4hart") ? 10800 : 3600,
     }))),
   ).filter(job => (!test || job.test === test) && (!runner || job.runner === runner) && (!arch || job.arch === arch)) };
 }

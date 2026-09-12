@@ -261,8 +261,15 @@ pub(super) fn analyze(
             || next_exit != exit[block]
             || next_anticipated != anticipated_after_phis[block]
         {
-            next_entry.freeze(&value_keys);
             next_exit.freeze(&value_keys);
+            if !next_entry.freeze_block_entry(
+                &next_exit,
+                transfer.length,
+                &transfer.definitions,
+                &transfer.local_uses,
+            ) {
+                next_entry.freeze(&value_keys);
+            }
             entry[block] = next_entry;
             exit[block] = next_exit;
             anticipated_after_phis[block] = next_anticipated;
