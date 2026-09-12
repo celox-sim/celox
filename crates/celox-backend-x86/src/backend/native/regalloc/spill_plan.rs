@@ -13,71 +13,207 @@ use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis, Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct LogicalValue(pub u32);
 
-/// Sparse logical-value set with the same ascending iteration order as a
-/// `BTreeSet`, stored contiguously for the allocator's small W/S frontiers.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct LogicalSet(Vec<LogicalValue>);
+/// Mutable W/S frontiers stay sorted; completed large S rows use indexed
+/// 16-bit offsets. They keep exact ascending iteration and membership without
+/// retaining four bytes for every live value in every CFG row.
+#[derive(Debug, Clone)]
+pub(super) enum LogicalSet {
+    Mutable(Vec<LogicalValue>),
+    Frozen(std::sync::Arc<FrozenLogicalSet>),
+}
+
+#[derive(Debug)]
+pub(super) struct FrozenLogicalSet {
+    values: std::sync::Arc<[LogicalValue]>,
+    // Each chunk contains at most 64 ascending values within a u16 span.
+    chunks: Box<[(u32, u32)]>, // (base value, first offset index)
+    offsets: Box<[u16]>,
+}
+
+impl Default for LogicalSet {
+    fn default() -> Self {
+        Self::Mutable(Vec::new())
+    }
+}
+
+impl PartialEq for LogicalSet {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Mutable(left), Self::Mutable(right)) => left == right,
+            (Self::Frozen(left), Self::Frozen(right)) => {
+                left.chunks == right.chunks && left.offsets == right.offsets
+            }
+            _ => self.len() == other.len() && self.iter().eq(other.iter()),
+        }
+    }
+}
+impl Eq for LogicalSet {}
 
 impl LogicalSet {
     fn new() -> Self {
         Self::default()
     }
 
+    fn freeze(&mut self, pool: &std::sync::Arc<[LogicalValue]>) {
+        let Self::Mutable(values) = self else {
+            return;
+        };
+        if values.len() < 64
+            || values
+                .last()
+                .is_some_and(|value| value.0 as usize >= pool.len())
+        {
+            return;
+        }
+        let mut chunks = Vec::new();
+        let mut offsets = Vec::with_capacity(values.len());
+        let mut base = 0;
+        let mut chunk_start = 0;
+        for (index, value) in values.iter().enumerate() {
+            if index == 0 || index - chunk_start == 64 || value.0 - base > u32::from(u16::MAX) {
+                let Ok(offset) = u32::try_from(index) else {
+                    return;
+                };
+                base = value.0;
+                chunk_start = index;
+                chunks.push((base, offset));
+            }
+            offsets.push((value.0 - base) as u16);
+        }
+        if offsets.len() * 2 + chunks.len() * 8 >= values.len() * 4 {
+            return;
+        }
+        *self = Self::Frozen(std::sync::Arc::new(FrozenLogicalSet {
+            values: std::sync::Arc::clone(pool),
+            chunks: chunks.into_boxed_slice(),
+            offsets: offsets.into_boxed_slice(),
+        }));
+    }
+
+    fn mutable(&mut self) -> &mut Vec<LogicalValue> {
+        if matches!(self, Self::Frozen(_)) {
+            *self = Self::Mutable(self.iter().copied().collect());
+        }
+        let Self::Mutable(values) = self else {
+            unreachable!()
+        };
+        values
+    }
+
     #[cfg(test)]
     pub(super) fn clear(&mut self) {
-        self.0.clear();
+        *self = Self::default();
     }
 
     pub(super) fn contains(&self, value: &LogicalValue) -> bool {
-        self.0.binary_search(value).is_ok()
+        match self {
+            Self::Mutable(values) => values.binary_search(value).is_ok(),
+            Self::Frozen(row) => {
+                let Some(chunk) = row
+                    .chunks
+                    .partition_point(|&(base, _)| base <= value.0)
+                    .checked_sub(1)
+                else {
+                    return false;
+                };
+                let (base, start) = row.chunks[chunk];
+                let Ok(offset) = u16::try_from(value.0 - base) else {
+                    return false;
+                };
+                let end = row
+                    .chunks
+                    .get(chunk + 1)
+                    .map_or(row.offsets.len(), |&(_, end)| end as usize);
+                row.offsets[start as usize..end]
+                    .binary_search(&offset)
+                    .is_ok()
+            }
+        }
     }
 
     pub(super) fn insert(&mut self, value: LogicalValue) -> bool {
-        let Err(index) = self.0.binary_search(&value) else {
+        let values = self.mutable();
+        let Err(index) = values.binary_search(&value) else {
             return false;
         };
-        self.0.insert(index, value);
+        values.insert(index, value);
         true
     }
 
     fn remove(&mut self, value: &LogicalValue) -> bool {
-        let Ok(index) = self.0.binary_search(value) else {
+        let values = self.mutable();
+        let Ok(index) = values.binary_search(value) else {
             return false;
         };
-        self.0.remove(index);
+        values.remove(index);
         true
     }
 
     fn len(&self) -> usize {
-        self.0.len()
+        match self {
+            Self::Mutable(values) => values.len(),
+            Self::Frozen(row) => row.offsets.len(),
+        }
     }
-
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
-
-    fn iter(&self) -> std::slice::Iter<'_, LogicalValue> {
-        self.0.iter()
+    fn iter(&self) -> LogicalIter<'_> {
+        LogicalIter {
+            set: self,
+            position: 0,
+            chunk: 0,
+        }
     }
-
-    fn retain(&mut self, mut keep: impl FnMut(&LogicalValue) -> bool) {
-        self.0.retain(|value| keep(value));
+    fn retain(&mut self, keep: impl FnMut(&LogicalValue) -> bool) {
+        self.mutable().retain(keep);
     }
-
     fn difference<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a LogicalValue> + 'a {
-        self.0.iter().filter(|value| !other.contains(value))
+        self.iter().filter(|value| !other.contains(value))
     }
 }
+
+pub(super) struct LogicalIter<'a> {
+    set: &'a LogicalSet,
+    position: usize,
+    chunk: usize,
+}
+
+impl<'a> Iterator for LogicalIter<'a> {
+    type Item = &'a LogicalValue;
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = match self.set {
+            LogicalSet::Mutable(values) => values.get(self.position)?,
+            LogicalSet::Frozen(row) => {
+                let offset = *row.offsets.get(self.position)?;
+                if row
+                    .chunks
+                    .get(self.chunk + 1)
+                    .is_some_and(|&(_, start)| self.position == start as usize)
+                {
+                    self.chunk += 1;
+                }
+                &row.values[(row.chunks[self.chunk].0 + u32::from(offset)) as usize]
+            }
+        };
+        self.position += 1;
+        Some(value)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.set.len() - self.position;
+        (remaining, Some(remaining))
+    }
+}
+impl ExactSizeIterator for LogicalIter<'_> {}
 
 impl FromIterator<LogicalValue> for LogicalSet {
     fn from_iter<T: IntoIterator<Item = LogicalValue>>(iter: T) -> Self {
         let mut values = iter.into_iter().collect::<Vec<_>>();
         values.sort_unstable();
         values.dedup();
-        Self(values)
+        Self::Mutable(values)
     }
 }
-
 impl Extend<LogicalValue> for LogicalSet {
     fn extend<T: IntoIterator<Item = LogicalValue>>(&mut self, iter: T) {
         for value in iter {
@@ -85,22 +221,21 @@ impl Extend<LogicalValue> for LogicalSet {
         }
     }
 }
-
 impl IntoIterator for LogicalSet {
     type Item = LogicalValue;
     type IntoIter = std::vec::IntoIter<LogicalValue>;
-
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        match self {
+            Self::Mutable(values) => values.into_iter(),
+            Self::Frozen(_) => self.iter().copied().collect::<Vec<_>>().into_iter(),
+        }
     }
 }
-
 impl<'a> IntoIterator for &'a LogicalSet {
     type Item = &'a LogicalValue;
-    type IntoIter = std::slice::Iter<'a, LogicalValue>;
-
+    type IntoIter = LogicalIter<'a>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.iter()
     }
 }
 
@@ -528,6 +663,7 @@ fn plan_internal(
         s_entry: vec![LogicalSet::new(); func.blocks.len()],
         s_exit: vec![LogicalSet::new(); func.blocks.len()],
     };
+    let logical_keys = std::cell::OnceCell::<std::sync::Arc<[LogicalValue]>>::new();
     for block in 0..func.blocks.len() {
         let entry = if let Some(region) = next_use.region_at_entry(block) {
             init_loop_region(func, next_use, &result, block, region, registers)?
@@ -642,6 +778,17 @@ fn plan_internal(
         result.recipe_reloads.extend(transition.recipe_reloads);
         result.w_exit[block] = transition.w_exit;
         result.s_exit[block] = transition.s_exit;
+        if result.s_entry[block].len() >= 64 || result.s_exit[block].len() >= 64 {
+            let logical_keys =
+                logical_keys.get_or_init(|| (0..result.logical.count).map(LogicalValue).collect());
+            let same_spilled = result.s_entry[block] == result.s_exit[block];
+            result.s_entry[block].freeze(logical_keys);
+            if same_spilled && matches!(result.s_entry[block], LogicalSet::Frozen(_)) {
+                result.s_exit[block] = result.s_entry[block].clone();
+            } else {
+                result.s_exit[block].freeze(logical_keys);
+            }
+        }
     }
 
     // Section 4.3.  Delaying this until every W/S exit is known is equivalent
@@ -2538,6 +2685,49 @@ fn logical_entry_distance(
 }
 
 impl SpillPlan {
+    /// Keep only states queried after scheduling. Reconstruction still needs
+    /// W_entry for phi placement, but S_exit is only queried for phi sources.
+    /// Full tables must be retained when spill-plan verification is enabled.
+    pub(super) fn retain_reconstruction_states(
+        &mut self,
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+    ) -> Result<(), SpillPlanError> {
+        let mut exits = vec![LogicalSet::new(); func.blocks.len()];
+        for block in &func.blocks {
+            for phi in &block.phis {
+                for &(predecessor, source) in &phi.sources {
+                    let previous = cfg.block_index.get(&predecessor).copied().ok_or_else(|| {
+                        SpillPlanError::new(
+                            "SPILL_PLAN.RECONSTRUCTION_STATE",
+                            Some(block.id),
+                            None,
+                            vec![phi.dst, source],
+                            "phi predecessor is outside the normalized CFG",
+                        )
+                    })?;
+                    let state = self.s_exit.get(previous).ok_or_else(|| {
+                        SpillPlanError::new(
+                            "SPILL_PLAN.RECONSTRUCTION_STATE",
+                            Some(predecessor),
+                            None,
+                            vec![source],
+                            "phi predecessor has no spill exit state",
+                        )
+                    })?;
+                    let source = self.logical.of(source);
+                    if state.contains(&source) {
+                        exits[previous].insert(source);
+                    }
+                }
+            }
+        }
+        self.s_exit = exits;
+        self.s_entry = Vec::new();
+        self.w_exit = Vec::new();
+        Ok(())
+    }
+
     /// Finalize whole-home rematerialization after the W/S plan has exposed
     /// every concrete point and edge reload.  Reconstruction must materialize
     /// this decision; it may no longer infer a different home kind on its own.
@@ -3161,6 +3351,63 @@ impl SpillPlan {
 mod tests {
     use super::*;
     use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator};
+
+    #[test]
+    fn frozen_spill_sets_preserve_membership_order_and_mutation() {
+        let pool = (0..200_000)
+            .map(LogicalValue)
+            .collect::<std::sync::Arc<[_]>>();
+        for stride in [1, 7, 257, 1025] {
+            let values = (0..130)
+                .map(|i| LogicalValue(i * stride))
+                .collect::<Vec<_>>();
+            let mut expected = values.iter().copied().collect::<BTreeSet<_>>();
+            let mut actual = values.into_iter().collect::<LogicalSet>();
+            let original = actual.clone();
+            actual.freeze(&pool);
+            assert!(matches!(actual, LogicalSet::Frozen(_)));
+            assert_eq!(actual, original);
+            assert_eq!(original, actual);
+            for value in (0..200_000)
+                .step_by(97)
+                .map(LogicalValue)
+                .chain(expected.iter().copied())
+            {
+                assert_eq!(actual.contains(&value), expected.contains(&value));
+            }
+            assert_eq!(
+                actual.iter().copied().collect::<Vec<_>>(),
+                expected.iter().copied().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                actual.clone().into_iter().collect::<Vec<_>>(),
+                original.into_iter().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                actual.insert(LogicalValue(199_999)),
+                expected.insert(LogicalValue(199_999))
+            );
+            actual.freeze(&pool);
+            assert_eq!(
+                actual.remove(&LogicalValue(0)),
+                expected.remove(&LogicalValue(0))
+            );
+            actual.freeze(&pool);
+            actual.retain(|value| value.0 % 3 != 0);
+            expected.retain(|value| value.0 % 3 != 0);
+            assert_eq!(
+                actual.into_iter().collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
+        let mut invalid = (0..128)
+            .map(LogicalValue)
+            .chain([LogicalValue(u32::MAX)])
+            .collect::<LogicalSet>();
+        invalid.freeze(&pool);
+        assert!(matches!(invalid, LogicalSet::Mutable(_)));
+        assert!(invalid.contains(&LogicalValue(u32::MAX)));
+    }
 
     #[test]
     fn integrated_ready_walk_closes_resident_lanes_before_starting_new_roots() {

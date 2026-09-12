@@ -465,7 +465,7 @@ fn assign_slots<P: LivenessProgram + ?Sized>(
     Ok(result)
 }
 
-fn assign_block_slots<P: LivenessProgram + ?Sized>(
+pub(super) fn assign_block_slots<P: LivenessProgram + ?Sized>(
     program: &P,
     block: usize,
 ) -> Result<BlockSlots, LiveIntervalError> {

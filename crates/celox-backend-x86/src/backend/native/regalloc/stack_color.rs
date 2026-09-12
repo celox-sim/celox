@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use celox_backend_common::regalloc::{CompactSegments, LiveSegment as StoredSegment};
+use celox_backend_common::regalloc::LiveSegment as StoredSegment;
+
+mod home_ranges;
+use home_ranges::HomeRanges;
 
 use crate::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
 use crate::{HashMap, HashSet};
@@ -749,18 +752,17 @@ fn build_planned_stack_program_from_events(
 
 #[derive(Default)]
 struct HomeSegments {
-    segments: CompactSegments,
+    segments: HomeRanges,
     pending: usize,
 }
 
-fn coalesce_segments(range: &mut CompactSegments) {
+fn coalesce_segments(range: &mut HomeRanges) {
     range.coalesce();
 }
 
-fn expand_home_segments(segments: CompactSegments) -> Vec<LiveSegment> {
+fn expand_home_segments(segments: HomeRanges) -> Vec<LiveSegment> {
     segments
-        .into_vec()
-        .into_iter()
+        .iter()
         .map(|segment| LiveSegment {
             block: BlockId(
                 u32::try_from(segment.block).expect("stored home has a native block identity"),
@@ -814,7 +816,7 @@ fn append_home_interval(
 
 fn finish_home_segments(
     ranges: BTreeMap<SpillHome, HomeSegments>,
-) -> Result<BTreeMap<SpillHome, CompactSegments>, StackColorError> {
+) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
     ranges
         .into_iter()
         .map(|(home, mut range)| {
@@ -835,9 +837,10 @@ fn finish_home_segments(
 
 fn merge_home_segments(
     intervals: LiveIntervals,
+    ends: &std::sync::Arc<HashMap<u32, u64>>,
     version_homes: &[SpillHome],
     homes: &BTreeSet<SpillHome>,
-) -> Result<BTreeMap<SpillHome, CompactSegments>, StackColorError> {
+) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
     if intervals.intervals.len() != version_homes.len() {
         return Err(StackColorError::new(
             "STACK_COLOR.PLANNED_INTERVAL_SHAPE",
@@ -850,7 +853,15 @@ fn merge_home_segments(
     let mut ranges = homes
         .iter()
         .copied()
-        .map(|home| (home, HomeSegments::default()))
+        .map(|home| {
+            (
+                home,
+                HomeSegments {
+                    segments: HomeRanges::new(ends),
+                    pending: 0,
+                },
+            )
+        })
         .collect();
     for (version, (&home, interval)) in version_homes.iter().zip(intervals.intervals).enumerate() {
         append_home_interval(&mut ranges, version, home, interval)?;
@@ -862,11 +873,20 @@ fn stream_home_segments(
     program: &PlannedStackLivenessProgram,
     cfg: &NormalizedCfg,
     homes: &BTreeSet<SpillHome>,
-) -> Result<BTreeMap<SpillHome, CompactSegments>, StackColorError> {
+    ends: &std::sync::Arc<HashMap<u32, u64>>,
+) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
     let mut ranges = homes
         .iter()
         .copied()
-        .map(|home| (home, HomeSegments::default()))
+        .map(|home| {
+            (
+                home,
+                HomeSegments {
+                    segments: HomeRanges::new(ends),
+                    pending: 0,
+                },
+            )
+        })
         .collect();
     let mut error = None;
     visit_program_intervals(program, cfg, |version, interval| {
@@ -929,15 +949,33 @@ fn color_planned_stack_program(
         });
     }
     let phase = timing.then(crate::timing::now);
+    let ends = std::sync::Arc::new(
+        (0..program.block_count())
+            .map(|block| {
+                let slots = super::live_interval::assign_block_slots(&program, block)
+                    .map_err(|error| planned_live_error(error, &program.version_homes))?;
+                let end = slots.exit.next().ok_or_else(|| {
+                    StackColorError::new(
+                        "STACK_COLOR.SLOT_RANGE",
+                        Some(program.block_id(block)),
+                        None,
+                        [],
+                        "block endpoint exceeds the slot domain",
+                    )
+                })?;
+                Ok((program.block_id(block).0, end.as_u64()))
+            })
+            .collect::<Result<HashMap<_, _>, StackColorError>>()?,
+    );
     let ranges = if verify {
         let intervals = analyze_program_with_verification(&program, cfg, true)
             .map_err(|error| planned_live_error(error, &program.version_homes))?;
-        let ranges = merge_home_segments(intervals, &program.version_homes, &homes)?;
+        let ranges = merge_home_segments(intervals, &ends, &program.version_homes, &homes)?;
         #[cfg(test)]
-        assert_eq!(ranges, stream_home_segments(&program, cfg, &homes)?);
+        assert_eq!(ranges, stream_home_segments(&program, cfg, &homes, &ends)?);
         ranges
     } else {
-        stream_home_segments(&program, cfg, &homes)?
+        stream_home_segments(&program, cfg, &homes, &ends)?
     };
     if let Some(start) = phase {
         tracing::debug!(
