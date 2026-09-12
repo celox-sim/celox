@@ -1338,13 +1338,13 @@ impl InterpBackend {
         let mut comb_apply_units: HashMap<AbsoluteAddr, Vec<PreparedUnit>> = HashMap::default();
         for (clock, ff_units) in &laid_out.sir.eval_apply_ffs {
             let units = if let Some(fused) = laid_out.sir.eval_comb_apply_ffs.get(clock) {
-                fused.clone()
+                prepare_units(fused, four_state)
             } else {
-                let mut combined = laid_out.sir.eval_comb.clone();
-                combined.extend(ff_units.iter().cloned());
+                let mut combined = prepare_units(&laid_out.sir.eval_comb, four_state);
+                combined.extend(prepare_units(ff_units, four_state));
                 combined
             };
-            comb_apply_units.insert(*clock, prepare_units(&units, four_state));
+            comb_apply_units.insert(*clock, units);
         }
         let eval_comb_units = prepare_units(&laid_out.sir.eval_comb, four_state);
         let eval_apply_units = laid_out
