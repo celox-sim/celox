@@ -29,6 +29,24 @@ write_log() {
     printf '%s\n' "$@" >"$path"
 }
 
+# HEAD compatibility configures a relative checkout path. Verify it remains
+# usable as --project after the runner changes into that checkout.
+bash -s -- "$TMP" "$ROOT" <<'RELATIVE_PROJECT_TEST'
+    set -euo pipefail
+    TMP="$1"
+    ROOT="$2"
+    cd "$TMP"
+    export HELIODOR_DIR="relative/source"
+    source "$ROOT/scripts/run-heliodor-bench.sh"
+    mkdir -p "$HELIODOR_DIR"
+    touch "$HELIODOR_DIR/Veryl.toml"
+    for limit in 0 10; do
+        run_in_heliodor "$limit" "$TMP/relative-project.log" \
+            bash -c 'test -f "$1/Veryl.toml"' bash "$HELIODOR_DIR" \
+            || exit 1
+    done
+RELATIVE_PROJECT_TEST
+
 pass_log="$TMP/pass.log"
 write_log "$pass_log" \
     'diagnostic before result' \
