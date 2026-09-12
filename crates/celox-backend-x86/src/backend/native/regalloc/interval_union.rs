@@ -229,6 +229,78 @@ struct DynamicUnionNode {
     next: u32,
 }
 
+// Ordinary blocks use 32-bit slots. Keep a lossless wide fallback for the
+// same slot domain as LiveSegment, without doubling every occupancy node.
+#[derive(Debug, Clone)]
+enum DynamicNodeArena {
+    Packed(Vec<[u32; 3]>),
+    Wide(Vec<DynamicUnionNode>),
+}
+
+impl DynamicNodeArena {
+    fn pack(node: DynamicUnionNode) -> Option<[u32; 3]> {
+        Some([node.start.packed()?, node.end.packed()?, node.next])
+    }
+
+    fn unpack([start, end, next]: [u32; 3]) -> DynamicUnionNode {
+        DynamicUnionNode {
+            start: SlotIndex::from_packed(start),
+            end: SlotIndex::from_packed(end),
+            next,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Packed(nodes) => nodes.len(),
+            Self::Wide(nodes) => nodes.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<DynamicUnionNode> {
+        match self {
+            Self::Packed(nodes) => nodes.get(index).copied().map(Self::unpack),
+            Self::Wide(nodes) => nodes.get(index).copied(),
+        }
+    }
+
+    fn node(&self, index: usize) -> DynamicUnionNode {
+        self.get(index).expect("dynamic union node is in range")
+    }
+
+    fn promote(&mut self) -> &mut Vec<DynamicUnionNode> {
+        if let Self::Packed(nodes) = self {
+            *self = Self::Wide(nodes.iter().copied().map(Self::unpack).collect());
+        }
+        let Self::Wide(nodes) = self else {
+            unreachable!()
+        };
+        nodes
+    }
+
+    fn push(&mut self, node: DynamicUnionNode) {
+        if let Self::Packed(nodes) = self
+            && let Some(packed) = Self::pack(node)
+        {
+            nodes.push(packed);
+            return;
+        }
+        self.promote().push(node);
+    }
+
+    fn update(&mut self, index: usize, update: impl FnOnce(&mut DynamicUnionNode)) {
+        let mut node = self.node(index);
+        update(&mut node);
+        if let Self::Packed(nodes) = self
+            && let Some(packed) = Self::pack(node)
+        {
+            nodes[index] = packed;
+            return;
+        }
+        self.promote()[index] = node;
+    }
+}
+
 /// Ownerless, append-only occupancy for one dynamically created stack slot.
 ///
 /// Stack coloring never evicts an assigned home and only needs to know
@@ -242,7 +314,7 @@ struct DynamicUnionNode {
 #[derive(Debug, Clone)]
 struct DynamicSlotUnion {
     heads: Box<[u32]>,
-    nodes: Vec<DynamicUnionNode>,
+    nodes: DynamicNodeArena,
 }
 
 impl DynamicSlotUnion {
@@ -251,14 +323,14 @@ impl DynamicSlotUnion {
     fn new(block_count: usize) -> Self {
         Self {
             heads: vec![Self::NONE; block_count].into_boxed_slice(),
-            nodes: Vec::new(),
+            nodes: DynamicNodeArena::Packed(Vec::new()),
         }
     }
 
     fn interferes_segment(&self, segment: LiveSegment, block: usize) -> bool {
         let mut current = self.heads[block];
         while current != Self::NONE {
-            let node = self.nodes[current as usize];
+            let node = self.nodes.node(current as usize);
             if node.end <= segment.start {
                 current = node.next;
                 continue;
@@ -333,7 +405,7 @@ impl DynamicSlotUnion {
         let mut previous = Self::NONE;
         let mut current = self.heads[block];
         while current != Self::NONE {
-            let node = self.nodes[current as usize];
+            let node = self.nodes.node(current as usize);
             if node.end <= segment.start {
                 previous = current;
                 current = node.next;
@@ -343,21 +415,24 @@ impl DynamicSlotUnion {
         }
 
         let merge_left =
-            previous != Self::NONE && self.nodes[previous as usize].end == segment.start;
+            previous != Self::NONE && self.nodes.node(previous as usize).end == segment.start;
         let merge_right =
-            current != Self::NONE && self.nodes[current as usize].start == segment.end;
+            current != Self::NONE && self.nodes.node(current as usize).start == segment.end;
         match (merge_left, merge_right) {
             (true, true) => {
-                let right = self.nodes[current as usize];
-                let left = &mut self.nodes[previous as usize];
-                left.end = right.end;
-                left.next = right.next;
+                let right = self.nodes.node(current as usize);
+                self.nodes.update(previous as usize, |left| {
+                    left.end = right.end;
+                    left.next = right.next;
+                });
             }
             (true, false) => {
-                self.nodes[previous as usize].end = segment.end;
+                self.nodes
+                    .update(previous as usize, |node| node.end = segment.end);
             }
             (false, true) => {
-                self.nodes[current as usize].start = segment.start;
+                self.nodes
+                    .update(current as usize, |node| node.start = segment.start);
             }
             (false, false) => {
                 let node = self.nodes.len() as u32;
@@ -369,7 +444,8 @@ impl DynamicSlotUnion {
                 if previous == Self::NONE {
                     self.heads[block] = node;
                 } else {
-                    self.nodes[previous as usize].next = node;
+                    self.nodes
+                        .update(previous as usize, |previous| previous.next = node);
                 }
             }
         }
@@ -389,7 +465,7 @@ impl DynamicSlotUnion {
             let mut previous_end = None::<SlotIndex>;
             let mut traversed = 0usize;
             while current != Self::NONE {
-                let Some(&node) = self.nodes.get(current as usize) else {
+                let Some(node) = self.nodes.get(current as usize) else {
                     return Err(IntervalUnionError::new(
                         "INTERVAL_UNION.DYNAMIC_NODE_RANGE",
                         index.block_ids.get(block).copied(),
@@ -441,8 +517,8 @@ impl DynamicSlotUnion {
                     (Self::NONE, Self::NONE) => break,
                     (Self::NONE, _) | (_, Self::NONE) => return false,
                     _ => {
-                        let left_node = self.nodes[left as usize];
-                        let right_node = other.nodes[right as usize];
+                        let left_node = self.nodes.node(left as usize);
+                        let right_node = other.nodes.node(right as usize);
                         if (left_node.start, left_node.end) != (right_node.start, right_node.end) {
                             return false;
                         }
@@ -630,6 +706,40 @@ impl DynamicIntervalMatrix {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dynamic_nodes_promote_without_losing_slots_or_links() {
+        let mut nodes = super::DynamicNodeArena::Packed(Vec::new());
+        let first = super::DynamicUnionNode {
+            start: super::SlotIndex::for_test(2),
+            end: super::SlotIndex::for_test(u32::MAX as u64),
+            next: u32::MAX,
+        };
+        nodes.push(first);
+        assert_eq!(nodes.get(0), Some(first));
+        assert!(matches!(nodes, super::DynamicNodeArena::Packed(_)));
+        nodes.update(0, |node| {
+            node.end = super::SlotIndex::for_test(u32::MAX as u64 + 1)
+        });
+        assert!(matches!(nodes, super::DynamicNodeArena::Wide(_)));
+        assert_eq!(nodes.node(0).start, first.start);
+        assert_eq!(nodes.node(0).next, first.next);
+        assert_eq!(
+            nodes.node(0).end,
+            super::SlotIndex::for_test(u32::MAX as u64 + 1)
+        );
+        let wide = super::DynamicUnionNode {
+            start: super::SlotIndex::for_test(u64::MAX - 1),
+            end: super::SlotIndex::for_test(u64::MAX),
+            next: 0,
+        };
+        nodes.push(wide);
+        assert_eq!(nodes.get(1), Some(wide));
+        assert_eq!(nodes.get(2), None);
+        let mut direct = super::DynamicNodeArena::Packed(Vec::new());
+        direct.push(wide);
+        assert_eq!(direct.get(0), Some(wide));
+    }
+
     use super::*;
     use crate::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
 

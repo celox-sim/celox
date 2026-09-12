@@ -197,6 +197,9 @@ pub(super) fn analyze(
     let phi_uses = phi_edge_uses(func, cfg)?;
     let region_topology = RegionTopology::build(cfg)?;
     let edge_loop_exits = &region_topology.edge_exits;
+    let value_keys = (0..func.vregs.count())
+        .map(VReg)
+        .collect::<std::sync::Arc<[_]>>();
     let mut entry = vec![DistanceMap::default(); func.blocks.len()];
     let mut exit = vec![DistanceMap::default(); func.blocks.len()];
     let mut anticipated_after_phis = vec![HashSet::<VReg>::default(); func.blocks.len()];
@@ -258,6 +261,8 @@ pub(super) fn analyze(
             || next_exit != exit[block]
             || next_anticipated != anticipated_after_phis[block]
         {
+            next_entry.freeze(&value_keys);
+            next_exit.freeze(&value_keys);
             entry[block] = next_entry;
             exit[block] = next_exit;
             anticipated_after_phis[block] = next_anticipated;

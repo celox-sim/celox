@@ -12,13 +12,16 @@ mod parallel_copy;
 mod stack_color;
 
 pub use live_interval::{
-    LiveInterval, LiveIntervalError, LiveIntervals, LiveSegment, analyze_live_intervals,
+    CompactLiveIntervals, CompactSegments, LiveInterval, LiveIntervalError, LiveIntervals,
+    LiveSegment, LiveSegmentStorage, analyze_compact_live_intervals, analyze_live_intervals,
 };
 pub use parallel_copy::{
     CopyDestination, CopyOperation, CopyResolution, CopyResolutionError, CopyResolutionWork,
     CopySource, ParallelCopy, resolve_parallel_copies,
 };
-pub use stack_color::{StackColorError, StackSlotColoring, color_stack_slots};
+pub use stack_color::{
+    StackColorError, StackSlotColoring, color_stack_slots, color_stack_slots_with_storage,
+};
 
 /// A physical register that can be stored in a compact register set.
 pub trait MachineRegister: Copy + Eq + Hash + Ord + fmt::Debug {
