@@ -1,0 +1,7 @@
+case,n,four_state,masks,path,policy,regions,lowered_regions,unroll,frontend_ms,recover_ms,baseline_backend_ms,candidate_compile_ms,decision_ms,baseline_bytes,candidate_bytes,repeats,baseline_us,candidate_us,speedup,p_numerator,p_denominator,selected
+counters_1000,1000,false,known,reset,readers,2,1,32,184.829,2.702,37.554,77.976,92.943,31932,13567,2465,0.1018,0.1023,0.995,46138460,155117520,baseline
+counters_1000,1000,false,known,increment,readers,2,1,16,184.829,3.171,35.932,91.236,106.346,31932,13167,702,0.1996,0.3006,0.664,155052829,155117520,baseline
+counters_1000,1000,true,known,reset,readers,2,1,32,55.243,2.325,111.572,57.586,72.881,75804,27772,978,0.2480,0.2392,1.037,2000573,155117520,candidate
+counters_1000,1000,true,known,increment,readers,2,1,32,55.243,2.788,99.646,54.453,68.852,75804,27772,239,0.8923,0.7819,1.141,10886,155117520,candidate
+counters_1000,1000,true,mixed,reset,readers,2,1,16,57.601,2.426,103.070,54.290,70.416,75804,26684,1015,0.2573,0.2477,1.039,68173728,155117520,baseline
+counters_1000,1000,true,mixed,increment,readers,2,1,32,57.601,2.427,93.685,52.934,66.586,75804,27772,252,0.8969,0.7519,1.193,45,155117520,candidate

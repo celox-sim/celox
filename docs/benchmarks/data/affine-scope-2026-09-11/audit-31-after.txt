@@ -1,0 +1,75 @@
+   Compiling celox-sir v0.4.8 (/home/tsukasa/develop/celox/crates/celox-sir)
+   Compiling celox-slt v0.4.8 (/home/tsukasa/develop/celox/crates/celox-slt)
+   Compiling celox-sir-opt v0.4.8 (/home/tsukasa/develop/celox/crates/celox-sir-opt)
+   Compiling celox-backend-wasm v0.4.8 (/home/tsukasa/develop/celox/crates/celox-backend-wasm)
+   Compiling celox-backend-x86 v0.4.8 (/home/tsukasa/develop/celox/crates/celox-backend-x86)
+   Compiling celox-backend-cranelift v0.4.8 (/home/tsukasa/develop/celox/crates/celox-backend-cranelift)
+   Compiling celox-frontend-core v0.4.8 (/home/tsukasa/develop/celox/crates/celox-frontend-core)
+   Compiling celox-frontend-veryl v0.4.8 (/home/tsukasa/develop/celox/crates/celox-frontend-veryl)
+   Compiling celox v0.4.8 (/home/tsukasa/develop/celox/crates/celox)
+    Finished `heliodor-dev` profile [optimized] target(s) in 6.45s
+     Running `target/heliodor-dev/examples/affine_veryl scope 31 /tmp/celox-affine-scope-post`
+map four_state=false pre recovered: statements=1
+map four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+map four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+map four_state=true pre recovered: statements=1
+map four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+map four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+producer_consumer four_state=false pre recovered: statements=4
+producer_consumer four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+producer_consumer four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+producer_consumer four_state=true pre recovered: statements=4
+producer_consumer four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+producer_consumer four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+reduction four_state=false pre: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+reduction four_state=false post: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+reduction four_state=true pre: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+reduction four_state=true post: rejected={"canonical: invalid affine region: SIR loop has carried scalar state": 1, "recovered: invalid affine region: unrolled recovery requires a straight-line unit": 1}
+ff_shift four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+ff_shift four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+ff_shift four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+ff_shift four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 3, "recovered: invalid affine region: no repeated unrolled array stores": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 2}
+fir5 four_state=false pre recovered: statements=1
+fir5 four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+fir5 four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+fir5 four_state=true pre recovered: statements=1
+fir5 four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+fir5 four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+strided_pair four_state=false pre recovered: statements=1
+strided_pair four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+strided_pair four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+strided_pair four_state=true pre recovered: statements=1
+strided_pair four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+strided_pair four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+reverse four_state=false pre recovered: statements=1
+reverse four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+reverse four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+reverse four_state=true pre recovered: statements=1
+reverse four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+reverse four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+broadcast four_state=false pre recovered: statements=1
+broadcast four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+broadcast four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+broadcast four_state=true pre recovered: statements=1
+broadcast four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+broadcast four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+lane_mux four_state=false pre recovered: statements=1
+lane_mux four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+lane_mux four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+lane_mux four_state=true pre recovered: statements=1
+lane_mux four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+lane_mux four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+rotate four_state=false pre recovered: statements=2
+rotate four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+rotate four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+rotate four_state=true pre recovered: statements=2
+rotate four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1}
+rotate four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+indexed_gather four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 1}
+indexed_gather four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 1}
+indexed_gather four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 1}
+indexed_gather four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery rejects effects and potential traps": 1}
+interleave four_state=false pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: affine analysis work limit reached": 1}
+interleave four_state=false post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}
+interleave four_state=true pre: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: affine analysis work limit reached": 1}
+interleave four_state=true post: rejected={"canonical: invalid affine region: no canonical SIR memory loops": 1, "recovered: invalid affine region: unrolled recovery requires static complete cells": 1}

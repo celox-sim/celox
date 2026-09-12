@@ -1,0 +1,7 @@
+case,n,four_state,masks,tile,unroll,compile_ms,recover_schedule_ms,baseline_backend_ms,search_ms,evaluations,rejected,steps,stop,baseline_bytes,tuned_bytes,repeats,baseline_us,tuned_us,speedup,baseline_p25_us,baseline_p75_us,tuned_p25_us,tuned_p75_us,p_numerator,p_denominator,selected,search_seed_us,search_best_us
+map,512,false,known,512,16,34.502,0.524,13.900,106.062,18,0,2,Converged,10481,475,3906,0.0777,0.1478,0.526,0.0768,0.0792,0.1449,0.1527,155117520,155117520,baseline,0.2193,0.1478
+map,512,true,known,512,16,20.742,0.413,39.570,269.997,18,0,2,Converged,26541,1218,3906,0.3354,0.3420,0.981,0.3328,0.3413,0.3371,0.3576,154025770,155117520,baseline,0.5425,0.3347
+map,512,true,mixed,512,16,20.859,0.520,39.715,324.987,19,0,3,Converged,26541,1218,3906,0.3444,0.3484,0.989,0.3405,0.3625,0.3372,0.3826,90112826,155117520,baseline,0.5352,0.3739
+producer_consumer,512,false,known,512,32,64.176,1.804,27.246,437.783,18,0,3,Converged,18064,2560,3906,0.1640,0.2232,0.735,0.1630,0.1695,0.2210,0.2267,155117520,155117520,baseline,0.5732,0.2210
+producer_consumer,512,true,known,512,32,47.551,1.638,104.624,1843.263,18,0,3,Converged,68091,8819,3906,0.9219,0.8140,1.132,0.9189,0.9241,0.8070,0.8211,1,155117520,tuned,1.9953,0.8304
+producer_consumer,512,true,mixed,512,32,48.952,1.660,129.106,1830.843,18,0,3,Converged,68091,8819,3906,0.9178,0.8102,1.133,0.9142,0.9292,0.8073,0.8326,8728,155117520,tuned,2.0883,0.8319

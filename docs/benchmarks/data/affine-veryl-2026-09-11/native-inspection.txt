@@ -1,0 +1,13 @@
+Native inspection: objdump -D -b binary -m i386:x86-64 --no-show-raw-insn
+Only emitted text is decoded; trailing constant tables are excluded.
+XMM register moves in the prologue/epilogue save general-purpose registers.
+These counts are static instructions, not runtime counts or a causal speed model.
+
+map_false_baseline.bin: imul=32, jmp=1, mov=43, movabs=6, movq=10, or=16, rdgsbase=1, ret=1, shl=16, wrgsbase=2, xor=1
+map_false_scheduled.bin: add=1, cmp=1, imul=1, jg=1, jmp=2, mov=4, movq=2, rdgsbase=1, ret=1, shl=1, shr=1, wrgsbase=2, xor=2
+map_true_baseline.bin: cmove=2, cmovne=30, imul=32, jmp=1, mov=129, movabs=16, movq=14, or=64, rdgsbase=1, ret=1, shl=32, test=32, wrgsbase=2, xor=2
+map_true_scheduled.bin: add=1, cmove=1, cmovne=1, cmp=1, imul=1, je=1, jmp=2, mov=9, movabs=1, movq=2, movzbl=2, or=3, rdgsbase=1, ret=1, setle=1, setne=1, shl=1, shr=1, test=4, wrgsbase=2, xor=3
+producer_consumer_false_baseline.bin: add=44, imul=32, jmp=1, lea=16, mov=71, movabs=8, movq=14, or=30, rdgsbase=1, ret=1, shl=31, wrgsbase=2, xor=1
+producer_consumer_false_scheduled.bin: add=3, cmp=1, imul=6, jg=1, jmp=2, lea=1, mov=12, movabs=6, movq=2, rdgsbase=1, ret=1, shl=3, shr=3, wrgsbase=2, xor=3
+producer_consumer_true_baseline.bin: add=60, cmove=1, cmovne=91, imul=32, jmp=1, mov=256, movabs=24, movq=44, movzbl=62, or=212, rdgsbase=1, ret=1, setne=62, shl=62, test=154, wrgsbase=2, xor=3
+producer_consumer_true_scheduled.bin: add=3, cmove=3, cmovne=8, cmp=1, imul=6, je=1, jmp=2, lea=1, mov=36, movabs=5, movq=6, movzbl=7, or=14, rdgsbase=1, ret=1, setle=1, setne=6, shl=3, shr=3, test=18, wrgsbase=2, xor=4
