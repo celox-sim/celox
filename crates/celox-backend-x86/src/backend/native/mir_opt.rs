@@ -2804,10 +2804,9 @@ fn gvn_load_version(
 }
 
 fn gvn_affected_memory_variables(
-    inst: &MInst,
+    effect: &memory_effect::MemoryEffects,
     tracked: &GvnTrackedMemory,
 ) -> Option<Vec<GvnMemoryVariable>> {
-    let effect = memory_effect::writes(inst);
     if let Some(memory) = effect.unknown_memory() {
         return Some(match memory {
             memory_effect::UnknownMemory::Direct(base) if tracked.tracks_base(base) => {
@@ -2891,28 +2890,20 @@ fn compute_gvn_load_versions(
 
     let frontiers = gvn_dominance_frontiers(predecessors, idom)?;
     let mut definition_blocks = HashMap::<GvnMemoryVariable, BTreeSet<usize>>::default();
-    let mut write_versions =
-        HashMap::<(usize, usize, GvnMemoryVariable), GvnMemoryVersion>::default();
+    // A write's identity is its ordinal in the original instruction stream.
+    // Keep one starting ordinal per block instead of repeating the full
+    // version for every byte written by every instruction.
+    let mut block_write_ordinals = Vec::with_capacity(func.blocks.len());
     let mut write_ordinal = 0usize;
     for (block, mir_block) in func.blocks.iter().enumerate() {
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+        block_write_ordinals.push(write_ordinal);
+        for inst in &mir_block.insts {
             let effect = memory_effect::writes(inst);
-            let ordinal = if effect.has_effect() {
-                let ordinal = write_ordinal;
+            if effect.has_effect() {
                 write_ordinal = write_ordinal.checked_add(1)?;
-                Some(ordinal)
-            } else {
-                None
-            };
-            for variable in gvn_affected_memory_variables(inst, &tracked)? {
+            }
+            for variable in gvn_affected_memory_variables(&effect, &tracked)? {
                 definition_blocks.entry(variable).or_default().insert(block);
-                write_versions.insert(
-                    (block, instruction, variable),
-                    GvnMemoryVersion::Write {
-                        ordinal: ordinal.expect("an affected variable belongs to a memory write"),
-                        variable,
-                    },
-                );
             }
         }
     }
@@ -2971,7 +2962,16 @@ fn compute_gvn_load_versions(
             let version = GvnMemoryVersion::Phi { block, variable };
             changes.push((variable, current.insert(variable, version)));
         }
+        let mut write_ordinal = block_write_ordinals[block];
         for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+            let effect = memory_effect::writes(inst);
+            let ordinal = if effect.has_effect() {
+                let ordinal = write_ordinal;
+                write_ordinal = write_ordinal.checked_add(1)?;
+                Some(ordinal)
+            } else {
+                None
+            };
             if let MInst::Load {
                 base, offset, size, ..
             } = inst
@@ -2981,8 +2981,11 @@ fn compute_gvn_load_versions(
                     gvn_load_version(*base, *offset, *size, &current)?,
                 );
             }
-            for variable in gvn_affected_memory_variables(inst, &tracked)? {
-                let version = *write_versions.get(&(block, instruction, variable))?;
+            for variable in gvn_affected_memory_variables(&effect, &tracked)? {
+                let version = GvnMemoryVersion::Write {
+                    ordinal: ordinal.expect("an affected variable belongs to a memory write"),
+                    variable,
+                };
                 changes.push((variable, current.insert(variable, version)));
             }
         }
@@ -14271,6 +14274,69 @@ mod tests {
                 src: VReg(0),
             }
         ));
+    }
+
+    #[test]
+    fn gvn_write_ordinals_follow_layout_even_when_dominance_order_differs() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+        let load = |dst| MInst::Load {
+            dst: VReg(dst),
+            base: BaseReg::SimState,
+            offset: 16,
+            size: OpSize::S64,
+        };
+        let store = |offset, size| MInst::Store {
+            base: BaseReg::SimState,
+            offset,
+            src: VReg(0),
+            size,
+        };
+        let mut entry = MBlock::new(BlockId(0));
+        // An untracked write still consumes an ordinal.
+        entry.insts = vec![store(128, OpSize::S64), MInst::Jump { target: BlockId(2) }];
+        let mut exit = MBlock::new(BlockId(1));
+        exit.insts = vec![load(1), store(16, OpSize::S8), load(2), MInst::Return];
+        let mut middle = MBlock::new(BlockId(2));
+        middle.insts = vec![
+            store(16, OpSize::S64),
+            load(3),
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+        func.push_block(exit);
+        func.push_block(middle);
+        let versions = compute_gvn_load_versions(
+            &func,
+            &[vec![], vec![2], vec![0]],
+            &[Some(0), Some(2), Some(0)],
+        )
+        .unwrap();
+        for location in [(2, 1), (1, 0)] {
+            let version = &versions[&location];
+            for (index, actual) in version.bytes.iter().enumerate() {
+                assert_eq!(
+                    *actual,
+                    GvnMemoryVersion::Write {
+                        ordinal: 2,
+                        variable: GvnMemoryVariable::Byte(BaseReg::SimState, 16 + index as i64),
+                    }
+                );
+            }
+        }
+        let version = &versions[&(1, 2)];
+        for (index, actual) in version.bytes.iter().enumerate() {
+            assert_eq!(
+                *actual,
+                GvnMemoryVersion::Write {
+                    ordinal: if index == 0 { 1 } else { 2 },
+                    variable: GvnMemoryVariable::Byte(BaseReg::SimState, 16 + index as i64),
+                }
+            );
+        }
     }
 
     #[test]
