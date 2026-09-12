@@ -10,8 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 
 use celox_backend_common::regalloc::{
-    BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts, LiveIntervals,
-    PhiAllocationFacts, PhiSource, analyze_live_intervals, color_stack_slots,
+    BlockAllocationFacts, CompactLiveIntervals as LiveIntervals, CompactSegments,
+    FunctionAllocationFacts, InstructionAllocationFacts, PhiAllocationFacts, PhiSource,
+    analyze_compact_live_intervals as analyze_live_intervals,
+    color_stack_slots_with_storage as color_stack_slots,
 };
 
 use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
@@ -202,11 +204,19 @@ pub(crate) fn build_facts(function: &MFunction) -> Result<AllocationFacts, Targe
     Ok(facts)
 }
 
+#[cfg(test)]
 pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), TargetRegallocError> {
     let facts = build_facts(&function.function)?;
     let intervals = analyze_live_intervals(&facts)
         .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
 
+    verify_allocated_with_intervals(function, &intervals)
+}
+
+fn verify_allocated_with_intervals(
+    function: &AllocatedFunction,
+    intervals: &LiveIntervals<VReg>,
+) -> Result<(), TargetRegallocError> {
     for block in &function.function.blocks {
         for (instruction_index, instruction) in block.insts.iter().enumerate() {
             for value in instruction.uses().into_iter().chain(instruction.def()) {
@@ -229,7 +239,7 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
             }
         }
     }
-    verify_interval_registers(function, &intervals)
+    verify_interval_registers(function, intervals)
 }
 
 const ALLOCATABLE_REGISTERS: [Arm64Reg; 24] = [
@@ -318,6 +328,7 @@ pub(crate) fn allocate_with_spills(
             )
         })
         .collect::<BTreeSet<_>>();
+    drop(initial_facts);
     let mut spill_frame_size = 0_u32;
 
     loop {
@@ -327,6 +338,7 @@ pub(crate) fn allocate_with_spills(
         let facts = build_facts(&function)?;
         let intervals = analyze_live_intervals(&facts)
             .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
+        drop(facts);
         let proactive = close_phi_spill_set(
             &function,
             select_spill_batch(&function, &intervals, &candidates, &frequencies, false),
@@ -342,8 +354,9 @@ pub(crate) fn allocate_with_spills(
             )?;
             continue;
         }
-        match allocate_without_spills(function.clone()) {
-            Ok(allocated) => {
+        match color_intervals(&function, &intervals) {
+            Ok(assignment) => {
+                let allocated = finish_allocation(function, assignment, &intervals)?;
                 return Ok(TargetAllocation {
                     allocated,
                     spill_frame_size,
@@ -427,9 +440,57 @@ fn spill_frequencies(function: &MFunction, facts: &AllocationFacts) -> BTreeMap<
         .collect()
 }
 
+/// Merge exact block-sorted intervals without copying the complete segment
+/// table. The heap retains one position per value; callers reuse one block row.
+struct BlockSegmentCursor<'a> {
+    intervals: Vec<(VReg, &'a CompactSegments)>,
+    next_segments: BinaryHeap<Reverse<(usize, usize, usize)>>,
+}
+
+impl<'a> BlockSegmentCursor<'a> {
+    fn new(intervals: &'a LiveIntervals<VReg>) -> Self {
+        let intervals = intervals
+            .iter()
+            .map(|(&value, interval)| (value, &interval.segments))
+            .collect::<Vec<_>>();
+        let next_segments = intervals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, segments))| {
+                segments
+                    .first()
+                    .map(|segment| Reverse((segment.block, index, 0)))
+            })
+            .collect();
+        Self {
+            intervals,
+            next_segments,
+        }
+    }
+
+    fn next(&mut self, segments: &mut Vec<(u64, u64, VReg)>) -> Option<usize> {
+        segments.clear();
+        let &Reverse((block, _, _)) = self.next_segments.peek()?;
+        while let Some(&Reverse((next_block, index, position))) = self.next_segments.peek() {
+            if next_block != block {
+                break;
+            }
+            self.next_segments.pop();
+            let (value, interval) = self.intervals[index];
+            let segment = interval.get(position).expect("queued segment exists");
+            segments.push((segment.start, segment.end, value));
+            if let Some(next) = interval.get(position + 1) {
+                self.next_segments
+                    .push(Reverse((next.block, index, position + 1)));
+            }
+        }
+        Some(block)
+    }
+}
+
 fn select_spill_batch(
     function: &MFunction,
-    intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
+    intervals: &LiveIntervals<VReg>,
     candidates: &BTreeSet<VReg>,
     frequencies: &BTreeMap<BlockId, u64>,
     force: bool,
@@ -484,34 +545,9 @@ fn select_spill_batch(
     let mut peak = Vec::new();
     // Merge the already block-sorted intervals one block at a time. Building
     // a second copy of every segment can consume gigabytes on large designs.
-    let interval_segments = intervals
-        .iter()
-        .map(|(&value, interval)| (value, interval.segments.as_slice()))
-        .collect::<Vec<_>>();
-    let mut next_segments = interval_segments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (_, segments))| {
-            segments
-                .first()
-                .map(|segment| Reverse((segment.block, index, 0)))
-        })
-        .collect::<BinaryHeap<_>>();
+    let mut cursor = BlockSegmentCursor::new(intervals);
     let mut segments = Vec::new();
-    while let Some(&Reverse((block, _, _))) = next_segments.peek() {
-        segments.clear();
-        while let Some(&Reverse((next_block, index, position))) = next_segments.peek() {
-            if next_block != block {
-                break;
-            }
-            next_segments.pop();
-            let (value, interval) = interval_segments[index];
-            let segment = interval[position];
-            segments.push((segment.start, segment.end, value));
-            if let Some(next) = interval.get(position + 1) {
-                next_segments.push(Reverse((next.block, index, position + 1)));
-            }
-        }
+    while cursor.next(&mut segments).is_some() {
         segments.sort_unstable();
         let mut active = Vec::<(u64, VReg)>::new();
         for &(start, end, value) in &segments {
@@ -808,6 +844,7 @@ fn spill_values(
 /// This first target-native path intentionally reports pressure instead of
 /// hiding a spill policy. Spill/reload insertion is the next AArch64-owned
 /// layer and can preserve this coloring and edge-copy boundary.
+#[cfg(test)]
 pub(crate) fn allocate_without_spills(
     function: MFunction,
 ) -> Result<AllocatedFunction, TargetRegallocError> {
@@ -815,41 +852,45 @@ pub(crate) fn allocate_without_spills(
     let intervals = analyze_live_intervals(&facts)
         .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
     let assignment = color_intervals(&function, &intervals)?;
+    finish_allocation(function, assignment, &intervals)
+}
+
+// Coloring and verification inspect the same unchanged MIR. Reuse its liveness
+// instead of retaining multiple copies of the largest allocation data structure.
+fn finish_allocation(
+    function: MFunction,
+    assignment: Assignment<VReg>,
+    intervals: &LiveIntervals<VReg>,
+) -> Result<AllocatedFunction, TargetRegallocError> {
     let edge_copies = build_edge_copies(&function, &assignment)?;
     let allocated = AllocatedFunction {
         function,
         assignment,
         edge_copies,
     };
-    verify_allocated(&allocated)?;
+    verify_allocated_with_intervals(&allocated, intervals)?;
     Ok(allocated)
 }
 
 fn color_intervals(
     function: &MFunction,
-    intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
+    intervals: &LiveIntervals<VReg>,
 ) -> Result<Assignment<VReg>, TargetRegallocError> {
     let mut interference = intervals
         .iter()
         .map(|(&value, _)| (value, BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    // Index intervals by block once; large kernels have many values that
-    // are live in only a small fraction of their basic blocks.
-    let mut block_segments = vec![Vec::new(); function.blocks.len()];
-    for (&value, interval) in intervals.iter() {
-        for segment in &interval.segments {
-            let segments = &mut block_segments[segment.block];
-            // Match segment_in_block's first-segment semantics if an
-            // interval ever carries more than one segment for a block.
-            if !segments.last().is_some_and(|&(_, _, last)| last == value) {
-                segments.push((segment.start, segment.end, value));
-            }
-        }
-    }
-    for mut segments in block_segments {
+    // Keep only the current block's sweep input. Duplicating all exact
+    // intervals here can exceed the memory used by liveness itself.
+    let mut cursor = BlockSegmentCursor::new(intervals);
+    let mut segments = Vec::new();
+    while cursor.next(&mut segments).is_some() {
+        // Cursor rows are grouped by value before sorting. Preserve the
+        // historical first-segment semantics for repeated block entries.
+        segments.dedup_by_key(|segment| segment.2);
         segments.sort_unstable();
         let mut active = Vec::<(u64, VReg)>::new();
-        for (start, end, value) in segments {
+        for &(start, end, value) in &segments {
             active.retain(|(active_end, _)| *active_end > start);
             for &(_, other) in &active {
                 interference.entry(value).or_default().insert(other);
@@ -1037,41 +1078,38 @@ fn adapt_copy_source(source: celox_backend_common::regalloc::CopySource<Arm64Reg
 
 fn verify_interval_registers(
     function: &AllocatedFunction,
-    intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
+    intervals: &LiveIntervals<VReg>,
 ) -> Result<(), TargetRegallocError> {
+    let mut cursor = BlockSegmentCursor::new(intervals);
     let mut segments = Vec::new();
-    for (&value, interval) in intervals.iter() {
-        let Some(register) = function.assignment.get(&value) else {
+    let mut registered = Vec::new();
+    while let Some(block) = cursor.next(&mut segments) {
+        registered.clear();
+        registered.extend(segments.iter().filter_map(|&(start, end, value)| {
             // Legacy edge values may reside in a stack home or immediate.
-            continue;
-        };
-        segments.extend(
-            interval
-                .segments
-                .iter()
-                .map(|segment| (segment.block, register, segment.start, segment.end, value)),
-        );
-    }
-    segments.sort_unstable_by_key(|&(block, register, start, end, value)| {
-        (block, register, start, end, value)
-    });
-    let mut previous = None;
-    for (block, register, start, end, value) in segments {
-        if let Some((left_block, left_register, _, left_end, left)) = previous
-            && left_block == block
-            && left_register == register
-            && start < left_end
-            && left != value
-        {
-            return Err(TargetRegallocError::RegisterConflict {
-                block: function.function.blocks[block].id,
-                instruction: usize::try_from(start / 3).unwrap_or(usize::MAX),
-                left,
-                right: value,
-                register,
-            });
+            function
+                .assignment
+                .get(&value)
+                .map(|register| (register, start, end, value))
+        }));
+        registered.sort_unstable();
+        let mut previous = None;
+        for &(register, start, end, value) in &registered {
+            if let Some((left_register, _, left_end, left)) = previous
+                && left_register == register
+                && start < left_end
+                && left != value
+            {
+                return Err(TargetRegallocError::RegisterConflict {
+                    block: function.function.blocks[block].id,
+                    instruction: usize::try_from(start / 3).unwrap_or(usize::MAX),
+                    left,
+                    right: value,
+                    register,
+                });
+            }
+            previous = Some((register, start, end, value));
         }
-        previous = Some((block, register, start, end, value));
     }
     Ok(())
 }
@@ -1216,6 +1254,45 @@ mod tests {
                 register,
                 ..
             }) if register == Arm64Reg::new(1)
+        ));
+    }
+
+    #[test]
+    fn register_verification_checks_values_across_block_boundaries() {
+        let mut entry = MBlock::new(BlockId(10));
+        entry.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 1,
+        });
+        entry.push(MInst::Jump {
+            target: BlockId(20),
+        });
+        let mut middle = MBlock::new(BlockId(20));
+        middle.push(MInst::LoadImm {
+            dst: VReg(1),
+            value: 2,
+        });
+        middle.push(MInst::Jump {
+            target: BlockId(30),
+        });
+        let mut exit = MBlock::new(BlockId(30));
+        exit.push(MInst::Add {
+            dst: VReg(2),
+            lhs: VReg(0),
+            rhs: VReg(1),
+        });
+        exit.push(MInst::Return);
+        let function = MFunction::new(vec![entry, middle, exit], Vec::new());
+        let mut allocated = allocate_without_spills(function).unwrap();
+        verify_allocated(&allocated).unwrap();
+        let register = allocated.assignment.get(&VReg(0)).unwrap();
+        allocated.assignment.set(VReg(1), register);
+        assert!(matches!(
+            verify_allocated(&allocated),
+            Err(TargetRegallocError::RegisterConflict {
+                block: BlockId(20),
+                ..
+            })
         ));
     }
 

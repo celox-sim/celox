@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { matrix, mergeArtifacts } from "./heliodor-suite.mjs";
+import { matrix, mergeArtifacts, prepareSuiteTestbench } from "./heliodor-suite.mjs";
 
-test("suite isolates all 88 backend runs and reserves time for large designs", () => {
+test("suite isolates all 72 backend runs and reserves time for large designs", () => {
   const jobs = matrix().include;
-  assert.equal(jobs.length, 88);
-  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.runner}`)).size, 88);
+  assert.equal(jobs.length, 72);
+  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.runner}`)).size, 72);
   for (const job of jobs) {
     assert.ok(job.timeout_sec < 300 * 60);
     if (job.test.endsWith("4hart") || job.test.endsWith("8hart")) assert.ok(job.timeout_sec > 3600);
@@ -33,7 +33,7 @@ test("publication requires one successful matching result from every backend", (
     }
     const output = join(root, "suite");
     mergeArtifacts(root, output);
-    for (const arch of ["x86_64", "aarch64"]) assert.equal(readFileSync(`${output}-${arch}.tsv`, "utf8").trim().split("\n").length, 45);
+    for (const arch of ["x86_64", "aarch64"]) assert.equal(readFileSync(`${output}-${arch}.tsv`, "utf8").trim().split("\n").length, 37);
     const [file, content] = files[0];
     for (const invalid of [content.replace("\tpass", "\tfail"), content.replace("\t0\t", "\t124\t"), content.replace("veryl-cc-sync\t", "celox\t"), content + content.split("\n")[1] + "\n"]) {
       writeFileSync(file, invalid);
@@ -65,4 +65,25 @@ test("dispatch validation rejects profile/filter conflicts instead of succeeding
   assert.equal(validate({}).status, 0);
   assert.equal(validate({ ARM64_PROFILE: "true" }).status, 0);
   assert.notEqual(validate({ SUITE_ARCH: "invalid" }).status, 0);
+});
+
+
+test("N=8 suite budget changes only that wrapper and remains idempotent", () => {
+  const prefix = "module another_test { for _i in 0..3000 {} }\n";
+  const source = prefix + `module test_soc_smp_linux_boot_8hart {
+        // early on success (the N=8 boot reaches shutdown at ~25M). Budget 30M.
+        for _i in 0..3000 {
+            clk.next(10000);
+            if pass { break; }
+        }
+        $assert(pass, "must reach shutdown");
+}`;
+  const prepared = prepareSuiteTestbench(source);
+  assert.ok(prepared.startsWith(prefix));
+  assert.match(prepared, /for _i in 0\.\.10000/);
+  assert.ok(prepared.includes('$assert(pass, "must reach shutdown")'));
+  assert.equal(prepareSuiteTestbench(prepared), prepared);
+  assert.throws(() => prepareSuiteTestbench(source.replace("0..3000 {\n", "0..4000 {\n")), /Unexpected/);
+  assert.throws(() => prepareSuiteTestbench(source + source), /exactly one/);
+  assert.throws(() => prepareSuiteTestbench(prefix), /exactly one/);
 });

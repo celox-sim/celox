@@ -455,13 +455,16 @@ fn fold_proven_comparisons(func: &mut MFunction) {
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
-                defs.insert(dst, inst.clone());
+                defs.insert(dst, inst);
             }
         }
     }
+    // Prove against the original definitions, then apply only the rewrites.
+    // Cloning every instruction here multiplies memory for large SMP designs.
+    let mut replacements = Vec::new();
     let mut upper_bounds = HashMap::default();
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
             let replacement = match inst {
                 MInst::CmpSelect {
                     dst,
@@ -508,9 +511,13 @@ fn fold_proven_comparisons(func: &mut MFunction) {
                 _ => None,
             };
             if let Some(replacement) = replacement {
-                *inst = replacement;
+                replacements.push((block_index, inst_index, replacement));
             }
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
@@ -529,16 +536,19 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
         }
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
-                defs.insert(dst, inst.clone());
+                defs.insert(dst, inst);
             }
             for source in inst.uses() {
                 *use_counts.entry(source).or_default() += 1;
             }
         }
     }
+    // Prove against the original definitions, then apply only the rewrites.
+    // Cloning every instruction here multiplies memory for large SMP designs.
+    let mut replacements = Vec::new();
     let mut upper_bounds = HashMap::default();
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
             let replacement = match inst {
                 MInst::CmpImm {
                     dst,
@@ -605,9 +615,13 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
                 _ => None,
             };
             if let Some(replacement) = replacement {
-                *inst = replacement;
+                replacements.push((block_index, inst_index, replacement));
             }
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
@@ -2790,10 +2804,9 @@ fn gvn_load_version(
 }
 
 fn gvn_affected_memory_variables(
-    inst: &MInst,
+    effect: &memory_effect::MemoryEffects,
     tracked: &GvnTrackedMemory,
 ) -> Option<Vec<GvnMemoryVariable>> {
-    let effect = memory_effect::writes(inst);
     if let Some(memory) = effect.unknown_memory() {
         return Some(match memory {
             memory_effect::UnknownMemory::Direct(base) if tracked.tracks_base(base) => {
@@ -2877,28 +2890,20 @@ fn compute_gvn_load_versions(
 
     let frontiers = gvn_dominance_frontiers(predecessors, idom)?;
     let mut definition_blocks = HashMap::<GvnMemoryVariable, BTreeSet<usize>>::default();
-    let mut write_versions =
-        HashMap::<(usize, usize, GvnMemoryVariable), GvnMemoryVersion>::default();
+    // A write's identity is its ordinal in the original instruction stream.
+    // Keep one starting ordinal per block instead of repeating the full
+    // version for every byte written by every instruction.
+    let mut block_write_ordinals = Vec::with_capacity(func.blocks.len());
     let mut write_ordinal = 0usize;
     for (block, mir_block) in func.blocks.iter().enumerate() {
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+        block_write_ordinals.push(write_ordinal);
+        for inst in &mir_block.insts {
             let effect = memory_effect::writes(inst);
-            let ordinal = if effect.has_effect() {
-                let ordinal = write_ordinal;
+            if effect.has_effect() {
                 write_ordinal = write_ordinal.checked_add(1)?;
-                Some(ordinal)
-            } else {
-                None
-            };
-            for variable in gvn_affected_memory_variables(inst, &tracked)? {
+            }
+            for variable in gvn_affected_memory_variables(&effect, &tracked)? {
                 definition_blocks.entry(variable).or_default().insert(block);
-                write_versions.insert(
-                    (block, instruction, variable),
-                    GvnMemoryVersion::Write {
-                        ordinal: ordinal.expect("an affected variable belongs to a memory write"),
-                        variable,
-                    },
-                );
             }
         }
     }
@@ -2957,7 +2962,16 @@ fn compute_gvn_load_versions(
             let version = GvnMemoryVersion::Phi { block, variable };
             changes.push((variable, current.insert(variable, version)));
         }
+        let mut write_ordinal = block_write_ordinals[block];
         for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+            let effect = memory_effect::writes(inst);
+            let ordinal = if effect.has_effect() {
+                let ordinal = write_ordinal;
+                write_ordinal = write_ordinal.checked_add(1)?;
+                Some(ordinal)
+            } else {
+                None
+            };
             if let MInst::Load {
                 base, offset, size, ..
             } = inst
@@ -2967,8 +2981,11 @@ fn compute_gvn_load_versions(
                     gvn_load_version(*base, *offset, *size, &current)?,
                 );
             }
-            for variable in gvn_affected_memory_variables(inst, &tracked)? {
-                let version = *write_versions.get(&(block, instruction, variable))?;
+            for variable in gvn_affected_memory_variables(&effect, &tracked)? {
+                let version = GvnMemoryVersion::Write {
+                    ordinal: ordinal.expect("an affected variable belongs to a memory write"),
+                    variable,
+                };
                 changes.push((variable, current.insert(variable, version)));
             }
         }
@@ -4431,17 +4448,18 @@ fn fold_late_serial_and_immediates(func: &mut MFunction) {
 /// This is produced by dynamic bit-select XOR assignment such as
 /// `x[s] ^= 1`. For 2-state values it is equivalent to `x ^ (1 << s)`.
 fn fold_bit_toggle_insert(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
             let MInst::Or { dst, lhs, rhs } = *inst else {
                 continue;
             };
@@ -4449,20 +4467,25 @@ fn fold_bit_toggle_insert(func: &mut MFunction) {
             if let Some((value, mask)) = match_bit_toggle_insert(lhs, rhs, &defs)
                 .or_else(|| match_bit_toggle_insert(rhs, lhs, &defs))
             {
-                *inst = MInst::Xor {
+                let replacement = MInst::Xor {
                     dst,
                     lhs: value,
                     rhs: mask,
                 };
+                replacements.push((block_index, inst_index, replacement));
             }
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
 fn match_bit_toggle_insert(
     clear_part: VReg,
     insert_part: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
 ) -> Option<(VReg, VReg)> {
     let MInst::And {
         lhs: clear_lhs,
@@ -4558,7 +4581,7 @@ fn match_bit_toggle_insert(
     }
 }
 
-fn is_const_one(reg: VReg, defs: &HashMap<VReg, MInst>) -> bool {
+fn is_const_one(reg: VReg, defs: &HashMap<VReg, &MInst>) -> bool {
     matches!(defs.get(&reg), Some(MInst::LoadImm { value: 1, .. }))
 }
 
@@ -4584,28 +4607,34 @@ fn fold_byte_enable_spread_to_pdep(func: &mut MFunction) {
         .filter_map(|instruction| {
             instruction
                 .def()
-                .map(|definition| (definition, instruction.clone()))
+                .map(|definition| (definition, instruction))
         })
         .collect::<HashMap<_, _>>();
 
-    for block in &mut func.blocks {
-        for instruction in &mut block.insts {
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, instruction) in block.insts.iter().enumerate() {
             let Some(dst) = instruction.def() else {
                 continue;
             };
             let Some((enable, lane_mask)) = match_byte_enable_spread(dst, &defs) else {
                 continue;
             };
-            *instruction = MInst::Pdep {
+            let replacement = MInst::Pdep {
                 dst,
                 src: enable,
                 mask: lane_mask,
             };
+            replacements.push((block_index, inst_index, replacement));
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
-fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, VReg)> {
+fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, VReg)> {
     let (spread7, lane_mask) = and_with_constant(result, 0x0101_0101_0101_0101, defs)?;
     let masked14 = or_with_shifted_self(spread7, 7, defs)?;
     let (spread14, _) = and_with_constant(masked14, 0x0003_0003_0003_0003, defs)?;
@@ -4618,7 +4647,7 @@ fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, MInst>) -> Option
 fn and_with_constant(
     result: VReg,
     expected: u64,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
 ) -> Option<(VReg, VReg)> {
     let MInst::And { lhs, rhs, .. } = defs.get(&result)? else {
         return None;
@@ -4635,7 +4664,7 @@ fn and_with_constant(
 fn or_with_shifted_self(
     result: VReg,
     expected_shift: u8,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
 ) -> Option<VReg> {
     let MInst::Or { lhs, rhs, .. } = defs.get(&result)? else {
         return None;
@@ -4649,7 +4678,7 @@ fn or_with_shifted_self(
     }
 }
 
-fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, MInst>) -> Option<VReg> {
+fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, &MInst>) -> Option<VReg> {
     match defs.get(&result)? {
         MInst::ShlImm { src, imm, .. } if *imm == expected_shift => Some(*src),
         MInst::Shl { lhs, rhs, .. }
@@ -4671,18 +4700,17 @@ fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, MInst>)
 /// where source bits are the contiguous low bits `0..N` and destination bits
 /// are strictly increasing. This is exactly `pdep(src, mask)`.
 fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let Some(dst) = inst.def() else { continue };
             if !matches!(inst, MInst::Or { .. } | MInst::OrImm { .. }) {
@@ -4770,18 +4798,19 @@ fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
                 ]
             };
 
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
 fn collect_deposit_chain_chunks(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     chunks: &mut Vec<(u8, u8, u8)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -4804,7 +4833,7 @@ fn collect_deposit_chain_chunks(
 
 fn collect_deposit_term(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     chunks: &mut Vec<(u8, u8, u8)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -4820,12 +4849,12 @@ fn collect_deposit_term(
     true
 }
 
-fn trace_deposit_term(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8, u8)> {
+fn trace_deposit_term(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, u8, u8, u8)> {
     trace_deposit_term_inner(reg, defs)
         .filter(|(_, _, width, dst_lsb)| *width > 0 && (*dst_lsb as u16 + *width as u16) <= 64)
 }
 
-fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8, u8)> {
+fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, u8, u8, u8)> {
     let Some(def) = defs.get(&reg) else {
         return Some((reg, 0, 64, 0));
     };
@@ -4875,7 +4904,7 @@ fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(V
     }
 }
 
-fn trace_value_window(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8)> {
+fn trace_value_window(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, u8, u8)> {
     let Some(def) = defs.get(&reg) else {
         return Some((reg, 0, 64));
     };
@@ -4921,7 +4950,7 @@ fn trace_value_window(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u
     }
 }
 
-fn load_imm_value(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<u64> {
+fn load_imm_value(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<u64> {
     match defs.get(&reg)? {
         MInst::LoadImm { value, .. } => Some(*value),
         MInst::Mov { src, .. } => load_imm_value(*src, defs),
@@ -4937,18 +4966,17 @@ fn load_imm_value(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<u64> {
 /// where destination chunks are contiguous low bits and source chunks are
 /// strictly increasing. This is `pext(src, mask)`.
 fn fold_extract_chain_to_pext(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let Some(dst) = inst.def() else { continue };
             if !matches!(inst, MInst::Or { .. } | MInst::OrImm { .. }) {
@@ -5036,12 +5064,13 @@ fn fold_extract_chain_to_pext(func: &mut MFunction) {
                 ]
             };
 
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
@@ -5054,20 +5083,19 @@ fn fold_extract_chain_to_pext(func: &mut MFunction) {
 /// Replacement: `pext(src, mask) → popcnt → and 1` where
 /// `mask = (1 << a) | (1 << b) | ...`
 fn fold_xor_chain_to_pext(func: &mut MFunction) {
-    // Build def map: VReg → instruction (cloned to avoid borrowing func)
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    // Keep the original definitions borrowed until all rewrites are planned.
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
     // For each block, scan for Xor instructions and try to fold
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             // Look for: v = xor a, b  where result is 1-bit (used with and 1)
             let MInst::Xor { dst, lhs, rhs } = inst else {
@@ -5138,13 +5166,13 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
                     imm: 1,
                 },
             ];
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        // Apply replacements in reverse order (to preserve indices)
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
@@ -5156,18 +5184,17 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
 ///   if mask == all_ones: `popcnt src`
 ///   else: `masked = and src, mask; popcnt masked`
 fn fold_add_chain_to_popcnt(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let MInst::Add { dst, lhs, rhs } = inst else {
                 continue;
@@ -5227,12 +5254,13 @@ fn fold_add_chain_to_popcnt(func: &mut MFunction) {
                 ]
             };
 
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
@@ -5243,7 +5271,7 @@ fn collect_xor_chain_bits(
     _vreg: VReg,
     lhs: VReg,
     rhs: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     bits: &mut Vec<(VReg, u64)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -5312,7 +5340,7 @@ fn collect_xor_chain_bits(
 /// Returns true if the tree contains only 0/1 bit extractions from one source.
 fn collect_add_chain_bits(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     bits: &mut Vec<(VReg, u64)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -14246,6 +14274,69 @@ mod tests {
                 src: VReg(0),
             }
         ));
+    }
+
+    #[test]
+    fn gvn_write_ordinals_follow_layout_even_when_dominance_order_differs() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+        let load = |dst| MInst::Load {
+            dst: VReg(dst),
+            base: BaseReg::SimState,
+            offset: 16,
+            size: OpSize::S64,
+        };
+        let store = |offset, size| MInst::Store {
+            base: BaseReg::SimState,
+            offset,
+            src: VReg(0),
+            size,
+        };
+        let mut entry = MBlock::new(BlockId(0));
+        // An untracked write still consumes an ordinal.
+        entry.insts = vec![store(128, OpSize::S64), MInst::Jump { target: BlockId(2) }];
+        let mut exit = MBlock::new(BlockId(1));
+        exit.insts = vec![load(1), store(16, OpSize::S8), load(2), MInst::Return];
+        let mut middle = MBlock::new(BlockId(2));
+        middle.insts = vec![
+            store(16, OpSize::S64),
+            load(3),
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+        func.push_block(exit);
+        func.push_block(middle);
+        let versions = compute_gvn_load_versions(
+            &func,
+            &[vec![], vec![2], vec![0]],
+            &[Some(0), Some(2), Some(0)],
+        )
+        .unwrap();
+        for location in [(2, 1), (1, 0)] {
+            let version = &versions[&location];
+            for (index, actual) in version.bytes.iter().enumerate() {
+                assert_eq!(
+                    *actual,
+                    GvnMemoryVersion::Write {
+                        ordinal: 2,
+                        variable: GvnMemoryVariable::Byte(BaseReg::SimState, 16 + index as i64),
+                    }
+                );
+            }
+        }
+        let version = &versions[&(1, 2)];
+        for (index, actual) in version.bytes.iter().enumerate() {
+            assert_eq!(
+                *actual,
+                GvnMemoryVersion::Write {
+                    ordinal: if index == 0 { 1 } else { 2 },
+                    variable: GvnMemoryVariable::Byte(BaseReg::SimState, 16 + index as i64),
+                }
+            );
+        }
     }
 
     #[test]

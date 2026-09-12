@@ -1,6 +1,7 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
 use crate::PassOptions;
+use crate::ir::cfg::SirCfg;
 use crate::ir::{
     AbsoluteAddr, BasicBlock, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
     RegisterType, SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, STABLE_REGION, UnaryOp,
@@ -8,6 +9,7 @@ use crate::ir::{
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Turns a prioritized chain of exact, same-selector muxes into one sparse
@@ -207,6 +209,7 @@ fn find_sparse_case_plans(
     block_ids.sort_unstable();
     let mut planned_blocks = HashSet::default();
     let mut plans = Vec::new();
+    let dominance = OnceCell::<Option<SirCfg>>::new();
 
     // The first sweep plans only maximal same-selector spines.  This avoids
     // repeating global-use cloning, local DCE, and arm-DAG collection for all
@@ -225,11 +228,6 @@ fn find_sparse_case_plans(
                 nonmaximal_same_selector_muxes(eu, block, &local_defs, &def_sites, &use_counts);
             let dense_lookup_indices =
                 dense_constant_lookup_mux_indices(eu, block, &local_defs, &def_sites, &deferred);
-            // The CFG is unchanged during discovery. Reuse producer-block
-            // dominance proofs across candidates for this target block; each
-            // proof otherwise walks the whole CFG again. Clear the cache for
-            // each target so storage stays bounded by the block count.
-            let mut dominance = HashMap::<BlockId, bool>::default();
             let mut best: Option<SparseCasePlan> = None;
             for (root_index, inst) in block.instructions.iter().enumerate() {
                 if !matches!(inst, SIRInstruction::Mux(..))
@@ -247,7 +245,7 @@ fn find_sparse_case_plans(
                     &def_sites,
                     &use_counts,
                     stable_alias_class,
-                    &mut dominance,
+                    &dominance,
                 ) else {
                     continue;
                 };
@@ -417,7 +415,7 @@ fn recognize_sparse_case_chain(
     def_sites: &HashMap<RegisterId, DefSite>,
     use_counts: &HashMap<RegisterId, usize>,
     stable_alias_class: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-    dominance: &mut HashMap<BlockId, bool>,
+    dominance: &OnceCell<Option<SirCfg>>,
 ) -> Option<SparseCasePlan> {
     let SIRInstruction::Mux(result, _, _, _) = &block.instructions[root_index] else {
         return None;
@@ -1263,7 +1261,7 @@ fn cross_block_exact_dead_defs_after_rewrite(
     reachable_arms: &[usize],
     use_counts: &HashMap<RegisterId, usize>,
     def_sites: &HashMap<RegisterId, DefSite>,
-    dominance: &mut HashMap<BlockId, bool>,
+    dominance: &OnceCell<Option<SirCfg>>,
 ) -> Option<HashSet<DefSite>> {
     // Matching proves the shape of every condition, but the definitions can
     // live in a predecessor after an earlier CFG rewrite.  Restrict the
@@ -1283,11 +1281,7 @@ fn cross_block_exact_dead_defs_after_rewrite(
 
     for &reg in &candidates {
         let site = def_sites.get(&reg)?;
-        if site.block != block.id
-            && !*dominance
-                .entry(site.block)
-                .or_insert_with(|| block_dominates(eu, site.block, block.id))
-        {
+        if site.block != block.id && !cached_block_dominates(eu, site.block, block.id, dominance) {
             // A verifier-valid producer must dominate its use.  Refusing the
             // credit here keeps this proof conservative even for malformed IR
             // presented to the pass without verification.
@@ -1385,6 +1379,24 @@ fn is_exact_condition_dag_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr
             | SIRInstruction::Concat(..)
             | SIRInstruction::Slice(..)
     )
+}
+
+/// Build the forward dominator tree only if a cross-block proof is needed.
+/// Discovery leaves the CFG unchanged, so all candidates share this linear-
+/// space analysis. Invalid CFGs retain the conservative original path proof.
+fn cached_block_dominates(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    dominator: BlockId,
+    target: BlockId,
+    cache: &OnceCell<Option<SirCfg>>,
+) -> bool {
+    cache
+        .get_or_init(|| SirCfg::analyze_forward_structure(eu).ok())
+        .as_ref()
+        .map_or_else(
+            || block_dominates(eu, dominator, target),
+            |cfg| cfg.dominates(dominator, target),
+        )
 }
 
 fn block_dominates(
@@ -2108,6 +2120,52 @@ mod tests {
                 blocks: [(BlockId(0), block)].into_iter().collect(),
                 register_map: self.register_map,
             }
+        }
+    }
+
+    #[test]
+    fn cached_dominance_matches_path_removal_on_branching_and_looping_cfgs() {
+        for pattern in 0..256usize {
+            let mut builder = FixtureBuilder::new();
+            let condition = builder.register(1);
+            let mut eu = builder.finish(vec![condition]);
+            for block in 0..4 {
+                let id = BlockId(block * 7);
+                let next = BlockId(((block + 1) % 4) * 7);
+                let other = BlockId(((pattern >> (block * 2)) & 3) * 7);
+                eu.blocks.insert(
+                    id,
+                    BasicBlock {
+                        id,
+                        params: Vec::new(),
+                        instructions: Vec::new(),
+                        terminator: SIRTerminator::Branch {
+                            cond: condition,
+                            true_block: (next, Vec::new()),
+                            false_block: (other, Vec::new()),
+                        },
+                    },
+                );
+            }
+            let cache = OnceCell::new();
+            for dominator in 0..5 {
+                for target in 0..5 {
+                    let (dominator, target) = (BlockId(dominator * 7), BlockId(target * 7));
+                    assert_eq!(
+                        cached_block_dominates(&eu, dominator, target, &cache),
+                        block_dominates(&eu, dominator, target)
+                    );
+                }
+            }
+            assert!(cache.get().unwrap().is_some());
+            eu.blocks.get_mut(&BlockId(0)).unwrap().terminator =
+                SIRTerminator::Jump(BlockId(99), Vec::new());
+            let invalid = OnceCell::new();
+            assert_eq!(
+                cached_block_dominates(&eu, BlockId(7), BlockId(14), &invalid),
+                block_dominates(&eu, BlockId(7), BlockId(14))
+            );
+            assert!(invalid.get().unwrap().is_none());
         }
     }
 

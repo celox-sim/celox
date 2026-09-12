@@ -7,7 +7,9 @@
 //! interfere merely because their blocks are adjacent in layout.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -21,12 +23,23 @@ use super::cfg::NormalizedCfg;
 pub(super) struct SlotIndex(u64);
 
 impl SlotIndex {
-    pub(super) fn next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
+    pub(super) fn as_u64(self) -> u64 {
+        self.0
+    }
+    pub(super) fn from_u64(value: u64) -> Self {
+        Self(value)
     }
 
-    pub(super) fn distance_to(self, end: Self) -> Option<u64> {
-        end.0.checked_sub(self.0)
+    pub(super) fn packed(self) -> Option<u32> {
+        self.0.try_into().ok()
+    }
+
+    pub(super) fn from_packed(value: u32) -> Self {
+        Self(u64::from(value))
+    }
+
+    pub(super) fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
     }
 
     #[cfg(test)]
@@ -35,37 +48,29 @@ impl SlotIndex {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct InstructionSlots {
-    use_: SlotIndex,
-    clobber: SlotIndex,
-    def: SlotIndex,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BlockSlots {
     pub entry: SlotIndex,
     pub phi_def: SlotIndex,
     pub exit: SlotIndex,
-    instructions: Vec<InstructionSlots>,
+    instruction_count: usize,
 }
 
 impl BlockSlots {
     pub fn instruction_use(&self, instruction: usize) -> Option<SlotIndex> {
-        self.instructions.get(instruction).map(|slots| slots.use_)
+        (instruction < self.instruction_count).then(|| SlotIndex(instruction as u64 * 3 + 2))
     }
 
     /// Target resources clobbered after operands are consumed and before the
     /// instruction result becomes available.
     #[cfg(test)]
     pub fn instruction_clobber(&self, instruction: usize) -> Option<SlotIndex> {
-        self.instructions
-            .get(instruction)
-            .map(|slots| slots.clobber)
+        self.instruction_use(instruction).and_then(SlotIndex::next)
     }
 
     pub fn instruction_def(&self, instruction: usize) -> Option<SlotIndex> {
-        self.instructions.get(instruction).map(|slots| slots.def)
+        self.instruction_use(instruction)
+            .map(|slot| SlotIndex(slot.0 + 2))
     }
 }
 
@@ -408,8 +413,14 @@ pub(super) fn analyze_program_with_verification<P: LivenessProgram + ?Sized>(
     check_model_shape(program, cfg)?;
     let block_slots = assign_slots(program)?;
     let facts = collect_facts(program, cfg, &block_slots)?;
-    let (live_in, live_out) = solve_liveness(program.block_count(), cfg, &facts);
-    let intervals = build_intervals(program, cfg, &block_slots, &facts, &live_in, &live_out)?;
+    let intervals = build_sparse_intervals(program, cfg, &block_slots, &facts)?;
+    #[cfg(test)]
+    {
+        let (live_in, live_out) = solve_liveness(program.block_count(), cfg, &facts);
+        let reference = build_intervals(program, cfg, &block_slots, &facts, &live_in, &live_out)?;
+        assert_eq!(intervals, reference);
+    }
+    drop(facts);
     let result = LiveIntervals {
         block_slots,
         intervals,
@@ -454,62 +465,22 @@ fn assign_slots<P: LivenessProgram + ?Sized>(
     Ok(result)
 }
 
-fn assign_block_slots<P: LivenessProgram + ?Sized>(
+pub(super) fn assign_block_slots<P: LivenessProgram + ?Sized>(
     program: &P,
     block: usize,
 ) -> Result<BlockSlots, LiveIntervalError> {
-    let block_id = program.block_id(block);
-    let block_instruction_count = program.instruction_count(block);
+    slots_for_block(program.block_id(block), program.instruction_count(block))
+}
+
+fn slots_for_block(
+    block_id: BlockId,
+    block_instruction_count: usize,
+) -> Result<BlockSlots, LiveIntervalError> {
     let entry = SlotIndex(0);
     let phi_def = SlotIndex(1);
-    let mut instructions = Vec::with_capacity(block_instruction_count);
-    for instruction in 0..block_instruction_count {
-        let use_ = u64::try_from(instruction)
-            .ok()
-            .and_then(|instruction| instruction.checked_mul(3))
-            .and_then(|slot| slot.checked_add(2))
-            .map(SlotIndex)
-            .ok_or_else(|| {
-                LiveIntervalError::new(
-                    "LIVE_INTERVAL.SLOT_RANGE",
-                    Some(block_id),
-                    Some(instruction),
-                    Vec::new(),
-                    "instruction use is outside the slot-index domain",
-                )
-            })?;
-        let clobber = use_.next().ok_or_else(|| {
-            LiveIntervalError::new(
-                "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block_id),
-                Some(instruction),
-                Vec::new(),
-                "instruction clobber is outside the slot-index domain",
-            )
-        })?;
-        let def = clobber.next().ok_or_else(|| {
-            LiveIntervalError::new(
-                "LIVE_INTERVAL.SLOT_RANGE",
-                Some(block_id),
-                Some(instruction),
-                Vec::new(),
-                "instruction definition is outside the slot-index domain",
-            )
-        })?;
-        if instructions
-            .last()
-            .is_some_and(|previous: &InstructionSlots| previous.def >= use_)
-        {
-            return Err(LiveIntervalError::new(
-                "LIVE_INTERVAL.SLOT_ORDER",
-                Some(block_id),
-                Some(instruction),
-                Vec::new(),
-                "instruction program points are duplicated or out of order",
-            ));
-        }
-        instructions.push(InstructionSlots { use_, clobber, def });
-    }
+    // Program points form a checked arithmetic progression. Retaining three
+    // u64s per instruction duplicates that progression and is prohibitive for
+    // the stack-home event program of a large design.
     let exit = u64::try_from(block_instruction_count)
         .ok()
         .and_then(|instruction_count| instruction_count.checked_mul(3))
@@ -524,28 +495,11 @@ fn assign_block_slots<P: LivenessProgram + ?Sized>(
                 "block exit is outside the slot-index domain",
             )
         })?;
-    if entry >= phi_def
-        || instructions
-            .first()
-            .is_some_and(|instruction| phi_def >= instruction.use_)
-        || instructions
-            .last()
-            .is_some_and(|instruction| instruction.def >= exit)
-        || (instructions.is_empty() && phi_def >= exit)
-    {
-        return Err(LiveIntervalError::new(
-            "LIVE_INTERVAL.SLOT_ORDER",
-            Some(block_id),
-            None,
-            Vec::new(),
-            "block boundary and instruction program points are out of order",
-        ));
-    }
     Ok(BlockSlots {
         entry,
         phi_def,
         exit,
-        instructions,
+        instruction_count: block_instruction_count,
     })
 }
 
@@ -755,6 +709,149 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
     })
 }
 
+// Walk each SSA value backwards from its uses. Scratch storage is bounded by
+// the CFG size; no complete live-in/live-out tables coexist with the intervals.
+fn build_sparse_intervals<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+    slots: &[BlockSlots],
+    facts: &ModelFacts,
+) -> Result<Vec<Option<LiveInterval>>, LiveIntervalError> {
+    let mut intervals = Vec::with_capacity(facts.definitions.len());
+    for_each_sparse_interval(program, cfg, slots, facts, |_, interval| {
+        intervals.push(interval)
+    })?;
+    Ok(intervals)
+}
+
+/// Stream exact intervals to a consumer that can discard each SSA version.
+/// Diagnostic callers retain the full model for independent verification.
+pub(super) fn visit_program_intervals<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+    emit: impl FnMut(usize, Option<LiveInterval>),
+) -> Result<(), LiveIntervalError> {
+    check_model_shape(program, cfg)?;
+    let slots = assign_slots(program)?;
+    let facts = collect_facts(program, cfg, &slots)?;
+    for_each_sparse_interval(program, cfg, &slots, &facts, emit)
+}
+
+fn for_each_sparse_interval<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+    slots: &[BlockSlots],
+    facts: &ModelFacts,
+    mut emit: impl FnMut(usize, Option<LiveInterval>),
+) -> Result<(), LiveIntervalError> {
+    let dominators = DominatorIntervals::build(program, cfg)?;
+    let mut ends = vec![None::<SlotIndex>; program.block_count()];
+    let mut touched = Vec::new();
+    let mut pending = Vec::new();
+    for (index, definition) in facts.definitions.iter().copied().enumerate() {
+        let value = VReg(index as u32);
+        let uses = &facts.uses[index];
+        let Some(definition) = definition else {
+            if uses.is_empty() {
+                emit(index, None);
+                continue;
+            }
+            return Err(LiveIntervalError::new(
+                "LIVE_INTERVAL.MISSING_DEFINITION",
+                uses.first().map(|site| site.block()),
+                None,
+                vec![value],
+                "used value has no MIR definition",
+            ));
+        };
+        if matches!(definition, DefinitionSite::Phi { .. }) && uses.is_empty() {
+            emit(index, None);
+            continue;
+        }
+        let definition_block = cfg.block_index[&definition.block()];
+        ends[definition_block] = definition.slot().next();
+        touched.push(definition_block);
+        for &site in uses {
+            let block = cfg.block_index[&site.block()];
+            if block == definition_block && site.slot() <= definition.slot() {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.USE_BEFORE_DEFINITION",
+                    Some(site.block()),
+                    None,
+                    vec![value],
+                    "value is used before its definition",
+                ));
+            }
+            if !dominators.dominates(definition_block, block) {
+                return Err(LiveIntervalError::new(
+                    "LIVE_INTERVAL.DEFINITION_DOMINANCE",
+                    Some(site.block()),
+                    None,
+                    vec![value],
+                    "definition does not dominate the MIR use",
+                ));
+            }
+            pending.push((
+                block,
+                site.slot().next().ok_or_else(|| {
+                    LiveIntervalError::new(
+                        "LIVE_INTERVAL.SLOT_RANGE",
+                        Some(site.block()),
+                        None,
+                        vec![value],
+                        "live segment end overflows",
+                    )
+                })?,
+            ));
+        }
+        while let Some((block, end)) = pending.pop() {
+            let first_visit = ends[block].is_none();
+            if first_visit {
+                touched.push(block);
+            }
+            ends[block] = Some(ends[block].map_or(end, |current| current.max(end)));
+            if first_visit && block != definition_block {
+                for &predecessor in &cfg.predecessors[block] {
+                    let end = slots[predecessor].exit.next().ok_or_else(|| {
+                        LiveIntervalError::new(
+                            "LIVE_INTERVAL.SLOT_RANGE",
+                            Some(program.block_id(predecessor)),
+                            None,
+                            vec![value],
+                            "live segment end overflows",
+                        )
+                    })?;
+                    pending.push((predecessor, end));
+                }
+            }
+        }
+        let mut segments = touched
+            .drain(..)
+            .map(|block| LiveSegment {
+                block: program.block_id(block),
+                start: if block == definition_block {
+                    definition.slot()
+                } else {
+                    slots[block].entry
+                },
+                end: ends[block].take().expect("visited block has a segment end"),
+            })
+            .collect::<Vec<_>>();
+        segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
+        emit(
+            index,
+            Some(LiveInterval {
+                value,
+                definition,
+                segments,
+                uses: uses.clone().into(),
+            }),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn solve_liveness(
     block_count: usize,
     cfg: &NormalizedCfg,
@@ -832,6 +929,7 @@ fn solve_liveness(
     (live_in, live_out)
 }
 
+#[cfg(test)]
 fn build_intervals<P: LivenessProgram + ?Sized>(
     program: &P,
     cfg: &NormalizedCfg,
@@ -1278,6 +1376,36 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_slots_cover_large_blocks_and_reject_overflow() {
+        for count in [0, 1, 2, 100_000_000] {
+            let slots = slots_for_block(BlockId(0), count).unwrap();
+            assert_eq!(slots.exit, SlotIndex(count as u64 * 3 + 2));
+            assert_eq!(slots.instruction_use(count), None);
+            assert_eq!(slots.instruction_def(count), None);
+            if count != 0 {
+                assert_eq!(
+                    slots.instruction_use(count - 1),
+                    Some(SlotIndex((count as u64 - 1) * 3 + 2))
+                );
+                assert_eq!(
+                    slots.instruction_clobber(count - 1),
+                    Some(SlotIndex((count as u64 - 1) * 3 + 3))
+                );
+                assert_eq!(
+                    slots.instruction_def(count - 1),
+                    Some(SlotIndex((count as u64 - 1) * 3 + 4))
+                );
+            }
+        }
+        if let Ok(count) = usize::try_from(u64::MAX / 3 + 1) {
+            assert_eq!(
+                slots_for_block(BlockId(0), count).unwrap_err().rule,
+                "LIVE_INTERVAL.SLOT_RANGE"
+            );
+        }
+    }
+
+    #[test]
     fn instruction_use_and_definition_slots_allow_last_use_register_reuse() {
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm {
@@ -1430,6 +1558,50 @@ mod tests {
         assert!(right.covers(BlockId(2), intervals.block_slots[right_block].exit));
         assert!(matches!(left.uses.last(), Some(UseSite::PhiEdge { .. })));
         assert!(matches!(right.uses.last(), Some(UseSite::PhiEdge { .. })));
+    }
+
+    #[test]
+    fn sparse_liveness_matches_dataflow_across_branching_loops() {
+        for pattern in 0..64_u32 {
+            let mut blocks = Vec::new();
+            for block in 0..8_u32 {
+                let mut row = MBlock::new(BlockId(block));
+                if block == 0 {
+                    for value in 0..7 {
+                        row.push(MInst::LoadImm {
+                            dst: VReg(value),
+                            value: value as u64,
+                        });
+                    }
+                } else {
+                    row.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        src: VReg(1 + (pattern + block) % 6),
+                        size: OpSize::S64,
+                    });
+                }
+                if block == 7 {
+                    row.push(MInst::Return);
+                } else if block > 0 && pattern & (1 << (block - 1)) != 0 {
+                    row.push(MInst::Branch {
+                        cond: VReg(0),
+                        true_bb: BlockId(block + 1),
+                        false_bb: BlockId(1 + (pattern % block)),
+                    });
+                } else {
+                    row.push(MInst::Jump {
+                        target: BlockId(block + 1),
+                    });
+                }
+                blocks.push(row);
+            }
+            let mut function = function(7, blocks);
+            let cfg = normalize(&mut function);
+            // Test builds compare every sparse result with the original
+            // fixed-point solver before the independent interval verifier.
+            analyze_program(&function, &cfg).unwrap();
+        }
     }
 
     #[test]

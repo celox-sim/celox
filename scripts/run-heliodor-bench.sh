@@ -8,10 +8,13 @@ CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HELIODOR_REPO="${HELIODOR_REPO:-https://github.com/dalance/heliodor.git}"
 HELIODOR_REF="${HELIODOR_REF:-a78d04730cf2b37c616e039b4a5bd437c1cfd355}"
 HELIODOR_DIR="${HELIODOR_DIR:-$CELOX_ROOT/target/heliodor/source}"
+# Runners chdir into the checkout before resolving --project and source paths.
+HELIODOR_DIR="$(realpath -m "$HELIODOR_DIR")"
 HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/results}"
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
 HELIODOR_TESTS="${HELIODOR_TESTS:-test_soc_linux_boot}"
 HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cc-sync celox}"
+HELIODOR_SUITE="${HELIODOR_SUITE:-0}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
@@ -99,6 +102,7 @@ usage: scripts/run-heliodor-bench.sh [prepare|list|run|gate]
 Environment:
   HELIODOR_DIR         checkout/cache directory (default: target/heliodor/source)
   HELIODOR_TOOLS_DIR   benchmark-owned tool install directory
+  HELIODOR_SUITE       use expanded-suite testbench budget (0 or 1; default: 0)
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
@@ -968,6 +972,16 @@ ensure_results_schema() {
     esac
 }
 
+# This old upstream HEAD predates the testbench portability annotations in
+# 6285682. Quarantine only the reproduced revision; every new HEAD is tested.
+heliodor_head_skip_reason() {
+    case "$1" in
+        94e9c5821c24a8941c3ddc3b76daddc7124a855a)
+            echo "Upstream testbench lacks initial_assign annotations for fw_rom/dram; fixed by Heliodor 6285682fa0a514077da9d17fee385c7841160025."
+            ;;
+    esac
+}
+
 prepare() {
     if ! mkdir -p "$(dirname "$HELIODOR_DIR")" "$HELIODOR_RESULTS_DIR" "$HELIODOR_TOOLS_DIR"; then
         echo "error: could not create Heliodor benchmark directories" >&2
@@ -1014,6 +1028,12 @@ prepare() {
     local head
     if ! head="$(git -C "$HELIODOR_DIR" rev-parse HEAD)"; then
         echo "error: could not resolve Heliodor HEAD" >&2
+        return 1
+    fi
+    if [[ "$HELIODOR_SUITE" == 1 ]]; then
+        node "$SCRIPT_DIR/heliodor-suite.mjs" prepare "$HELIODOR_DIR" || return "$?"
+    elif [[ "$HELIODOR_SUITE" != 0 ]]; then
+        echo "error: HELIODOR_SUITE must be 0 or 1" >&2
         return 1
     fi
     echo "Heliodor: $head at $HELIODOR_DIR"
