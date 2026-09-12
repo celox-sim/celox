@@ -12,6 +12,7 @@ HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/result
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
 HELIODOR_TESTS="${HELIODOR_TESTS:-test_soc_linux_boot}"
 HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cc-sync celox}"
+HELIODOR_SUITE="${HELIODOR_SUITE:-0}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
@@ -99,6 +100,7 @@ usage: scripts/run-heliodor-bench.sh [prepare|list|run|gate]
 Environment:
   HELIODOR_DIR         checkout/cache directory (default: target/heliodor/source)
   HELIODOR_TOOLS_DIR   benchmark-owned tool install directory
+  HELIODOR_SUITE       use expanded-suite testbench budget (0 or 1; default: 0)
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
@@ -1014,6 +1016,12 @@ prepare() {
     local head
     if ! head="$(git -C "$HELIODOR_DIR" rev-parse HEAD)"; then
         echo "error: could not resolve Heliodor HEAD" >&2
+        return 1
+    fi
+    if [[ "$HELIODOR_SUITE" == 1 ]]; then
+        node "$SCRIPT_DIR/heliodor-suite.mjs" prepare "$HELIODOR_DIR" || return "$?"
+    elif [[ "$HELIODOR_SUITE" != 0 ]]; then
+        echo "error: HELIODOR_SUITE must be 0 or 1" >&2
         return 1
     fi
     echo "Heliodor: $head at $HELIODOR_DIR"

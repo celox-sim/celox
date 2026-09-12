@@ -482,6 +482,7 @@ jobs:
     env:
       # Keep expanded workloads separate from the historical fixed gate.
       HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025
+      HELIODOR_SUITE: "1"
       HELIODOR_TESTS: ${{ matrix.test }}
       HELIODOR_RUNNERS: ${{ matrix.runner }}
       HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}

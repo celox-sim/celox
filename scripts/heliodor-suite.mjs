@@ -2,6 +2,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
 
 // Linux 7.1 SMP is quarantined: both hart counts stall in the pinned RTL;
 // the two-hart cache-read deadlock also reproduces on Verilator. See docs.
@@ -36,6 +37,38 @@ export function matrix({ test = "", runner = "", arch = "", profile = false } = 
   ).filter(job => (!test || job.test === test) && (!runner || job.runner === runner) && (!arch || job.arch === arch)) };
 }
 
+export const suiteRevision = "6285682fa0a514077da9d17fee385c7841160025";
+export const suiteTestbench = "8hart-100m-v1";
+
+// The pinned Veryl N=8 wrapper still budgets 30M cycles, while its Verilator
+// wrapper allows 100M. Secondary-hart startup can already exceed 30M.
+const originalBudget = `        // early on success (the N=8 boot reaches shutdown at ~25M). Budget 30M.`;
+const suiteBudget = `        // early on success. Budget 100M, matching the Verilator N=8 wrapper.
+        // Celox suite testbench: ${suiteTestbench}.`;
+export function prepareSuiteTestbench(source) {
+  const marker = "module test_soc_smp_linux_boot_8hart {";
+  const parts = source.split(marker);
+  if (parts.length !== 2) throw new Error("Expected exactly one N=8 testbench module");
+  const [prefix, module] = parts;
+  const originalLoop = "        for _i in 0..3000 {";
+  const suiteLoop = "        for _i in 0..10000 {";
+  if (module.includes(suiteBudget) && module.split(suiteLoop).length === 2 && !module.includes(originalLoop)) return source;
+  if (!module.includes(originalBudget) || module.split(originalLoop).length !== 2 || module.includes(suiteLoop)) {
+    throw new Error("Unexpected N=8 testbench budget; refusing to patch changed source");
+  }
+  return prefix + marker + module.replace(originalBudget, suiteBudget).replace(originalLoop, suiteLoop);
+}
+
+function prepareSuite(directory) {
+  const head = execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (head !== suiteRevision) throw new Error(`Suite preparation requires ${suiteRevision}, found ${head}`);
+  const path = join(directory, "tb/test_soc_smp_linux_boot.veryl");
+  const source = readFileSync(path, "utf8");
+  const prepared = prepareSuiteTestbench(source);
+  if (prepared !== source) writeFileSync(path, prepared);
+  console.log(`Heliodor suite testbench: ${suiteTestbench} (RTL ${head})`);
+}
+
 // Require each expected backend artifact, not merely a count of TSV files.
 // A partial manual rerun must never be accepted as a full nightly result.
 export function mergeArtifacts(root, outputPrefix) {
@@ -63,9 +96,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.argv[2] === "matrix" || process.argv[2] === "validate") {
     const result = matrix({ test: process.env.SUITE_TEST, runner: process.env.SUITE_RUNNER, arch: process.env.SUITE_ARCH, profile: process.env.ARM64_PROFILE === "true" });
     if (process.argv[2] === "matrix") console.log(JSON.stringify(result));
+  } else if (process.argv[2] === "prepare" && process.argv.length === 4) {
+    prepareSuite(process.argv[3]);
   } else if (process.argv[2] === "merge" && process.argv.length === 5) {
     mergeArtifacts(process.argv[3], process.argv[4]);
   } else {
-    throw new Error("Usage: heliodor-suite.mjs validate | matrix | merge <artifact-dir> <output-prefix>");
+    throw new Error("Usage: heliodor-suite.mjs validate | matrix | prepare <source-dir> | merge <artifact-dir> <output-prefix>");
   }
 }
