@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// Linux 7.1 SMP is quarantined: both hart counts stall in the pinned RTL;
+// the two-hart cache-read deadlock also reproduces on Verilator. See docs.
 export const workloads = [
   "test_soc_linux_boot",
   "test_soc_smp_linux_boot_2hart",
@@ -12,8 +14,6 @@ export const workloads = [
   "test_soc_66_smp_linux_boot_2hart",
   "test_soc_66_smp_linux_boot_4hart",
   "test_soc_71_linux_boot",
-  "test_soc_71_smp_linux_boot_2hart",
-  "test_soc_71_smp_linux_boot_4hart",
   "test_soc_71v_linux_boot",
 ];
 export const runners = ["veryl-cc-sync", "celox", "celox-tiered", "veryl-cc-tiered"];

@@ -83,18 +83,23 @@ x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backend
 | --- | --- |
 | 5.15 | 1, 2, 4, 8 |
 | 6.6 | 1, 2, 4 |
-| 7.1 | 1, 2, 4 |
+| 7.1 | 1 |
 | 7.1 with vector enabled | 1 |
 
-These 11 workloads use Heliodor revision
+These 9 workloads use Heliodor revision
 `6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
-simulated guest, not the benchmark host OS. Backends run in separate jobs (88 jobs
+simulated guest, not the benchmark host OS. Backends run in separate jobs (72 jobs
 for the complete suite). These jobs use separate hosted machines; their CPU and
 memory details are retained in each artifact for interpreting comparisons.
 Each runner has a one-hour timeout for 1/2 harts,
 three hours for 4 harts, and four hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
 The nightly publisher requires the complete suite on both architectures.
+
+Linux 7.1 SMP (2/4 harts) is excluded pending an upstream RTL fix. Both
+configurations stop retiring instructions on one hart; the two-hart case also
+reproduces on Verilator, with a stalled data-cache read and another hart waiting
+for a lock. These failures are not counted as successful benchmark results.
 
 The dashboard labels each kernel and hart count separately. Expanded results
 use separate history from the older fixed gate because the design revision is
