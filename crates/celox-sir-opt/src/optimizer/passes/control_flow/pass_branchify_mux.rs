@@ -3772,28 +3772,57 @@ fn collect_cross_arm_defs(
     root_required: bool,
     seen: &mut HashSet<(BlockId, usize)>,
 ) -> Option<Vec<LocatedInstruction>> {
+    let mut result = Vec::new();
+    collect_cross_arm_defs_into(
+        eu,
+        cfg,
+        use_counts,
+        locations,
+        mux_block,
+        mux_idx,
+        root,
+        root_required,
+        seen,
+        &mut result,
+    )
+    .then_some(result)
+}
+
+// Append in dependency order; rebuilding a subtree vector at every recursion
+// level repeatedly moves the dependencies of a long single-use chain.
+fn collect_cross_arm_defs_into(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    use_counts: &HashMap<RegisterId, usize>,
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+    mux_block: BlockId,
+    mux_idx: usize,
+    root: RegisterId,
+    root_required: bool,
+    seen: &mut HashSet<(BlockId, usize)>,
+    result: &mut Vec<LocatedInstruction>,
+) -> bool {
     let Some(&(block_id, index)) = locations.get(&root) else {
-        return root_required.then(Vec::new);
+        return root_required;
     };
     if block_id == mux_block && index >= mux_idx {
-        return None;
+        return false;
     }
     if !cfg.dominates(block_id, mux_block) {
-        return None;
+        return false;
     }
     if use_counts.get(&root).copied().unwrap_or(0) != 1 {
-        return root_required.then(Vec::new);
+        return root_required;
     }
-    let instruction = eu.blocks[&block_id].instructions[index].clone();
-    if !is_cross_block_sinkable_input(&instruction) {
-        return root_required.then(Vec::new);
+    let instruction = &eu.blocks[&block_id].instructions[index];
+    if !is_cross_block_sinkable_input(instruction) {
+        return root_required;
     }
     if !seen.insert((block_id, index)) {
-        return Some(Vec::new());
+        return true;
     }
 
-    let mut result = Vec::new();
-    for operand in inst_uses(&instruction) {
+    for operand in inst_uses(instruction) {
         let can_attempt_move =
             locations
                 .get(&operand)
@@ -3801,21 +3830,18 @@ fn collect_cross_arm_defs(
                     (operand_block != mux_block || operand_idx < mux_idx)
                         && cfg.dominates(operand_block, mux_block)
                 });
-        if can_attempt_move
-            && use_counts.get(&operand).copied().unwrap_or(0) == 1
-            && let Some(operand_defs) = collect_cross_arm_defs(
-                eu, cfg, use_counts, locations, mux_block, mux_idx, operand, false, seen,
-            )
-        {
-            result.extend(operand_defs);
+        if can_attempt_move && use_counts.get(&operand).copied().unwrap_or(0) == 1 {
+            collect_cross_arm_defs_into(
+                eu, cfg, use_counts, locations, mux_block, mux_idx, operand, false, seen, result,
+            );
         }
     }
     result.push(LocatedInstruction {
         block: block_id,
         index,
-        instruction,
+        instruction: instruction.clone(),
     });
-    Some(result)
+    true
 }
 
 fn is_cross_block_sinkable_input(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
@@ -6707,6 +6733,104 @@ mod tests {
             closed_cross_block_condition_slice(definitions, BlockId(1)).is_empty(),
             "a producer cannot move below the local condition node which still uses it"
         );
+    }
+
+    #[test]
+    fn cross_arm_collection_preserves_long_chain_order_and_root_rules() {
+        let outputs = (2..258).collect::<Vec<_>>();
+        let mut instructions = Vec::new();
+        append_mul_chain(&mut instructions, 1, 0, &outputs);
+        let eu = cfg_unit(
+            259,
+            &[],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: instructions.clone(),
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Binary(
+                        RegisterId(258),
+                        RegisterId(257),
+                        crate::ir::BinaryOp::Mul,
+                        RegisterId(0),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let cfg = SirCfg::analyze_forward_structure(&eu).unwrap();
+        let mut counts = count_uses(&eu);
+        let locations = instruction_def_locations(&eu);
+        let mut seen = HashSet::default();
+        let result = collect_cross_arm_defs(
+            &eu,
+            &cfg,
+            &counts,
+            &locations,
+            BlockId(1),
+            0,
+            RegisterId(257),
+            true,
+            &mut seen,
+        )
+        .unwrap();
+        assert_eq!(result.len(), instructions.len());
+        for (index, actual) in result.iter().enumerate() {
+            assert_eq!((actual.block, actual.index), (BlockId(0), index));
+            assert_eq!(actual.instruction, instructions[index]);
+        }
+        assert!(
+            collect_cross_arm_defs(
+                &eu,
+                &cfg,
+                &counts,
+                &locations,
+                BlockId(1),
+                0,
+                RegisterId(257),
+                true,
+                &mut seen
+            )
+            .unwrap()
+            .is_empty()
+        );
+        counts.insert(RegisterId(257), 2);
+        for root in [RegisterId(257), RegisterId(1)] {
+            assert!(
+                collect_cross_arm_defs(
+                    &eu,
+                    &cfg,
+                    &counts,
+                    &locations,
+                    BlockId(1),
+                    0,
+                    root,
+                    true,
+                    &mut HashSet::default()
+                )
+                .unwrap()
+                .is_empty()
+            );
+            assert!(
+                collect_cross_arm_defs(
+                    &eu,
+                    &cfg,
+                    &counts,
+                    &locations,
+                    BlockId(1),
+                    0,
+                    root,
+                    false,
+                    &mut HashSet::default()
+                )
+                .is_none()
+            );
+        }
     }
 
     fn append_mul_chain(

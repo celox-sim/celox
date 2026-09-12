@@ -801,8 +801,8 @@ fn compile_unit_refs(
         feature = "x86_64-codegen",
         all(target_arch = "x86_64", not(feature = "arm64-codegen"))
     ))]
-    let emit_result = emit::emit_prepared_eu(
-        &sir_eu,
+    let emit_result = emit::emit_owned_prepared_eu(
+        sir_eu,
         layout,
         four_state,
         label,
