@@ -106,6 +106,12 @@ configurations stop retiring instructions on one hart; the two-hart case also
 reproduces on Verilator, with a stalled data-cache read and another hart waiting
 for a lock. These failures are not counted as successful benchmark results.
 
+The separate HEAD compatibility job skips only upstream revision
+`94e9c5821c24a8941c3ddc3b76daddc7124a855a`: its testbench lacks the
+`initial_assign` annotations for ROM/DRAM preloads added by `6285682`.
+CI records this as a known-source exclusion, not a successful simulation.
+Every other upstream HEAD remains eligible for the compatibility test.
+
 The dashboard labels each kernel and hart count separately. Expanded results
 use separate history from the older fixed gate because the design revision is
 different. Each chart retains the same compilation, execution, and tiered timing

@@ -972,6 +972,16 @@ ensure_results_schema() {
     esac
 }
 
+# This old upstream HEAD predates the testbench portability annotations in
+# 6285682. Quarantine only the reproduced revision; every new HEAD is tested.
+heliodor_head_skip_reason() {
+    case "$1" in
+        94e9c5821c24a8941c3ddc3b76daddc7124a855a)
+            echo "Upstream testbench lacks initial_assign annotations for fw_rom/dram; fixed by Heliodor 6285682fa0a514077da9d17fee385c7841160025."
+            ;;
+    esac
+}
+
 prepare() {
     if ! mkdir -p "$(dirname "$HELIODOR_DIR")" "$HELIODOR_RESULTS_DIR" "$HELIODOR_TOOLS_DIR"; then
         echo "error: could not create Heliodor benchmark directories" >&2
