@@ -24,6 +24,8 @@ pub(super) fn movable(inst: &MInst) -> bool {
             | MInst::SubImm { .. }
             | MInst::Mul { .. }
             | MInst::Mul32 { .. }
+            | MInst::MulImm { .. }
+            | MInst::MulImm32 { .. }
             | MInst::And { .. }
             | MInst::And32 { .. }
             | MInst::AndImm { .. }

@@ -312,6 +312,14 @@ pub(super) struct PureRecipeId(pub u32);
 /// separate variants; no arbitrary HDL bit width is attached to a VReg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PureRecipe {
+    MulImm64 {
+        source: VReg,
+        immediate: i32,
+    },
+    MulImm32 {
+        source: VReg,
+        immediate: i32,
+    },
     Copy64 {
         source: VReg,
     },
@@ -367,6 +375,8 @@ impl PureRecipe {
     fn source(self) -> VReg {
         match self {
             Self::Copy64 { source }
+            | Self::MulImm64 { source, .. }
+            | Self::MulImm32 { source, .. }
             | Self::Copy32 { source }
             | Self::AndImm64 { source, .. }
             | Self::AndImm32 { source, .. }
@@ -385,6 +395,8 @@ impl PureRecipe {
     fn step(self) -> PureStep {
         match self {
             Self::Copy64 { .. } => PureStep::Copy64,
+            Self::MulImm64 { immediate, .. } => PureStep::MulImm64 { immediate },
+            Self::MulImm32 { immediate, .. } => PureStep::MulImm32 { immediate },
             Self::Copy32 { .. } => PureStep::Copy32,
             Self::AndImm64 { immediate, .. } => PureStep::AndImm64 { immediate },
             Self::AndImm32 { immediate, .. } => PureStep::AndImm32 { immediate },
@@ -405,6 +417,8 @@ impl PureRecipe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PureStep {
+    MulImm64 { immediate: i32 },
+    MulImm32 { immediate: i32 },
     Copy64,
     Copy32,
     AndImm64 { immediate: u64 },
@@ -428,6 +442,16 @@ pub(super) enum PureStep {
 /// lowering path.
 pub(super) fn materialize_pure_step(step: PureStep, dst: VReg, source: VReg) -> MInst {
     match step {
+        PureStep::MulImm64 { immediate } => MInst::MulImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::MulImm32 { immediate } => MInst::MulImm32 {
+            dst,
+            src: source,
+            imm: immediate,
+        },
         PureStep::Copy64 => MInst::Mov { dst, src: source },
         PureStep::Copy32 => MInst::Mov32 { dst, src: source },
         PureStep::AndImm64 { immediate } => MInst::AndImm {
@@ -1885,7 +1909,10 @@ fn canonical_instruction_bits(
         MInst::LoadPtr { size, .. }
         | MInst::LoadIndexed { size, .. }
         | MInst::LoadPtrIndexed { size, .. } => (size.bytes() * 8) as u8,
-        MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => 32,
+        MInst::Add32 { .. }
+        | MInst::Sub32 { .. }
+        | MInst::Mul32 { .. }
+        | MInst::MulImm32 { .. } => 32,
         MInst::And { lhs, rhs, .. } => known(*lhs)?.min(known(*rhs)?),
         MInst::And32 { lhs, rhs, .. } => known(*lhs)?.min(known(*rhs)?).min(32),
         MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => known(*lhs)?.max(known(*rhs)?),
@@ -2066,6 +2093,14 @@ fn relevant_recipe_values(
 
 fn pure_expression(inst: &MInst) -> Option<PureRecipe> {
     match inst {
+        MInst::MulImm { src, imm, .. } => Some(PureRecipe::MulImm64 {
+            source: *src,
+            immediate: *imm,
+        }),
+        MInst::MulImm32 { src, imm, .. } => Some(PureRecipe::MulImm32 {
+            source: *src,
+            immediate: *imm,
+        }),
         MInst::Mov { src, .. } => Some(PureRecipe::Copy64 { source: *src }),
         MInst::Mov32 { src, .. } => Some(PureRecipe::Copy32 { source: *src }),
         MInst::AndImm { src, imm, .. } => Some(PureRecipe::AndImm64 {
@@ -3605,6 +3640,86 @@ mod tests {
                 .unwrap(),
             vec![Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn immediate_product_recovery_preserves_width_and_rejects_clobbered_inputs() {
+        for word32 in [false, true] {
+            let (mut func, values) = function_with_values(5);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::Load {
+                dst: values[0],
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            });
+            let multiply = if word32 {
+                MInst::MulImm32 {
+                    dst: values[1],
+                    src: values[0],
+                    imm: -7,
+                }
+            } else {
+                MInst::MulImm {
+                    dst: values[1],
+                    src: values[0],
+                    imm: -7,
+                }
+            };
+            block.push(multiply.clone());
+            block.push(MInst::Mov {
+                dst: values[2],
+                src: values[1],
+            });
+            block.push(MInst::LoadImm {
+                dst: values[3],
+                value: 0,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: values[3],
+                size: OpSize::S64,
+            });
+            block.push(MInst::Mov {
+                dst: values[4],
+                src: values[1],
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+            let (_, _, analysis) = analyze_function(func);
+            let expected = if word32 {
+                PureStep::MulImm32 { immediate: -7 }
+            } else {
+                PureStep::MulImm64 { immediate: -7 }
+            };
+            assert_eq!(
+                analysis.resolved_recipe(values[1]).unwrap().unwrap().steps,
+                vec![expected]
+            );
+            assert_eq!(
+                materialize_pure_step(expected, values[1], values[0]),
+                multiply
+            );
+            assert!(
+                analysis
+                    .resolved_recipe_at_point(PointUse {
+                        block: BlockId(0),
+                        instruction: 2,
+                        value: values[1],
+                    })
+                    .is_some()
+            );
+            assert!(
+                analysis
+                    .resolved_recipe_at_point(PointUse {
+                        block: BlockId(0),
+                        instruction: 5,
+                        value: values[1],
+                    })
+                    .is_none()
+            );
+        }
     }
 
     #[test]

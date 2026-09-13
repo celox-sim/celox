@@ -1209,6 +1209,8 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::Sub32 { .. }
         | MInst::Mul { .. }
         | MInst::Mul32 { .. }
+        | MInst::MulImm { .. }
+        | MInst::MulImm32 { .. }
         | MInst::And { .. }
         | MInst::And32 { .. }
         | MInst::Or { .. }
