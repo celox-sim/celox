@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 
-use super::LiveInterval;
+use super::{LiveInterval, LiveSegment, LiveSegmentStorage};
 
 /// Failure while assigning target-owned spill homes to reusable frame slots.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,18 +66,30 @@ where
     V: 'a + Copy + Ord,
     I: IntoIterator<Item = &'a LiveInterval<V>>,
 {
+    color_stack_slots_with_storage::<V, I, Vec<LiveSegment>>(intervals)
+}
+
+/// Color intervals held in an alternative exact segment representation.
+pub fn color_stack_slots_with_storage<'a, V, I, S>(
+    intervals: I,
+) -> Result<StackSlotColoring<V>, StackColorError<V>>
+where
+    V: 'a + Copy + Ord,
+    S: 'a + LiveSegmentStorage,
+    I: IntoIterator<Item = &'a LiveInterval<V, S>>,
+{
     let mut seen = BTreeSet::new();
     let mut ordered = Vec::new();
     for interval in intervals {
         if !seen.insert(interval.value) {
             return Err(StackColorError::DuplicateValue(interval.value));
         }
-        let Some(first) = interval.segments.first() else {
+        let Some(first) = interval.segments.segment_first() else {
             return Err(StackColorError::EmptyInterval(interval.value));
         };
         let last = interval
             .segments
-            .last()
+            .segment_last()
             .expect("a nonempty interval has a last segment");
         ordered.push((
             (first.block, first.start),

@@ -6194,6 +6194,101 @@ mod tests {
     }
 
     #[test]
+    fn direct_join_does_not_prove_the_branch_was_taken() {
+        for direct_true in [false, true] {
+            let mut register_map = HashMap::default();
+            register_map.insert(RegisterId(0), bit(1));
+            for reg in 1..=2 {
+                register_map.insert(RegisterId(reg), bit(8));
+            }
+            let mut blocks = HashMap::default();
+            insert_block(
+                &mut blocks,
+                0,
+                vec![RegisterId(0), RegisterId(1)],
+                vec![SIRInstruction::Binary(
+                    RegisterId(2),
+                    RegisterId(1),
+                    BinaryOp::Mul,
+                    RegisterId(1),
+                )],
+                SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (BlockId(if direct_true { 1 } else { 2 }), vec![]),
+                    false_block: (BlockId(if direct_true { 2 } else { 1 }), vec![]),
+                },
+            );
+            insert_block(
+                &mut blocks,
+                1,
+                vec![],
+                vec![SIRInstruction::Store(
+                    address(80),
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(2),
+                    vec![],
+                    vec![],
+                )],
+                SIRTerminator::Jump(BlockId(3), vec![]),
+            );
+            insert_block(
+                &mut blocks,
+                2,
+                vec![],
+                vec![],
+                SIRTerminator::Jump(BlockId(3), vec![]),
+            );
+            // Both outcomes reach block 5, one directly and one through block 4.
+            // The final use is unconditional for either direct-edge orientation.
+            insert_block(
+                &mut blocks,
+                3,
+                vec![],
+                vec![],
+                SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (BlockId(if direct_true { 5 } else { 4 }), vec![]),
+                    false_block: (BlockId(if direct_true { 4 } else { 5 }), vec![]),
+                },
+            );
+            insert_block(
+                &mut blocks,
+                4,
+                vec![],
+                vec![],
+                SIRTerminator::Jump(BlockId(5), vec![]),
+            );
+            insert_block(
+                &mut blocks,
+                5,
+                vec![],
+                vec![SIRInstruction::Store(
+                    address(81),
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(2),
+                    vec![],
+                    vec![],
+                )],
+                SIRTerminator::Return,
+            );
+            let mut eu = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks,
+                register_map,
+            };
+            eu.verify_result().unwrap();
+            let before = eu.clone();
+            sink_pure_values_with_predicate_repair(&mut eu);
+            eu.verify_result().unwrap();
+            for condition in [0, 1] {
+                assert_eq!(execute(&before, condition, 7), execute(&eu, condition, 7));
+            }
+        }
+    }
+
+    #[test]
     fn repairs_conditional_availability_across_repeated_priority_regions() {
         let mut register_map = HashMap::default();
         register_map.insert(RegisterId(0), bit(1));

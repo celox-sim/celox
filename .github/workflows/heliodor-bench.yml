@@ -56,10 +56,10 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Pull requests neither write benchmark history nor need to wait behind unrelated
-# benchmark runs. Serialize master publishers with bench.yml, while develop uses
-# a separate group so its dispatch cannot replace a pending master nightly run.
+# benchmark runs. Only master publishers share bench.yml's group. Other
+# branches must not replace a pending publisher or compile-time benchmark.
 concurrency:
-  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
+  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || github.ref != 'refs/heads/master' && format('heliodor-validation-{0}', github.ref) || 'bench' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -478,19 +478,27 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.linux-suite-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 300
+    timeout-minutes: 330
     env:
       # Keep expanded workloads separate from the historical fixed gate.
       HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025
+      HELIODOR_SUITE: "1"
       HELIODOR_TESTS: ${{ matrix.test }}
       HELIODOR_RUNNERS: ${{ matrix.runner }}
       HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}
       HELIODOR_CELOX_CARGO_PROFILE: release
       CELOX_OPT_LEVEL: O2
+      # Keep phase/progress evidence when a large workload times out.
+      RUST_LOG: ${{ contains(matrix.test, '8hart') && 'celox::=debug,celox_backend_x86::=debug,celox_backend_arm64::=debug' || 'off' }}
+      CELOX_PHASE_TIMING: ${{ contains(matrix.test, '8hart') && '1' || '0' }}
+      CELOX_TESTBENCH_PROGRESS: ${{ contains(matrix.test, '8hart') && '1000000' || '0' }}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Record host
@@ -502,7 +510,20 @@ jobs:
           df -h >> heliodor-suite-host.txt
       - name: Run complete workload
         shell: bash
-        run: set -o pipefail && /usr/bin/time -v bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
+        run: |
+          # Preserve resource evidence in the Actions log even if the runner
+          # stops before it can upload the workload artifacts.
+          (
+            while sleep 60; do
+              date -u '+HELIODOR_RESOURCE_SAMPLE %Y-%m-%dT%H:%M:%SZ'
+              free -m
+              ps -eo pid,ppid,rss,pcpu,comm --sort=-rss | sed -n '1,9p'
+            done
+          ) &
+          resource_monitor=$!
+          trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
+          set -o pipefail
+          /usr/bin/time -v bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
       - name: Verify tiered promotion
         if: matrix.runner == 'celox-tiered'
         shell: bash
@@ -624,6 +645,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Resolve Heliodor HEAD
+        id: upstream
         shell: bash
         run: |
           set -euo pipefail
@@ -637,8 +659,18 @@ jobs:
           echo "Testing Heliodor HEAD at $heliodor_revision"
           echo "### Heliodor HEAD compatibility" >> "$GITHUB_STEP_SUMMARY"
           echo "Upstream revision: \`$heliodor_revision\`" >> "$GITHUB_STEP_SUMMARY"
+          source scripts/run-heliodor-bench.sh
+          skip_reason="$(heliodor_head_skip_reason "$heliodor_revision")"
+          if [[ -n "$skip_reason" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$skip_reason"
+            printf 'SKIPPED: %s\n' "$skip_reason" | tee heliodor-head-output.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run Heliodor HEAD compatibility gate
+        if: steps.upstream.outputs.run == 'true'
         shell: bash
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-head-output.txt
 

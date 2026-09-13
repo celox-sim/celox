@@ -45,27 +45,218 @@ impl LiveSegment {
     }
 }
 
-/// Sparse per-block live interval for one target-owned virtual register.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveInterval<V> {
-    pub value: V,
-    pub segments: Vec<LiveSegment>,
+/// Storage for exact block-sparse segments, accessed without allocating.
+pub trait LiveSegmentStorage {
+    fn segment_len(&self) -> usize;
+    fn segment_get(&self, index: usize) -> Option<LiveSegment>;
+    fn segment_iter(&self) -> impl ExactSizeIterator<Item = LiveSegment>;
+    fn segment_is_empty(&self) -> bool {
+        self.segment_len() == 0
+    }
+    fn segment_first(&self) -> Option<LiveSegment> {
+        self.segment_get(0)
+    }
+    fn segment_last(&self) -> Option<LiveSegment> {
+        self.segment_len()
+            .checked_sub(1)
+            .and_then(|i| self.segment_get(i))
+    }
 }
 
-impl<V> LiveInterval<V> {
+impl LiveSegmentStorage for Vec<LiveSegment> {
+    fn segment_len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn segment_get(&self, index: usize) -> Option<LiveSegment> {
+        self.as_slice().get(index).copied()
+    }
+    fn segment_iter(&self) -> impl ExactSizeIterator<Item = LiveSegment> {
+        self.as_slice().iter().copied()
+    }
+}
+
+/// Twelve-byte ordinary segments, with lossless fallback for wide coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactSegments(CompactSegmentStorage);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompactSegmentStorage {
+    Packed(Vec<[u32; 3]>),
+    Wide(Vec<LiveSegment>),
+}
+
+impl CompactSegments {
+    pub fn len(&self) -> usize {
+        self.segment_len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.segment_is_empty()
+    }
+    pub fn get(&self, index: usize) -> Option<LiveSegment> {
+        self.segment_get(index)
+    }
+    pub fn first(&self) -> Option<LiveSegment> {
+        self.segment_first()
+    }
+    pub fn last(&self) -> Option<LiveSegment> {
+        self.segment_last()
+    }
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = LiveSegment> {
+        self.segment_iter()
+    }
+
+    /// Sort and union overlapping or adjacent segments in each block.
+    pub fn coalesce(&mut self) {
+        match &mut self.0 {
+            CompactSegmentStorage::Packed(segments) => {
+                segments.sort_unstable();
+                segments.dedup_by(|segment, previous| {
+                    if previous[0] == segment[0] && segment[1] <= previous[2] {
+                        previous[2] = previous[2].max(segment[2]);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                segments.shrink_to_fit();
+            }
+            CompactSegmentStorage::Wide(segments) => {
+                segments.sort_unstable_by_key(|s| (s.block, s.start, s.end));
+                segments.dedup_by(|segment, previous| {
+                    if previous.block == segment.block && segment.start <= previous.end {
+                        previous.end = previous.end.max(segment.end);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                segments.shrink_to_fit();
+            }
+        }
+    }
+
+    /// Expand one row for consumers that require a contiguous legacy slice.
+    pub fn into_vec(self) -> Vec<LiveSegment> {
+        match self.0 {
+            CompactSegmentStorage::Packed(segments) => {
+                segments.into_iter().map(Self::unpack).collect()
+            }
+            CompactSegmentStorage::Wide(segments) => segments,
+        }
+    }
+
+    fn pack(segment: LiveSegment) -> Option<[u32; 3]> {
+        Some([
+            segment.block.try_into().ok()?,
+            segment.start.try_into().ok()?,
+            segment.end.try_into().ok()?,
+        ])
+    }
+    fn unpack([block, start, end]: [u32; 3]) -> LiveSegment {
+        LiveSegment {
+            block: block as usize,
+            start: u64::from(start),
+            end: u64::from(end),
+        }
+    }
+}
+
+impl Default for CompactSegments {
+    fn default() -> Self {
+        Self(CompactSegmentStorage::Packed(Vec::new()))
+    }
+}
+
+impl FromIterator<LiveSegment> for CompactSegments {
+    fn from_iter<T: IntoIterator<Item = LiveSegment>>(segments: T) -> Self {
+        let mut result = Self::default();
+        result.extend(segments);
+        result
+    }
+}
+
+impl Extend<LiveSegment> for CompactSegments {
+    fn extend<T: IntoIterator<Item = LiveSegment>>(&mut self, segments: T) {
+        let segments = segments.into_iter();
+        let additional = segments.size_hint().0;
+        match &mut self.0 {
+            CompactSegmentStorage::Packed(v) => v.reserve(additional),
+            CompactSegmentStorage::Wide(v) => v.reserve(additional),
+        }
+        for segment in segments {
+            match &mut self.0 {
+                CompactSegmentStorage::Packed(packed) => {
+                    if let Some(segment) = Self::pack(segment) {
+                        packed.push(segment);
+                    } else {
+                        let mut wide = packed.iter().copied().map(Self::unpack).collect::<Vec<_>>();
+                        wide.push(segment);
+                        self.0 = CompactSegmentStorage::Wide(wide);
+                    }
+                }
+                CompactSegmentStorage::Wide(wide) => wide.push(segment),
+            }
+        }
+    }
+}
+
+impl LiveSegmentStorage for CompactSegments {
+    fn segment_len(&self) -> usize {
+        match &self.0 {
+            CompactSegmentStorage::Packed(v) => v.len(),
+            CompactSegmentStorage::Wide(v) => v.len(),
+        }
+    }
+    fn segment_get(&self, index: usize) -> Option<LiveSegment> {
+        match &self.0 {
+            CompactSegmentStorage::Packed(v) => v.get(index).copied().map(Self::unpack),
+            CompactSegmentStorage::Wide(v) => v.as_slice().get(index).copied(),
+        }
+    }
+    fn segment_iter(&self) -> impl ExactSizeIterator<Item = LiveSegment> {
+        (0..self.segment_len())
+            .map(|index| self.segment_get(index).expect("segment index is in range"))
+    }
+}
+
+/// Compact form of exact SSA liveness; the legacy Vec-backed API is unchanged.
+pub type CompactLiveIntervals<V> = LiveIntervals<V, CompactSegments>;
+
+/// Sparse per-block live interval for one target-owned virtual register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveInterval<V, S = Vec<LiveSegment>> {
+    pub value: V,
+    pub segments: S,
+}
+
+impl<V, S: LiveSegmentStorage> LiveInterval<V, S> {
     pub fn segment_in_block(&self, block: usize) -> Option<LiveSegment> {
-        self.segments
-            .binary_search_by_key(&block, |segment| segment.block)
-            .ok()
-            .map(|index| self.segments[index])
+        let mut left = 0;
+        let mut right = self.segments.segment_len();
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let segment = self.segments.segment_get(mid)?;
+            match segment.block.cmp(&block) {
+                std::cmp::Ordering::Less => left = mid + 1,
+                std::cmp::Ordering::Greater => right = mid,
+                std::cmp::Ordering::Equal => return Some(segment),
+            }
+        }
+        None
     }
 
     pub fn interferes(&self, other: &Self) -> bool {
         let mut left = 0;
         let mut right = 0;
-        while left < self.segments.len() && right < other.segments.len() {
-            let a = self.segments[left];
-            let b = other.segments[right];
+        while left < self.segments.segment_len() && right < other.segments.segment_len() {
+            let a = self
+                .segments
+                .segment_get(left)
+                .expect("segment is in range");
+            let b = other
+                .segments
+                .segment_get(right)
+                .expect("segment is in range");
             if a.overlaps(b) {
                 return true;
             }
@@ -81,8 +272,8 @@ impl<V> LiveInterval<V> {
 
 /// Exact SSA liveness reconstructed from allocation facts.
 #[derive(Debug, Clone)]
-pub struct LiveIntervals<V> {
-    intervals: BTreeMap<V, LiveInterval<V>>,
+pub struct LiveIntervals<V, S = Vec<LiveSegment>> {
+    intervals: BTreeMap<V, LiveInterval<V, S>>,
     // Most allocators only query intervals. Materialize the legacy block-set
     // views on demand, without making every analysis retain them twice.
     live_in: Vec<OnceLock<BTreeSet<V>>>,
@@ -90,24 +281,24 @@ pub struct LiveIntervals<V> {
     block_exits: Vec<u64>,
 }
 
-impl<V: PartialEq> PartialEq for LiveIntervals<V> {
+impl<V: PartialEq, S: PartialEq> PartialEq for LiveIntervals<V, S> {
     fn eq(&self, other: &Self) -> bool {
         self.intervals == other.intervals && self.block_exits == other.block_exits
     }
 }
-impl<V: Eq> Eq for LiveIntervals<V> {}
+impl<V: Eq, S: Eq> Eq for LiveIntervals<V, S> {}
 
-impl<V: Ord> LiveIntervals<V> {
-    pub fn get(&self, value: &V) -> Option<&LiveInterval<V>> {
+impl<V: Ord, S> LiveIntervals<V, S> {
+    pub fn get(&self, value: &V) -> Option<&LiveInterval<V, S>> {
         self.intervals.get(value)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&V, &LiveInterval<V>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&V, &LiveInterval<V, S>)> {
         self.intervals.iter()
     }
 }
 
-impl<V: Copy + Ord> LiveIntervals<V> {
+impl<V: Copy + Ord, S: LiveSegmentStorage> LiveIntervals<V, S> {
     pub fn live_in(&self, block: usize) -> Option<&BTreeSet<V>> {
         self.live_in.get(block).map(|cache| {
             cache.get_or_init(|| {
@@ -586,6 +777,40 @@ pub fn analyze_live_intervals<V, R>(
 where
     V: Copy + Eq + Hash + Ord + fmt::Debug,
 {
+    analyze_intervals_with_storage(facts)
+}
+
+/// Build the same exact intervals using compact coordinate storage.
+pub fn analyze_compact_live_intervals<V, R>(
+    facts: &FunctionAllocationFacts<V, R>,
+) -> Result<CompactLiveIntervals<V>, LiveIntervalError<V>>
+where
+    V: Copy + Eq + Hash + Ord + fmt::Debug,
+{
+    let compact: CompactLiveIntervals<V> = analyze_intervals_with_storage(facts)?;
+    #[cfg(test)]
+    {
+        let reference: LiveIntervals<V> = analyze_intervals_with_storage(facts)?;
+        assert_eq!(compact.intervals.len(), reference.intervals.len());
+        for ((value, interval), (expected_value, expected)) in compact.iter().zip(reference.iter())
+        {
+            assert_eq!(value, expected_value);
+            assert_eq!(
+                interval.segments.iter().collect::<Vec<_>>(),
+                expected.segments
+            );
+        }
+    }
+    Ok(compact)
+}
+
+fn analyze_intervals_with_storage<V, R, S>(
+    facts: &FunctionAllocationFacts<V, R>,
+) -> Result<LiveIntervals<V, S>, LiveIntervalError<V>>
+where
+    V: Copy + Eq + Hash + Ord + fmt::Debug,
+    S: LiveSegmentStorage + FromIterator<LiveSegment>,
+{
     facts.verify().map_err(|error| {
         LiveIntervalError::new(
             "LIVE_INTERVAL.ALLOCATION_FACTS",
@@ -707,6 +932,63 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_segments_preserve_wide_coordinates_and_extension() {
+        let narrow = LiveSegment {
+            block: 3,
+            start: 0,
+            end: u32::MAX as u64,
+        };
+        let wide = LiveSegment {
+            block: usize::MAX,
+            start: u64::MAX - 1,
+            end: u64::MAX,
+        };
+        let mut segments: CompactSegments = [narrow].into_iter().collect();
+        assert!(matches!(segments.0, CompactSegmentStorage::Packed(_)));
+        assert_eq!(segments.first(), Some(narrow));
+        segments.extend([wide]);
+        assert!(matches!(segments.0, CompactSegmentStorage::Wide(_)));
+        assert_eq!(segments.iter().collect::<Vec<_>>(), vec![narrow, wide]);
+        assert_eq!(segments.last(), Some(wide));
+        assert_eq!(segments.get(2), None);
+        assert_eq!(segments.into_vec(), vec![narrow, wide]);
+    }
+
+    #[test]
+    fn compact_union_matches_a_wide_reference_across_batches() {
+        for offset in [0, u32::MAX as u64] {
+            let source = (0..128_u64)
+                .map(|index| LiveSegment {
+                    block: (index % 5) as usize,
+                    start: offset + (index * 17) % 53,
+                    end: offset + (index * 17) % 53 + 1 + index % 7,
+                })
+                .collect::<Vec<_>>();
+            let mut sorted = source.clone();
+            sorted.sort_unstable_by_key(|s| (s.block, s.start, s.end));
+            let mut reference = Vec::<LiveSegment>::new();
+            for segment in sorted {
+                if let Some(previous) = reference.last_mut()
+                    && previous.block == segment.block
+                    && segment.start <= previous.end
+                {
+                    previous.end = previous.end.max(segment.end);
+                } else {
+                    reference.push(segment);
+                }
+            }
+            for batch in [1, 7, 64, 128] {
+                let mut compact = CompactSegments::default();
+                for chunk in source.chunks(batch) {
+                    compact.extend(chunk.iter().copied());
+                    compact.coalesce();
+                }
+                assert_eq!(compact.into_vec(), reference);
+            }
+        }
+    }
+
     use super::*;
     use crate::regalloc::{
         BlockAllocationFacts, InstructionAllocationFacts, InstructionConstraints,
@@ -788,10 +1070,13 @@ mod tests {
         }
         let slots = block_slots(facts).unwrap();
         let model = collect_model(facts, &predecessors, &slots).unwrap();
+        let compact = analyze_compact_live_intervals(facts).unwrap();
         let (live_in, live_out) = solve_liveness(facts, &predecessors, &model);
         for block in 0..facts.blocks.len() {
             assert_eq!(actual.live_in(block).unwrap(), &live_in[block]);
             assert_eq!(actual.live_out(block).unwrap(), &live_out[block]);
+            assert_eq!(compact.live_in(block).unwrap(), &live_in[block]);
+            assert_eq!(compact.live_out(block).unwrap(), &live_out[block]);
             for (&value, definition) in &model.definitions {
                 let expected = if live_in[block].contains(&value)
                     || live_out[block].contains(&value)

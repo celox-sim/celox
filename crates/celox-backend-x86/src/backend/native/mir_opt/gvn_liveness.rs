@@ -1,4 +1,4 @@
-//! Sparse SSA liveness for GVN's register-pressure profitability check.
+//! Demand-driven SSA liveness for GVN's register-pressure profitability check.
 
 use crate::HashMap;
 use crate::native::mir::*;
@@ -9,15 +9,43 @@ enum LivePoint {
     Exit(usize),
 }
 
-/// Return sorted live-out values for each block. Trace each value backwards
-/// from its uses, stopping at its unique SSA definition. This visits each live
-/// block/value pair once, independently of block storage order, without
-/// repeatedly allocating and merging sets in whole-function fixed-point scans.
-pub(super) fn live_out(
+enum LiveBlocks {
+    Sparse(Box<[usize]>),
+    Dense(Box<[u64]>),
+}
+
+impl LiveBlocks {
+    fn contains(&self, block: usize) -> bool {
+        match self {
+            Self::Sparse(blocks) => blocks.binary_search(&block).is_ok(),
+            Self::Dense(words) => words[block / 64] & (1u64 << (block % 64)) != 0,
+        }
+    }
+}
+
+/// Liveness of the original, unchanged MIR. GVN only asks whether an available
+/// expression's leader is live at a candidate block's exit. Defer backward
+/// tracing until that query and retain a compact row per queried leader,
+/// rather than materializing every live block/value pair up front.
+///
+/// Each queried value is traced once. Dense lifetimes use one bit per block;
+/// short lifetimes retain sorted block indices. Neither representation drops
+/// facts or changes GVN's register-pressure profitability decision.
+pub(super) struct LiveOut<'a> {
+    predecessors: &'a [Vec<usize>],
+    definition_blocks: Vec<usize>,
+    uses: Vec<Vec<LivePoint>>,
+    rows: HashMap<VReg, LiveBlocks>,
+    visited_entry: Vec<u32>,
+    visited_exit: Vec<u32>,
+    work: Vec<LivePoint>,
+}
+
+pub(super) fn live_out<'a>(
     func: &MFunction,
     block_indices: &HashMap<BlockId, usize>,
-    predecessors: &[Vec<usize>],
-) -> Vec<Vec<VReg>> {
+    predecessors: &'a [Vec<usize>],
+) -> LiveOut<'a> {
     let value_count = func.vregs.count() as usize;
     let block_count = func.blocks.len();
     let mut definition_blocks = vec![usize::MAX; value_count];
@@ -50,37 +78,71 @@ pub(super) fn live_out(
         }
     }
 
-    let mut live_out = vec![Vec::new(); block_count];
-    let mut visited_entry = vec![u32::MAX; block_count];
-    let mut visited_exit = vec![u32::MAX; block_count];
-    let mut work = Vec::new();
-    for (value, use_sites) in uses.iter().enumerate() {
-        let vreg = VReg(value as u32);
-        work.extend_from_slice(use_sites);
-        while let Some(point) = work.pop() {
+    LiveOut {
+        predecessors,
+        definition_blocks,
+        uses,
+        rows: HashMap::default(),
+        visited_entry: vec![u32::MAX; block_count],
+        visited_exit: vec![u32::MAX; block_count],
+        work: Vec::new(),
+    }
+}
+
+impl LiveOut<'_> {
+    pub(super) fn contains(&mut self, vreg: VReg, block: usize) -> bool {
+        if let Some(row) = self.rows.get(&vreg) {
+            return row.contains(block);
+        }
+        let value = vreg.0 as usize;
+        if self.uses[value].is_empty() {
+            return false;
+        }
+        self.work.extend(std::mem::take(&mut self.uses[value]));
+        let mut blocks = Vec::new();
+        while let Some(point) = self.work.pop() {
             match point {
                 LivePoint::Entry(block) => {
-                    if visited_entry[block] == vreg.0 {
+                    if self.visited_entry[block] == vreg.0 {
                         continue;
                     }
-                    visited_entry[block] = vreg.0;
-                    work.extend(predecessors[block].iter().copied().map(LivePoint::Exit));
+                    self.visited_entry[block] = vreg.0;
+                    self.work.extend(
+                        self.predecessors[block]
+                            .iter()
+                            .copied()
+                            .map(LivePoint::Exit),
+                    );
                 }
                 LivePoint::Exit(block) => {
-                    if visited_exit[block] == vreg.0 {
+                    if self.visited_exit[block] == vreg.0 {
                         continue;
                     }
-                    visited_exit[block] = vreg.0;
-                    // Processing VRegs in order produces sorted sets directly.
-                    live_out[block].push(vreg);
-                    if definition_blocks[value] != block {
-                        work.push(LivePoint::Entry(block));
+                    self.visited_exit[block] = vreg.0;
+                    blocks.push(block);
+                    if self.definition_blocks[value] != block {
+                        self.work.push(LivePoint::Entry(block));
                     }
                 }
             }
         }
+        let word_count = self.predecessors.len().div_ceil(64);
+        let row = if word_count * std::mem::size_of::<u64>()
+            < blocks.len() * std::mem::size_of::<usize>()
+        {
+            let mut words = vec![0u64; word_count];
+            for block in blocks {
+                words[block / 64] |= 1u64 << (block % 64);
+            }
+            LiveBlocks::Dense(words.into_boxed_slice())
+        } else {
+            blocks.sort_unstable();
+            LiveBlocks::Sparse(blocks.into_boxed_slice())
+        };
+        let live = row.contains(block);
+        self.rows.insert(vreg, row);
+        live
     }
-    live_out
 }
 
 #[cfg(test)]
@@ -101,7 +163,22 @@ mod tests {
                 predecessors[indices[&successor]].push(index);
             }
         }
-        live_out(function, &indices, &predecessors)
+        let mut liveness = live_out(function, &indices, &predecessors);
+        let mut result = vec![Vec::new(); function.blocks.len()];
+        // Query out of VReg order and repeat queries to exercise cached rows.
+        for value in (0..function.vregs.count()).rev() {
+            for (block, values) in result.iter_mut().enumerate() {
+                let live = liveness.contains(VReg(value), block);
+                assert_eq!(liveness.contains(VReg(value), block), live);
+                if live {
+                    values.push(VReg(value));
+                }
+            }
+        }
+        for values in &mut result {
+            values.reverse();
+        }
+        result
     }
 
     // Conventional block equations provide an independent oracle for loops,
@@ -325,6 +402,58 @@ mod tests {
                 "case {case}: {function:?}"
             );
         }
+    }
+
+    #[test]
+    fn many_long_lifetimes_are_only_retained_when_queried() {
+        const BLOCKS: usize = 256;
+        const VALUES: u32 = 512;
+        let mut blocks = Vec::new();
+        for index in 0..BLOCKS {
+            let mut block = MBlock::new(BlockId(index as u32));
+            if index == 0 {
+                for value in 0..VALUES {
+                    block.push(MInst::LoadImm {
+                        dst: VReg(value),
+                        value: value.into(),
+                    });
+                }
+            }
+            if index + 1 == BLOCKS {
+                for value in 0..VALUES {
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        src: VReg(value),
+                        size: OpSize::S64,
+                    });
+                }
+                block.push(MInst::Return);
+            } else {
+                block.push(MInst::Jump {
+                    target: BlockId((index + 1) as u32),
+                });
+            }
+            blocks.push(block);
+        }
+        let function = function(blocks, VALUES);
+        let indices = (0..BLOCKS).map(|i| (BlockId(i as u32), i)).collect();
+        let predecessors = (0..BLOCKS)
+            .map(|i| i.checked_sub(1).into_iter().collect())
+            .collect::<Vec<_>>();
+        let mut liveness = live_out(&function, &indices, &predecessors);
+        assert!(liveness.rows.is_empty());
+        for block in 0..BLOCKS {
+            assert_eq!(
+                liveness.contains(VReg(VALUES - 1), block),
+                block + 1 < BLOCKS
+            );
+        }
+        assert_eq!(liveness.rows.len(), 1);
+        let LiveBlocks::Dense(words) = &liveness.rows[&VReg(VALUES - 1)] else {
+            panic!("long lifetimes must use a compact bitmap");
+        };
+        assert_eq!(std::mem::size_of_val(words.as_ref()), BLOCKS / 8);
     }
 
     #[test]

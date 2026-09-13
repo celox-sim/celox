@@ -11,6 +11,25 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
         and: bool,
         word32: bool,
     }
+    #[derive(Clone, Copy)]
+    enum Definition {
+        Binary(Operation, VReg, VReg),
+        Not(VReg),
+    }
+    #[derive(Clone, Copy)]
+    enum User {
+        Unused,
+        One(Option<VReg>),
+        Multiple,
+    }
+    impl User {
+        fn record(&mut self, user: Option<VReg>) {
+            *self = match *self {
+                Self::Unused => Self::One(user),
+                Self::One(_) | Self::Multiple => Self::Multiple,
+            };
+        }
+    }
     fn operands(inst: &MInst) -> Option<(Operation, VReg, VReg)> {
         let (and, word32, lhs, rhs) = match *inst {
             MInst::And { lhs, rhs, .. } => (true, false, lhs, rhs),
@@ -47,19 +66,28 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
         dst
     }
     let mut definitions = vec![None; func.vregs.count() as usize];
-    let mut users = vec![Vec::new(); definitions.len()];
+    let mut users = vec![User::Unused; definitions.len()];
     for (bi, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
-                users[source.0 as usize].push(None);
+                users[source.0 as usize].record(None);
             }
         }
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
-                definitions[dst.0 as usize] = Some((bi, inst.clone()));
+                // Only these facts participate in tree matching. Retaining
+                // every full instruction (and every user list) is unnecessary.
+                let definition = if let Some((op, lhs, rhs)) = operands(inst) {
+                    Some(Definition::Binary(op, lhs, rhs))
+                } else if let MInst::BitNot { src, .. } = inst {
+                    Some(Definition::Not(*src))
+                } else {
+                    None
+                };
+                definitions[dst.0 as usize] = definition.map(|definition| (bi, definition));
             }
             for source in inst.uses() {
-                users[source.0 as usize].push(inst.def());
+                users[source.0 as usize].record(inst.def());
             }
         }
     }
@@ -71,10 +99,10 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
                 continue;
             };
             let dst = inst.def().unwrap();
-            if let [Some(user)] = users[dst.0 as usize].as_slice()
+            if let User::One(Some(user)) = users[dst.0 as usize]
                 && let Some((owner, parent)) = &definitions[user.0 as usize]
                 && *owner == bi
-                && operands(parent).is_some_and(|(parent_op, _, _)| parent_op == op)
+                && matches!(parent, Definition::Binary(parent_op, _, _) if *parent_op == op)
             {
                 block.push(inst);
                 continue;
@@ -85,17 +113,17 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
             let mut depth = 0;
             while let Some((value, level)) = stack.pop() {
                 depth = depth.max(level);
-                if users[value.0 as usize].len() == 1
+                if matches!(users[value.0 as usize], User::One(_))
                     && let Some((owner, definition)) = &definitions[value.0 as usize]
                     && *owner == bi
                 {
-                    if let Some((child_op, a, b)) = operands(definition)
+                    if let Definition::Binary(child_op, a, b) = *definition
                         && child_op == op
                     {
                         stack.extend([(b, level + 1), (a, level + 1)]);
                         continue;
                     }
-                    if let MInst::BitNot { src, .. } = *definition {
+                    if let Definition::Not(src) = *definition {
                         negative.push(src);
                         continue;
                     }

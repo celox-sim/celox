@@ -893,28 +893,31 @@ fn describe_missing_home(
                 )
         })
         .collect::<Vec<_>>();
-    let states = func
-        .blocks
-        .iter()
-        .enumerate()
-        .filter(|(block, _)| {
-            plan.w_entry[*block].contains(&logical)
-                || plan.s_entry[*block].contains(&logical)
-                || plan.w_exit[*block].contains(&logical)
-                || plan.s_exit[*block].contains(&logical)
-        })
-        .take(24)
-        .map(|(block, mir_block)| {
-            format!(
-                "{}:[W{} S{} -> W{} S{}]",
-                mir_block.id,
-                u8::from(plan.w_entry[block].contains(&logical)),
-                u8::from(plan.s_entry[block].contains(&logical)),
-                u8::from(plan.w_exit[block].contains(&logical)),
-                u8::from(plan.s_exit[block].contains(&logical))
-            )
-        })
-        .collect::<Vec<_>>();
+    let states = if plan.s_entry.is_empty() {
+        vec!["scheduling states released; only reconstruction states retained".to_owned()]
+    } else {
+        func.blocks
+            .iter()
+            .enumerate()
+            .filter(|(block, _)| {
+                plan.w_entry[*block].contains(&logical)
+                    || plan.s_entry[*block].contains(&logical)
+                    || plan.w_exit[*block].contains(&logical)
+                    || plan.s_exit[*block].contains(&logical)
+            })
+            .take(24)
+            .map(|(block, mir_block)| {
+                format!(
+                    "{}:[W{} S{} -> W{} S{}]",
+                    mir_block.id,
+                    u8::from(plan.w_entry[block].contains(&logical)),
+                    u8::from(plan.s_entry[block].contains(&logical)),
+                    u8::from(plan.w_exit[block].contains(&logical)),
+                    u8::from(plan.s_exit[block].contains(&logical))
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     let operations = plan
         .point_ops
         .iter()
@@ -2673,7 +2676,37 @@ mod tests {
         plan.verify(&func, &cfg, registers).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
+        let mut projected = super::super::spill_plan::plan_with_recipe_costs(
+            &func,
+            &cfg,
+            &next_use,
+            &planning_recipes,
+            registers,
+        )
+        .unwrap();
+        projected.retain_reconstruction_states(&func, &cfg).unwrap();
+        projected
+            .select_recipe_homes(&func, &cfg, &recipes)
+            .unwrap();
+        assert_eq!(
+            super::super::ssa_state_home::planned_spills(&func, &cfg, &plan).unwrap(),
+            super::super::ssa_state_home::planned_spills(&func, &cfg, &projected).unwrap(),
+        );
+        assert_eq!(plan.recipe_homes, projected.recipe_homes);
+        let mut projected_func = func.clone();
+        let projected_result = reconstruct(
+            &mut projected_func,
+            &cfg,
+            &projected,
+            &recipes,
+            false,
+            false,
+        )
+        .unwrap();
         let result = reconstruct(&mut func, &cfg, &plan, &recipes, false, true).unwrap();
+        assert_eq!(func.to_string(), projected_func.to_string());
+        assert_eq!(result.frame_size, projected_result.frame_size);
+
         let rebuilt_cfg = (!result.shared_reload_blocks.is_empty())
             .then(|| super::super::cfg::normalize(&mut func).unwrap());
         let cfg = rebuilt_cfg.as_ref().unwrap_or(&cfg);

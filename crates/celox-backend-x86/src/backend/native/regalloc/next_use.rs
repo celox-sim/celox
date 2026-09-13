@@ -197,6 +197,9 @@ pub(super) fn analyze(
     let phi_uses = phi_edge_uses(func, cfg)?;
     let region_topology = RegionTopology::build(cfg)?;
     let edge_loop_exits = &region_topology.edge_exits;
+    let value_keys = (0..func.vregs.count())
+        .map(VReg)
+        .collect::<std::sync::Arc<[_]>>();
     let mut entry = vec![DistanceMap::default(); func.blocks.len()];
     let mut exit = vec![DistanceMap::default(); func.blocks.len()];
     let mut anticipated_after_phis = vec![HashSet::<VReg>::default(); func.blocks.len()];
@@ -204,29 +207,43 @@ pub(super) fn analyze(
     let mut queued = vec![true; func.blocks.len()];
     while let Some(block) = queue.pop_front() {
         queued[block] = false;
-        let mut next_exit = DistanceMap::default();
-        for (edge, &successor) in cfg.successors[block].iter().enumerate() {
-            let edge_exits = edge_loop_exits[block][edge];
-            for (&value, distance) in &entry[successor] {
-                let Some(distance) = distance.checked_across_edge(edge_exits) else {
-                    return Err(NextUseError::new(
-                        "NEXT_USE.DISTANCE_RANGE",
-                        Some(func.blocks[block].id),
-                        None,
-                        vec![value],
-                        "loop-region exit distance exceeds addressable CFG size",
-                    ));
-                };
-                next_exit.insert_min(value, distance);
+        // With one ordinary edge and no phi-edge uses, the exit is exactly
+        // the successor entry. Share its immutable storage rather than encode
+        // another copy of every live value for this block.
+        let shared_successor = match cfg.successors[block].as_slice() {
+            &[successor] if edge_loop_exits[block][0] == 0 && phi_uses[block][0].is_empty() => {
+                Some(successor)
             }
-            for &value in &phi_uses[block][edge] {
-                let distance = NextUseDistance::Finite {
-                    loop_exits: edge_exits,
-                    instructions: 0,
-                };
-                next_exit.insert_min(value, distance);
+            _ => None,
+        };
+        let mut next_exit = if let Some(successor) = shared_successor {
+            entry[successor].clone()
+        } else {
+            let mut next_exit = DistanceMap::default();
+            for (edge, &successor) in cfg.successors[block].iter().enumerate() {
+                let edge_exits = edge_loop_exits[block][edge];
+                for (&value, distance) in &entry[successor] {
+                    let Some(distance) = distance.checked_across_edge(edge_exits) else {
+                        return Err(NextUseError::new(
+                            "NEXT_USE.DISTANCE_RANGE",
+                            Some(func.blocks[block].id),
+                            None,
+                            vec![value],
+                            "loop-region exit distance exceeds addressable CFG size",
+                        ));
+                    };
+                    next_exit.insert_min(value, distance);
+                }
+                for &value in &phi_uses[block][edge] {
+                    let distance = NextUseDistance::Finite {
+                        loop_exits: edge_exits,
+                        instructions: 0,
+                    };
+                    next_exit.insert_min(value, distance);
+                }
             }
-        }
+            next_exit
+        };
         let transfer = &transfers[block];
         let mut next_entry = DistanceMap::default();
         for (&value, distance) in &next_exit {
@@ -258,6 +275,15 @@ pub(super) fn analyze(
             || next_exit != exit[block]
             || next_anticipated != anticipated_after_phis[block]
         {
+            next_exit.freeze(&value_keys);
+            if !next_entry.freeze_block_entry(
+                &next_exit,
+                transfer.length,
+                &transfer.definitions,
+                &transfer.local_uses,
+            ) {
+                next_entry.freeze(&value_keys);
+            }
             entry[block] = next_entry;
             exit[block] = next_exit;
             anticipated_after_phis[block] = next_anticipated;

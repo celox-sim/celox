@@ -75,6 +75,19 @@ pub(super) fn allocate(
             )
         })?;
     }
+    if !verify {
+        plan.retain_reconstruction_states(func, cfg)
+            .map_err(|error| {
+                super::RegallocError::new(
+                    "spill-plan state release",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            })?;
+    }
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa spill_plan elapsed={:?}",
