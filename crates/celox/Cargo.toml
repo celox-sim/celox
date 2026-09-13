@@ -79,6 +79,9 @@ celox-sir-opt         = { workspace = true, default-features = false, features =
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 celox-backend-arm64   = { workspace = true }
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 insta      = "1.46"
 libc.workspace = true

@@ -1666,72 +1666,139 @@ fn compile_program(
     let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
+    // Large CFGs retain several independent SIR/MIR and allocation analyses.
+    // Do not overlap their working sets with the next native function. Small
+    // programs retain the usual four-function compilation parallelism.
+    const SERIAL_NATIVE_BLOCK_THRESHOLD: usize = 65_536;
+    let comb_blocks = sir
+        .sir
+        .eval_comb
+        .iter()
+        .map(|unit| unit.blocks.len())
+        .sum::<usize>();
+    let max_task_blocks = compile_tasks
+        .iter()
+        .map(|task| {
+            task.units
+                .iter()
+                .map(|unit| unit.blocks.len())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let serial = comb_blocks.max(max_task_blocks) >= SERIAL_NATIVE_BLOCK_THRESHOLD;
+    if options.x86_options.diagnostics.phase_timing {
+        tracing::debug!(
+            "[native-timing] compile_program serial={serial} comb_blocks={comb_blocks} max_task_blocks={max_task_blocks} ff_tasks={}",
+            compile_tasks.len()
+        );
+    }
     let next_task = AtomicUsize::new(0);
-    let (comb_jit, compiled_ff_codes) = std::thread::scope(|scope| {
-        let four_state = options.four_state;
-        let x86_options = &options.x86_options;
-        let comb_handle = scope.spawn(move || {
-            if cancelled(cancel) {
-                return Err(cancelled_error());
+    let (comb_jit, compiled_ff_codes) = if serial {
+        let release_pages = || {
+            // glibc can retain gigabytes of freed compiler allocations between
+            // functions. This only returns unused pages; live data is untouched.
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            unsafe {
+                libc::malloc_trim(0);
             }
-            compile_units(
-                &sir.sir.eval_comb,
+        };
+        release_pages();
+        let comb_jit = compile_units(
+            &sir.sir.eval_comb,
+            layout,
+            options.four_state,
+            "eval_comb",
+            &options.x86_options,
+            capture_trace,
+            &options.optimize_options.diagnostics,
+            cancel,
+        )?;
+        let mut compiled = HashMap::default();
+        for (task_id, task) in compile_tasks.iter().enumerate() {
+            release_pages();
+            let code = compile_unit_refs(
+                &task.units,
                 layout,
-                four_state,
-                "eval_comb",
-                x86_options,
+                options.four_state,
+                task.label,
+                task.first_ff_unit,
+                &options.x86_options,
                 capture_trace,
                 &options.optimize_options.diagnostics,
                 cancel,
-            )
-        });
-        let task_worker_count = compile_tasks
-            .len()
-            .min(MAX_PARALLEL_NATIVE_FUNCTIONS.saturating_sub(1));
-        let task_handles = (0..task_worker_count)
-            .map(|_| {
-                let next_task = &next_task;
-                let compile_tasks = &compile_tasks;
-                scope.spawn(move || {
-                    let mut compiled = Vec::new();
-                    loop {
-                        if cancelled(cancel) {
-                            return Err(cancelled_error());
-                        }
-                        let task_id = next_task.fetch_add(1, Ordering::Relaxed);
-                        let Some(task) = compile_tasks.get(task_id) else {
-                            break;
-                        };
-                        let code = compile_unit_refs(
-                            &task.units,
-                            layout,
-                            four_state,
-                            task.label,
-                            task.first_ff_unit,
-                            x86_options,
-                            capture_trace,
-                            &options.optimize_options.diagnostics,
-                            cancel,
-                        )?;
-                        compiled.push((task_id, code));
-                    }
-                    Ok::<_, SimulatorError>(compiled)
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let comb_jit = comb_handle
-            .join()
-            .map_err(|_| codegen_message("native eval_comb compile thread panicked"))??;
-        let mut compiled_ff_codes = HashMap::default();
-        for handle in task_handles {
-            let compiled = handle
-                .join()
-                .map_err(|_| codegen_message("native FF compile thread panicked"))??;
-            compiled_ff_codes.extend(compiled);
+            )?;
+            compiled.insert(task_id, code);
         }
-        Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
-    })?;
+        release_pages();
+        (comb_jit, compiled)
+    } else {
+        std::thread::scope(|scope| {
+            let four_state = options.four_state;
+            let x86_options = &options.x86_options;
+            let comb_handle = scope.spawn(move || {
+                if cancelled(cancel) {
+                    return Err(cancelled_error());
+                }
+                compile_units(
+                    &sir.sir.eval_comb,
+                    layout,
+                    four_state,
+                    "eval_comb",
+                    x86_options,
+                    capture_trace,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                )
+            });
+            let task_worker_count = compile_tasks
+                .len()
+                .min(MAX_PARALLEL_NATIVE_FUNCTIONS.saturating_sub(1));
+            let task_handles = (0..task_worker_count)
+                .map(|_| {
+                    let next_task = &next_task;
+                    let compile_tasks = &compile_tasks;
+                    scope.spawn(move || {
+                        let mut compiled = Vec::new();
+                        loop {
+                            if cancelled(cancel) {
+                                return Err(cancelled_error());
+                            }
+                            let task_id = next_task.fetch_add(1, Ordering::Relaxed);
+                            let Some(task) = compile_tasks.get(task_id) else {
+                                break;
+                            };
+                            let code = compile_unit_refs(
+                                &task.units,
+                                layout,
+                                four_state,
+                                task.label,
+                                task.first_ff_unit,
+                                x86_options,
+                                capture_trace,
+                                &options.optimize_options.diagnostics,
+                                cancel,
+                            )?;
+                            compiled.push((task_id, code));
+                        }
+                        Ok::<_, SimulatorError>(compiled)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let comb_jit = comb_handle
+                .join()
+                .map_err(|_| codegen_message("native eval_comb compile thread panicked"))??;
+            let mut compiled_ff_codes = HashMap::default();
+            for handle in task_handles {
+                let compiled = handle
+                    .join()
+                    .map_err(|_| codegen_message("native FF compile thread panicked"))??;
+                compiled_ff_codes.extend(compiled);
+            }
+            Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
+        })?
+    };
     // A foreign-interface image can request per-unit entries so force/release
     // can reapply overrides between procedural store boundaries. Ordinary
     // images do not compile or retain this duplicate combinational code.
