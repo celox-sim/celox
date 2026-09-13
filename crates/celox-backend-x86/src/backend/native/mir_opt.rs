@@ -3025,7 +3025,7 @@ fn global_gvn(func: &mut MFunction) {
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
     let idom = compute_dominators(num_blocks, &preds, &succs);
     let load_versions = compute_gvn_load_versions(func, &preds, &idom).unwrap_or_default();
-    let live_out = gvn_liveness::live_out(func, &block_id_to_idx, &preds);
+    let mut live_out = gvn_liveness::live_out(func, &block_id_to_idx, &preds);
     let last_uses = func
         .blocks
         .iter()
@@ -3073,7 +3073,7 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_out: &[VReg],
+        live_out: &mut gvn_liveness::LiveOut<'_>,
         last_uses: &HashMap<VReg, usize>,
         load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
@@ -3098,7 +3098,7 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
-                    let reuse_does_not_extend_live_range = live_out.binary_search(&leader).is_ok()
+                    let reuse_does_not_extend_live_range = live_out.contains(leader, node)
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
@@ -3175,7 +3175,7 @@ fn global_gvn(func: &mut MFunction) {
             &mut value_numbers,
             &mut value_leaders,
             &mut leader_blocks,
-            &live_out[node],
+            &mut live_out,
             &last_uses[node],
             &load_versions,
             &mut value_table,

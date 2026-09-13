@@ -488,6 +488,10 @@ jobs:
       HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}
       HELIODOR_CELOX_CARGO_PROFILE: release
       CELOX_OPT_LEVEL: O2
+      # Keep phase/progress evidence when a large workload times out.
+      RUST_LOG: ${{ contains(matrix.test, '8hart') && 'celox::=debug,celox_backend_x86::=debug,celox_backend_arm64::=debug' || 'off' }}
+      CELOX_PHASE_TIMING: ${{ contains(matrix.test, '8hart') && '1' || '0' }}
+      CELOX_TESTBENCH_PROGRESS: ${{ contains(matrix.test, '8hart') && '1000000' || '0' }}
     steps:
       - uses: actions/checkout@v7
         with:
