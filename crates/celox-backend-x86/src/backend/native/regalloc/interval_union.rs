@@ -311,9 +311,89 @@ impl DynamicNodeArena {
 /// flat node arena stores the same interval union without per-segment heap
 /// allocations. Adjacent ranges are merged because their owners are
 /// irrelevant after the assignment map records the selected slot.
+/// Most occupied rows cover their complete block. Keep those as bits and
+/// allocate a node head only for partial rows. Fall back to the ordinary dense
+/// table if partial occupancy would cost more than one u32 per block.
+#[derive(Debug, Clone)]
+enum BlockHeads {
+    Sparse {
+        len: usize,
+        full: Box<[u64]>,
+        partial: HashMap<usize, u32>,
+    },
+    Dense(Box<[u32]>),
+}
+
+impl BlockHeads {
+    fn new(len: usize) -> Self {
+        Self::Sparse {
+            len,
+            full: vec![0; len.div_ceil(64)].into_boxed_slice(),
+            partial: HashMap::default(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Sparse { len, .. } => *len,
+            Self::Dense(heads) => heads.len(),
+        }
+    }
+
+    fn get(&self, block: usize) -> u32 {
+        match self {
+            Self::Sparse { full, partial, .. } => {
+                if full[block / 64] & (1u64 << (block % 64)) != 0 {
+                    DynamicSlotUnion::FULL
+                } else {
+                    partial
+                        .get(&block)
+                        .copied()
+                        .unwrap_or(DynamicSlotUnion::NONE)
+                }
+            }
+            Self::Dense(heads) => heads[block],
+        }
+    }
+
+    fn set(&mut self, block: usize, head: u32) {
+        match self {
+            Self::Dense(heads) => {
+                heads[block] = head;
+                return;
+            }
+            Self::Sparse { full, partial, .. } => {
+                let bit = 1u64 << (block % 64);
+                if head == DynamicSlotUnion::FULL {
+                    full[block / 64] |= bit;
+                    partial.remove(&block);
+                } else {
+                    full[block / 64] &= !bit;
+                    if head == DynamicSlotUnion::NONE {
+                        partial.remove(&block);
+                    } else {
+                        partial.insert(block, head);
+                    }
+                }
+            }
+        }
+        let Self::Sparse { len, full, partial } = self else {
+            unreachable!()
+        };
+        if full.len() * 8 + partial.capacity() * std::mem::size_of::<(usize, u32)>() >= *len * 4 {
+            let heads = (0..*len).map(|block| self.get(block)).collect();
+            *self = Self::Dense(heads);
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..self.len()).map(|block| self.get(block))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DynamicSlotUnion {
-    heads: Box<[u32]>,
+    heads: BlockHeads,
     nodes: DynamicNodeArena,
     full_ends: Arc<[SlotIndex]>,
 }
@@ -324,7 +404,7 @@ impl DynamicSlotUnion {
 
     fn new(block_count: usize) -> Self {
         Self {
-            heads: vec![Self::NONE; block_count].into_boxed_slice(),
+            heads: BlockHeads::new(block_count),
             nodes: DynamicNodeArena::Packed(Vec::new()),
             full_ends: Arc::from([]),
         }
@@ -346,7 +426,7 @@ impl DynamicSlotUnion {
     }
 
     fn interferes_segment(&self, segment: LiveSegment, block: usize) -> bool {
-        let mut current = self.heads[block];
+        let mut current = self.heads.get(block);
         while current != Self::NONE {
             let node = self
                 .node(current, block)
@@ -423,24 +503,24 @@ impl DynamicSlotUnion {
     }
 
     fn insert_segment(&mut self, segment: LiveSegment, block: usize) {
-        if self.heads[block] == Self::NONE
+        if self.heads.get(block) == Self::NONE
             && segment.start.as_u64() == 0
             && self.full_ends.get(block) == Some(&segment.end)
         {
-            self.heads[block] = Self::FULL;
+            self.heads.set(block, Self::FULL);
             return;
         }
-        if self.heads[block] == Self::FULL {
+        if self.heads.get(block) == Self::FULL {
             // Only a disjoint interval beyond the shared endpoint can reach
             // here. Materialize the prefix so ordinary merging stays exact.
             let node = self
                 .node(Self::FULL, block)
                 .expect("full block has an endpoint");
-            self.heads[block] = self.nodes.len() as u32;
+            self.heads.set(block, self.nodes.len() as u32);
             self.nodes.push(node);
         }
         let mut previous = Self::NONE;
-        let mut current = self.heads[block];
+        let mut current = self.heads.get(block);
         while current != Self::NONE {
             let node = self.nodes.node(current as usize);
             if node.end <= segment.start {
@@ -479,20 +559,20 @@ impl DynamicSlotUnion {
                     next: current,
                 });
                 if previous == Self::NONE {
-                    self.heads[block] = node;
+                    self.heads.set(block, node);
                 } else {
                     self.nodes
                         .update(previous as usize, |previous| previous.next = node);
                 }
             }
         }
-        let head = self.heads[block];
+        let head = self.heads.get(block);
         if let Some(node) = self.nodes.get(head as usize)
             && node.start.as_u64() == 0
             && node.next == Self::NONE
             && self.full_ends.get(block) == Some(&node.end)
         {
-            self.heads[block] = Self::FULL;
+            self.heads.set(block, Self::FULL);
         }
     }
 
@@ -505,7 +585,7 @@ impl DynamicSlotUnion {
                 "dynamic stack-slot block table does not cover the CFG",
             ));
         }
-        for (block, &head) in self.heads.iter().enumerate() {
+        for (block, head) in self.heads.iter().enumerate() {
             let mut current = head;
             let mut previous_end = None::<SlotIndex>;
             let mut traversed = 0usize;
@@ -555,8 +635,8 @@ impl DynamicSlotUnion {
             return false;
         }
         for block in 0..self.heads.len() {
-            let mut left = self.heads[block];
-            let mut right = other.heads[block];
+            let mut left = self.heads.get(block);
+            let mut right = other.heads.get(block);
             loop {
                 match (left, right) {
                     (Self::NONE, Self::NONE) => break,
@@ -578,7 +658,7 @@ impl DynamicSlotUnion {
     }
 
     fn is_empty(&self) -> bool {
-        self.heads.iter().all(|&head| head == Self::NONE)
+        self.heads.iter().all(|head| head == Self::NONE)
     }
 }
 
@@ -718,7 +798,8 @@ impl DynamicIntervalMatrix {
                 continue;
             }
             previous_block = Some(block);
-            if slot == self.unions.len() || self.unions[slot].heads[block] == DynamicSlotUnion::NONE
+            if slot == self.unions.len()
+                || self.unions[slot].heads.get(block) == DynamicSlotUnion::NONE
             {
                 newly_occupied_blocks.push(block);
             }
@@ -785,6 +866,42 @@ impl DynamicIntervalMatrix {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn full_block_heads_stay_compact_and_promote_exactly() {
+        use super::{BlockHeads, DynamicSlotUnion};
+        const BLOCKS: usize = 65_537;
+        let mut heads = BlockHeads::new(BLOCKS);
+        let mut expected = vec![DynamicSlotUnion::NONE; BLOCKS];
+        for (block, expected_head) in expected.iter_mut().enumerate() {
+            if block % 3 != 0 {
+                heads.set(block, DynamicSlotUnion::FULL);
+                *expected_head = DynamicSlotUnion::FULL;
+            }
+        }
+        heads.set(64, 7);
+        expected[64] = 7;
+        heads.set(65, DynamicSlotUnion::NONE);
+        expected[65] = DynamicSlotUnion::NONE;
+        let BlockHeads::Sparse { full, partial, .. } = &heads else {
+            panic!("full blocks need a bitmap")
+        };
+        assert!(full.len() * 8 + partial.capacity() * std::mem::size_of::<(usize, u32)>() < BLOCKS);
+        assert_eq!(heads.iter().collect::<Vec<_>>(), expected);
+        let saved = heads.clone();
+        for (block, expected_head) in expected.iter_mut().enumerate() {
+            heads.set(block, block as u32);
+            *expected_head = block as u32;
+        }
+        assert!(matches!(heads, BlockHeads::Dense(_)));
+        assert_eq!(heads.iter().collect::<Vec<_>>(), expected);
+        assert_eq!(saved.get(64), 7);
+        assert_eq!(saved.get(65), DynamicSlotUnion::NONE);
+        heads.set(64, DynamicSlotUnion::FULL);
+        heads.set(65, DynamicSlotUnion::NONE);
+        assert_eq!(heads.get(64), DynamicSlotUnion::FULL);
+        assert_eq!(heads.get(65), DynamicSlotUnion::NONE);
+    }
+
     #[test]
     fn dynamic_nodes_promote_without_losing_slots_or_links() {
         let mut nodes = super::DynamicNodeArena::Packed(Vec::new());
@@ -893,7 +1010,7 @@ mod tests {
                 }
                 assert_eq!(reference, compact);
             }
-            assert_eq!(compact.unions[0].heads[0], DynamicSlotUnion::FULL);
+            assert_eq!(compact.unions[0].heads.get(0), DynamicSlotUnion::FULL);
             let overlapping = compact
                 .make_range(vec![LiveSegment {
                     block: BlockId(0),
