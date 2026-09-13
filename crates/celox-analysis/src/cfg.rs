@@ -49,7 +49,7 @@ impl fmt::Display for CfgError {
 
 impl std::error::Error for CfgError {}
 
-/// Immediate dominators and constant-time dominance intervals.
+/// Immediate dominators, constant-time dominance, and logarithmic LCA queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DominatorTree {
     pub idom: Vec<Option<usize>>,
@@ -57,6 +57,7 @@ pub struct DominatorTree {
     enter: Vec<usize>,
     exit: Vec<usize>,
     depth: Vec<usize>,
+    chain_head: Vec<usize>,
 }
 
 impl DominatorTree {
@@ -131,12 +132,28 @@ impl DominatorTree {
                 }
             }
         }
+        // Heavy paths need one word per block. A root-to-leaf path contains
+        // at most logarithmically many light edges, bounding LCA walks without
+        // a binary-lifting table for every ancestor level.
+        let mut chain_head = vec![usize::MAX; idom.len()];
+        let mut pending = vec![(root, root)];
+        while let Some((block, head)) = pending.pop() {
+            chain_head[block] = head;
+            let heavy = children[block]
+                .iter()
+                .copied()
+                .max_by_key(|&child| exit[child] - enter[child]);
+            for &child in &children[block] {
+                pending.push((child, if Some(child) == heavy { head } else { child }));
+            }
+        }
         Ok(Self {
             idom,
             children,
             enter,
             exit,
             depth,
+            chain_head,
         })
     }
 
@@ -157,6 +174,15 @@ impl DominatorTree {
     }
 
     #[must_use]
+    /// Distance from the root, or None for an unreachable or unknown block.
+    pub fn depth(&self, block: usize) -> Option<usize> {
+        self.depth
+            .get(block)
+            .copied()
+            .filter(|&depth| depth != usize::MAX)
+    }
+
+    #[must_use]
     pub fn lca(&self, left: usize, right: usize) -> Option<usize> {
         let (Some(&left_depth), Some(&right_depth)) = (self.depth.get(left), self.depth.get(right))
         else {
@@ -165,19 +191,28 @@ impl DominatorTree {
         if left_depth == usize::MAX || right_depth == usize::MAX {
             return None;
         }
+        if self.dominates(left, right) {
+            return Some(left);
+        }
+        if self.dominates(right, left) {
+            return Some(right);
+        }
         let mut left = left;
         let mut right = right;
-        while self.depth[left] > self.depth[right] {
-            left = self.idom[left]?;
+        while self.chain_head[left] != self.chain_head[right] {
+            let left_head = self.chain_head[left];
+            let right_head = self.chain_head[right];
+            if self.depth[left_head] > self.depth[right_head] {
+                left = self.idom[left_head]?;
+            } else {
+                right = self.idom[right_head]?;
+            }
         }
-        while self.depth[right] > self.depth[left] {
-            right = self.idom[right]?;
-        }
-        while left != right {
-            left = self.idom[left]?;
-            right = self.idom[right]?;
-        }
-        Some(left)
+        Some(if self.depth[left] <= self.depth[right] {
+            left
+        } else {
+            right
+        })
     }
 }
 
@@ -775,6 +810,56 @@ fn natural_loops(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heavy_path_lca_matches_ancestor_walks_with_permuted_and_unreachable_nodes() {
+        const NODES: usize = 64;
+        let identity = |node: usize| (node * 17 + 31) % NODES;
+        for shape in 0..3 {
+            let mut parents = vec![None; NODES + 1];
+            let mut random = 0x1234_5678u64;
+            for node in 1..NODES {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let parent = match shape {
+                    0 => node - 1,
+                    1 => (node - 1) / 2,
+                    _ => (random as usize) % node,
+                };
+                parents[identity(node)] = Some(identity(parent));
+            }
+            let tree = DominatorTree::from_idom(parents.clone(), identity(0)).unwrap();
+            for left in 0..=NODES {
+                for right in 0..=NODES {
+                    let expected = if left == NODES || right == NODES {
+                        None
+                    } else {
+                        let mut ancestors = std::collections::BTreeSet::new();
+                        let mut cursor = Some(left);
+                        while let Some(node) = cursor {
+                            ancestors.insert(node);
+                            cursor = parents[node];
+                        }
+                        let mut cursor = Some(right);
+                        while let Some(node) = cursor {
+                            if ancestors.contains(&node) {
+                                break;
+                            }
+                            cursor = parents[node];
+                        }
+                        cursor
+                    };
+                    assert_eq!(
+                        tree.lca(left, right),
+                        expected,
+                        "shape={shape} {left} {right}"
+                    );
+                }
+            }
+            assert_eq!(tree.depth(identity(0)), Some(0));
+            assert_eq!(tree.depth(NODES), None);
+            assert_eq!(tree.lca(usize::MAX, identity(0)), None);
+        }
+    }
 
     #[test]
     fn linear_graph() {

@@ -570,6 +570,11 @@ fn sink_pure_values_to_use_dominators(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
                     None => use_index,
                     Some(current) => cfg.dominators.lca(current, use_index).unwrap_or(0),
                 });
+                // Once a retained use pins the value to its definition block,
+                // no later use can make a deeper placement legal.
+                if destination.is_some_and(|index| cfg.block_ids[index] == source_id) {
+                    break;
+                }
             }
 
             let Some(destination) = destination.map(|index| cfg.block_ids[index]) else {
@@ -649,6 +654,39 @@ fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
     };
     let uses = collect_uses(eu);
     let facts = predicate_facts(eu, &cfg);
+    // Eligibility of an ancestor's merge is independent of the value being
+    // repaired. Index it once instead of walking long straight-line dominator
+    // chains for every definition/use pair and rejecting the same blocks.
+    let mut repair_merges = vec![None; cfg.block_ids.len()];
+    for (candidate, merge_slot) in repair_merges.iter_mut().enumerate() {
+        if facts[candidate].is_empty() || cfg.sccs[cfg.scc_for_block[candidate]].cyclic {
+            continue;
+        }
+        let Some(merge) = cfg.immediate_postdominator(candidate) else {
+            continue;
+        };
+        if !cfg.dominators.dominates(candidate, merge)
+            && !cfg.sccs[cfg.scc_for_block[merge]].cyclic
+            && merge_accepts_phi(&cfg, eu, cfg.block_ids[merge])
+        {
+            *merge_slot = Some(merge);
+        }
+    }
+    let mut nearest_candidate = vec![None; cfg.block_ids.len()];
+    let mut pending = vec![(0usize, None)];
+    while let Some((block, ancestor)) = pending.pop() {
+        let nearest = if repair_merges[block].is_some() {
+            Some(block)
+        } else {
+            ancestor
+        };
+        nearest_candidate[block] = nearest;
+        pending.extend(
+            cfg.dominators.children[block]
+                .iter()
+                .map(|&child| (child, nearest)),
+        );
+    }
     let mut definitions = HashMap::default();
     for &block_id in &cfg.block_ids {
         for instruction in &eu.blocks[&block_id].instructions {
@@ -688,13 +726,17 @@ fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
 
         let mut candidates = HashSet::default();
         for &use_block in &use_blocks {
-            let mut block = cfg.block_index(use_block).unwrap();
-            while cfg.block_ids[block] != source {
-                candidates.insert(block);
-                let Some(parent) = cfg.dominators.idom[block] else {
+            let mut next = nearest_candidate[cfg.block_index(use_block).unwrap()];
+            while let Some(block) = next {
+                if cfg.block_ids[block] == source || !cfg.dominates(source, cfg.block_ids[block]) {
                     break;
-                };
-                block = parent;
+                }
+                // All uses share the same definition. A previously visited
+                // ancestor already contributed its entire path to that source.
+                if !candidates.insert(block) {
+                    break;
+                }
+                next = cfg.dominators.idom[block].and_then(|parent| nearest_candidate[parent]);
             }
         }
         let mut best = None;
@@ -717,21 +759,16 @@ fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
             if dominated_uses == 0 || dominated_uses == use_blocks.len() {
                 continue;
             }
-            let Some(merge_index) = cfg.immediate_postdominator(candidate_index) else {
-                continue;
-            };
+            let merge_index = repair_merges[candidate_index]
+                .expect("indexed repair candidates have an admissible merge");
             let merge = cfg.block_ids[merge_index];
-            if cfg.dominates(candidate, merge)
-                || cfg.sccs[cfg.scc_for_block[merge_index]].cyclic
-                || use_blocks.iter().any(|&block| {
-                    !cfg.dominates(candidate, block)
-                        && (!cfg.dominates(merge, block)
-                            || candidate_facts
-                                .iter()
-                                .any(|fact| !facts[cfg.block_index(block).unwrap()].contains(fact)))
-                })
-                || !merge_accepts_phi(&cfg, eu, merge)
-            {
+            if use_blocks.iter().any(|&block| {
+                !cfg.dominates(candidate, block)
+                    && (!cfg.dominates(merge, block)
+                        || candidate_facts
+                            .iter()
+                            .any(|fact| !facts[cfg.block_index(block).unwrap()].contains(fact)))
+            }) {
                 continue;
             }
             let score = (
@@ -823,13 +860,8 @@ fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
     true
 }
 
-fn dominator_depth(cfg: &SirCfg, mut block: usize) -> usize {
-    let mut depth = 0;
-    while let Some(parent) = cfg.dominators.idom[block] {
-        depth += 1;
-        block = parent;
-    }
-    depth
+fn dominator_depth(cfg: &SirCfg, block: usize) -> usize {
+    cfg.dominators.depth(block).unwrap_or(0)
 }
 
 fn merge_accepts_phi(
