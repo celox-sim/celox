@@ -56,10 +56,10 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Pull requests neither write benchmark history nor need to wait behind unrelated
-# benchmark runs. Serialize master publishers with bench.yml, while develop uses
-# a separate group so its dispatch cannot replace a pending master nightly run.
+# benchmark runs. Only master publishers share bench.yml's group. Other
+# branches must not replace a pending publisher or compile-time benchmark.
 concurrency:
-  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
+  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || github.ref != 'refs/heads/master' && format('heliodor-validation-{0}', github.ref) || 'bench' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
