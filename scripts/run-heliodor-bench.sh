@@ -1032,7 +1032,12 @@ prepare() {
     fi
     if [[ "$HELIODOR_SUITE" == 1 ]]; then
         node "$SCRIPT_DIR/heliodor-suite.mjs" prepare "$HELIODOR_DIR" || return "$?"
-    elif [[ "$HELIODOR_SUITE" != 0 ]]; then
+    elif [[ "$HELIODOR_SUITE" == 0 ]]; then
+        local suite_wrapper="$HELIODOR_DIR/tb/test_soc_smp_linux_boot.veryl"
+        if [[ -f "$suite_wrapper" ]] && grep -Fq '// Celox suite testbench:' "$suite_wrapper"; then
+            node "$SCRIPT_DIR/heliodor-suite.mjs" restore "$HELIODOR_DIR" || return "$?"
+        fi
+    else
         echo "error: HELIODOR_SUITE must be 0 or 1" >&2
         return 1
     fi

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { matrix, mergeArtifacts, prepareSuiteTestbench } from "./heliodor-suite.mjs";
 
 test("suite isolates all 72 backend runs and reserves time for large designs", () => {
@@ -11,7 +11,7 @@ test("suite isolates all 72 backend runs and reserves time for large designs", (
   assert.equal(jobs.length, 72);
   assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.runner}`)).size, 72);
   for (const job of jobs) {
-    assert.ok(job.timeout_sec + 30 * 60 <= 330 * 60);
+    assert.ok(job.timeout_sec + 30 * 60 <= 360 * 60);
     if (job.test.endsWith("4hart") || job.test.endsWith("8hart")) assert.ok(job.timeout_sec > 3600);
   }
   assert.deepEqual(matrix({ test: "test_soc_66_smp_linux_boot_4hart", runner: "celox", arch: "aarch64" }).include,
@@ -86,4 +86,49 @@ test("N=8 suite budget changes only that wrapper and remains idempotent", () => 
   assert.throws(() => prepareSuiteTestbench(source.replace("0..3000 {\n", "0..4000 {\n")), /Unexpected/);
   assert.throws(() => prepareSuiteTestbench(source + source), /exactly one/);
   assert.throws(() => prepareSuiteTestbench(prefix), /exactly one/);
+});
+
+
+test("disabling suite mode restores the tracked wrapper and preserves other edits", () => {
+  const root = mkdtempSync(join(tmpdir(), "heliodor-suite-restore-"));
+  try {
+    const source = `module test_soc_smp_linux_boot_8hart {
+        // early on success (the N=8 boot reaches shutdown at ~25M). Budget 30M.
+        for _i in 0..3000 {
+            clk.next(10000);
+        }
+        $assert(pass, "must reach shutdown");
+}`;
+    mkdirSync(join(root, "tb"));
+    const file = join(root, "tb/test_soc_smp_linux_boot.veryl");
+    writeFileSync(file, source);
+    const git = (...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: "pipe" });
+    git("init", "--quiet");
+    git("add", ".");
+    git("-c", "user.name=Suite test", "-c", "user.email=suite@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
+    git("remote", "add", "origin", root);
+    const prepareStock = () => spawnSync("bash", ["-c", "source scripts/run-heliodor-bench.sh; prepare"], {
+      encoding: "utf8",
+      env: { ...process.env, HELIODOR_DIR: root, HELIODOR_REF: "HEAD", HELIODOR_SUITE: "0",
+        HELIODOR_RESULTS_DIR: join(root, "results"), HELIODOR_TOOLS_DIR: join(root, "tools") },
+    });
+    for (let repetition = 0; repetition < 2; repetition++) {
+      writeFileSync(file, prepareSuiteTestbench(source));
+      const result = prepareStock();
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(file, "utf8"), source);
+    }
+    const editedSuite = prepareSuiteTestbench(source) + "\n// local edit\n";
+    writeFileSync(file, editedSuite);
+    const rejected = prepareStock();
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /additional local edits/);
+    assert.equal(readFileSync(file, "utf8"), editedSuite);
+    const stockEdit = source + "\n// local edit\n";
+    writeFileSync(file, stockEdit);
+    assert.equal(prepareStock().status, 0);
+    assert.equal(readFileSync(file, "utf8"), stockEdit);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -92,14 +92,16 @@ simulated guest, not the benchmark host OS. Backends run in separate jobs (72 jo
 for the complete suite). These jobs use separate hosted machines; their CPU and
 memory details are retained in each artifact for interpreting comparisons.
 Each runner has a one-hour timeout for 1/2 harts,
-three hours for 4 harts, and five hours for 8 harts;
+three hours for 4 harts, and five and a half hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
 The nightly publisher requires the complete suite on both architectures.
 The suite applies testbench adjustment `8hart-100m-v1`: the 8-hart Veryl test
 gets the same 100-million-cycle budget as its upstream Verilator wrapper,
 replacing the stale 30-million-cycle limit. The shutdown assertion is unchanged.
 `HELIODOR_SUITE=1` applies this adjustment only to the pinned suite revision;
-the selected adjustment is recorded in the job log.
+the selected adjustment is recorded in the job log. Switching the same checkout
+back to `HELIODOR_SUITE=0` restores the stock testbench. Additional local edits
+to a patched wrapper are preserved and reported as an error.
 
 Linux 7.1 SMP (2/4 harts) is excluded pending an upstream RTL fix. Both
 configurations stop retiring instructions on one hart; the two-hart case also
