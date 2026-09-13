@@ -168,10 +168,18 @@ impl DistanceMap {
         definitions: &crate::HashSet<VReg>,
         local_uses: &[(VReg, usize)],
     ) -> bool {
-        let (Self::Packed(map), Self::Frozen(base)) = (&*self, base) else {
+        let Self::Packed(map) = &*self else {
             return false;
         };
-        let Ok(instruction_delta) = u32::try_from(instructions) else {
+        let (base, previous_delta, previous_overrides) = match base {
+            Self::Frozen(row) => (row, 0, &[][..]),
+            Self::Relative(row) => (&row.base, row.instruction_delta, row.overrides.as_ref()),
+            _ => return false,
+        };
+        let Some(instruction_delta) = u32::try_from(instructions)
+            .ok()
+            .and_then(|delta| delta.checked_add(previous_delta))
+        else {
             return false;
         };
         if map.len() < CHUNK_SIZE
@@ -185,9 +193,15 @@ impl DistanceMap {
             .iter()
             .copied()
             .chain(local_uses.iter().map(|&(key, _)| key))
+            .chain(previous_overrides.iter().map(|&(key, _)| key))
             .collect::<Vec<_>>();
         changed.sort_unstable();
         changed.dedup();
+        // Flatten onto the original frozen row, keeping lookup and destruction
+        // depth constant even across a long chain of single-successor blocks.
+        if changed.len() > 32 {
+            return false;
+        }
         let mut overrides = Vec::new();
         let mut len = base.len;
         for key in changed {
@@ -626,6 +640,64 @@ mod tests {
     }
 
     #[test]
+    fn chained_transfers_share_one_base_and_preserve_overrides() {
+        let pool = (0..1024).map(VReg).collect::<Arc<[_]>>();
+        let mut row = DistanceMap::default();
+        for id in 0..512 {
+            row.insert(VReg(id), NextUseDistance::local(id as usize));
+        }
+        row.freeze(&pool);
+        let DistanceMap::Frozen(base) = &row else {
+            panic!("expected frozen row")
+        };
+        let original = Arc::clone(base);
+        for step in 0..256 {
+            let mut next = DistanceMap::default();
+            for (&key, distance) in &row {
+                next.insert(key, distance.checked_prepend_instructions(3).unwrap());
+            }
+            let removed = VReg(step % 8);
+            let used = VReg(512 + step % 8);
+            next.remove(&removed);
+            next.insert(used, NextUseDistance::local(1));
+            let expected = next.clone();
+            assert!(next.freeze_block_entry(
+                &row,
+                3,
+                &[removed].into_iter().collect(),
+                &[(used, 1)],
+            ));
+            assert_eq!(next, expected);
+            let DistanceMap::Relative(relative) = &next else {
+                panic!("expected relative row")
+            };
+            assert!(Arc::ptr_eq(&relative.base, &original));
+            for key in pool.iter() {
+                assert_eq!(next.get(key), expected.get(key));
+            }
+            let mut actual = next.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
+            let mut oracle = expected.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
+            actual.sort_unstable_by_key(|&(k, _)| k);
+            oracle.sort_unstable_by_key(|&(k, _)| k);
+            assert_eq!(actual, oracle);
+            row = next;
+        }
+        // Too many accumulated edits fall back to the exact ordinary row.
+        let mut next = DistanceMap::default();
+        for (&key, distance) in &row {
+            next.insert(key, distance);
+        }
+        let definitions = (16..48).map(VReg).collect::<crate::HashSet<_>>();
+        for key in &definitions {
+            next.remove(key);
+        }
+        let expected = next.clone();
+        assert!(!next.freeze_block_entry(&row, 0, &definitions, &[]));
+        next.freeze(&pool);
+        assert_eq!(next, expected);
+    }
+
+    #[test]
     fn relative_rows_handle_packed_boundaries_and_fallbacks() {
         let pool = (0..1024).map(VReg).collect::<Arc<[_]>>();
         let mut base = DistanceMap::default();
@@ -661,11 +733,9 @@ mod tests {
             &crate::HashSet::default(),
             &[]
         ));
-        assert!(
-            !expected
-                .clone()
-                .freeze_block_entry(&entry, 0, &crate::HashSet::default(), &[])
-        );
+        let mut composed = expected.clone();
+        assert!(composed.freeze_block_entry(&entry, 0, &crate::HashSet::default(), &[]));
+        assert_eq!(composed, expected);
         let mut many_edits = base.clone();
         for id in 0..33 {
             many_edits.remove(&VReg(id));
