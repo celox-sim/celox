@@ -793,20 +793,15 @@ fn plan_internal(
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
             .collect::<Result<LogicalSet, _>>()?;
-        let exit_reload_costs = constraints
-            .map(|_| {
-                exit_reload_costs(
-                    func,
-                    cfg,
-                    next_use,
-                    planning_recipes,
-                    &result.logical,
-                    &edge_translations,
-                    block,
-                )
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let exit_reload_costs = LazyExitReloadCosts {
+            func,
+            cfg,
+            next_use,
+            recipes: planning_recipes,
+            translations: &edge_translations,
+            block,
+            cache: std::cell::RefCell::new(HashMap::default()),
+        };
         let (spilled, transition, order) = loop {
             // S means that a valid home exists on every path.  Every live
             // value omitted from W_entry therefore requires a home; edge
@@ -1048,6 +1043,63 @@ fn plan_internal(
     Ok(result)
 }
 
+/// Scheduling only prices values considered for eviction. Large live-through
+/// sets must not cause every block to price every successor's entire live set.
+trait ExitReloadCosts {
+    fn cost(&self, value: LogicalValue) -> u32;
+}
+
+#[cfg(test)]
+impl ExitReloadCosts for HashMap<LogicalValue, u32> {
+    fn cost(&self, value: LogicalValue) -> u32 {
+        self.get(&value).copied().unwrap_or(0)
+    }
+}
+
+struct LazyExitReloadCosts<'a> {
+    func: &'a MFunction,
+    cfg: &'a NormalizedCfg,
+    next_use: &'a NextUseAnalysis,
+    recipes: &'a PlanningRecipes,
+    translations: &'a EdgeTranslations,
+    block: usize,
+    // Released after this block, with one entry per queried eviction candidate.
+    cache: std::cell::RefCell<HashMap<LogicalValue, u32>>,
+}
+
+impl ExitReloadCosts for LazyExitReloadCosts<'_> {
+    fn cost(&self, value: LogicalValue) -> u32 {
+        if let Some(&cost) = self.cache.borrow().get(&value) {
+            return cost;
+        }
+        let mut cost = 0u32;
+        for &successor in &self.cfg.successors[self.block] {
+            let translation = self.translations.by_edge.get(&(self.block, successor));
+            // A phi source is demanded once even if it feeds several phis or
+            // is also live through. Phi destinations belong to the successor;
+            // they must not be charged under their untranslated identity.
+            let phi_source = translation.is_some_and(|edge| edge.to_successor.contains_key(&value));
+            let untranslated =
+                translation.is_none_or(|edge| !edge.to_predecessor.contains_key(&value));
+            if phi_source
+                || (untranslated && self.next_use.entry[successor].contains_key(&VReg(value.0)))
+            {
+                cost = cost.saturating_add(u32::from(reload_cost_on_edge(
+                    self.func,
+                    self.recipes,
+                    self.block,
+                    successor,
+                    value,
+                )));
+            }
+        }
+        self.cache.borrow_mut().insert(value, cost);
+        cost
+    }
+}
+
+// Independent eager reference: enumerate and translate all successor demands.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn exit_reload_costs(
     func: &MFunction,
@@ -1392,7 +1444,7 @@ fn plan_scheduled_block_transition(
     w_entry: &LogicalSet,
     spilled: LogicalSet,
     constraints: &[super::constraints::InstructionConstraints],
-    exit_reload_costs: &HashMap<LogicalValue, u32>,
+    exit_reload_costs: &dyn ExitReloadCosts,
 ) -> Result<(BlockTransition, Vec<usize>), SpillPlanError> {
     let instructions = &func.blocks[block].insts;
     if instructions.len() != constraints.len() {
@@ -1592,7 +1644,7 @@ fn plan_explicit_block_order(
     registers: usize,
     w_entry: &LogicalSet,
     spilled: LogicalSet,
-    exit_reload_costs: &HashMap<LogicalValue, u32>,
+    exit_reload_costs: &dyn ExitReloadCosts,
     order: &[usize],
 ) -> Result<BlockTransition, SpillPlanError> {
     let instructions = &func.blocks[block].insts;
@@ -2348,7 +2400,7 @@ struct RemainingBlockUses<'a> {
     preferred_rank: Vec<usize>,
     remaining: HashMap<LogicalValue, RemainingUses>,
     exit: &'a DistanceMap,
-    exit_reload_costs: &'a HashMap<LogicalValue, u32>,
+    exit_reload_costs: &'a dyn ExitReloadCosts,
     emitted: Vec<bool>,
     emitted_count: usize,
 }
@@ -2359,7 +2411,7 @@ impl<'a> RemainingBlockUses<'a> {
         next_use: &'a NextUseAnalysis,
         logical: &LogicalValues,
         block: usize,
-        exit_reload_costs: &'a HashMap<LogicalValue, u32>,
+        exit_reload_costs: &'a dyn ExitReloadCosts,
         preferred_order: Option<&[usize]>,
     ) -> Result<Self, SpillPlanError> {
         let instructions = func.blocks[block].insts.len();
@@ -2528,7 +2580,7 @@ impl<'a> RemainingBlockUses<'a> {
     }
 
     fn exit_reload_cost(&self, value: LogicalValue) -> u32 {
-        self.exit_reload_costs.get(&value).copied().unwrap_or(0)
+        self.exit_reload_costs.cost(value)
     }
 }
 
@@ -3959,6 +4011,103 @@ mod tests {
 
         assert_eq!(costs.get(&source), Some(&expected));
         assert_eq!(costs.len(), 1, "only the shared phi source is live out");
+        assert_lazy_exit_costs_match(&func, &cfg, &next_use, &recipes, &logical, &translations);
+    }
+
+    fn assert_lazy_exit_costs_match(
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        next_use: &NextUseAnalysis,
+        recipes: &PlanningRecipes,
+        logical: &LogicalValues,
+        translations: &EdgeTranslations,
+    ) {
+        for block in 0..func.blocks.len() {
+            let expected =
+                exit_reload_costs(func, cfg, next_use, recipes, logical, translations, block)
+                    .unwrap();
+            let lazy = LazyExitReloadCosts {
+                func,
+                cfg,
+                next_use,
+                recipes,
+                translations,
+                block,
+                cache: std::cell::RefCell::new(HashMap::default()),
+            };
+            assert!(lazy.cache.borrow().is_empty());
+            // Query one identity repeatedly before touching the rest. Neither
+            // live-set size nor repeated requests may grow the block cache.
+            for _ in 0..3 {
+                assert_eq!(lazy.cost(LogicalValue(0)), expected.cost(LogicalValue(0)));
+                assert_eq!(lazy.cache.borrow().len(), 1);
+            }
+            for value in (0..func.vregs.count()).rev().map(LogicalValue) {
+                assert_eq!(
+                    lazy.cost(value),
+                    expected.cost(value),
+                    "block {block}, {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_exit_prices_match_eager_demands_at_loops_and_duplicate_phis() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let initial = vregs.alloc();
+        let first = vregs.alloc();
+        let second = vregs.alloc();
+        let unused = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: initial,
+            value: 7,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut header = MBlock::new(BlockId(1));
+        for (dst, backedge) in [(first, second), (second, first), (unused, first)] {
+            header.phis.push(PhiNode {
+                dst,
+                sources: vec![(BlockId(0), initial), (BlockId(2), backedge)],
+            });
+        }
+        header.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+        let mut body = MBlock::new(BlockId(2));
+        body.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: first,
+            size: OpSize::S64,
+        });
+        body.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(3));
+        for (offset, src) in [(0, first), (8, second), (16, initial)] {
+            exit.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset,
+                src,
+                size: OpSize::S64,
+            });
+        }
+        exit.push(MInst::Return);
+        func.blocks = vec![entry, header, body, exit];
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
+        assert_lazy_exit_costs_match(&func, &cfg, &next_use, &recipes, &logical, &translations);
     }
 
     #[test]
