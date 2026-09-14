@@ -61,7 +61,9 @@ pub struct DominatorTree {
 }
 
 impl DominatorTree {
-    fn compute(successors: &[Vec<usize>], root: usize) -> Result<Self, CfgError> {
+    /// Compute dominance without constructing loop, SCC, or frontier tables.
+    /// Vertices unreachable from `root` have no dominance interval.
+    pub fn compute(successors: &[Vec<usize>], root: usize) -> Result<Self, CfgError> {
         let idom = lengauer_tarjan(successors, root)?;
         Self::from_idom(idom, root)
     }

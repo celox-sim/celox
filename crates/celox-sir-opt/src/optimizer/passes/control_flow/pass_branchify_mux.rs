@@ -2,7 +2,8 @@ use super::pass_manager::ExecutionUnitPass;
 use super::placement_analysis::{PlacementAnalysis, ValueId, ValueOrigin, ValueSafety, ValueUse};
 use super::shared::{def_reg, normalize_branch_condition};
 use crate::PassOptions;
-use crate::ir::cfg::SirCfg;
+use crate::ir::analysis::{visit_instruction_uses, visit_terminator_uses};
+use crate::ir::cfg::{SirCfg, SirDominance};
 use crate::ir::{
     BasicBlock, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIROffset, SIRTerminator,
@@ -126,6 +127,88 @@ struct LocatedInstruction {
     block: BlockId,
     index: usize,
     instruction: SIRInstruction<RegionedAbsoluteAddr>,
+}
+
+#[derive(Default)]
+struct CrossBlockBatch {
+    targets: HashSet<BlockId>,
+    sources: HashSet<BlockId>,
+    definitions: HashSet<(BlockId, usize)>,
+}
+
+impl CrossBlockBatch {
+    fn reserve<'a>(
+        &mut self,
+        target: BlockId,
+        definitions: impl Iterator<Item = &'a LocatedInstruction>,
+    ) -> bool {
+        if self.targets.contains(&target) || self.sources.contains(&target) {
+            return false;
+        }
+        let locations = definitions.map(located_instruction_key).collect::<Vec<_>>();
+        if locations.iter().any(|&(block, index)| {
+            self.targets.contains(&block) || self.definitions.contains(&(block, index))
+        }) {
+            return false;
+        }
+        self.targets.insert(target);
+        self.sources.extend(
+            locations
+                .iter()
+                .map(|&(block, _)| block)
+                .filter(|&block| block != target),
+        );
+        self.definitions.extend(locations);
+        true
+    }
+}
+
+/// Plans in a batch may remove distinct definitions from the same source
+/// block, but never split another plan's source or target. Prefix counts map
+/// their original indices to the indices after preceding removals. Storage
+/// is linear in the affected source instructions, not in the number of plans.
+#[derive(Default)]
+struct CrossBlockOffsets {
+    removed: HashMap<BlockId, Vec<usize>>,
+}
+
+impl CrossBlockOffsets {
+    fn remap<'a>(
+        &mut self,
+        eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+        target: BlockId,
+        definitions: impl Iterator<Item = &'a mut LocatedInstruction>,
+    ) {
+        let mut removed = Vec::new();
+        for definition in definitions {
+            if definition.block == target {
+                continue;
+            }
+            let counts = self
+                .removed
+                .entry(definition.block)
+                .or_insert_with(|| vec![0; eu.blocks[&definition.block].instructions.len() + 1]);
+            let original = definition.index;
+            let mut position = original;
+            while position != 0 {
+                definition.index -= counts[position];
+                position &= position - 1;
+            }
+            removed.push((definition.block, original));
+        }
+        // All definitions of this plan use the same pre-application indices.
+        for (block, original) in removed {
+            let counts = self
+                .removed
+                .get_mut(&block)
+                .expect("source has prefix counts");
+            let mut position = original + 1;
+            while position < counts.len() {
+                counts[position] += 1;
+                position += position.isolate_lowest_one();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -398,71 +481,82 @@ fn run_branchify_mux(
     // single-Mux motion below so later conditions and their pure compare
     // DAGs are evaluated only on the fall-through path.
     while enable_whole_function_rewrites
-        && let Some(plan) = find_cross_block_priority_chain_plan(eu, &use_counts)
+        && let Some(plans) = find_cross_block_priority_chain_plans(eu, &use_counts, true)
     {
-        if let Some(register) = trace_reg {
-            tracing::debug!(
-                "[branchify-trace] selected cross-block priority plan source=b{} first_mux={} muxes={} r{} uses={}",
-                plan.block_id.0,
-                plan.first_mux_idx,
-                plan.muxes.len(),
-                register.0,
-                use_counts.get(&register).copied().unwrap_or(0)
+        let mut offsets = CrossBlockOffsets::default();
+        for mut plan in plans {
+            offsets.remap(
+                eu,
+                plan.block_id,
+                plan.condition_defs
+                    .iter_mut()
+                    .flatten()
+                    .chain(plan.arm_defs.iter_mut().flatten()),
             );
-            for (kind, group, definitions) in plan
-                .condition_defs
-                .iter()
-                .enumerate()
-                .map(|(index, definitions)| ("condition", index, definitions))
-                .chain(
-                    plan.arm_defs
-                        .iter()
-                        .enumerate()
-                        .map(|(index, definitions)| ("arm", index, definitions)),
-                )
-            {
-                for definition in definitions {
-                    if def_reg(&definition.instruction) == Some(register)
-                        || inst_uses(&definition.instruction).contains(&register)
-                    {
-                        tracing::debug!(
-                            "[branchify-trace] plan {kind}[{group}] b{} i{}: {}",
-                            definition.block.0,
-                            definition.index,
-                            definition.instruction
-                        );
+            if let Some(register) = trace_reg {
+                tracing::debug!(
+                    "[branchify-trace] selected cross-block priority plan source=b{} first_mux={} muxes={} r{} uses={}",
+                    plan.block_id.0,
+                    plan.first_mux_idx,
+                    plan.muxes.len(),
+                    register.0,
+                    use_counts.get(&register).copied().unwrap_or(0)
+                );
+                for (kind, group, definitions) in plan
+                    .condition_defs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, definitions)| ("condition", index, definitions))
+                    .chain(
+                        plan.arm_defs
+                            .iter()
+                            .enumerate()
+                            .map(|(index, definitions)| ("arm", index, definitions)),
+                    )
+                {
+                    for definition in definitions {
+                        if def_reg(&definition.instruction) == Some(register)
+                            || inst_uses(&definition.instruction).contains(&register)
+                        {
+                            tracing::debug!(
+                                "[branchify-trace] plan {kind}[{group}] b{} i{}: {}",
+                                definition.block.0,
+                                definition.index,
+                                definition.instruction
+                            );
+                        }
                     }
                 }
+                for candidate in eu.blocks.values() {
+                    trace_reg_in_new_block(candidate, register);
+                }
             }
-            for candidate in eu.blocks.values() {
-                trace_reg_in_new_block(candidate, register);
+            let trace_plan = trace_reg.map(|register| {
+                (
+                    register,
+                    plan.block_id,
+                    plan.first_mux_idx,
+                    plan.muxes.len(),
+                )
+            });
+            apply_cross_block_priority_chain(eu, plan, &mut next_block_id, &mut reg_counter);
+            if let Some((register, block, first_mux, muxes)) = trace_plan
+                && let Err(error) = eu.verify_result()
+            {
+                tracing::debug!(
+                    "[branchify-trace] invalid cross-block priority plan source=b{} first_mux={} muxes={}: {error}",
+                    block.0,
+                    first_mux,
+                    muxes
+                );
+                for candidate in eu.blocks.values() {
+                    trace_reg_in_new_block(candidate, register);
+                }
+                panic!("cross-block priority rewrite produced invalid SIR");
             }
+            applied += 1;
+            cross_priority_applied += 1;
         }
-        let trace_plan = trace_reg.map(|register| {
-            (
-                register,
-                plan.block_id,
-                plan.first_mux_idx,
-                plan.muxes.len(),
-            )
-        });
-        apply_cross_block_priority_chain(eu, plan, &mut next_block_id, &mut reg_counter);
-        if let Some((register, block, first_mux, muxes)) = trace_plan
-            && let Err(error) = eu.verify_result()
-        {
-            tracing::debug!(
-                "[branchify-trace] invalid cross-block priority plan source=b{} first_mux={} muxes={}: {error}",
-                block.0,
-                first_mux,
-                muxes
-            );
-            for candidate in eu.blocks.values() {
-                trace_reg_in_new_block(candidate, register);
-            }
-            panic!("cross-block priority rewrite produced invalid SIR");
-        }
-        applied += 1;
-        cross_priority_applied += 1;
         use_counts = count_uses(eu);
     }
     verify_stage(eu, "cross-block priority chains");
@@ -486,11 +580,22 @@ fn run_branchify_mux(
     verify_stage(eu, "cross-block groups");
     report_stage("cross-block groups");
     while enable_whole_function_rewrites
-        && let Some(plan) = find_cross_block_branchify_plan(eu, &use_counts)
+        && let Some(plans) = find_cross_block_branchify_plans(eu, &use_counts, true)
     {
-        apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
-        applied += 1;
-        cross_mux_applied += 1;
+        let mut offsets = CrossBlockOffsets::default();
+        for mut plan in plans {
+            offsets.remap(
+                eu,
+                plan.block_id,
+                plan.condition_defs
+                    .iter_mut()
+                    .chain(&mut plan.true_defs)
+                    .chain(&mut plan.false_defs),
+            );
+            apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
+            applied += 1;
+            cross_mux_applied += 1;
+        }
         use_counts = count_uses(eu);
     }
     verify_stage(eu, "cross-block muxes");
@@ -1082,9 +1187,9 @@ fn collect_selector_motion_closure(
         result.remove(&index);
         return;
     }
-    for operand in inst_uses(instruction) {
+    visit_instruction_uses(instruction, |operand| {
         collect_selector_motion_closure(eu, def_locations, block_id, operand, removed, result);
-    }
+    });
 }
 
 fn selector_definition_uses_are_closed(
@@ -1978,17 +2083,24 @@ fn apply_coupled_state_update_batch(
     debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
-fn find_cross_block_priority_chain_plan(
+fn find_cross_block_priority_chain_plans(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
-) -> Option<CrossBlockPriorityChainPlan> {
-    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
+    multiple: bool,
+) -> Option<Vec<CrossBlockPriorityChainPlan>> {
+    let cfg = SirDominance::analyze(eu).ok()?;
     let locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
+    let mut selection = CrossBlockBatch::default();
+    let mut plans = Vec::new();
 
     for block_id in block_ids {
+        if selection.sources.contains(&block_id) {
+            continue;
+        }
         let block = &eu.blocks[&block_id];
+        let suffix_chunks = std::cell::OnceCell::new();
         for first_mux_idx in 0..block.instructions.len() {
             let SIRInstruction::Mux(dst, cond, true_val, false_val) =
                 &block.instructions[first_mux_idx]
@@ -2032,8 +2144,7 @@ fn find_cross_block_priority_chain_plan(
             let mut moved_locations = HashSet::default();
             let mut valid = true;
             for mux in &muxes {
-                let mut seen = HashSet::default();
-                let Some(defs) = collect_cross_arm_defs(
+                let Some(defs) = collect_cross_condition_defs(
                     eu,
                     &cfg,
                     use_counts,
@@ -2041,8 +2152,6 @@ fn find_cross_block_priority_chain_plan(
                     block_id,
                     first_mux_idx,
                     mux.cond,
-                    true,
-                    &mut seen,
                 ) else {
                     valid = false;
                     break;
@@ -2051,7 +2160,6 @@ fn find_cross_block_priority_chain_plan(
                 // not a closed rewrite.  If the root (or an intermediate)
                 // remains in the Mux block, it still uses that prefix before
                 // the newly created decision blocks execute.
-                let defs = closed_cross_block_condition_slice(defs, block_id);
                 for def in &defs {
                     if !moved_locations.insert((def.block, def.index)) {
                         valid = false;
@@ -2107,15 +2215,9 @@ fn find_cross_block_priority_chain_plan(
                 continue;
             }
 
-            let head = block
-                .instructions
-                .iter()
-                .enumerate()
-                .take(first_mux_idx)
-                .map(|(_, instruction)| instruction.clone())
-                .collect::<Vec<_>>();
+            let head = &block.instructions[..first_mux_idx];
             let outer_condition_defs = condition_defs.last().expect("chain has an outer condition");
-            if moved_defs_insertion_index(&head, outer_condition_defs).is_none() {
+            if moved_defs_insertion_index(head, outer_condition_defs).is_none() {
                 continue;
             }
 
@@ -2143,24 +2245,15 @@ fn find_cross_block_priority_chain_plan(
                     branchified_instruction_cost(&block.instructions[mux.mux_idx], &eu.register_map)
                 })
                 .sum::<u128>();
-            let suffix = block
-                .instructions
-                .iter()
-                .skip(muxes.last().expect("chain has a first mux").mux_idx + 1)
-                .cloned()
-                .collect::<Vec<_>>();
-            let live_through = block_live_ins(&suffix, &terminator_uses(&block.terminator));
             let chunks_for = |value: RegisterId| {
                 eu.register_map
                     .get(&value)
                     .map(|register| register.width().div_ceil(64).max(1))
                     .unwrap_or(1) as u128
             };
-            let live_through_cost = live_through
-                .into_iter()
-                .filter(|value| *value != muxes.last().expect("chain has a first mux").dst)
-                .map(chunks_for)
-                .sum::<u128>();
+            let live_through_cost = suffix_chunks
+                .get_or_init(|| mux_live_through_chunks(block, &eu.register_map))
+                [muxes.last().expect("chain has a first mux").mux_idx];
             let introduced_cost = (muxes.len() as u128)
                 .saturating_mul(BRANCH_CONTROL_COST)
                 .saturating_add(
@@ -2179,16 +2272,29 @@ fn find_cross_block_priority_chain_plan(
                 continue;
             }
 
-            return Some(CrossBlockPriorityChainPlan {
+            let plan = CrossBlockPriorityChainPlan {
                 block_id,
                 first_mux_idx,
                 muxes,
                 condition_defs,
                 arm_defs,
-            });
+            };
+            if selection.reserve(
+                block_id,
+                plan.condition_defs
+                    .iter()
+                    .flatten()
+                    .chain(plan.arm_defs.iter().flatten()),
+            ) {
+                plans.push(plan);
+                if !multiple {
+                    return Some(plans);
+                }
+                break;
+            }
         }
     }
-    None
+    (!plans.is_empty()).then_some(plans)
 }
 
 fn apply_cross_block_priority_chain(
@@ -2335,23 +2441,120 @@ fn apply_cross_block_priority_chain(
     );
 }
 
-fn find_cross_block_branchify_plan(
+// Summarize local single-use DAGs once. A cross-block leaf is relevant only
+// when the arm collector could move that leaf itself; loads and shared values
+// therefore stop propagation. Dominance is deliberately left to the existing
+// planner, making this a conservative rejection filter rather than a new
+// movement rule.
+fn movable_cross_block_inputs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
-) -> Option<CrossBlockBranchifyPlan> {
-    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+) -> HashSet<RegisterId> {
+    let mut cross_inputs = HashSet::default();
+    for block in eu.blocks.values() {
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            let Some(root) = def_reg(instruction) else {
+                continue;
+            };
+            if use_counts.get(&root).copied().unwrap_or(0) != 1
+                || !is_cross_block_sinkable_input(instruction)
+            {
+                continue;
+            }
+            let mut crosses = false;
+            visit_instruction_uses(instruction, |operand| {
+                let Some(&(source_block, source_index)) = locations.get(&operand) else {
+                    return;
+                };
+                if use_counts.get(&operand).copied().unwrap_or(0) != 1
+                    || !is_cross_block_sinkable_input(
+                        &eu.blocks[&source_block].instructions[source_index],
+                    )
+                {
+                    return;
+                }
+                crosses |= source_block != block.id
+                    || source_index >= index
+                    || cross_inputs.contains(&operand);
+            });
+            if crosses {
+                cross_inputs.insert(root);
+            }
+        }
+    }
+    cross_inputs
+}
+
+fn collect_cross_condition_defs(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirDominance,
+    use_counts: &HashMap<RegisterId, usize>,
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+    mux_block: BlockId,
+    mux_idx: usize,
+    root: RegisterId,
+) -> Option<Vec<LocatedInstruction>> {
+    if let Some(&(block, index)) = locations.get(&root)
+        && block == mux_block
+    {
+        // A movable local root necessarily appears in its collected slice,
+        // which the closure rule below discards in its entirety. A shared or
+        // immovable local root already produces an empty slice. Preserve the
+        // original availability rejection without walking either local DAG.
+        return (index < mux_idx && cfg.dominates(block, mux_block)).then(Vec::new);
+    }
+    let mut seen = HashSet::default();
+    collect_cross_arm_defs(
+        eu, cfg, use_counts, locations, mux_block, mux_idx, root, true, &mut seen,
+    )
+    .map(|defs| closed_cross_block_condition_slice(defs, mux_block))
+}
+
+fn find_cross_block_branchify_plans(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    use_counts: &HashMap<RegisterId, usize>,
+    multiple: bool,
+) -> Option<Vec<CrossBlockBranchifyPlan>> {
+    let cfg = SirDominance::analyze(eu).ok()?;
     let def_locations = instruction_def_locations(eu);
+    let cross_inputs = movable_cross_block_inputs(eu, use_counts, &def_locations);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
+    let mut selection = CrossBlockBatch::default();
+    let mut plans = Vec::new();
 
     for block_id in block_ids {
+        if selection.sources.contains(&block_id) {
+            continue;
+        }
         let block = &eu.blocks[&block_id];
+        let suffix_chunks = std::cell::OnceCell::new();
         for (mux_idx, inst) in block.instructions.iter().enumerate() {
             let SIRInstruction::Mux(dst, cond, true_val, false_val) = inst else {
                 continue;
             };
-            let mut condition_seen = HashSet::default();
-            let Some(condition_defs) = collect_cross_arm_defs(
+            let could_cross = |root: RegisterId| {
+                let Some(&(definition_block, index)) = def_locations.get(&root) else {
+                    return false;
+                };
+                use_counts.get(&root).copied().unwrap_or(0) == 1
+                    && is_cross_block_sinkable_input(
+                        &eu.blocks[&definition_block].instructions[index],
+                    )
+                    && (definition_block != block_id || cross_inputs.contains(&root))
+            };
+            // The later local planner owns these Muxes. Avoid repeatedly
+            // cloning their entire single-use DAG merely to rediscover that
+            // none of its definitions can move from another block.
+            let cross_condition = def_locations
+                .get(cond)
+                .is_some_and(|&(definition_block, _)| definition_block != block_id)
+                && could_cross(*cond);
+            if !cross_condition && !could_cross(*true_val) && !could_cross(*false_val) {
+                continue;
+            }
+            let Some(condition_defs) = collect_cross_condition_defs(
                 eu,
                 &cfg,
                 use_counts,
@@ -2359,15 +2562,12 @@ fn find_cross_block_branchify_plan(
                 block_id,
                 mux_idx,
                 *cond,
-                true,
-                &mut condition_seen,
             ) else {
                 continue;
             };
             // Do not sever a cross-block producer from a condition node that
             // remains in the Mux block.  Such a prefix is not independently
             // movable: the local node still executes before the new branch.
-            let condition_defs = closed_cross_block_condition_slice(condition_defs, block_id);
             if moved_defs_insertion_index(&block.instructions[..mux_idx], &condition_defs).is_none()
             {
                 continue;
@@ -2454,12 +2654,26 @@ fn find_cross_block_branchify_plan(
                 true_defs,
                 false_defs,
             };
-            if cross_block_branch_is_profitable(eu, &plan) {
-                return Some(plan);
+            let live_through_chunks = suffix_chunks
+                .get_or_init(|| mux_live_through_chunks(block, &eu.register_map))[mux_idx];
+            if cross_block_branch_is_profitable(eu, &plan, live_through_chunks)
+                && selection.reserve(
+                    block_id,
+                    plan.condition_defs
+                        .iter()
+                        .chain(&plan.true_defs)
+                        .chain(&plan.false_defs),
+                )
+            {
+                plans.push(plan);
+                if !multiple {
+                    return Some(plans);
+                }
+                break;
             }
         }
     }
-    None
+    (!plans.is_empty()).then_some(plans)
 }
 
 /// Return the only insertion point that keeps a moved condition DAG in SSA
@@ -2480,26 +2694,41 @@ fn moved_defs_insertion_index(
         return None;
     }
 
-    let first_use = head
-        .iter()
-        .position(|instruction| {
-            inst_uses(instruction)
-                .iter()
-                .any(|reg| moved_registers.contains(reg))
-        })
-        .unwrap_or(head.len());
-    let mut insertion = 0usize;
+    let mut external_operands = HashSet::default();
     for definition in moved {
-        for operand in inst_uses(&definition.instruction) {
-            if moved_registers.contains(&operand) {
-                continue;
+        visit_instruction_uses(&definition.instruction, |operand| {
+            if !moved_registers.contains(&operand) {
+                external_operands.insert(operand);
             }
-            if let Some(index) = head
-                .iter()
-                .position(|instruction| def_reg(instruction) == Some(operand))
-            {
-                insertion = insertion.max(index + 1);
+        });
+    }
+    if external_operands.is_empty() {
+        return Some(0);
+    }
+
+    // Scan the head once instead of restarting a definition search for every
+    // operand of a potentially large moved DAG. Removing each found operand
+    // also preserves the old first-definition behavior for malformed heads.
+    let mut first_use = head.len();
+    let mut insertion = 0usize;
+    for (index, instruction) in head.iter().enumerate() {
+        if first_use == head.len() {
+            visit_instruction_uses(instruction, |operand| {
+                if moved_registers.contains(&operand) {
+                    first_use = index;
+                }
+            });
+        }
+        if let Some(defined) = def_reg(instruction)
+            && external_operands.remove(&defined)
+        {
+            insertion = index + 1;
+            if insertion > first_use {
+                return None;
             }
+        }
+        if external_operands.is_empty() {
+            return Some(insertion);
         }
     }
     (insertion <= first_use).then_some(insertion)
@@ -2537,7 +2766,7 @@ fn closed_cross_block_condition_slice(
 fn find_cross_block_group_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Option<CrossBlockGroupBranchifyPlan> {
-    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
+    let cfg = SirDominance::analyze(eu).ok()?;
     let def_locations = instruction_def_locations(eu);
     let def_blocks = all_def_blocks(eu);
     let use_locations = register_use_locations(eu);
@@ -3529,7 +3758,7 @@ fn located_instruction_key(instruction: &LocatedInstruction) -> (BlockId, usize)
 
 fn collect_cross_group_defs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &SirCfg,
+    cfg: &SirDominance,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
     first_mux_idx: usize,
@@ -3537,7 +3766,7 @@ fn collect_cross_group_defs(
 ) -> Vec<LocatedInstruction> {
     fn visit(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        cfg: &SirCfg,
+        cfg: &SirDominance,
         locations: &HashMap<RegisterId, (BlockId, usize)>,
         mux_block: BlockId,
         first_mux_idx: usize,
@@ -3665,7 +3894,7 @@ fn filter_cross_group_defs(
 }
 
 fn cross_group_value_available(
-    cfg: &SirCfg,
+    cfg: &SirDominance,
     def_blocks: &HashMap<RegisterId, BlockId>,
     def_locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -3763,7 +3992,7 @@ fn cross_group_branch_is_profitable(
 /// as a live-in; SSA dominance guarantees that it is available at the Mux.
 fn collect_cross_arm_defs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &SirCfg,
+    cfg: &SirDominance,
     use_counts: &HashMap<RegisterId, usize>,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -3792,7 +4021,7 @@ fn collect_cross_arm_defs(
 // level repeatedly moves the dependencies of a long single-use chain.
 fn collect_cross_arm_defs_into(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &SirCfg,
+    cfg: &SirDominance,
     use_counts: &HashMap<RegisterId, usize>,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -3822,7 +4051,7 @@ fn collect_cross_arm_defs_into(
         return true;
     }
 
-    for operand in inst_uses(instruction) {
+    visit_instruction_uses(instruction, |operand| {
         let can_attempt_move =
             locations
                 .get(&operand)
@@ -3835,7 +4064,7 @@ fn collect_cross_arm_defs_into(
                 eu, cfg, use_counts, locations, mux_block, mux_idx, operand, false, seen, result,
             );
         }
-    }
+    });
     result.push(LocatedInstruction {
         block: block_id,
         index,
@@ -3859,6 +4088,7 @@ fn is_cross_block_sinkable_input(inst: &SIRInstruction<RegionedAbsoluteAddr>) ->
 fn cross_block_branch_is_profitable(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     plan: &CrossBlockBranchifyPlan,
+    live_through_chunks: u128,
 ) -> bool {
     let block = &eu.blocks[&plan.block_id];
     let true_arm_cost = plan
@@ -3871,16 +4101,6 @@ fn cross_block_branch_is_profitable(
         .iter()
         .map(|def| branchified_instruction_cost(&def.instruction, &eu.register_map))
         .sum::<u128>();
-    let suffix = block
-        .instructions
-        .iter()
-        .skip(plan.mux_idx + 1)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut live_through = block_live_ins(&suffix, &terminator_uses(&block.terminator));
-    live_through.retain(|value| *value != plan.dst);
-    live_through.sort_unstable();
-    live_through.dedup();
     let chunks_for = |value: RegisterId| {
         eu.register_map
             .get(&value)
@@ -3888,11 +4108,7 @@ fn cross_block_branch_is_profitable(
             .unwrap_or(1) as u128
     };
     let phi_copy_cost = chunks_for(plan.dst).saturating_mul(PHI_COPY_COST_PER_CHUNK);
-    let live_through_cost = live_through
-        .into_iter()
-        .map(chunks_for)
-        .sum::<u128>()
-        .saturating_mul(LIVE_THROUGH_COST_PER_CHUNK);
+    let live_through_cost = live_through_chunks.saturating_mul(LIVE_THROUGH_COST_PER_CHUNK);
     BranchProfitability {
         true_arm_cost,
         false_arm_cost,
@@ -6288,6 +6504,51 @@ fn collect_removed_defs_needed_by_head(
     restore
 }
 
+// A backward scan gives every Mux's exact suffix cost. The planners ask for
+// this table lazily per block, instead of cloning and scanning the same long
+// suffix for each candidate. The Mux result travels through its phi and is
+// charged separately, so exclude it from the live-through total.
+fn mux_live_through_chunks(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    register_map: &HashMap<RegisterId, crate::ir::RegisterType>,
+) -> Vec<u128> {
+    let chunks_for = |value: RegisterId| {
+        register_map
+            .get(&value)
+            .map(|register| register.width().div_ceil(64).max(1))
+            .unwrap_or(1) as u128
+    };
+    let mut live = HashSet::default();
+    let mut chunks = 0u128;
+    visit_terminator_uses(&block.terminator, |value| {
+        if live.insert(value) {
+            chunks += chunks_for(value);
+        }
+    });
+    let mut costs = vec![0; block.instructions.len()];
+    for (index, instruction) in block.instructions.iter().enumerate().rev() {
+        if let SIRInstruction::Mux(destination, ..) = instruction {
+            costs[index] = chunks
+                - if live.contains(destination) {
+                    chunks_for(*destination)
+                } else {
+                    0
+                };
+        }
+        if let Some(definition) = def_reg(instruction)
+            && live.remove(&definition)
+        {
+            chunks -= chunks_for(definition);
+        }
+        visit_instruction_uses(instruction, |value| {
+            if live.insert(value) {
+                chunks += chunks_for(value);
+            }
+        });
+    }
+    costs
+}
+
 fn block_live_ins(
     instructions: &[SIRInstruction<RegionedAbsoluteAddr>],
     terminator_args: &[RegisterId],
@@ -6297,11 +6558,11 @@ fn block_live_ins(
     let mut seen = HashSet::default();
 
     for inst in instructions {
-        for reg in inst_uses(inst) {
+        visit_instruction_uses(inst, |reg| {
             if !defs.contains(&reg) && seen.insert(reg) {
                 live_ins.push(reg);
             }
-        }
+        });
         if let Some(def) = def_reg(inst) {
             defs.insert(def);
         }
@@ -6561,21 +6822,13 @@ fn count_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, u
 }
 
 fn block_use_count(block: &BasicBlock<RegionedAbsoluteAddr>, reg: RegisterId) -> usize {
-    let inst_uses = block
-        .instructions
-        .iter()
-        .map(|inst| {
-            inst_uses(inst)
-                .into_iter()
-                .filter(|use_reg| *use_reg == reg)
-                .count()
-        })
-        .sum::<usize>();
-    let term_uses = terminator_uses(&block.terminator)
-        .into_iter()
-        .filter(|use_reg| *use_reg == reg)
-        .count();
-    inst_uses + term_uses
+    let mut count = 0;
+    let mut visit = |used| count += usize::from(used == reg);
+    for inst in &block.instructions {
+        visit_instruction_uses(inst, &mut visit);
+    }
+    visit_terminator_uses(&block.terminator, visit);
+    count
 }
 
 fn add_block_uses(
@@ -6583,13 +6836,13 @@ fn add_block_uses(
     block: &BasicBlock<RegionedAbsoluteAddr>,
 ) {
     for inst in &block.instructions {
-        for reg in inst_uses(inst) {
+        visit_instruction_uses(inst, |reg| {
             *counts.entry(reg).or_default() += 1;
-        }
+        });
     }
-    for reg in terminator_uses(&block.terminator) {
+    visit_terminator_uses(&block.terminator, |reg| {
         *counts.entry(reg).or_default() += 1;
-    }
+    });
 }
 
 fn remove_block_uses(
@@ -6597,13 +6850,9 @@ fn remove_block_uses(
     block: &BasicBlock<RegionedAbsoluteAddr>,
 ) {
     for inst in &block.instructions {
-        for reg in inst_uses(inst) {
-            decrement_use(counts, reg);
-        }
+        visit_instruction_uses(inst, |reg| decrement_use(counts, reg));
     }
-    for reg in terminator_uses(&block.terminator) {
-        decrement_use(counts, reg);
-    }
+    visit_terminator_uses(&block.terminator, |reg| decrement_use(counts, reg));
 }
 
 fn decrement_use(counts: &mut HashMap<RegisterId, usize>, reg: RegisterId) {
@@ -6763,7 +7012,7 @@ mod tests {
                 },
             ],
         );
-        let cfg = SirCfg::analyze_forward_structure(&eu).unwrap();
+        let cfg = SirDominance::analyze(&eu).unwrap();
         let mut counts = count_uses(&eu);
         let locations = instruction_def_locations(&eu);
         let mut seen = HashSet::default();
@@ -6876,6 +7125,378 @@ mod tests {
             entry_block_id: BlockId(0),
             blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
             register_map,
+        }
+    }
+
+    #[test]
+    fn batched_cross_block_plans_match_serial_rewrites_with_shared_sources() {
+        fn fixture(priority: bool, reverse_sources: bool) -> ExecutionUnit<RegionedAbsoluteAddr> {
+            let mut register = 2;
+            let mut booleans = vec![1];
+            let mut source = BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0), RegisterId(1)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+            };
+            let mut blocks = Vec::new();
+            for index in 1..=8 {
+                let target = if reverse_sources { 9 - index } else { index };
+                let mut arms = Vec::new();
+                for _ in 0..if priority { 3 } else { 2 } {
+                    let outputs = (register..register + 16).collect::<Vec<_>>();
+                    register += outputs.len();
+                    append_mul_chain(&mut source.instructions, 0, 0, &outputs);
+                    arms.push(RegisterId(*outputs.last().unwrap()));
+                }
+                let mut instructions = Vec::new();
+                let mut result = arms[0];
+                for &arm in &arms[1..] {
+                    let condition = RegisterId(register);
+                    booleans.push(register);
+                    register += 1;
+                    source.instructions.push(SIRInstruction::Unary(
+                        condition,
+                        crate::ir::UnaryOp::Ident,
+                        RegisterId(1),
+                    ));
+                    let next = RegisterId(register);
+                    register += 1;
+                    instructions.push(SIRInstruction::Mux(next, condition, arm, result));
+                    result = next;
+                }
+                instructions.push(store(target, result.0));
+                blocks.push(BasicBlock {
+                    id: BlockId(target),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: if target == 8 {
+                        SIRTerminator::Return
+                    } else {
+                        SIRTerminator::Jump(BlockId(target + 1), Vec::new())
+                    },
+                });
+            }
+            blocks.push(source);
+            cfg_unit(register, &booleans, blocks)
+        }
+        fn rewrite(
+            mut eu: ExecutionUnit<RegionedAbsoluteAddr>,
+            priority: bool,
+            multiple: bool,
+        ) -> (ExecutionUnit<RegionedAbsoluteAddr>, usize) {
+            let mut next_block = 9;
+            let mut next_register = eu.register_map.len();
+            let mut largest_batch = 0;
+            loop {
+                let counts = count_uses(&eu);
+                let mut offsets = CrossBlockOffsets::default();
+                if priority {
+                    let Some(plans) = find_cross_block_priority_chain_plans(&eu, &counts, multiple)
+                    else {
+                        break;
+                    };
+                    largest_batch = largest_batch.max(plans.len());
+                    for mut plan in plans {
+                        offsets.remap(
+                            &eu,
+                            plan.block_id,
+                            plan.condition_defs
+                                .iter_mut()
+                                .flatten()
+                                .chain(plan.arm_defs.iter_mut().flatten()),
+                        );
+                        apply_cross_block_priority_chain(
+                            &mut eu,
+                            plan,
+                            &mut next_block,
+                            &mut next_register,
+                        );
+                        assert_eq!(eu.verify_result(), Ok(()));
+                    }
+                } else {
+                    let Some(plans) = find_cross_block_branchify_plans(&eu, &counts, multiple)
+                    else {
+                        break;
+                    };
+                    largest_batch = largest_batch.max(plans.len());
+                    for mut plan in plans {
+                        offsets.remap(
+                            &eu,
+                            plan.block_id,
+                            plan.condition_defs
+                                .iter_mut()
+                                .chain(&mut plan.true_defs)
+                                .chain(&mut plan.false_defs),
+                        );
+                        apply_cross_block_branchify(
+                            &mut eu,
+                            plan,
+                            &mut next_block,
+                            &mut next_register,
+                        );
+                        assert_eq!(eu.verify_result(), Ok(()));
+                    }
+                }
+            }
+            (eu, largest_batch)
+        }
+        for priority in [false, true] {
+            for reverse_sources in [false, true] {
+                let original = fixture(priority, reverse_sources);
+                assert_eq!(original.verify_result(), Ok(()));
+                let (serial, _) = rewrite(original.clone(), priority, false);
+                let (batched, largest_batch) = rewrite(original, priority, true);
+                assert_eq!(largest_batch, 8);
+                assert_eq!(batched.blocks, serial.blocks);
+                assert_eq!(batched.register_map, serial.register_map);
+            }
+        }
+        let definition = |block, index| LocatedInstruction {
+            block: BlockId(block),
+            index,
+            instruction: imm(index, 1),
+        };
+        let mut selection = CrossBlockBatch::default();
+        assert!(selection.reserve(BlockId(1), [&definition(0, 0)].into_iter()));
+        assert!(!selection.reserve(BlockId(2), [&definition(0, 0)].into_iter()));
+        assert!(!selection.reserve(BlockId(0), [&definition(3, 0)].into_iter()));
+        assert!(!selection.reserve(BlockId(3), [&definition(1, 0)].into_iter()));
+        assert!(selection.reserve(BlockId(2), [&definition(0, 1)].into_iter()));
+    }
+
+    #[test]
+    fn mux_suffix_costs_match_independent_forward_live_in_scans() {
+        let register_map = (0..96)
+            .map(|value| {
+                (
+                    RegisterId(value),
+                    RegisterType::Bit {
+                        width: [0, 1, 64, 65, 129][value % 5],
+                        signed: false,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for seed in 0..32 {
+            let block = BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: (0..128)
+                    .map(|index| {
+                        if index % 3 == 0 {
+                            SIRInstruction::Mux(
+                                RegisterId(index % 80),
+                                RegisterId((index * 7 + seed) % 100),
+                                RegisterId((index * 13 + seed) % 100),
+                                RegisterId((index * 17 + seed) % 100),
+                            )
+                        } else {
+                            SIRInstruction::Unary(
+                                RegisterId(index % 80),
+                                crate::ir::UnaryOp::Ident,
+                                RegisterId((index * 19 + seed) % 100),
+                            )
+                        }
+                    })
+                    .collect(),
+                terminator: SIRTerminator::Jump(
+                    BlockId(1),
+                    vec![RegisterId(seed), RegisterId(seed), RegisterId(99)],
+                ),
+            };
+            let costs = mux_live_through_chunks(&block, &register_map);
+            for (index, instruction) in block.instructions.iter().enumerate() {
+                let SIRInstruction::Mux(destination, ..) = instruction else {
+                    continue;
+                };
+                let expected = block_live_ins(
+                    &block.instructions[index + 1..],
+                    &terminator_uses(&block.terminator),
+                )
+                .into_iter()
+                .filter(|value| value != destination)
+                .map(|value| {
+                    register_map
+                        .get(&value)
+                        .map(|register| register.width().div_ceil(64).max(1))
+                        .unwrap_or(1) as u128
+                })
+                .sum::<u128>();
+                assert_eq!(costs[index], expected, "seed={seed} instruction={index}");
+            }
+        }
+    }
+
+    #[test]
+    fn moved_condition_insertion_matches_operand_by_operand_search() {
+        fn reference(
+            head: &[SIRInstruction<RegionedAbsoluteAddr>],
+            moved: &[LocatedInstruction],
+        ) -> Option<usize> {
+            if moved.is_empty() {
+                return Some(head.len());
+            }
+            let registers = moved
+                .iter()
+                .filter_map(|definition| def_reg(&definition.instruction))
+                .collect::<HashSet<_>>();
+            if registers.len() != moved.len() {
+                return None;
+            }
+            let first_use = head
+                .iter()
+                .position(|instruction| {
+                    inst_uses(instruction)
+                        .iter()
+                        .any(|register| registers.contains(register))
+                })
+                .unwrap_or(head.len());
+            let insertion = moved
+                .iter()
+                .flat_map(|definition| inst_uses(&definition.instruction))
+                .filter(|operand| !registers.contains(operand))
+                .filter_map(|operand| {
+                    head.iter()
+                        .position(|instruction| def_reg(instruction) == Some(operand))
+                        .map(|index| index + 1)
+                })
+                .max()
+                .unwrap_or(0);
+            (insertion <= first_use).then_some(insertion)
+        }
+        for seed in 0..32 {
+            let head = (0..80)
+                .map(|index| {
+                    SIRInstruction::Unary(
+                        RegisterId(index % 64),
+                        crate::ir::UnaryOp::Ident,
+                        RegisterId((index * 19 + seed) % 160),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut moved = (0..32)
+                .map(|index| LocatedInstruction {
+                    block: BlockId(1),
+                    index,
+                    instruction: SIRInstruction::Unary(
+                        RegisterId(128 + index),
+                        crate::ir::UnaryOp::Ident,
+                        RegisterId((index * 17 + seed) % 160),
+                    ),
+                })
+                .collect::<Vec<_>>();
+            for head_len in [0, 1, 16, 80] {
+                for moved_len in [0, 1, 8, 32] {
+                    assert_eq!(
+                        moved_defs_insertion_index(&head[..head_len], &moved[..moved_len]),
+                        reference(&head[..head_len], &moved[..moved_len]),
+                        "seed={seed} head={head_len} moved={moved_len}"
+                    );
+                }
+            }
+            moved.push(moved[0].clone());
+            assert_eq!(moved_defs_insertion_index(&head, &moved), None);
+            assert_eq!(reference(&head, &moved), None);
+        }
+    }
+
+    #[test]
+    fn cross_block_rejection_filters_match_full_definition_walks() {
+        const PER_BLOCK: usize = 64;
+        let eu = cfg_unit(
+            4 * PER_BLOCK,
+            &[],
+            (0..4)
+                .map(|block| BasicBlock {
+                    id: BlockId(block),
+                    params: Vec::new(),
+                    instructions: (0..PER_BLOCK)
+                        .map(|index| {
+                            let root = block * PER_BLOCK + index;
+                            if root == 0 {
+                                imm(root, 1)
+                            } else if index > 0 && index % 11 == 0 {
+                                SIRInstruction::Load(
+                                    RegisterId(root),
+                                    addr(block),
+                                    SIROffset::Static(0),
+                                    64,
+                                )
+                            } else if index % 7 == 0 {
+                                SIRInstruction::Binary(
+                                    RegisterId(root),
+                                    RegisterId(root - 1),
+                                    crate::ir::BinaryOp::Add,
+                                    RegisterId(0),
+                                )
+                            } else {
+                                SIRInstruction::Unary(
+                                    RegisterId(root),
+                                    crate::ir::UnaryOp::Ident,
+                                    RegisterId(root - 1),
+                                )
+                            }
+                        })
+                        .collect(),
+                    terminator: if block < 3 {
+                        SIRTerminator::Jump(BlockId(block + 1), Vec::new())
+                    } else {
+                        SIRTerminator::Return
+                    },
+                })
+                .collect(),
+        );
+        let cfg = SirDominance::analyze(&eu).unwrap();
+        let counts = count_uses(&eu);
+        let locations = instruction_def_locations(&eu);
+        let cross_inputs = movable_cross_block_inputs(&eu, &counts, &locations);
+        for block in 0..4 {
+            for position in [0, PER_BLOCK / 2, PER_BLOCK] {
+                for root in (0..=4 * PER_BLOCK).map(RegisterId) {
+                    let full = collect_cross_arm_defs(
+                        &eu,
+                        &cfg,
+                        &counts,
+                        &locations,
+                        BlockId(block),
+                        position,
+                        root,
+                        true,
+                        &mut HashSet::default(),
+                    );
+                    if locations
+                        .get(&root)
+                        .is_some_and(|&(owner, _)| owner == BlockId(block))
+                        && full.as_ref().is_some_and(|defs| {
+                            defs.iter()
+                                .any(|definition| definition.block != BlockId(block))
+                        })
+                    {
+                        assert!(
+                            cross_inputs.contains(&root),
+                            "missing cross-block root {root:?}"
+                        );
+                    }
+                    let expected = full
+                        .map(|defs| closed_cross_block_condition_slice(defs, BlockId(block)))
+                        .map(|defs| defs.iter().map(located_instruction_key).collect::<Vec<_>>());
+                    let actual = collect_cross_condition_defs(
+                        &eu,
+                        &cfg,
+                        &counts,
+                        &locations,
+                        BlockId(block),
+                        position,
+                        root,
+                    )
+                    .map(|defs| defs.iter().map(located_instruction_key).collect::<Vec<_>>());
+                    assert_eq!(
+                        actual, expected,
+                        "block={block} position={position} root={root:?}"
+                    );
+                }
+            }
         }
     }
 
