@@ -943,6 +943,10 @@ pub enum MInst {
     Sar { dst: VReg, lhs: VReg, rhs: VReg },
 
     // ── ALU with immediate ─────────────────────────────────────
+    /// `dst = src * sign_extend(imm)` modulo 2^64.
+    MulImm { dst: VReg, src: VReg, imm: i32 },
+    /// `dst = zero_extend((src * imm)[31:0])`.
+    MulImm32 { dst: VReg, src: VReg, imm: i32 },
     /// dst = src & imm (full 64-bit word)
     AndImm { dst: VReg, src: VReg, imm: u64 },
     /// `dst = zero_extend((src & imm)[31:0])`
@@ -1318,6 +1322,8 @@ impl fmt::Display for MInst {
             MInst::ShrImm { dst, src, imm } => write!(f, "{dst} = shr {src}, {imm}"),
             MInst::ShlImm { dst, src, imm } => write!(f, "{dst} = shl {src}, {imm}"),
             MInst::SarImm { dst, src, imm } => write!(f, "{dst} = sar {src}, {imm}"),
+            MInst::MulImm { dst, src, imm } => write!(f, "{dst} = mul {src}, {imm}"),
+            MInst::MulImm32 { dst, src, imm } => write!(f, "{dst} = mul.w32 {src}, {imm}"),
             MInst::AddImm { dst, src, imm } => write!(f, "{dst} = add {src}, {imm}"),
             MInst::SubImm { dst, src, imm } => write!(f, "{dst} = sub {src}, {imm}"),
             MInst::Cmp {
@@ -1517,6 +1523,8 @@ impl MInst {
             | MInst::ShrImm { dst, .. }
             | MInst::ShlImm { dst, .. }
             | MInst::SarImm { dst, .. }
+            | MInst::MulImm { dst, .. }
+            | MInst::MulImm32 { dst, .. }
             | MInst::AddImm { dst, .. }
             | MInst::SubImm { dst, .. }
             | MInst::Cmp { dst, .. }
@@ -1602,6 +1610,8 @@ impl MInst {
             | MInst::ShrImm { dst, .. }
             | MInst::ShlImm { dst, .. }
             | MInst::SarImm { dst, .. }
+            | MInst::MulImm { dst, .. }
+            | MInst::MulImm32 { dst, .. }
             | MInst::AddImm { dst, .. }
             | MInst::SubImm { dst, .. }
             | MInst::Cmp { dst, .. }
@@ -1721,6 +1731,8 @@ impl MInst {
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. }
+            | MInst::MulImm { src, .. }
+            | MInst::MulImm32 { src, .. }
             | MInst::AddImm { src, .. }
             | MInst::SubImm { src, .. }
             | MInst::BitNot { src, .. }
@@ -1923,6 +1935,8 @@ impl MInst {
             | MInst::ShrImm { src, .. }
             | MInst::ShlImm { src, .. }
             | MInst::SarImm { src, .. }
+            | MInst::MulImm { src, .. }
+            | MInst::MulImm32 { src, .. }
             | MInst::AddImm { src, .. }
             | MInst::SubImm { src, .. }
             | MInst::BitNot { src, .. }

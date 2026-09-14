@@ -264,6 +264,10 @@ fn instruction_bits(inst: &MInst, facts: &[KnownBits]) -> KnownBits {
         }
         MInst::Mul { lhs, rhs, .. } => bits(*lhs).mul(bits(*rhs)),
         MInst::Mul32 { lhs, rhs, .. } => bits(*lhs).mul(bits(*rhs)).truncate(low32),
+        MInst::MulImm { src, imm, .. } => bits(*src).mul(KnownBits::constant(*imm as u64)),
+        MInst::MulImm32 { src, imm, .. } => bits(*src)
+            .mul(KnownBits::constant(*imm as u64))
+            .truncate(low32),
         MInst::ShrImm { src, imm, .. } => bits(*src).shr(*imm),
         MInst::ShlImm { src, imm, .. } => bits(*src).shl(*imm),
         MInst::Cmp { lhs, rhs, kind, .. } => bits(*lhs).compare(bits(*rhs), *kind),
@@ -402,9 +406,10 @@ pub(super) fn fold(func: &mut MFunction) {
         .iter()
         .flat_map(|block| &block.insts)
         .filter_map(|inst| match inst {
-            MInst::ShlImm { .. } | MInst::AddImm { .. } | MInst::Mul { .. } => {
-                Some((inst.def().unwrap(), inst.clone()))
-            }
+            MInst::ShlImm { .. }
+            | MInst::AddImm { .. }
+            | MInst::Mul { .. }
+            | MInst::MulImm { .. } => Some((inst.def().unwrap(), inst.clone())),
             _ => None,
         })
         .collect::<HashMap<_, _>>();
@@ -548,6 +553,19 @@ pub(super) fn fold(func: &mut MFunction) {
                             imm: ((*imm as u64) >> shift) as i32,
                         };
                     }
+                    Some(MInst::MulImm { src, imm, .. })
+                        if *imm > 0
+                            && (*imm as u64).trailing_zeros() >= u32::from(shift)
+                            && (!facts[src.0 as usize].zero)
+                                .checked_mul(*imm as u64)
+                                .is_some() =>
+                    {
+                        inst = MInst::MulImm {
+                            dst,
+                            src: *src,
+                            imm: ((*imm as u64) >> shift) as i32,
+                        };
+                    }
                     Some(MInst::Mul { lhs, rhs, .. }) => {
                         for (source, factor) in [(*lhs, *rhs), (*rhs, *lhs)] {
                             if let Some(factor) = facts[factor.0 as usize].value()
@@ -673,6 +691,14 @@ fn demand_masks(func: &MFunction, facts: &[KnownBits]) -> Vec<u64> {
                 // the originally constant output bit.
                 use_bits(lhs, mask & !right);
                 use_bits(rhs, mask & (!left | right));
+            }
+            MInst::MulImm { src, .. } | MInst::MulImm32 { src, .. } => {
+                let mask = if matches!(inst, MInst::MulImm32 { .. }) {
+                    mask & u64::from(u32::MAX)
+                } else {
+                    mask
+                };
+                use_bits(src, u64::MAX.checked_shr(mask.leading_zeros()).unwrap_or(0));
             }
             MInst::Add { lhs, rhs, .. }
             | MInst::Sub { lhs, rhs, .. }
@@ -902,6 +928,7 @@ pub(super) fn fold_demanded(func: &mut MFunction) {
                     MInst::Add { dst, lhs, rhs } => MInst::Add32 { dst, lhs, rhs },
                     MInst::Sub { dst, lhs, rhs } => MInst::Sub32 { dst, lhs, rhs },
                     MInst::Mul { dst, lhs, rhs } => MInst::Mul32 { dst, lhs, rhs },
+                    MInst::MulImm { dst, src, imm } => MInst::MulImm32 { dst, src, imm },
                     MInst::AndImm { dst, src, imm } => MInst::AndImm32 {
                         dst,
                         src,

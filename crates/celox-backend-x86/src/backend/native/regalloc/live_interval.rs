@@ -718,18 +718,34 @@ fn build_sparse_intervals<P: LivenessProgram + ?Sized>(
     facts: &ModelFacts,
 ) -> Result<Vec<Option<LiveInterval>>, LiveIntervalError> {
     let mut intervals = Vec::with_capacity(facts.definitions.len());
-    for_each_sparse_interval(program, cfg, slots, facts, |_, interval| {
-        intervals.push(interval)
+    for_each_sparse_interval(program, cfg, slots, facts, |index, interval| {
+        intervals.push(interval.map(|interval| {
+            let mut segments = interval.segments.to_vec();
+            segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
+            LiveInterval {
+                value: VReg(index as u32),
+                definition: interval.definition,
+                segments,
+                uses: facts.uses[index].clone().into(),
+            }
+        }));
     })?;
     Ok(intervals)
 }
 
-/// Stream exact intervals to a consumer that can discard each SSA version.
-/// Diagnostic callers retain the full model for independent verification.
-pub(super) fn visit_program_intervals<P: LivenessProgram + ?Sized>(
+/// Borrowed exact segments for one SSA version, in traversal order. A consumer
+/// that merges versions need not sort each version or retain its use list.
+pub(super) struct IntervalSegments<'a> {
+    pub definition: DefinitionSite,
+    pub segments: &'a [LiveSegment],
+}
+
+/// Reuse one segment buffer while streaming versions to the stack-home union.
+/// Diagnostic callers retain sorted intervals for independent verification.
+pub(super) fn visit_program_segments<P: LivenessProgram + ?Sized>(
     program: &P,
     cfg: &NormalizedCfg,
-    emit: impl FnMut(usize, Option<LiveInterval>),
+    emit: impl FnMut(usize, Option<IntervalSegments<'_>>),
 ) -> Result<(), LiveIntervalError> {
     check_model_shape(program, cfg)?;
     let slots = assign_slots(program)?;
@@ -742,12 +758,13 @@ fn for_each_sparse_interval<P: LivenessProgram + ?Sized>(
     cfg: &NormalizedCfg,
     slots: &[BlockSlots],
     facts: &ModelFacts,
-    mut emit: impl FnMut(usize, Option<LiveInterval>),
+    mut emit: impl FnMut(usize, Option<IntervalSegments<'_>>),
 ) -> Result<(), LiveIntervalError> {
     let dominators = DominatorIntervals::build(program, cfg)?;
     let mut ends = vec![None::<SlotIndex>; program.block_count()];
     let mut touched = Vec::new();
     let mut pending = Vec::new();
+    let mut segments = Vec::new();
     for (index, definition) in facts.definitions.iter().copied().enumerate() {
         let value = VReg(index as u32);
         let uses = &facts.uses[index];
@@ -825,26 +842,21 @@ fn for_each_sparse_interval<P: LivenessProgram + ?Sized>(
                 }
             }
         }
-        let mut segments = touched
-            .drain(..)
-            .map(|block| LiveSegment {
-                block: program.block_id(block),
-                start: if block == definition_block {
-                    definition.slot()
-                } else {
-                    slots[block].entry
-                },
-                end: ends[block].take().expect("visited block has a segment end"),
-            })
-            .collect::<Vec<_>>();
-        segments.sort_unstable_by_key(|segment| (segment.block, segment.start));
+        segments.clear();
+        segments.extend(touched.drain(..).map(|block| LiveSegment {
+            block: program.block_id(block),
+            start: if block == definition_block {
+                definition.slot()
+            } else {
+                slots[block].entry
+            },
+            end: ends[block].take().expect("visited block has a segment end"),
+        }));
         emit(
             index,
-            Some(LiveInterval {
-                value,
+            Some(IntervalSegments {
                 definition,
-                segments,
-                uses: uses.clone().into(),
+                segments: &segments,
             }),
         );
     }

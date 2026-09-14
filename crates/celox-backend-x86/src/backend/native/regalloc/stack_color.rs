@@ -20,8 +20,8 @@ use crate::{HashMap, HashSet};
 use super::cfg::NormalizedCfg;
 use super::interval_union::{AllocationBundleId, DynamicIntervalMatrix, IntervalUnionError};
 use super::live_interval::{
-    LiveInterval, LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram, SlotIndex,
-    analyze_program_with_verification, visit_program_intervals,
+    IntervalSegments, LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram, SlotIndex,
+    analyze_program_with_verification, visit_program_segments,
 };
 use super::spill_plan::{LogicalValue, PlannedEdgeOp, PlannedOp, SpillHome, SpillPlan};
 
@@ -777,7 +777,7 @@ fn append_home_interval(
     ranges: &mut BTreeMap<SpillHome, HomeSegments>,
     version: usize,
     home: SpillHome,
-    interval: Option<LiveInterval>,
+    interval: Option<IntervalSegments<'_>>,
 ) -> Result<(), StackColorError> {
     let interval = interval.ok_or_else(|| {
         StackColorError::new(
@@ -800,7 +800,7 @@ fn append_home_interval(
     range.pending += interval.segments.len();
     range
         .segments
-        .extend(interval.segments.into_iter().map(|segment| StoredSegment {
+        .extend(interval.segments.iter().map(|segment| StoredSegment {
             block: segment.block.0 as usize,
             start: segment.start.as_u64(),
             end: segment.end.as_u64(),
@@ -864,7 +864,15 @@ fn merge_home_segments(
         })
         .collect();
     for (version, (&home, interval)) in version_homes.iter().zip(intervals.intervals).enumerate() {
-        append_home_interval(&mut ranges, version, home, interval)?;
+        append_home_interval(
+            &mut ranges,
+            version,
+            home,
+            interval.as_ref().map(|interval| IntervalSegments {
+                definition: interval.definition,
+                segments: &interval.segments,
+            }),
+        )?;
     }
     finish_home_segments(ranges)
 }
@@ -889,7 +897,7 @@ fn stream_home_segments(
         })
         .collect();
     let mut error = None;
-    visit_program_intervals(program, cfg, |version, interval| {
+    visit_program_segments(program, cfg, |version, interval| {
         if error.is_none() {
             error = append_home_interval(
                 &mut ranges,
