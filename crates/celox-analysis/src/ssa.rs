@@ -160,7 +160,7 @@ where
 
     let mut definitions = BTreeMap::<V, BTreeSet<usize>>::new();
     let mut definition_ids = BTreeSet::<(V, D)>::new();
-    let mut upward_uses = BTreeSet::<(V, usize)>::new();
+    let mut upward_uses = BTreeMap::<V, Vec<usize>>::new();
     let mut usage_ids = BTreeSet::<U>::new();
     for (block, block_events) in events.iter().enumerate() {
         let mut locally_defined = BTreeSet::<V>::new();
@@ -175,7 +175,10 @@ where
                         ));
                     }
                     if !locally_defined.contains(&variable) {
-                        upward_uses.insert((variable, block));
+                        let uses = upward_uses.entry(variable).or_default();
+                        if uses.last().copied() != Some(block) {
+                            uses.push(block);
+                        }
                     }
                 }
                 Event::Definition {
@@ -196,41 +199,52 @@ where
         }
     }
 
-    let definition_pairs = definitions
-        .iter()
-        .flat_map(|(&variable, blocks)| blocks.iter().map(move |&block| (variable, block)))
-        .collect::<BTreeSet<_>>();
-    let mut live_in = upward_uses.clone();
-    let mut live_work = upward_uses.into_iter().collect::<VecDeque<_>>();
-    while let Some((variable, block)) = live_work.pop_front() {
-        for &predecessor in &cfg.predecessors()[block] {
-            let pair = (variable, predecessor);
-            if !definition_pairs.contains(&pair) && live_in.insert(pair) {
-                live_work.push_back(pair);
+    drop(definition_ids);
+    // Phi placement only needs the current variable's live-in set. Retaining
+    // all (variable, block) pairs makes large sparse memory partitions consume
+    // gigabytes. Reuse block marks without clearing every block per variable.
+    let mut defined = vec![0usize; blocks];
+    let mut live_in = vec![0usize; blocks];
+    let mut queued = vec![0usize; blocks];
+    let mut work = VecDeque::new();
+    let mut phi_pairs = BTreeSet::<(usize, V)>::new();
+    for (index, (&variable, original_definitions)) in definitions.iter().enumerate() {
+        let Some(uses) = upward_uses.get(&variable) else {
+            continue;
+        };
+        let generation = index + 1;
+        for &block in original_definitions {
+            defined[block] = generation;
+        }
+        for &block in uses {
+            live_in[block] = generation;
+            work.push_back(block);
+        }
+        while let Some(block) = work.pop_front() {
+            for &predecessor in &cfg.predecessors()[block] {
+                if defined[predecessor] != generation && live_in[predecessor] != generation {
+                    live_in[predecessor] = generation;
+                    work.push_back(predecessor);
+                }
             }
         }
-    }
-
-    let mut phi_pairs = BTreeSet::<(usize, V)>::new();
-    for (&variable, original_definitions) in &definitions {
-        let mut queued = original_definitions.clone();
-        let mut work = original_definitions
-            .iter()
-            .copied()
-            .collect::<VecDeque<_>>();
+        for &block in original_definitions {
+            queued[block] = generation;
+            work.push_back(block);
+        }
         while let Some(definition) = work.pop_front() {
             for frontier in cfg.dominance_frontier(definition) {
-                if !live_in.contains(&(variable, frontier))
-                    || !phi_pairs.insert((frontier, variable))
-                {
+                if live_in[frontier] != generation || !phi_pairs.insert((frontier, variable)) {
                     continue;
                 }
-                if queued.insert(frontier) {
+                if queued[frontier] != generation {
+                    queued[frontier] = generation;
                     work.push_back(frontier);
                 }
             }
         }
     }
+    drop((defined, live_in, queued, work, definitions, upward_uses));
 
     let mut phis = Vec::<Phi<V, D>>::with_capacity(phi_pairs.len());
     let mut phis_by_block = vec![Vec::<usize>::new(); blocks];
@@ -353,6 +367,149 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_variable_lifetimes_preserve_loop_and_local_definition_semantics() {
+        let cfg = ControlFlowGraph::analyze(
+            vec![vec![1, 2], vec![3], vec![3], vec![4, 5], vec![3], vec![]],
+            0,
+        )
+        .unwrap();
+        let (a, b, entry_only, carried) = (3usize, 17usize, usize::MAX - 1, usize::MAX);
+        let definition = |variable, definition| Event::Definition {
+            variable,
+            definition,
+        };
+        let usage = |variable, usage| Event::Use { variable, usage };
+        let events = vec![
+            vec![definition(a, 100), definition(b, 200)],
+            vec![definition(a, 101)],
+            vec![definition(b, 202)],
+            vec![
+                usage(a, 300),
+                usage(carried, 301),
+                definition(b, 203),
+                definition(carried, 303),
+            ],
+            vec![definition(a, 104), usage(b, 400)],
+            vec![usage(a, 500), usage(entry_only, 501), usage(carried, 502)],
+        ];
+        let ssa = build(&cfg, &events).unwrap();
+        assert_eq!(ssa.phis.len(), 2);
+        assert_eq!(ssa.phis[0].variable, a);
+        assert_eq!(ssa.phis[0].block, 3);
+        assert_eq!(
+            ssa.phis[0].inputs,
+            vec![
+                (
+                    1,
+                    Version::Definition {
+                        variable: a,
+                        definition: 101
+                    }
+                ),
+                (
+                    2,
+                    Version::Definition {
+                        variable: a,
+                        definition: 100
+                    }
+                ),
+                (
+                    4,
+                    Version::Definition {
+                        variable: a,
+                        definition: 104
+                    }
+                ),
+            ]
+        );
+        assert_eq!(ssa.phis[1].variable, carried);
+        assert_eq!(ssa.phis[1].block, 3);
+        assert_eq!(
+            ssa.phis[1].inputs,
+            vec![
+                (1, Version::Entry(carried)),
+                (2, Version::Entry(carried)),
+                (
+                    4,
+                    Version::Definition {
+                        variable: carried,
+                        definition: 303
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            ssa.uses[&300],
+            Version::Phi {
+                variable: a,
+                block: 3
+            }
+        );
+        assert_eq!(ssa.uses[&500], ssa.uses[&300]);
+        assert_eq!(
+            ssa.uses[&301],
+            Version::Phi {
+                variable: carried,
+                block: 3
+            }
+        );
+        assert_eq!(
+            ssa.uses[&400],
+            Version::Definition {
+                variable: b,
+                definition: 203
+            }
+        );
+        assert_eq!(ssa.uses[&501], Version::Entry(entry_only));
+        assert_eq!(
+            ssa.uses[&502],
+            Version::Definition {
+                variable: carried,
+                definition: 303
+            }
+        );
+    }
+
+    #[test]
+    fn many_live_variables_in_a_long_chain_reach_their_entry_definitions() {
+        let blocks = 256;
+        let cfg = ControlFlowGraph::analyze(
+            (0..blocks)
+                .map(|block| {
+                    if block + 1 == blocks {
+                        vec![]
+                    } else {
+                        vec![block + 1]
+                    }
+                })
+                .collect(),
+            0,
+        )
+        .unwrap();
+        let mut events = vec![Vec::new(); blocks];
+        for usage in 0..128 {
+            let variable = usize::MAX - usage;
+            events[0].push(Event::Definition {
+                variable,
+                definition: 0,
+            });
+            events[blocks - 1].push(Event::Use { variable, usage });
+        }
+        let ssa = build(&cfg, &events).unwrap();
+        assert!(ssa.phis.is_empty());
+        assert_eq!(ssa.uses.len(), 128);
+        for usage in 0..128 {
+            assert_eq!(
+                ssa.uses[&usage],
+                Version::Definition {
+                    variable: usize::MAX - usage,
+                    definition: 0
+                }
+            );
+        }
+    }
 
     #[test]
     fn branch_definitions_create_one_live_join_phi() {

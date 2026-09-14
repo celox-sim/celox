@@ -29,6 +29,33 @@ write_log() {
     printf '%s\n' "$@" >"$path"
 }
 
+# Quarantining the reproduced upstream defect must not disable future HEADs
+# or the annotated revision used by the expanded suite.
+[[ "$(heliodor_head_skip_reason 94e9c5821c24a8941c3ddc3b76daddc7124a855a)" == *initial_assign* ]] \
+    || fail "known invalid HEAD did not explain its exclusion"
+assert_eq "$(heliodor_head_skip_reason 6285682fa0a514077da9d17fee385c7841160025)" "" \
+    "annotated suite revision remains eligible"
+assert_eq "$(heliodor_head_skip_reason 1111111111111111111111111111111111111111)" "" \
+    "new upstream HEAD remains eligible"
+
+# HEAD compatibility configures a relative checkout path. Verify it remains
+# usable as --project after the runner changes into that checkout.
+bash -s -- "$TMP" "$ROOT" <<'RELATIVE_PROJECT_TEST'
+    set -euo pipefail
+    TMP="$1"
+    ROOT="$2"
+    cd "$TMP"
+    export HELIODOR_DIR="relative/source"
+    source "$ROOT/scripts/run-heliodor-bench.sh"
+    mkdir -p "$HELIODOR_DIR"
+    touch "$HELIODOR_DIR/Veryl.toml"
+    for limit in 0 10; do
+        run_in_heliodor "$limit" "$TMP/relative-project.log" \
+            bash -c 'test -f "$1/Veryl.toml"' bash "$HELIODOR_DIR" \
+            || exit 1
+    done
+RELATIVE_PROJECT_TEST
+
 pass_log="$TMP/pass.log"
 write_log "$pass_log" \
     'diagnostic before result' \

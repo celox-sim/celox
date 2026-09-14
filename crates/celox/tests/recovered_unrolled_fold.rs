@@ -37,6 +37,79 @@ const MULTI_STATE_LOOP: &str = r#"
 
 all_backends! {
 
+// Independent reductions without feedback retain their shared loop and
+// induction variable. Check both reductions across changing external inputs.
+fn recovered_independent_reductions_share_input_correctly(sim) {
+    @ignore_on(sv);
+    @setup { let code = r#"
+        module Top (
+            values: input logic<32>,
+            sum: output logic<8>,
+            parity: output logic<8>,
+        ) {
+            always_comb {
+                sum = 8'd0;
+                parity = 8'd0;
+                for h in 0..4 {
+                    sum = sum + values[h * 8+:8];
+                    parity = parity ^ values[h * 8+:8];
+                }
+            }
+        }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
+    let values = sim.signal("values");
+    let sum = sim.signal("sum");
+    let parity = sim.signal("parity");
+    for value in [0u32, 0x04030201, 0xffffffff, 0x12345678, 0x800100ff, 0] {
+        sim.modify(|io| io.set(values, value)).unwrap();
+        let bytes = value.to_le_bytes();
+        let expected_sum = bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+        let expected_parity = bytes.iter().fold(0u8, |acc, byte| acc ^ *byte);
+        assert_eq!(sim.get(sum), expected_sum.into());
+        assert_eq!(sim.get(parity), expected_parity.into());
+    }
+}
+
+// Read enables determine the write grant, but never read the granted writes.
+// Recovering both reductions as one atomic fold must not invent that feedback.
+fn recovered_mmio_read_write_dependencies_are_independent(sim) {
+    @ignore_on(sv);
+    @setup { let code = r#"
+        module Top (
+            reads : input logic<2>,
+            writes: input logic<2>,
+            read_enable : output logic,
+            write_enable: output logic,
+        ) {
+            var grant: logic;
+            var fired: logic<2>;
+            assign grant = !read_enable;
+            assign fired = if grant ? writes : 2'd0;
+            always_comb {
+                read_enable = 1'b0;
+                write_enable = 1'b0;
+                for h in 0..2 {
+                    if reads[h] { read_enable = 1'b1; }
+                    if fired[h] { write_enable = 1'b1; }
+                }
+            }
+        }
+    "#; }
+    @build SimulatorBuilder::new(code, "Top");
+    let reads = sim.signal("reads");
+    let writes = sim.signal("writes");
+    let read_enable = sim.signal("read_enable");
+    let write_enable = sim.signal("write_enable");
+    for r in [0u8, 1, 2, 3, 0] {
+        for w in [0u8, 1, 2, 3, 0] {
+            sim.modify(|io| { io.set(reads, r); io.set(writes, w); }).unwrap();
+            assert_eq!(sim.get(read_enable), ((r != 0) as u8).into());
+            assert_eq!(sim.get(write_enable), ((r == 0 && w != 0) as u8).into());
+        }
+    }
+}
+
 fn recovered_unrolled_store_forward_selects_older_entry(sim) {
     @ignore_on(sv);
     @setup { let code = r#"

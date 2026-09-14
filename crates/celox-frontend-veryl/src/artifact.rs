@@ -293,6 +293,7 @@ pub(crate) fn project_module_with_ids(
     let mut source_variables = ir.variables.iter().collect::<Vec<_>>();
     source_variables.sort_unstable_by_key(|(id, _)| **id);
 
+    let mut source_texts = HashMap::default();
     let variables = source_variables
         .into_iter()
         .map(|(id, variable)| {
@@ -329,7 +330,12 @@ pub(crate) fn project_module_with_ids(
                     packed_dims,
                     source: Some(celox_frontend_core::SourceLocation {
                         path: variable.token.beg.source.to_string(),
-                        text: variable.token.beg.source.get_text(),
+                        text: source_texts
+                            .entry(variable.token.beg.source)
+                            .or_insert_with(|| {
+                                std::sync::Arc::<str>::from(variable.token.beg.source.get_text())
+                            })
+                            .clone(),
                         span: (&variable.token).into(),
                     }),
                     module_affiliated: variable.affiliation == Affiliation::Module,
@@ -487,5 +493,50 @@ mod tests {
     fn enum_state_kind_follows_its_backing_type() {
         assert!(is_4state(&enum_with_backing(TypeKind::Logic)));
         assert!(!is_4state(&enum_with_backing(TypeKind::Bit)));
+    }
+}
+
+#[cfg(test)]
+mod source_location_tests {
+    use super::*;
+    use veryl_analyzer::{Analyzer, Context};
+    use veryl_parser::{Parser, resource_table};
+
+    #[test]
+    fn projected_locations_share_file_contents_and_preserve_spans() {
+        let code = "module Top (a: input logic, b: output logic) { assign b = a; }\n";
+        let metadata = veryl_metadata::Metadata::create_default("prj").unwrap();
+        let parser = Parser::parse(code, &"shared.veryl").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        assert!(analyzer.analyze_pass1("prj", &parser.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        let mut ir = veryl_analyzer::ir::Ir::default();
+        let mut context = Context::default();
+        assert!(
+            analyzer
+                .analyze_pass2(&parser.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+        let top = resource_table::insert_str("Top");
+        let rtl = crate::parse_ir(&ir, &BuildConfig::default(), &top).unwrap();
+        let module = &rtl.symbolic.modules[&rtl.symbolic.root_id];
+        let locations = module
+            .variables
+            .values()
+            .filter_map(|v| v.source.as_ref())
+            .collect::<Vec<_>>();
+        assert!(locations.len() >= 2);
+        for location in &locations {
+            assert_eq!(location.text.as_ref(), code);
+            assert!(std::sync::Arc::ptr_eq(&locations[0].text, &location.text));
+            let cloned = (**location).clone();
+            assert!(std::sync::Arc::ptr_eq(&location.text, &cloned.text));
+        }
+        assert!(
+            locations
+                .iter()
+                .any(|location| location.span != locations[0].span)
+        );
     }
 }

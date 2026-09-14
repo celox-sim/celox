@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "celox"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
@@ -459,7 +459,7 @@ dependencies = [
  "tempfile",
  "test-case",
  "thiserror 2.0.20",
- "toml 1.1.5+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
  "vcd",
  "veryl-analyzer",
@@ -475,14 +475,14 @@ dependencies = [
 
 [[package]]
 name = "celox-analysis"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-arm64"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -499,14 +499,14 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-common"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-cranelift"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-design",
  "celox-sir",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-wasm"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-backend-cranelift",
  "celox-design",
@@ -532,13 +532,13 @@ dependencies = [
  "celox-state-layout",
  "fxhash",
  "num-bigint",
- "wasm-encoder 0.258.0",
+ "wasm-encoder 0.259.0",
  "wasmtime",
 ]
 
 [[package]]
 name = "celox-backend-x86"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -557,13 +557,14 @@ dependencies = [
 
 [[package]]
 name = "celox-bench"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox",
  "clap",
  "libc",
  "tempfile",
  "thiserror 2.0.20",
+ "tracing-subscriber",
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
@@ -572,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench-sv"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "veryl-analyzer",
  "veryl-emitter",
@@ -583,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "celox-design"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -592,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "celox-example-my-frontend-napi"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-frontend-sdk",
  "celox-napi",
@@ -603,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-core"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-design",
  "celox-frontend-sdk",
@@ -619,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sdk"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -630,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sv"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-design",
  "celox-frontend-core",
@@ -644,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-veryl"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -666,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "celox-macros"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
  "insta",
@@ -682,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "celox-napi"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox",
  "celox-design",
@@ -696,7 +697,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "toml 1.1.5+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
@@ -705,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "celox-runtime"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -721,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -733,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir-opt"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
@@ -750,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "celox-slt"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -766,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "celox-state-layout"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-design",
  "fxhash",
@@ -775,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sv-analyzer"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
  "miette",
@@ -786,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "celox-testbench"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox-design",
  "num-bigint",
@@ -796,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "celox-ts-gen"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "fxhash",
  "insta",
@@ -809,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "celox-vpi"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox",
  "clap",
@@ -821,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "celox-wasm"
-version = "0.4.8"
+version = "0.6.0"
 dependencies = [
  "celox",
  "console_error_panic_hook",
@@ -2558,6 +2559,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3707,6 +3717,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4121,6 +4140,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread_local"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4157,9 +4185,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.5+spec-1.1.0"
+version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -4244,6 +4272,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+dependencies = [
+ "matchers",
+ "once_cell",
+ "regex-automata",
+ "sharded-slab",
+ "thread_local",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]
@@ -4415,7 +4458,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 2.0.20",
- "toml 1.1.5+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "vcd",
  "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=86e4bdaa355e1170a65d60085604a7a8a2fc58f1)",
  "veryl-metadata",
@@ -4463,7 +4506,7 @@ dependencies = [
  "serde_regex",
  "spdx",
  "thiserror 2.0.20",
- "toml 1.1.5+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "url",
  "uuid",
  "veryl-component-sys 0.1.1 (git+https://github.com/veryl-lang/veryl.git?rev=86e4bdaa355e1170a65d60085604a7a8a2fc58f1)",
@@ -4536,7 +4579,7 @@ dependencies = [
  "smallvec",
  "target-lexicon",
  "thiserror 2.0.20",
- "toml 1.1.5+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "twox-hash",
  "vcd",
  "veryl-analyzer",
@@ -4694,12 +4737,12 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.258.0"
+version = "0.259.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e974fe6821a8cf64575d51ea2194e2c8f77e7b66e9afe7419ce8a97f9ee0d251"
+checksum = "b1d0246511d901aacf25d2dc9111f0054947de5e093fe662099e709ff7530dc3"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.258.0",
+ "wasmparser 0.259.0",
 ]
 
 [[package]]
@@ -4740,9 +4783,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.258.0"
+version = "0.259.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9a61719f93a87b16d325921e251800c4833f8fab50fa21c7de73aed50086313"
+checksum = "0f7c12eac7bb587801590f6a67ff0bc84d0748513864b71108e4b311cc3df694"
 dependencies = [
  "bitflags 2.13.0",
  "indexmap",

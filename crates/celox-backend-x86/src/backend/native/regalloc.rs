@@ -346,6 +346,10 @@ fn run_regalloc_in_place(
         func.verify_result()
             .map_err(|error| RegallocError::mir("input MIR verification", error))?;
     }
+    // Edge splitting can nearly double the block count. Classify the original
+    // MIR so medium-size functions do not pay for global allocator trimming.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let release_unused_pages = func.blocks.len() >= 60_000;
     let cfg_start = timing.then(crate::timing::now);
     let normalized_cfg =
         cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
@@ -418,6 +422,15 @@ fn run_regalloc_in_place(
         );
     }
     checkpoint()?;
+    // Instruction selection and MIR optimization have dropped their temporary
+    // maps. Return unused glibc pages before building the large CFG analyses,
+    // rather than retaining both phases' high-water marks in resident memory.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if release_unused_pages {
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
     let next_use_start = timing.then(crate::timing::now);
     let next_use = next_use::analyze(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use analysis", error))?;
@@ -444,8 +457,8 @@ fn run_regalloc_in_place(
     let allocation = ssa::allocate(
         func,
         &normalized_cfg,
-        &next_use,
-        &planning_recipes,
+        next_use,
+        planning_recipes,
         &allocation_constraints,
         trace,
         timing,

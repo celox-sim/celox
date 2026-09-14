@@ -45,9 +45,18 @@ pub(in crate::optimizer) fn predicate_facts(
         };
         let true_index = cfg.block_index(true_block.0).unwrap();
         let false_index = cfg.block_index(false_block.0).unwrap();
-        let fact = if cfg.dominators.dominates(true_index, block) {
+        // A successor dominating this block does not prove which edge was
+        // taken: the other arm may join that same successor. Only infer an
+        // outcome when the successor can be entered through this edge alone.
+        // Reject entry/backedge and coincident-target cases conservatively.
+        let exclusive_edge = |successor: usize| {
+            successor != 0
+                && true_index != false_index
+                && cfg.predecessors[successor].as_slice() == [parent]
+        };
+        let fact = if exclusive_edge(true_index) && cfg.dominators.dominates(true_index, block) {
             Some((*cond, true))
-        } else if cfg.dominators.dominates(false_index, block) {
+        } else if exclusive_edge(false_index) && cfg.dominators.dominates(false_index, block) {
             Some((*cond, false))
         } else {
             None

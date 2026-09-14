@@ -18,6 +18,7 @@ celox           = { path = "../celox" }
 clap            = { workspace = true }
 libc            = { workspace = true }
 thiserror       = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 veryl-analyzer  = { workspace = true }
 veryl-metadata  = { workspace = true }
 veryl-parser    = { workspace = true }
