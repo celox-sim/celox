@@ -518,32 +518,50 @@ fn planned_phi_relations(
             }
         }
     }
+    if rows.is_empty() {
+        return Vec::new();
+    }
     let mut ordered_phis = Vec::new();
-    for (home, (definitions, upward_uses)) in rows {
-        let definitions = definitions.into_iter().collect::<HashSet<_>>();
-        let mut live_in = upward_uses.iter().copied().collect::<HashSet<_>>();
-        let mut live_work = VecDeque::from(upward_uses);
+    // Epochs keep scratch storage proportional to the CFG and reuse it across
+    // homes. Unchanged block membership needs no hashing or per-home clearing.
+    let mut defined = vec![0usize; events.len()];
+    let mut live_in = vec![0usize; events.len()];
+    let mut queued = vec![0usize; events.len()];
+    let mut phis = vec![0usize; events.len()];
+    let mut live_work = VecDeque::new();
+    let mut phi_work = Vec::new();
+    for (index, (home, (definitions, upward_uses))) in rows.into_iter().enumerate() {
+        let epoch = index + 1;
+        for block in definitions {
+            defined[block] = epoch;
+            queued[block] = epoch;
+            phi_work.push(block);
+        }
+        for block in upward_uses {
+            live_in[block] = epoch;
+            live_work.push_back(block);
+        }
         while let Some(block) = live_work.pop_front() {
             for &predecessor in &cfg.predecessors[block] {
-                if !definitions.contains(&predecessor) && live_in.insert(predecessor) {
+                if defined[predecessor] != epoch && live_in[predecessor] != epoch {
+                    live_in[predecessor] = epoch;
                     live_work.push_back(predecessor);
                 }
             }
         }
-        let mut phis = HashSet::default();
-        let mut queued = definitions.clone();
-        let mut phi_work = definitions.into_iter().collect::<Vec<_>>();
         while let Some(block) = phi_work.pop() {
             for &frontier in &cfg.dominance_frontier[block] {
-                if frontier == 0 || !live_in.contains(&frontier) || !phis.insert(frontier) {
+                if frontier == 0 || live_in[frontier] != epoch || phis[frontier] == epoch {
                     continue;
                 }
-                if queued.insert(frontier) {
+                phis[frontier] = epoch;
+                ordered_phis.push((home, frontier));
+                if queued[frontier] != epoch {
+                    queued[frontier] = epoch;
                     phi_work.push(frontier);
                 }
             }
         }
-        ordered_phis.extend(phis.into_iter().map(|block| (home, block)));
     }
     ordered_phis.sort_unstable_by_key(|(home, block)| (*block, *home));
     ordered_phis
@@ -1341,6 +1359,62 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn reused_phi_scratch_matches_global_dataflow_on_permuted_loops() {
+        for seed in 0..8usize {
+            let mut values = VRegAllocator::new();
+            let condition = values.alloc();
+            let mut func = MFunction::new(values, vec![SpillDesc::transient()]);
+            let id = |index: usize| BlockId(((index * 17) % 64 * 13 + 7) as u32);
+            for index in 0..64 {
+                let mut block = MBlock::new(id(index));
+                if index == 0 {
+                    block.push(MInst::LoadImm {
+                        dst: condition,
+                        value: 1,
+                    });
+                }
+                if index == 63 {
+                    block.push(MInst::Return);
+                } else {
+                    block.push(MInst::Branch {
+                        cond: condition,
+                        true_bb: id(index + 1),
+                        false_bb: id(1 + (index * 7 + seed) % 63),
+                    });
+                }
+                func.blocks.push(block);
+            }
+            let cfg = cfg::normalize(&mut func).unwrap();
+            let mut events = vec![Vec::new(); func.blocks.len()];
+            for (block, row) in events.iter_mut().enumerate() {
+                for home in 0..16usize {
+                    let kinds: &[PlannedStackEventKind] =
+                        match (block * 17 + home * 31 + seed * 73) % 13 {
+                            0..=2 => &[],
+                            3..=5 => &[PlannedStackEventKind::Store],
+                            6..=8 => &[PlannedStackEventKind::Reload],
+                            _ => &[PlannedStackEventKind::Reload, PlannedStackEventKind::Store],
+                        };
+                    for &kind in kinds {
+                        row.push(PlannedStackEvent {
+                            instruction: row.len(),
+                            sequence: row.len(),
+                            home: SpillHome(home as u32 * 100001),
+                            kind,
+                            definition: None,
+                            reaching: None,
+                        });
+                    }
+                }
+            }
+            assert_eq!(
+                planned_phi_relations(&events, &cfg),
+                reference_phi_relations(&events, &cfg)
+            );
+        }
+    }
+
     #[test]
     fn production_sequential_homes_reuse_one_slot() {
         let mut source = function(0, vec![MInst::Return]);
