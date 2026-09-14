@@ -717,6 +717,32 @@ where
         .collect())
 }
 
+/// Group bit ranges by destination object for overlap probes.
+///
+/// Overlap tests pair a read with the writes of the same object, or a write
+/// with the reads of the same object. Indexing one side by object id lets the
+/// probe scan only atoms that share the object instead of the whole access
+/// list, which keeps the FF/comb scheduling passes from nesting linearly.
+fn index_accesses<'a, Addr: Copy + Eq + Hash + 'a>(
+    accesses: impl IntoIterator<Item = &'a VarAtomBase<Addr>>,
+) -> HashMap<Addr, Vec<BitAccess>> {
+    let mut index = HashMap::<Addr, Vec<BitAccess>>::default();
+    for access in accesses {
+        index.entry(access.id).or_default().push(access.access);
+    }
+    index
+}
+
+/// Returns true when any indexed range overlaps `access`.
+fn indexed_overlaps<Addr: Eq + Hash>(
+    index: &HashMap<Addr, Vec<BitAccess>>,
+    access: &VarAtomBase<Addr>,
+) -> bool {
+    index
+        .get(&access.id)
+        .is_some_and(|ranges| ranges.iter().any(|range| range.overlaps(&access.access)))
+}
+
 pub(crate) fn plan_ff_comb_schedule<Addr>(
     input: &[LogicPath<Addr>],
     ff: &[FfAccessSummary<Addr>],
@@ -782,22 +808,24 @@ where
         }
     }
 
+    // Index each summary's writes by object once; both loops below probe the
+    // same write set repeatedly.
+    let ff_writes = ff
+        .iter()
+        .map(|summary| index_accesses(&summary.writes))
+        .collect::<Vec<_>>();
+
     let mut comb_before_direct_write = vec![Vec::new(); ff.len()];
     for (path_index, path) in input.iter().enumerate() {
         if !required_comb[path_index] {
             continue;
         }
-        for (ff_index, summary) in ff.iter().enumerate() {
+        for (ff_index, writes) in ff_writes.iter().enumerate() {
             if path
                 .sources
                 .iter()
                 .chain(&path.previous_sources)
-                .any(|read| {
-                    summary
-                        .writes
-                        .iter()
-                        .any(|write| read.id == write.id && read.access.overlaps(&write.access))
-                })
+                .any(|read| indexed_overlaps(writes, read))
             {
                 comb_before_direct_write[ff_index].push(path_index);
             }
@@ -805,15 +833,13 @@ where
     }
 
     let mut ff_before_direct_write = vec![Vec::new(); ff.len()];
-    for (writer, write_summary) in ff.iter().enumerate() {
+    for (writer, writes) in ff_writes.iter().enumerate() {
         for (reader, read_summary) in ff.iter().enumerate() {
             if writer != reader
-                && read_summary.reads.iter().any(|read| {
-                    write_summary
-                        .writes
-                        .iter()
-                        .any(|write| read.id == write.id && read.access.overlaps(&write.access))
-                })
+                && read_summary
+                    .reads
+                    .iter()
+                    .any(|read| indexed_overlaps(writes, read))
             {
                 ff_before_direct_write[writer].push(reader);
             }
@@ -3014,6 +3040,27 @@ fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
     var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
 ) -> Vec<Vec<VarAtomBase<Addr>>> {
+    // Index reads by object so the overlap probes below only scan atoms that
+    // share the object under test. Only the comb readers the plan actually
+    // consults need an index; every other path would pay for an unused map.
+    let mut consulted_comb_readers = vec![false; input.len()];
+    for readers in &plan.comb_before_direct_write {
+        for &reader in readers {
+            consulted_comb_readers[reader] = true;
+        }
+    }
+    let comb_reads = input
+        .iter()
+        .zip(&consulted_comb_readers)
+        .map(|(path, &consulted)| {
+            consulted.then(|| index_accesses(path.sources.iter().chain(&path.previous_sources)))
+        })
+        .collect::<Vec<_>>();
+    let ff_reads = summaries
+        .iter()
+        .map(|summary| index_accesses(&summary.reads))
+        .collect::<Vec<_>>();
+
     summaries
         .iter()
         .enumerate()
@@ -3039,11 +3086,7 @@ fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
                     // before only one of its own Stores. Keep just the
                     // overlapping range staged so lowering reads pre-edge
                     // state without penalizing disjoint writes.
-                    if summary
-                        .reads
-                        .iter()
-                        .any(|read| read.id == write.id && read.access.overlaps(&write.access))
-                    {
+                    if indexed_overlaps(&ff_reads[writer], write) {
                         return false;
                     }
 
@@ -3051,22 +3094,14 @@ fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
                     let comb_readers_proven = plan.comb_before_direct_write[writer]
                         .iter()
                         .filter(|&&reader| {
-                            input[reader]
-                                .sources
-                                .iter()
-                                .chain(&input[reader].previous_sources)
-                                .any(|read| {
-                                    read.id == write.id && read.access.overlaps(&write.access)
-                                })
+                            comb_reads[reader]
+                                .as_ref()
+                                .is_some_and(|reads| indexed_overlaps(reads, write))
                         })
                         .all(|&reader| retained.contains(&(reader, writer_node)));
                     let ff_readers_proven = plan.ff_before_direct_write[writer]
                         .iter()
-                        .filter(|&&reader| {
-                            summaries[reader].reads.iter().any(|read| {
-                                read.id == write.id && read.access.overlaps(&write.access)
-                            })
-                        })
+                        .filter(|&&reader| indexed_overlaps(&ff_reads[reader], write))
                         .all(|&reader| retained.contains(&(ff_node_base + reader, writer_node)));
                     comb_readers_proven && ff_readers_proven
                 })
@@ -3965,8 +4000,8 @@ mod tests {
         ExactFoldGroup, ExactIndexedLoadKey, FfAccessSummary, FoldGroupReadFacts,
         NormalizedIndexExpr, add_acyclic_ff_write_order_edges, best_weighted_fold_family,
         build_fold_group_schedule_index, build_logic_path_memory_ssa, collect_node_input_deps,
-        direct_ff_write_ranges, plan_ff_comb_schedule, prepare_atomic_fold_group_results, sort,
-        stable_topological_sccs,
+        direct_ff_write_ranges, index_accesses, indexed_overlaps, plan_ff_comb_schedule,
+        prepare_atomic_fold_group_results, sort, stable_topological_sccs,
     };
     use crate::{HashMap, HashSet};
     use crate::{
@@ -4012,6 +4047,40 @@ mod tests {
             stable_topological_sccs(unordered, &adj, &[Some(0), Some(0), Some(1)]).unwrap();
 
         assert_eq!(ordered, vec![vec![0], vec![2], vec![1]]);
+    }
+
+    #[test]
+    fn id_indexed_overlap_probes_match_a_naive_scan() {
+        // The scheduling passes index one side of each overlap test by object
+        // id. A probe must agree with scanning the whole access list, including
+        // when objects are interleaved or a probe shares no object with it.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..256 {
+            let accesses = (0..(next() % 12) as usize)
+                .map(|_| {
+                    let lsb = (next() % 32) as usize;
+                    VarAtomBase::new((next() % 5) as u32, lsb, lsb + (next() % 8) as usize)
+                })
+                .collect::<Vec<_>>();
+            let probe_lsb = (next() % 32) as usize;
+            let probe = VarAtomBase::new(
+                (next() % 5) as u32,
+                probe_lsb,
+                probe_lsb + (next() % 8) as usize,
+            );
+
+            let index = index_accesses(&accesses);
+            let naive = accesses
+                .iter()
+                .any(|access| access.id == probe.id && access.access.overlaps(&probe.access));
+            assert_eq!(indexed_overlaps(&index, &probe), naive);
+        }
     }
 
     fn simple_path(

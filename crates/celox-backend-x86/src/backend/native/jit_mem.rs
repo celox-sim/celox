@@ -67,6 +67,14 @@ impl JitCode {
     ) -> Result<Self, std::io::Error> {
         // Allocate writable memory, copy code, then make executable
         let mut mmap = MmapMut::map_anon(code.len().max(1))?;
+        #[cfg(target_os = "linux")]
+        if code.len() >= 2 * 1024 * 1024 {
+            // Advise before touching the pages so large generated functions can
+            // use transparent huge pages and reduce instruction-TLB pressure.
+            // Keep the mapping's exact size; unsupported or unavailable huge
+            // pages fall back to the normal anonymous mapping.
+            let _ = mmap.advise(memmap2::Advice::HugePage);
+        }
         mmap[..code.len()].copy_from_slice(code);
         let mmap = mmap.make_exec()?;
 
@@ -176,4 +184,29 @@ fn sanitize_perf_symbol(name: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_images_preserve_bytes_bounds_and_entry_points() {
+        for size in [4096, 2 * 1024 * 1024, 6 * 1024 * 1024 + 37] {
+            let mut bytes = vec![0x90; size];
+            // mov eax, 7; ret, and a separate entry returning 42.
+            bytes[..6].copy_from_slice(&[0xb8, 7, 0, 0, 0, 0xc3]);
+            let second = size - 6;
+            bytes[second..].copy_from_slice(&[0xb8, 42, 0, 0, 0, 0xc3]);
+            let code = JitCode::new(&bytes).unwrap();
+            assert_eq!(code.image(), bytes);
+            assert!(code.entry_ptr(size).is_none());
+            assert!(code.entry_ptr(usize::MAX).is_none());
+            let mut state = [11, 22];
+            assert_eq!(unsafe { code.call(&mut state) }, 7);
+            let second: JitFn = unsafe { std::mem::transmute(code.entry_ptr(second).unwrap()) };
+            assert_eq!(unsafe { second(state.as_mut_ptr()) }, 42);
+            assert_eq!(state, [11, 22]);
+        }
+    }
 }
