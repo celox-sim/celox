@@ -9,14 +9,19 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
+use celox_backend_common::regalloc::LiveSegment as StoredSegment;
+
+mod home_ranges;
+use home_ranges::HomeRanges;
+
 use crate::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
 use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 use super::interval_union::{AllocationBundleId, DynamicIntervalMatrix, IntervalUnionError};
 use super::live_interval::{
-    LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram,
-    analyze_program_with_verification,
+    LiveInterval, LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram, SlotIndex,
+    analyze_program_with_verification, visit_program_intervals,
 };
 use super::spill_plan::{LogicalValue, PlannedEdgeOp, PlannedOp, SpillHome, SpillPlan};
 
@@ -81,19 +86,12 @@ impl fmt::Display for StackColorError {
 
 impl std::error::Error for StackColorError {}
 
+/// A stack event either defines one version or reads one version. It never
+/// needs the five-operand storage used by a general machine instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct StackInstruction {
-    uses: Uses,
-    definition: Option<VReg>,
-}
-
-impl Default for StackInstruction {
-    fn default() -> Self {
-        Self {
-            uses: Uses::none(),
-            definition: None,
-        }
-    }
+enum StackInstruction {
+    Store(VReg),
+    Reload(VReg),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,11 +186,17 @@ impl LivenessProgram for PlannedStackLivenessProgram {
     }
 
     fn instruction_uses(&self, block: usize, instruction: usize) -> Uses {
-        self.blocks[block].instructions[instruction].uses
+        match self.blocks[block].instructions[instruction] {
+            StackInstruction::Store(_) => Uses::none(),
+            StackInstruction::Reload(value) => Uses::one(value),
+        }
     }
 
     fn instruction_definition(&self, block: usize, instruction: usize) -> Option<VReg> {
-        self.blocks[block].instructions[instruction].definition
+        match self.blocks[block].instructions[instruction] {
+            StackInstruction::Store(value) => Some(value),
+            StackInstruction::Reload(_) => None,
+        }
     }
 }
 
@@ -486,6 +490,65 @@ fn build_planned_stack_program(
     build_planned_stack_program_from_events(func, cfg, events, homes)
 }
 
+// Homes have independent liveness and iterated dominance frontiers. Process
+// one home at a time so transient relations scale with the CFG, rather than
+// the product of all live homes and blocks.
+fn planned_phi_relations(
+    events: &[Vec<PlannedStackEvent>],
+    cfg: &NormalizedCfg,
+) -> Vec<(SpillHome, usize)> {
+    let mut rows = BTreeMap::<SpillHome, (Vec<usize>, Vec<usize>)>::new();
+    for (block, block_events) in events.iter().enumerate() {
+        let mut locally_defined = HashSet::default();
+        for event in block_events {
+            match event.kind {
+                PlannedStackEventKind::Store => {
+                    if locally_defined.insert(event.home) {
+                        rows.entry(event.home).or_default().0.push(block);
+                    }
+                }
+                PlannedStackEventKind::Reload => {
+                    if !locally_defined.contains(&event.home) {
+                        let uses = &mut rows.entry(event.home).or_default().1;
+                        if uses.last() != Some(&block) {
+                            uses.push(block);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut ordered_phis = Vec::new();
+    for (home, (definitions, upward_uses)) in rows {
+        let definitions = definitions.into_iter().collect::<HashSet<_>>();
+        let mut live_in = upward_uses.iter().copied().collect::<HashSet<_>>();
+        let mut live_work = VecDeque::from(upward_uses);
+        while let Some(block) = live_work.pop_front() {
+            for &predecessor in &cfg.predecessors[block] {
+                if !definitions.contains(&predecessor) && live_in.insert(predecessor) {
+                    live_work.push_back(predecessor);
+                }
+            }
+        }
+        let mut phis = HashSet::default();
+        let mut queued = definitions.clone();
+        let mut phi_work = definitions.into_iter().collect::<Vec<_>>();
+        while let Some(block) = phi_work.pop() {
+            for &frontier in &cfg.dominance_frontier[block] {
+                if frontier == 0 || !live_in.contains(&frontier) || !phis.insert(frontier) {
+                    continue;
+                }
+                if queued.insert(frontier) {
+                    phi_work.push(frontier);
+                }
+            }
+        }
+        ordered_phis.extend(phis.into_iter().map(|block| (home, block)));
+    }
+    ordered_phis.sort_unstable_by_key(|(home, block)| (*block, *home));
+    ordered_phis
+}
+
 fn build_planned_stack_program_from_events(
     func: &MFunction,
     cfg: &NormalizedCfg,
@@ -520,57 +583,9 @@ fn build_planned_stack_program_from_events(
         ));
     }
 
-    // Sparse pruned MemorySSA.  `definitions` and `live_in` contain only
-    // relations which actually occur; no home-by-block matrix is built.
-    let mut definitions = HashSet::<(SpillHome, usize)>::default();
-    let mut upward_uses = HashSet::<(SpillHome, usize)>::default();
-    for (block, block_events) in events.iter().enumerate() {
-        let mut locally_defined = HashSet::<SpillHome>::default();
-        for event in block_events {
-            match event.kind {
-                PlannedStackEventKind::Store => {
-                    locally_defined.insert(event.home);
-                    definitions.insert((event.home, block));
-                }
-                PlannedStackEventKind::Reload => {
-                    if !locally_defined.contains(&event.home) {
-                        upward_uses.insert((event.home, block));
-                    }
-                }
-            }
-        }
-    }
-    let mut live_in = upward_uses.clone();
-    let mut live_work = upward_uses.iter().copied().collect::<VecDeque<_>>();
-    while let Some((home, block)) = live_work.pop_front() {
-        for &predecessor in &cfg.predecessors[block] {
-            let relation = (home, predecessor);
-            if !definitions.contains(&relation) && live_in.insert(relation) {
-                live_work.push_back(relation);
-            }
-        }
-    }
-
-    let mut phi_relations = HashSet::<(SpillHome, usize)>::default();
-    let mut queued = definitions.clone();
-    let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
-    while let Some((home, block)) = phi_work.pop() {
-        for &frontier in &cfg.dominance_frontier[block] {
-            let relation = (home, frontier);
-            if frontier == 0 || !live_in.contains(&relation) || !phi_relations.insert(relation) {
-                continue;
-            }
-            if queued.insert(relation) {
-                phi_work.push(relation);
-            }
-        }
-    }
-
     let mut version_homes = Vec::<SpillHome>::new();
     let mut phis_by_block = vec![Vec::<PlannedStackPhi>::new(); func.blocks.len()];
-    let mut ordered_phis = phi_relations.into_iter().collect::<Vec<_>>();
-    ordered_phis.sort_unstable_by_key(|(home, block)| (*block, *home));
-    for (home, block) in ordered_phis {
+    for (home, block) in planned_phi_relations(&events, cfg) {
         let destination = allocate_planned_version(&mut version_homes, home)?;
         phis_by_block[block].push(PlannedStackPhi {
             home,
@@ -697,31 +712,30 @@ fn build_planned_stack_program_from_events(
     let blocks = func
         .blocks
         .iter()
-        .enumerate()
-        .map(|(block, mir_block)| StackBlock {
+        .zip(events)
+        .zip(phis_by_block)
+        .map(|((mir_block, block_events), block_phis)| StackBlock {
             id: mir_block.id,
-            phis: phis_by_block[block]
-                .iter()
+            phis: block_phis
+                .into_iter()
                 .map(|phi| StackPhi {
                     home: phi.destination,
-                    sources: phi.sources.clone(),
+                    sources: phi.sources,
                 })
                 .collect(),
-            instructions: events[block]
-                .iter()
+            instructions: block_events
+                .into_iter()
                 .map(|event| match event.kind {
-                    PlannedStackEventKind::Store => StackInstruction {
-                        uses: Uses::none(),
-                        definition: event.definition,
-                    },
-                    PlannedStackEventKind::Reload => StackInstruction {
-                        uses: Uses::one(
-                            event
-                                .reaching
-                                .expect("verified production stack reload has a reaching version"),
-                        ),
-                        definition: None,
-                    },
+                    PlannedStackEventKind::Store => StackInstruction::Store(
+                        event
+                            .definition
+                            .expect("every production stack store has a version"),
+                    ),
+                    PlannedStackEventKind::Reload => StackInstruction::Reload(
+                        event
+                            .reaching
+                            .expect("verified production stack reload has a reaching version"),
+                    ),
                 })
                 .collect(),
             edge_uses: Vec::new(),
@@ -736,11 +750,97 @@ fn build_planned_stack_program_from_events(
     ))
 }
 
+#[derive(Default)]
+struct HomeSegments {
+    segments: HomeRanges,
+    pending: usize,
+}
+
+fn coalesce_segments(range: &mut HomeRanges) {
+    range.coalesce();
+}
+
+fn expand_home_segments(segments: HomeRanges) -> Vec<LiveSegment> {
+    segments
+        .iter()
+        .map(|segment| LiveSegment {
+            block: BlockId(
+                u32::try_from(segment.block).expect("stored home has a native block identity"),
+            ),
+            start: SlotIndex::from_u64(segment.start),
+            end: SlotIndex::from_u64(segment.end),
+        })
+        .collect()
+}
+
+fn append_home_interval(
+    ranges: &mut BTreeMap<SpillHome, HomeSegments>,
+    version: usize,
+    home: SpillHome,
+    interval: Option<LiveInterval>,
+) -> Result<(), StackColorError> {
+    let interval = interval.ok_or_else(|| {
+        StackColorError::new(
+            "STACK_COLOR.PLANNED_INTERVAL_COVERAGE",
+            None,
+            None,
+            [home],
+            format!("stack MemorySSA version v{version} has no exact live interval"),
+        )
+    })?;
+    let Some(range) = ranges.get_mut(&home) else {
+        return Err(StackColorError::new(
+            "STACK_COLOR.PLANNED_HOME_COVERAGE",
+            Some(interval.definition.block()),
+            None,
+            [home],
+            "stack MemorySSA version belongs to a non-materialized home",
+        ));
+    };
+    range.pending += interval.segments.len();
+    range
+        .segments
+        .extend(interval.segments.into_iter().map(|segment| StoredSegment {
+            block: segment.block.0 as usize,
+            start: segment.start.as_u64(),
+            end: segment.end.as_u64(),
+        }));
+    // Compact in geometric batches: keep overlapping SSA versions bounded
+    // without re-sorting a large home after every short new segment.
+    if range.pending >= range.segments.len().div_ceil(2) {
+        coalesce_segments(&mut range.segments);
+        range.pending = 0;
+    }
+    Ok(())
+}
+
+fn finish_home_segments(
+    ranges: BTreeMap<SpillHome, HomeSegments>,
+) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
+    ranges
+        .into_iter()
+        .map(|(home, mut range)| {
+            coalesce_segments(&mut range.segments);
+            if range.segments.is_empty() {
+                return Err(StackColorError::new(
+                    "STACK_COLOR.PLANNED_HOME_RANGE",
+                    None,
+                    None,
+                    [home],
+                    "materialized stack home has no occupied range",
+                ));
+            }
+            Ok((home, range.segments))
+        })
+        .collect()
+}
+
 fn merge_home_segments(
-    intervals: &LiveIntervals,
+    intervals: LiveIntervals,
+    ends: &std::sync::Arc<HashMap<u32, u64>>,
     version_homes: &[SpillHome],
     homes: &BTreeSet<SpillHome>,
-) -> Result<BTreeMap<SpillHome, Vec<LiveSegment>>, StackColorError> {
+) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
     if intervals.intervals.len() != version_homes.len() {
         return Err(StackColorError::new(
             "STACK_COLOR.PLANNED_INTERVAL_SHAPE",
@@ -753,54 +853,58 @@ fn merge_home_segments(
     let mut ranges = homes
         .iter()
         .copied()
-        .map(|home| (home, Vec::<LiveSegment>::new()))
-        .collect::<BTreeMap<_, _>>();
-    for (version, (&home, interval)) in version_homes.iter().zip(&intervals.intervals).enumerate() {
-        let interval = interval.as_ref().ok_or_else(|| {
-            StackColorError::new(
-                "STACK_COLOR.PLANNED_INTERVAL_COVERAGE",
-                None,
-                None,
-                [home],
-                format!("stack MemorySSA version v{version} has no exact live interval"),
+        .map(|home| {
+            (
+                home,
+                HomeSegments {
+                    segments: HomeRanges::new(ends),
+                    pending: 0,
+                },
             )
-        })?;
-        let Some(range) = ranges.get_mut(&home) else {
-            return Err(StackColorError::new(
-                "STACK_COLOR.PLANNED_HOME_COVERAGE",
-                Some(interval.definition.block()),
-                None,
-                [home],
-                "stack MemorySSA version belongs to a non-materialized home",
-            ));
-        };
-        range.extend(interval.segments.iter().copied());
+        })
+        .collect();
+    for (version, (&home, interval)) in version_homes.iter().zip(intervals.intervals).enumerate() {
+        append_home_interval(&mut ranges, version, home, interval)?;
     }
-    for (&home, range) in &mut ranges {
-        range.sort_unstable_by_key(|segment| (segment.block, segment.start, segment.end));
-        let mut merged = Vec::<LiveSegment>::with_capacity(range.len());
-        for segment in std::mem::take(range) {
-            if let Some(previous) = merged.last_mut()
-                && previous.block == segment.block
-                && segment.start <= previous.end
-            {
-                previous.end = previous.end.max(segment.end);
-            } else {
-                merged.push(segment);
-            }
+    finish_home_segments(ranges)
+}
+
+fn stream_home_segments(
+    program: &PlannedStackLivenessProgram,
+    cfg: &NormalizedCfg,
+    homes: &BTreeSet<SpillHome>,
+    ends: &std::sync::Arc<HashMap<u32, u64>>,
+) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
+    let mut ranges = homes
+        .iter()
+        .copied()
+        .map(|home| {
+            (
+                home,
+                HomeSegments {
+                    segments: HomeRanges::new(ends),
+                    pending: 0,
+                },
+            )
+        })
+        .collect();
+    let mut error = None;
+    visit_program_intervals(program, cfg, |version, interval| {
+        if error.is_none() {
+            error = append_home_interval(
+                &mut ranges,
+                version,
+                program.version_homes[version],
+                interval,
+            )
+            .err();
         }
-        if merged.is_empty() {
-            return Err(StackColorError::new(
-                "STACK_COLOR.PLANNED_HOME_RANGE",
-                None,
-                None,
-                [home],
-                "materialized stack home has no occupied range",
-            ));
-        }
-        *range = merged;
+    })
+    .map_err(|error| planned_live_error(error, &program.version_homes))?;
+    if let Some(error) = error {
+        return Err(error);
     }
-    Ok(ranges)
+    finish_home_segments(ranges)
 }
 
 /// Color the stack slots emitted by the production W/S spill plan.
@@ -845,8 +949,34 @@ fn color_planned_stack_program(
         });
     }
     let phase = timing.then(crate::timing::now);
-    let intervals = analyze_program_with_verification(&program, cfg, verify)
-        .map_err(|error| planned_live_error(error, &program.version_homes))?;
+    let ends = std::sync::Arc::new(
+        (0..program.block_count())
+            .map(|block| {
+                let slots = super::live_interval::assign_block_slots(&program, block)
+                    .map_err(|error| planned_live_error(error, &program.version_homes))?;
+                let end = slots.exit.next().ok_or_else(|| {
+                    StackColorError::new(
+                        "STACK_COLOR.SLOT_RANGE",
+                        Some(program.block_id(block)),
+                        None,
+                        [],
+                        "block endpoint exceeds the slot domain",
+                    )
+                })?;
+                Ok((program.block_id(block).0, end.as_u64()))
+            })
+            .collect::<Result<HashMap<_, _>, StackColorError>>()?,
+    );
+    let ranges = if verify {
+        let intervals = analyze_program_with_verification(&program, cfg, true)
+            .map_err(|error| planned_live_error(error, &program.version_homes))?;
+        let ranges = merge_home_segments(intervals, &ends, &program.version_homes, &homes)?;
+        #[cfg(test)]
+        assert_eq!(ranges, stream_home_segments(&program, cfg, &homes, &ends)?);
+        ranges
+    } else {
+        stream_home_segments(&program, cfg, &homes, &ends)?
+    };
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] stack_color analyze_intervals elapsed={:?}",
@@ -854,12 +984,10 @@ fn color_planned_stack_program(
         );
     }
     let phase = timing.then(crate::timing::now);
-    let ranges = merge_home_segments(&intervals, &program.version_homes, &homes)?;
-    let bundle_homes = homes.iter().copied().collect::<Vec<_>>();
-    let mut bundle_ranges = Vec::with_capacity(bundle_homes.len());
-    for &home in &bundle_homes {
-        bundle_ranges.push(ranges[&home].clone());
-    }
+    // Streaming has discarded individual SSA versions. Release the remaining
+    // MemorySSA before constructing the interval matrix.
+    drop(program);
+    let (bundle_homes, mut bundle_ranges): (Vec<_>, Vec<_>) = ranges.into_iter().unzip();
 
     // General live-range unions are not necessarily chordal after all
     // MemorySSA versions of a physical home are coalesced. Largest ranges
@@ -870,7 +998,7 @@ fn color_planned_stack_program(
             let segments = &bundle_ranges[bundle];
             let length = segments.iter().fold(0u128, |total, segment| {
                 total.saturating_add(u128::from(
-                    segment.start.distance_to(segment.end).unwrap_or(u64::MAX),
+                    segment.end.checked_sub(segment.start).unwrap_or(u64::MAX),
                 ))
             });
             (bundle, length, segments.len())
@@ -896,11 +1024,16 @@ fn color_planned_stack_program(
     }
 
     let phase = timing.then(crate::timing::now);
-    let mut matrix = DynamicIntervalMatrix::new(cfg)
+    let mut matrix = DynamicIntervalMatrix::with_block_ends(cfg, &ends)
         .map_err(|error| planned_union_error(error, &bundle_homes))?;
     for &bundle in &order {
+        let segments = if verify {
+            bundle_ranges[bundle].clone()
+        } else {
+            std::mem::take(&mut bundle_ranges[bundle])
+        };
         let range = matrix
-            .make_range(bundle_ranges[bundle].clone())
+            .make_range(expand_home_segments(segments))
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
         let slot = matrix
             .first_available_validated(range.validated())
@@ -925,7 +1058,7 @@ fn color_planned_stack_program(
         // Rebuild from the final immutable assignment, independently of the
         // mutation order used by first-fit coloring. This is a diagnostic
         // proof of the already-computed assignment, not part of coloring.
-        let mut rebuilt = DynamicIntervalMatrix::new(cfg)
+        let mut rebuilt = DynamicIntervalMatrix::with_block_ends(cfg, &ends)
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
         let mut rebuild_order = (0..bundle_homes.len())
             .map(|bundle| {
@@ -946,7 +1079,7 @@ fn color_planned_stack_program(
         rebuild_order.sort_unstable();
         for (slot, bundle) in rebuild_order {
             let range = rebuilt
-                .make_range(bundle_ranges[bundle].clone())
+                .make_range(expand_home_segments(bundle_ranges[bundle].clone()))
                 .map_err(|error| planned_union_error(error, &bundle_homes))?;
             rebuilt
                 .assign_validated(AllocationBundleId(bundle as u32), slot, range.validated())
@@ -1099,6 +1232,107 @@ mod tests {
         function
     }
 
+    fn reference_phi_relations(
+        events: &[Vec<PlannedStackEvent>],
+        cfg: &NormalizedCfg,
+    ) -> Vec<(SpillHome, usize)> {
+        let mut definitions = HashSet::<(SpillHome, usize)>::default();
+        let mut upward_uses = HashSet::<(SpillHome, usize)>::default();
+        for (block, block_events) in events.iter().enumerate() {
+            let mut locally_defined = HashSet::<SpillHome>::default();
+            for event in block_events {
+                match event.kind {
+                    PlannedStackEventKind::Store => {
+                        locally_defined.insert(event.home);
+                        definitions.insert((event.home, block));
+                    }
+                    PlannedStackEventKind::Reload => {
+                        if !locally_defined.contains(&event.home) {
+                            upward_uses.insert((event.home, block));
+                        }
+                    }
+                }
+            }
+        }
+        let mut live_in = upward_uses.clone();
+        let mut live_work = upward_uses.iter().copied().collect::<VecDeque<_>>();
+        while let Some((home, block)) = live_work.pop_front() {
+            for &predecessor in &cfg.predecessors[block] {
+                let relation = (home, predecessor);
+                if !definitions.contains(&relation) && live_in.insert(relation) {
+                    live_work.push_back(relation);
+                }
+            }
+        }
+
+        let mut phi_relations = HashSet::<(SpillHome, usize)>::default();
+        let mut queued = definitions.clone();
+        let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
+        while let Some((home, block)) = phi_work.pop() {
+            for &frontier in &cfg.dominance_frontier[block] {
+                let relation = (home, frontier);
+                if frontier == 0 || !live_in.contains(&relation) || !phi_relations.insert(relation)
+                {
+                    continue;
+                }
+                if queued.insert(relation) {
+                    phi_work.push(relation);
+                }
+            }
+        }
+
+        let mut result = phi_relations.into_iter().collect::<Vec<_>>();
+        result.sort_unstable_by_key(|(home, block)| (*block, *home));
+        result
+    }
+
+    #[test]
+    fn per_home_phis_match_global_dataflow() {
+        use PlannedStackEventKind::{Reload as R, Store as S};
+        let patterns: &[&[PlannedStackEventKind]] =
+            &[&[], &[S], &[R], &[S, R], &[R, S], &[R, S, R]];
+        for loop_back in [false, true] {
+            let mut func = diamond_function();
+            if loop_back {
+                func.blocks[0].insts.pop();
+                func.blocks[0].push(MInst::Jump { target: BlockId(1) });
+                func.blocks[1].insts = vec![MInst::Branch {
+                    cond: VReg(0),
+                    true_bb: BlockId(2),
+                    false_bb: BlockId(3),
+                }];
+                func.blocks[2].insts = vec![MInst::Jump { target: BlockId(1) }];
+            }
+            let cfg = cfg::normalize(&mut func).unwrap();
+            for mut pattern in 0usize..patterns.len().pow(4) {
+                let mut events = vec![Vec::new(); func.blocks.len()];
+                for row in &mut events {
+                    let choice = pattern % patterns.len();
+                    pattern /= patterns.len();
+                    // Sparse, unrelated home IDs also exercise independence.
+                    for (home, kinds) in [
+                        (SpillHome(3), patterns[choice]),
+                        (SpillHome(10001), patterns[patterns.len() - 1 - choice]),
+                    ] {
+                        for &kind in kinds {
+                            row.push(PlannedStackEvent {
+                                instruction: row.len(),
+                                sequence: row.len(),
+                                home,
+                                kind,
+                                definition: None,
+                                reaching: None,
+                            });
+                        }
+                    }
+                }
+                assert_eq!(
+                    planned_phi_relations(&events, &cfg),
+                    reference_phi_relations(&events, &cfg)
+                );
+            }
+        }
+    }
     #[test]
     fn production_sequential_homes_reuse_one_slot() {
         let mut source = function(0, vec![MInst::Return]);

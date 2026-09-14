@@ -2898,6 +2898,7 @@ fn specialize_slt_node(
 struct ProofBitCanonicalizer {
     bit_cache: HashMap<(NodeId, usize), NodeId>,
     opaque_bits: HashMap<OpaqueProofKey, NodeId>,
+    signed_cache: HashMap<NodeId, bool>,
     /// Dense low-to-high mapping for each Concat. Building this once avoids
     /// rescanning an increasingly long part list independently for every bit.
     concat_layouts: HashMap<NodeId, Vec<(NodeId, usize)>>,
@@ -2998,6 +2999,98 @@ fn proof_outputs_match(
 }
 
 fn canonicalize_proof_bit(
+    node: NodeId,
+    bit: usize,
+    arena: &mut SLTNodeArena<VarId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
+) -> Option<NodeId> {
+    if canonicalizer.bit_cache.contains_key(&(node, bit)) {
+        return canonicalize_proof_bit_ready(node, bit, arena, canonicalizer);
+    }
+    // Demand-driven postorder traversal. The reducer below only visits cached
+    // children, so deeply unrolled expressions consume heap worklist space,
+    // not one native stack frame per expression/bit.
+    let mut pending = vec![(node, bit, false)];
+    while let Some((current, current_bit, ready)) = pending.pop() {
+        if canonicalizer
+            .bit_cache
+            .contains_key(&(current, current_bit))
+        {
+            continue;
+        }
+        if current_bit >= get_width(current, arena) {
+            return None;
+        }
+        if ready {
+            canonicalize_proof_bit_ready(current, current_bit, arena, canonicalizer)?;
+            continue;
+        }
+        let mut children = Vec::new();
+        match arena.get(current) {
+            SLTNode::Binary(lhs, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, rhs)
+                if current_bit < get_width(*lhs, arena) && current_bit < get_width(*rhs, arena) =>
+            {
+                children.extend([(*lhs, current_bit), (*rhs, current_bit)]);
+            }
+            SLTNode::Binary(lhs, op @ (BinaryOp::Shl | BinaryOp::Shr), rhs) => {
+                if let Some(shift) = specialized_constant(*rhs, arena)
+                    .filter(|constant| constant.mask.is_zero())
+                    .and_then(|constant| constant.value.to_usize())
+                {
+                    let source = if *op == BinaryOp::Shl {
+                        current_bit.checked_sub(shift)
+                    } else {
+                        current_bit.checked_add(shift)
+                    };
+                    if let Some(source) = source.filter(|&bit| bit < get_width(*lhs, arena)) {
+                        children.push((*lhs, source));
+                    }
+                }
+            }
+            SLTNode::Unary(UnaryOp::BitNot, inner) if current_bit < get_width(*inner, arena) => {
+                children.push((*inner, current_bit));
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } if get_width(*cond, arena) == 1
+                && current_bit < get_width(*then_expr, arena)
+                && current_bit < get_width(*else_expr, arena) =>
+            {
+                children.extend([
+                    (*cond, 0),
+                    (*then_expr, current_bit),
+                    (*else_expr, current_bit),
+                ]);
+            }
+            SLTNode::Concat(parts) => {
+                children.push(canonicalizer.concat_bit_source(current, parts, current_bit)?);
+            }
+            SLTNode::Slice { expr, access } => {
+                children.push((*expr, access.lsb.checked_add(current_bit)?));
+            }
+            SLTNode::Binary(lhs, _, rhs) => {
+                children.extend((0..get_width(*lhs, arena)).map(|bit| (*lhs, bit)));
+                children.extend((0..get_width(*rhs, arena)).map(|bit| (*rhs, bit)));
+            }
+            SLTNode::Unary(_, inner) => {
+                children.extend((0..get_width(*inner, arena)).map(|bit| (*inner, bit)));
+            }
+            _ => {}
+        }
+        pending.push((current, current_bit, true));
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .map(|(child, bit)| (child, bit, false)),
+        );
+    }
+    canonicalizer.bit_cache.get(&(node, bit)).copied()
+}
+
+fn canonicalize_proof_bit_ready(
     node: NodeId,
     bit: usize,
     arena: &mut SLTNodeArena<VarId>,
@@ -3180,8 +3273,8 @@ fn canonicalize_opaque_binary_operands(
     ) || matches!(
         op,
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
-    ) && proof_node_signed(lhs, arena)
-        && proof_node_signed(rhs, arena);
+    ) && proof_node_signed(lhs, arena, &mut canonicalizer.signed_cache)
+        && proof_node_signed(rhs, arena, &mut canonicalizer.signed_cache);
 
     let canonicalize_operand = |operand: NodeId,
                                 width: usize,
@@ -3207,60 +3300,94 @@ fn canonicalize_opaque_binary_operands(
     ))
 }
 
-fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
-    match arena.get(node) {
-        SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => *signed,
-        SLTNode::Binary(lhs, op, rhs) => match op {
-            BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::EqCase
-            | BinaryOp::NeCase
-            | BinaryOp::EqWildcard
-            | BinaryOp::NeWildcard
-            | BinaryOp::LtU
-            | BinaryOp::LtS
-            | BinaryOp::LeU
-            | BinaryOp::LeS
-            | BinaryOp::GtU
-            | BinaryOp::GtS
-            | BinaryOp::GeU
-            | BinaryOp::GeS
-            | BinaryOp::LogicAnd
-            | BinaryOp::LogicOr
-            | BinaryOp::DivU
-            | BinaryOp::RemU => false,
-            BinaryOp::DivS | BinaryOp::RemS => true,
-            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => proof_node_signed(*lhs, arena),
-            BinaryOp::Add
-            | BinaryOp::Sub
-            | BinaryOp::Mul
-            | BinaryOp::And
-            | BinaryOp::Or
-            | BinaryOp::Xor => proof_node_signed(*lhs, arena) && proof_node_signed(*rhs, arena),
-        },
-        SLTNode::Unary(
-            UnaryOp::LogicNot
-            | UnaryOp::And
-            | UnaryOp::Or
-            | UnaryOp::Xor
-            | UnaryOp::PopCount
-            | UnaryOp::CountLeadingZeros
-            | UnaryOp::CountTrailingZeros,
-            _,
-        ) => false,
-        SLTNode::Unary(
-            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
-            inner,
-        ) => proof_node_signed(*inner, arena),
-        SLTNode::Capture { expr, .. } => proof_node_signed(*expr, arena),
-        SLTNode::Mux {
-            then_expr,
-            else_expr,
-            ..
-        } => proof_node_signed(*then_expr, arena) && proof_node_signed(*else_expr, arena),
-        SLTNode::ForFold { loop_signed, .. } => *loop_signed,
-        SLTNode::ForFoldGroup { .. } | SLTNode::Concat(_) | SLTNode::Slice { .. } => false,
+fn proof_node_signed(
+    root: NodeId,
+    arena: &SLTNodeArena<VarId>,
+    cache: &mut HashMap<NodeId, bool>,
+) -> bool {
+    enum Rule {
+        Known(bool),
+        Copy(NodeId),
+        Both(NodeId, NodeId),
     }
+    let mut pending = vec![(root, false)];
+    while let Some((node, ready)) = pending.pop() {
+        if cache.contains_key(&node) {
+            continue;
+        }
+        let rule = match arena.get(node) {
+            SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
+                Rule::Known(*signed)
+            }
+            SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
+                | BinaryOp::EqWildcard
+                | BinaryOp::NeWildcard
+                | BinaryOp::LtU
+                | BinaryOp::LtS
+                | BinaryOp::LeU
+                | BinaryOp::LeS
+                | BinaryOp::GtU
+                | BinaryOp::GtS
+                | BinaryOp::GeU
+                | BinaryOp::GeS
+                | BinaryOp::LogicAnd
+                | BinaryOp::LogicOr
+                | BinaryOp::DivU
+                | BinaryOp::RemU => Rule::Known(false),
+                BinaryOp::DivS | BinaryOp::RemS => Rule::Known(true),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => Rule::Copy(*lhs),
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => Rule::Both(*lhs, *rhs),
+            },
+            SLTNode::Unary(
+                UnaryOp::LogicNot
+                | UnaryOp::And
+                | UnaryOp::Or
+                | UnaryOp::Xor
+                | UnaryOp::PopCount
+                | UnaryOp::CountLeadingZeros
+                | UnaryOp::CountTrailingZeros,
+                _,
+            ) => Rule::Known(false),
+            SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                inner,
+            ) => Rule::Copy(*inner),
+            SLTNode::Capture { expr, .. } => Rule::Copy(*expr),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => Rule::Both(*then_expr, *else_expr),
+            SLTNode::ForFold { loop_signed, .. } => Rule::Known(*loop_signed),
+            SLTNode::ForFoldGroup { .. } | SLTNode::Concat(_) | SLTNode::Slice { .. } => {
+                Rule::Known(false)
+            }
+        };
+        let value = match rule {
+            Rule::Known(value) => value,
+            Rule::Copy(child) if ready => cache[&child],
+            Rule::Both(lhs, rhs) if ready => cache[&lhs] && cache[&rhs],
+            Rule::Copy(child) => {
+                pending.extend([(node, true), (child, false)]);
+                continue;
+            }
+            Rule::Both(lhs, rhs) => {
+                pending.extend([(node, true), (rhs, false), (lhs, false)]);
+                continue;
+            }
+        };
+        cache.insert(node, value);
+    }
+    cache[&root]
 }
 
 fn alloc_opaque_proof_bit(
@@ -5283,6 +5410,50 @@ mod tests {
             BitAccess::new(8, 15),
             "a fixed array element must not become a whole-array carried state"
         );
+    }
+
+    #[test]
+    fn proof_bit_canonicalizer_handles_deep_arithmetic_on_a_small_stack() {
+        let (module, _) = analyze(MULTI_STATE_LOOP);
+        let bits = variable(&module, "bits");
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let mut arena = SLTNodeArena::new();
+                let input = arena
+                    .alloc(SLTNode::Input {
+                        variable: bits,
+                        signed: false,
+                        index: Vec::new(),
+                        access: BitAccess::new(0, 3),
+                    })
+                    .unwrap();
+                let mut node = input;
+                for _ in 0..10_000 {
+                    node = arena
+                        .alloc(SLTNode::Binary(node, BinaryOp::Add, input))
+                        .unwrap();
+                }
+                let mut canonicalizer = ProofBitCanonicalizer::default();
+                assert!(!proof_node_signed(
+                    node,
+                    &arena,
+                    &mut canonicalizer.signed_cache
+                ));
+                let result = canonicalize_proof_bit(node, 0, &mut arena, &mut canonicalizer);
+                assert!(result.is_some());
+                assert_eq!(
+                    result,
+                    canonicalize_proof_bit(node, 0, &mut arena, &mut canonicalizer)
+                );
+                assert_ne!(
+                    result,
+                    canonicalize_proof_bit(input, 0, &mut arena, &mut canonicalizer)
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub(super) struct Allocation {
 pub(super) fn allocate(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
-    next_use: &NextUseAnalysis,
-    planning_recipes: &PlanningRecipes,
+    next_use: NextUseAnalysis,
+    planning_recipes: PlanningRecipes,
     constraints: &super::constraints::ConstraintModel,
     trace: Option<&mut super::RegallocTrace>,
     timing: bool,
@@ -42,8 +42,8 @@ pub(super) fn allocate(
     let mut plan = super::spill_plan::plan_with_integrated_schedule(
         func,
         cfg,
-        next_use,
-        planning_recipes,
+        &next_use,
+        &planning_recipes,
         register_count,
         constraints,
     )
@@ -57,6 +57,9 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
+    // Scheduling has consumed these analyses. Do not retain their potentially
+    // huge CFG/value tables while constructing stack-home liveness and unions.
+    drop((next_use, planning_recipes));
     if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }
@@ -71,6 +74,19 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
+    }
+    if !verify {
+        plan.retain_reconstruction_states(func, cfg)
+            .map_err(|error| {
+                super::RegallocError::new(
+                    "spill-plan state release",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            })?;
     }
     if let Some(start) = phase {
         tracing::debug!(
@@ -220,25 +236,18 @@ pub(super) fn allocate(
     checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
-    let reconstruction = super::reconstruct::reconstruct(
-        func,
-        cfg,
-        &plan,
-        next_use,
-        &reload_recipes,
-        timing,
-        verify,
-    )
-    .map_err(|error| {
-        super::RegallocError::new(
-            "SSA reconstruction",
-            error.rule,
-            error.block,
-            error.instruction,
-            error.values,
-            error.message,
-        )
-    })?;
+    let reconstruction =
+        super::reconstruct::reconstruct(func, cfg, &plan, &reload_recipes, timing, verify)
+            .map_err(|error| {
+                super::RegallocError::new(
+                    "SSA reconstruction",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            })?;
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} shared_reload_blocks={} elapsed={:?}",

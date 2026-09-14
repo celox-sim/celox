@@ -12,6 +12,8 @@ on:
       - "crates/**"
       - "!crates/celox-napi/package.json"
       - "scripts/convert-heliodor-bench.mjs"
+      - "scripts/heliodor-suite.mjs"
+      - "scripts/heliodor-suite.test.mjs"
       - "scripts/ci-changes.mjs"
       - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
@@ -22,6 +24,18 @@ on:
     - cron: "37 2 * * *"
   workflow_dispatch:
     inputs:
+      suite_test:
+        description: Run only this Linux suite test (empty runs the full suite)
+        type: string
+        default: ""
+      suite_runner:
+        description: Run only this suite backend (empty runs all four)
+        type: string
+        default: ""
+      suite_arch:
+        description: Run only this suite architecture (empty runs both)
+        type: string
+        default: ""
       arm64_profile:
         description: Capture an ARM64 Linux boot profile without publishing history
         type: boolean
@@ -42,13 +56,32 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Pull requests neither write benchmark history nor need to wait behind unrelated
-# benchmark runs. Serialize master publishers with bench.yml, while develop uses
-# a separate group so its dispatch cannot replace a pending master nightly run.
+# benchmark runs. Only master publishers share bench.yml's group. Other
+# branches must not replace a pending publisher or compile-time benchmark.
 concurrency:
-  group: ${{ inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
+  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || github.ref != 'refs/heads/master' && format('heliodor-validation-{0}', github.ref) || 'bench' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-dispatch:
+    name: Validate dispatch inputs
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Reject conflicting or invalid inputs
+        env:
+          ARM64_PROFILE: ${{ inputs.arm64_profile }}
+          SUITE_TEST: ${{ inputs.suite_test }}
+          SUITE_RUNNER: ${{ inputs.suite_runner }}
+          SUITE_ARCH: ${{ inputs.suite_arch }}
+        run: node scripts/heliodor-suite.mjs validate
+
   # PRs use this gate to avoid spending a dedicated ARM runner on unrelated
   # Rust changes. Detection failures fail open in arm64-linux-boot below.
   arm64-changes:
@@ -87,12 +120,13 @@ jobs:
       - name: Test benchmark conversion fixtures
         shell: bash
         run: |
+          node --test scripts/heliodor-suite.test.mjs
           bash scripts/tests/convert-heliodor-bench.sh
           bash scripts/tests/run-heliodor-bench-results.sh
           bash scripts/tests/run-heliodor-bench-gate.sh
 
   heliodor:
-    if: ${{ !inputs.arm64_profile }}
+    if: ${{ !inputs.arm64_profile && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch }}
     # Keep the x86_64 gate on every workflow trigger. Only the ARM64 PR lane is
     # change-gated by arm64-changes below.
     runs-on: ubuntu-latest
@@ -257,7 +291,7 @@ jobs:
 
   arm64-linux-boot-full:
     name: Nightly ARM64 Linux boot
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch)
     permissions:
       contents: read
       actions: read
@@ -416,13 +450,109 @@ jobs:
             target/heliodor-arm64/results/profile-ir/native_optimized.sir
             heliodor-arm64-host.txt
 
+  linux-suite-matrix:
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !inputs.arm64_profile
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: matrix
+        env:
+          SUITE_TEST: ${{ inputs.suite_test }}
+          SUITE_RUNNER: ${{ inputs.suite_runner }}
+          SUITE_ARCH: ${{ inputs.suite_arch }}
+        run: echo "matrix=$(node scripts/heliodor-suite.mjs matrix)" >> "$GITHUB_OUTPUT"
+
+  linux-suite:
+    name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }}, ${{ matrix.runner }})
+    needs: linux-suite-matrix
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.linux-suite-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
+    env:
+      # Keep expanded workloads separate from the historical fixed gate.
+      HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025
+      HELIODOR_SUITE: "1"
+      HELIODOR_TESTS: ${{ matrix.test }}
+      HELIODOR_RUNNERS: ${{ matrix.runner }}
+      HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}
+      HELIODOR_CELOX_CARGO_PROFILE: release
+      CELOX_OPT_LEVEL: O2
+      # Keep phase/progress evidence when a large workload times out.
+      RUST_LOG: ${{ contains(matrix.test, '8hart') && 'celox::=debug,celox_backend_x86::=debug,celox_backend_arm64::=debug' || 'off' }}
+      CELOX_PHASE_TIMING: ${{ contains(matrix.test, '8hart') && '1' || '0' }}
+      CELOX_TESTBENCH_PROGRESS: ${{ contains(matrix.test, '8hart') && '1000000' || '0' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Record host
+        run: |
+          uname -a > heliodor-suite-host.txt
+          lscpu >> heliodor-suite-host.txt
+          free -h >> heliodor-suite-host.txt
+          swapon --show >> heliodor-suite-host.txt
+          df -h >> heliodor-suite-host.txt
+      - name: Run complete workload
+        shell: bash
+        run: |
+          # Preserve resource evidence in the Actions log even if the runner
+          # stops before it can upload the workload artifacts.
+          (
+            while sleep 60; do
+              date -u '+HELIODOR_RESOURCE_SAMPLE %Y-%m-%dT%H:%M:%SZ'
+              free -m
+              ps -eo pid,ppid,rss,pcpu,comm --sort=-rss | sed -n '1,9p'
+            done
+          ) &
+          resource_monitor=$!
+          trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
+          set -o pipefail
+          /usr/bin/time -v bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
+      - name: Verify tiered promotion
+        if: matrix.runner == 'celox-tiered'
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          logs=(target/heliodor/results/*_celox-tiered_*.log)
+          test "${#logs[@]}" -eq 1
+          validate_gate_tiered_stats "${logs[0]}" "$HELIODOR_TESTS"
+      - name: Upload workload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-suite-${{ matrix.arch }}-${{ matrix.test }}-${{ matrix.runner }}
+          path: |
+            heliodor-suite-host.txt
+            heliodor-suite-output.txt
+            target/heliodor/results/results.tsv
+            target/heliodor/results/*.log
+
   publish-linux-boot:
     name: Publish Linux boot benchmarks
     if: >-
+      !cancelled() &&
+      needs.heliodor.result == 'success' &&
+      needs.arm64-linux-boot-full.result == 'success' &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
       !inputs.arm64_profile &&
       github.ref == 'refs/heads/master'
-    needs: [heliodor, arm64-linux-boot-full]
+    needs: [heliodor, arm64-linux-boot-full, linux-suite]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -456,6 +586,24 @@ jobs:
             "$native_results" heliodor-published.json \
             --arm64-results "$arm64_results" --require-tiered
 
+      - uses: actions/download-artifact@v8
+        if: needs.linux-suite.result == 'success' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
+        with:
+          pattern: heliodor-suite-*
+          path: artifacts/suite
+
+      - name: Convert expanded Linux suite
+        if: needs.linux-suite.result == 'success' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
+        shell: bash
+        run: |
+          node scripts/heliodor-suite.mjs merge artifacts/suite suite
+          node scripts/convert-heliodor-bench.mjs suite-x86_64.tsv heliodor-suite.json --arm64-results suite-aarch64.tsv --require-tiered --suite
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+            writeFileSync("heliodor-published.json", JSON.stringify([...read("heliodor-published.json"), ...read("heliodor-suite.json")]));
+          '
+
       - name: Store Heliodor benchmark history
         uses: benchmark-action/github-action-benchmark@v1
         with:
@@ -474,7 +622,8 @@ jobs:
     name: Heliodor HEAD compatibility
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop')
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' &&
+       !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch)
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -496,6 +645,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Resolve Heliodor HEAD
+        id: upstream
         shell: bash
         run: |
           set -euo pipefail
@@ -509,8 +659,18 @@ jobs:
           echo "Testing Heliodor HEAD at $heliodor_revision"
           echo "### Heliodor HEAD compatibility" >> "$GITHUB_STEP_SUMMARY"
           echo "Upstream revision: \`$heliodor_revision\`" >> "$GITHUB_STEP_SUMMARY"
+          source scripts/run-heliodor-bench.sh
+          skip_reason="$(heliodor_head_skip_reason "$heliodor_revision")"
+          if [[ -n "$skip_reason" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$skip_reason"
+            printf 'SKIPPED: %s\n' "$skip_reason" | tee heliodor-head-output.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run Heliodor HEAD compatibility gate
+        if: steps.upstream.outputs.run == 'true'
         shell: bash
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-head-output.txt
 

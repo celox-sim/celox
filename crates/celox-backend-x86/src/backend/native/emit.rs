@@ -5587,6 +5587,48 @@ pub fn emit_prepared_eu(
     four_state: bool,
     label: &str,
     options: &crate::X86BackendOptions,
+    trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<EmitResult, ChainedEmitError> {
+    emit_prepared_eu_inner(
+        std::borrow::Cow::Borrowed(sir_eu),
+        layout,
+        four_state,
+        label,
+        options,
+        trace,
+        is_cancelled,
+    )
+}
+
+/// Consume the prepared SIR so its storage can be released after instruction
+/// selection, before MIR optimization and register allocation allocate analyses.
+pub fn emit_owned_prepared_eu(
+    sir_eu: crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    options: &crate::X86BackendOptions,
+    trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<EmitResult, ChainedEmitError> {
+    emit_prepared_eu_inner(
+        std::borrow::Cow::Owned(sir_eu),
+        layout,
+        four_state,
+        label,
+        options,
+        trace,
+        is_cancelled,
+    )
+}
+
+fn emit_prepared_eu_inner(
+    sir_eu: std::borrow::Cow<'_, crate::ExecutionUnit<crate::RegionedAbsoluteAddr>>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    options: &crate::X86BackendOptions,
     mut trace: Option<&mut NativeFunctionTrace>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
@@ -5632,13 +5674,13 @@ pub fn emit_prepared_eu(
         trace.optimized_sir = sir_eu.to_string();
     }
     if timing {
-        log_sir_width_stats(sir_eu);
+        log_sir_width_stats(&sir_eu);
     }
 
     // Single ISel + optimize + regalloc + emit
     let isel_start = timing.then(crate::timing::now);
     let mut mfunc =
-        isel::lower_execution_unit_with_diagnostics(sir_eu, layout, four_state, diagnostics);
+        isel::lower_execution_unit_with_diagnostics(&sir_eu, layout, four_state, diagnostics);
     if let Some(start) = isel_start {
         tracing::debug!(
             "[native-timing] emit_chained isel mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
@@ -5648,7 +5690,26 @@ pub fn emit_prepared_eu(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, "after_isel", sir_eu, &mfunc, diagnostics);
+    dump_native_block_context(label, "after_isel", &sir_eu, &mfunc, diagnostics);
+    let check_runtime_events = label == "eval_comb_apply_ff"
+        && options.native_tick_loop
+        && sir_eu.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    crate::SIRInstruction::RuntimeEvent { .. }
+                        | crate::SIRInstruction::CombCaptureEvent { .. }
+                )
+            })
+        });
+    // Later SIR access is only for an explicitly requested block dump. Traces
+    // already own their textual SIR, and runtime-event presence is captured above.
+    let sir_eu = if diagnostics.dump.is_some() {
+        Some(sir_eu)
+    } else {
+        drop(sir_eu);
+        None
+    };
     if timing {
         tracing::debug!("[native-timing] emit_chained verify after_isel label={label}");
     }
@@ -5665,7 +5726,9 @@ pub fn emit_prepared_eu(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, "after_legalize", sir_eu, &mfunc, diagnostics);
+    if let Some(sir_eu) = sir_eu.as_deref() {
+        dump_native_block_context(label, "after_legalize", sir_eu, &mfunc, diagnostics);
+    }
     if timing {
         tracing::debug!("[native-timing] emit_chained verify after_legalize label={label}");
     }
@@ -5718,7 +5781,9 @@ pub fn emit_prepared_eu(
     if diagnostics.mir_block_stats {
         log_mir_block_stats(label, "after_mir_opt", &mfunc);
     }
-    dump_native_block_context(label, "after_mir_opt", sir_eu, &mfunc, diagnostics);
+    if let Some(sir_eu) = sir_eu.as_deref() {
+        dump_native_block_context(label, "after_mir_opt", sir_eu, &mfunc, diagnostics);
+    }
     if timing {
         tracing::debug!("[native-timing] emit_chained verify after_mir_opt label={label}");
     }
@@ -5793,7 +5858,9 @@ pub fn emit_prepared_eu(
     if diagnostics.mir_block_stats {
         log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
-    dump_native_block_context(label, "after_regalloc", sir_eu, &mfunc, diagnostics);
+    if let Some(sir_eu) = sir_eu.as_deref() {
+        dump_native_block_context(label, "after_regalloc", sir_eu, &mfunc, diagnostics);
+    }
     // Post-allocation peepholes and CFG cleanup can change the physical value
     // present on a phi edge. Build the edge-copy plan from this final MIR, not
     // from the pre-cleanup allocation input.
@@ -5826,15 +5893,6 @@ pub fn emit_prepared_eu(
         .checked_add(layout.triggered_bits_total_size)
         .expect("native simulation-state size overflow");
     let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
-        let check_runtime_events = sir_eu.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction,
-                    crate::SIRInstruction::RuntimeEvent { .. }
-                        | crate::SIRInstruction::CombCaptureEvent { .. }
-                )
-            })
-        });
         emit_with_plan_tick_loop(
             &mfunc,
             &ra.assignment,

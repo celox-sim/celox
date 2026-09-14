@@ -1125,8 +1125,52 @@ struct LoweringCostCache {
     is_speculatable_pure: Vec<Option<bool>>,
     traversal_seen: Vec<bool>,
     traversal_work: Vec<NodeId>,
+    dirty: Vec<bool>,
+    touched: Vec<NodeId>,
     #[cfg(test)]
     analysis_node_visits: usize,
+}
+
+impl LoweringCostCache {
+    fn resize(&mut self, node_count: usize) {
+        self.tree_costs.resize(node_count, None);
+        self.contains_div_rem.resize(node_count, None);
+        self.fanout.resize(node_count, 0);
+        self.initially_materialized.resize(node_count, false);
+        self.owned_costs.resize(node_count, None);
+        self.owned_slice_lower_costs.resize(node_count, None);
+        self.contains_shared_nontrivial.resize(node_count, None);
+        self.is_speculatable_pure.resize(node_count, None);
+        self.traversal_seen.resize(node_count, false);
+        self.dirty.resize(node_count, false);
+    }
+
+    fn touch(&mut self, node: NodeId) {
+        if !self.dirty[node.0] {
+            self.dirty[node.0] = true;
+            self.touched.push(node);
+        }
+    }
+
+    fn reset(&mut self, node_count: usize) {
+        // Most top-level roots use a tiny part of the shared arena. Reset all
+        // facts for nodes written by any analysis, including nodes beyond a
+        // materialization boundary, without scanning every arena-sized table.
+        for node in self.touched.drain(..) {
+            self.tree_costs[node.0] = None;
+            self.contains_div_rem[node.0] = None;
+            self.fanout[node.0] = 0;
+            self.initially_materialized[node.0] = false;
+            self.owned_costs[node.0] = None;
+            self.owned_slice_lower_costs[node.0] = None;
+            self.contains_shared_nontrivial[node.0] = None;
+            self.is_speculatable_pure[node.0] = None;
+            self.traversal_seen[node.0] = false;
+            self.dirty[node.0] = false;
+        }
+        // Clear old entries before shrinking; new entries start empty.
+        self.resize(node_count);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3903,24 +3947,7 @@ impl SLTToSIRLowerer {
     ) {
         let node_count = arena.len();
         let mut cache = self.cost_cache.borrow_mut();
-        cache.tree_costs.clear();
-        cache.tree_costs.resize(node_count, None);
-        cache.contains_div_rem.clear();
-        cache.contains_div_rem.resize(node_count, None);
-        cache.fanout.clear();
-        cache.fanout.resize(node_count, 0);
-        cache.initially_materialized.clear();
-        cache.initially_materialized.resize(node_count, false);
-        cache.owned_costs.clear();
-        cache.owned_costs.resize(node_count, None);
-        cache.owned_slice_lower_costs.clear();
-        cache.owned_slice_lower_costs.resize(node_count, None);
-        cache.contains_shared_nontrivial.clear();
-        cache.contains_shared_nontrivial.resize(node_count, None);
-        cache.is_speculatable_pure.clear();
-        cache.is_speculatable_pure.resize(node_count, None);
-        cache.traversal_seen.clear();
-        cache.traversal_seen.resize(node_count, false);
+        cache.reset(node_count);
         cache.traversal_work.clear();
         cache.traversal_work.extend_from_slice(roots);
         #[cfg(test)]
@@ -3932,6 +3959,7 @@ impl SLTToSIRLowerer {
             if cache.traversal_seen[node.0] {
                 continue;
             }
+            cache.touch(node);
             cache.traversal_seen[node.0] = true;
             #[cfg(test)]
             {
@@ -3942,6 +3970,7 @@ impl SLTToSIRLowerer {
                 continue;
             }
             for child in Self::node_children(node, arena) {
+                cache.touch(child);
                 cache.fanout[child.0] = cache.fanout[child.0].saturating_add(1);
                 cache.traversal_work.push(child);
             }
@@ -3999,14 +4028,7 @@ impl SLTToSIRLowerer {
     fn prepare_cost_cache<A: Hash + Eq + Clone>(&self, arena: &SLTNodeArena<A>) {
         let mut cache = self.cost_cache.borrow_mut();
         if cache.tree_costs.len() < arena.len() {
-            cache.tree_costs.resize(arena.len(), None);
-            cache.contains_div_rem.resize(arena.len(), None);
-            cache.fanout.resize(arena.len(), 0);
-            cache.initially_materialized.resize(arena.len(), false);
-            cache.owned_costs.resize(arena.len(), None);
-            cache.owned_slice_lower_costs.resize(arena.len(), None);
-            cache.contains_shared_nontrivial.resize(arena.len(), None);
-            cache.is_speculatable_pure.resize(arena.len(), None);
+            cache.resize(arena.len());
         }
     }
 
@@ -4173,7 +4195,9 @@ impl SLTToSIRLowerer {
         for child in Self::node_children(node, arena) {
             cost = cost.saturating_add(self.estimated_tree_cost(child, arena));
         }
-        self.cost_cache.borrow_mut().tree_costs[node.0] = Some(cost);
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.touch(node);
+        cache.tree_costs[node.0] = Some(cost);
         cost
     }
 
@@ -4213,7 +4237,9 @@ impl SLTToSIRLowerer {
                 cost = cost.saturating_add(self.owned_tree_cost(child, arena));
             }
         }
-        self.cost_cache.borrow_mut().owned_costs[node.0] = Some(cost);
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.touch(node);
+        cache.owned_costs[node.0] = Some(cost);
         cost
     }
 
@@ -4255,7 +4281,9 @@ impl SLTToSIRLowerer {
                 cost = cost.saturating_add(self.owned_slice_lower_cost(child, arena));
             }
         }
-        self.cost_cache.borrow_mut().owned_slice_lower_costs[node.0] = Some(cost);
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.touch(node);
+        cache.owned_slice_lower_costs[node.0] = Some(cost);
         cost
     }
 
@@ -4278,7 +4306,9 @@ impl SLTToSIRLowerer {
                 || Self::node_children(node, arena)
                     .into_iter()
                     .any(|child| self.contains_shared_nontrivial(child, arena)));
-        self.cost_cache.borrow_mut().contains_shared_nontrivial[node.0] = Some(result);
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.touch(node);
+        cache.contains_shared_nontrivial[node.0] = Some(result);
         result
     }
 
@@ -4373,7 +4403,9 @@ impl SLTToSIRLowerer {
         ) && Self::node_children(node, arena)
             .into_iter()
             .all(|child| self.is_speculatable_pure(child, arena));
-        self.cost_cache.borrow_mut().is_speculatable_pure[node.0] = Some(result);
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.touch(node);
+        cache.is_speculatable_pure[node.0] = Some(result);
         result
     }
 
@@ -4509,7 +4541,9 @@ impl SLTToSIRLowerer {
             ) || Self::node_children(node, arena)
                 .into_iter()
                 .any(|child| self.contains_div_rem(child, arena)));
-        self.cost_cache.borrow_mut().contains_div_rem[node.0] = Some(result);
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.touch(node);
+        cache.contains_div_rem[node.0] = Some(result);
         result
     }
 
@@ -6190,6 +6224,78 @@ mod tests {
     use crate::SLTNodeArena;
     use celox_design::BitAccess;
     use celox_sir::{BlockId, ExecutionUnit};
+
+    #[test]
+    fn sparse_cost_cache_reset_matches_fresh_analysis_across_roots_and_arenas() {
+        let reused = SLTToSIRLowerer::new(false);
+        for padding in [2048, 4096, 1024] {
+            let mut arena = SLTNodeArena::<u32>::new();
+            for variable in 0..padding {
+                input(&mut arena, variable, 64);
+            }
+            let leaf = input(&mut arena, padding, 64);
+            let shared = operation_chain(&mut arena, leaf, BinaryOp::Add, 4, 3, 64);
+            let other = operation_chain(&mut arena, leaf, BinaryOp::DivU, 2, 7, 64);
+            let root = arena
+                .alloc(SLTNode::Binary(shared, BinaryOp::Xor, shared))
+                .unwrap();
+            for (roots, honor) in [
+                (vec![root], true),
+                (vec![other, shared], false),
+                (vec![shared], true),
+            ] {
+                let materialized = [(shared, RegisterId(0))].into_iter().collect();
+                let fresh = SLTToSIRLowerer::new(false);
+                for lowerer in [&reused, &fresh] {
+                    lowerer.reset_cost_cache_roots(&roots, &arena, &materialized, honor);
+                }
+                let new_variable = arena.len() as u32 + padding;
+                let grown = input(&mut arena, new_variable, 32);
+                for lowerer in [&reused, &fresh] {
+                    // Analyze a node outside the reset traversal as well as a
+                    // materialized subtree. Both must be cleared next time.
+                    for node in [root, shared, other, leaf, grown] {
+                        lowerer.estimated_tree_cost(node, &arena);
+                        lowerer.owned_tree_cost(node, &arena);
+                        lowerer.owned_slice_lower_cost(node, &arena);
+                        lowerer.contains_shared_nontrivial(node, &arena);
+                        lowerer.is_speculatable_pure(node, &arena);
+                        lowerer.contains_div_rem(node, &arena);
+                    }
+                }
+                let actual = reused.cost_cache.borrow();
+                let expected = fresh.cost_cache.borrow();
+                assert_eq!(actual.tree_costs, expected.tree_costs, "tree_costs");
+                assert_eq!(
+                    actual.contains_div_rem, expected.contains_div_rem,
+                    "contains_div_rem"
+                );
+                assert_eq!(actual.fanout, expected.fanout, "fanout");
+                assert_eq!(
+                    actual.initially_materialized, expected.initially_materialized,
+                    "initially_materialized"
+                );
+                assert_eq!(actual.owned_costs, expected.owned_costs, "owned_costs");
+                assert_eq!(
+                    actual.owned_slice_lower_costs, expected.owned_slice_lower_costs,
+                    "owned_slice_lower_costs"
+                );
+                assert_eq!(
+                    actual.contains_shared_nontrivial, expected.contains_shared_nontrivial,
+                    "contains_shared_nontrivial"
+                );
+                assert_eq!(
+                    actual.is_speculatable_pure, expected.is_speculatable_pure,
+                    "is_speculatable_pure"
+                );
+                assert_eq!(
+                    actual.traversal_seen, expected.traversal_seen,
+                    "traversal_seen"
+                );
+                assert!(actual.touched.len() < 64);
+            }
+        }
+    }
 
     fn input(arena: &mut SLTNodeArena<u32>, variable: u32, width: usize) -> NodeId {
         arena

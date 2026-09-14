@@ -1,22 +1,14 @@
 #![allow(clippy::disallowed_macros)] // CLI errors intentionally use stderr
 
-use std::{
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{fs, path::PathBuf, time::Instant};
 
 use clap::Parser as ClapParser;
 use veryl_analyzer::ir as air;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context};
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
-use veryl_simulator::Simulator as VerylSimulator;
-use veryl_simulator::ir::{BuildSession, Config, ProtoModuleCache, build_ir_cached};
-use veryl_simulator::testbench::{
-    TestResult, build_clock_periods, build_event_map, convert_initial_to_testbench,
-    run_testbench_blocks,
-};
+use veryl_simulator::ir::{BuildSession, Config, Event, ProtoModuleCache, build_ir_cached};
+use veryl_simulator::testbench::{TestResult, run_native_testbench_timed};
 
 #[derive(ClapParser)]
 #[command(about = "Run a Heliodor test with synchronous or tiered Veryl AOT-C")]
@@ -129,33 +121,14 @@ fn run() -> Result<(), VerylHeliodorError> {
     let mut cache = ProtoModuleCache::new(&session);
     let sim_ir = build_ir_cached(top, &mut cache)?;
     let module_name = sim_ir.name.to_string();
-    let mut sim = VerylSimulator::new(sim_ir, None);
-    let event_map = build_event_map(&sim.ir.event_statements, &sim.ir.module_variables);
-    let clock_periods = build_clock_periods(&sim.ir.event_statements);
-    // Veryl keeps each initial block as a separate process, including blocks
-    // in instantiated modules. Preserve declaration order and run them together.
-    let mut initials: Vec<_> = sim
-        .ir
-        .event_statements
-        .iter()
-        .filter_map(|(event, stmts)| event.initial_index().map(|index| (index, stmts)))
-        .collect();
-    initials.sort_by_key(|(index, _)| *index);
-    if initials.is_empty() {
-        return Err(VerylHeliodorError::MissingInitialBlock {
-            module: module_name,
-        });
-    }
-    let testbenches: Vec<_> = initials
-        .iter()
-        .map(|(_, stmts)| convert_initial_to_testbench(stmts, &event_map, &clock_periods, 3))
-        .collect();
-    let blocks: Vec<_> = testbenches.iter().map(Vec::as_slice).collect();
-    // In async mode this is startup until simulation can begin. C compilation
-    // can continue during run_testbench, so it is not the full compile cost.
     let compile_elapsed = compile_start.elapsed();
 
     if options.compile_only {
+        if !sim_ir.event_statements.contains_key(&Event::Initial) {
+            return Err(VerylHeliodorError::MissingInitialBlock {
+                module: module_name,
+            });
+        }
         let elapsed = total_start.elapsed();
         println!(
             "VERYL_TEST_TIMING test={} compile_ns={} execute_ns=0",
@@ -170,35 +143,26 @@ fn run() -> Result<(), VerylHeliodorError> {
         return Ok(());
     }
 
-    let execute_cpu_start = process_cpu_time();
+    // Use the same entry point as `veryl test`: it derives the testbench,
+    // initializes components and builds the private-write dirty filter.
+    // Calling run_testbench directly skips that filter and adds design settles
+    // that the standard Veryl runner avoids.
     let execute_start = Instant::now();
-    let result = run_testbench_blocks(&mut sim, &blocks);
-    let execute_elapsed = execute_start.elapsed();
-    let execute_cpu_elapsed = process_cpu_time()
-        .zip(execute_cpu_start)
-        .map(|(end, start)| end.saturating_sub(start));
+    let (result, derive_elapsed) = run_native_testbench_timed(sim_ir, None, module_name, None)?;
+    // Match Veryl's own timing split: derivation belongs to the build. In
+    // async mode C compilation can continue during the execution interval.
+    let execute_elapsed = execute_start.elapsed().saturating_sub(derive_elapsed);
+    let compile_elapsed = compile_elapsed + derive_elapsed;
     let elapsed = total_start.elapsed();
-    if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
-        println!(
-            "VERYL_TEST_TIMING test={} compile_ns={} execute_ns={} execute_cpu_ns={}",
-            options.test,
-            compile_elapsed.as_nanos(),
-            execute_elapsed.as_nanos(),
-            execute_cpu_elapsed.as_nanos()
-        );
-    } else {
-        println!(
-            "VERYL_TEST_TIMING test={} compile_ns={} execute_ns={}",
-            options.test,
-            compile_elapsed.as_nanos(),
-            execute_elapsed.as_nanos()
-        );
-    }
+    println!(
+        "VERYL_TEST_TIMING test={} compile_ns={} execute_ns={}",
+        options.test,
+        compile_elapsed.as_nanos(),
+        execute_elapsed.as_nanos()
+    );
 
     if options.aot_c_async {
-        // Veryl publishes whole-module dispatch counts when the IR is dropped.
-        // Drop and reporting stay outside both timed intervals.
-        drop(sim);
+        // The standard runner has dropped the IR and published dispatch counts.
         let (compiled, fallback) = veryl_simulator::residency::dispatch_counts()
             .into_iter()
             .fold(
@@ -229,26 +193,6 @@ fn run() -> Result<(), VerylHeliodorError> {
             Err(VerylHeliodorError::TestFailed { message })
         }
     }
-}
-
-#[cfg(unix)]
-fn process_cpu_time() -> Option<Duration> {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let result = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) };
-    (result == 0).then(|| {
-        Duration::new(
-            time.tv_sec.try_into().unwrap_or_default(),
-            time.tv_nsec.try_into().unwrap_or_default(),
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn process_cpu_time() -> Option<Duration> {
-    None
 }
 
 fn ensure_no_errors(

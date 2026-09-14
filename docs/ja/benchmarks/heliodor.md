@@ -15,10 +15,10 @@ Cranelift 単独の Linux 起動時間はこの比較の有効な尺度を大幅
 次の 3 つを分けて計測します。
 
 1. 同期バックエンドが設計をコンパイルする時間。
-2. 生成されたシミュレータがワークロード全体を実行する時間。
+2. テストベンチを含め、ワークロード全体を実行する時間。
 3. コンパイルとシミュレーションを並行させる tiered 実行の起動から Linux 完了までの時間。
 
-生成コードの速度比較に使うのは 2 つ目だけです。tiered 版は「実行開始まで」「コンパイルと
+実行時間は両シミュレータともテストベンチの処理を含みます。tiered 版は「実行開始まで」「コンパイルと
 並行した実行」「Linux 起動完了までの総時間」を別のグラフで表示します。tiered の実行区間には
 切り替え前のバックエンドも含まれるため、生成コードだけの速度としては比較しません。
 Veryl-CC は C のコンパイル完了前に Cranelift だけで処理を終える場合もあり、
@@ -66,3 +66,61 @@ CI の固定 `gate` は x86-64 で `veryl-cc-sync`、`celox`、`celox-tiered`、
 マシンと構成を使ってください。
 
 公開結果は[ベンチマークダッシュボード](./index.md)の **Heliodor Linux** に掲載します。
+
+## 大規模・Linux バージョン別の測定
+
+nightly とプロファイルを取らない手動実行では、次の 9 ケースを x86-64
+（`ubuntu-24.04`）と AArch64（`ubuntu-24.04-arm`）で測定します。
+各ケースで前述の 4 バックエンドを実行します。
+
+| ゲスト Linux カーネル | hart 数 |
+| --- | --- |
+| 5.15 | 1、2、4、8 |
+| 6.6 | 1、2、4 |
+| 7.1 | 1 |
+| 7.1（ベクトル有効） | 1 |
+
+Heliodor のリビジョンは `6285682fa0a514077da9d17fee385c7841160025` に固定します。
+Linux バージョンはシミュレーション内で起動するゲストのもので、ホスト OS の違いではありません。
+バックエンドごとに別ホストのジョブで測定し、全体で 72 ジョブを実行します。
+比較時に確認できるよう、各ホストの CPU とメモリ情報を成果物に記録します。
+各実行のタイムアウトは 1・2 hart が 1 時間、4 hart が 3 時間、8 hart が 4 時間です。未完了・失敗は計測値として公開せず、
+両アーキテクチャの全ケースが成功した場合に nightly の結果を公開します。
+8 hart の Veryl テストには `8hart-100m-v1` の調整を適用し、古い 3,000 万サイクルの
+上限を、上流の Verilator ラッパーと同じ 1 億サイクルに揃えます。shutdown のアサーションは維持します。
+`HELIODOR_SUITE=1` は固定した suite リビジョンだけにこの調整を適用し、ジョブログにも記録します。
+
+Linux 7.1 SMP（2・4 hart）は RTL の修正待ちとして対象から除外しています。
+どちらも一つの hart で命令の完了が停止し、2 hart では Verilator でも
+データキャッシュの読み出し待ちと他 hart のロック待ちが再現しました。
+この失敗を成功した計測結果として扱うことはありません。
+
+別の HEAD 互換性ジョブでは、上流リビジョン
+`94e9c5821c24a8941c3ddc3b76daddc7124a855a` だけを除外します。
+この版のテストベンチには ROM／DRAM 初期化の `initial_assign` 属性がなく、
+固定版 `6285682` で追加されています。CI には既知のソース不備による除外と明記し、
+シミュレーション成功には数えません。それ以外の HEAD は検証対象のままです。
+
+ダッシュボードにはカーネルと hart 数を区別して表示します。設計リビジョンが異なるため、
+従来の固定 gate とは別の履歴です。コンパイル・実行・tiered の時間の定義は共通です。
+大規模ケースは PR ごとには実行しません。
+
+Linux 6.6 の 4 hart をローカルで実行する例:
+
+```bash
+HELIODOR_REF=6285682fa0a514077da9d17fee385c7841160025 \
+HELIODOR_TESTS=test_soc_66_smp_linux_boot_4hart \
+HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered" \
+HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=10800 \
+bash scripts/run-heliodor-bench.sh run
+```
+
+一部の構成だけを再実行する場合は、手動実行の `suite_test`、`suite_runner`、
+`suite_arch` を指定します。空欄なら全構成が対象です。絞り込み実行では従来の gate を
+実行せず、ダッシュボードの履歴も更新しません。例:
+
+```bash
+gh workflow run heliodor-bench.yml --ref <branch> \
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner=celox -f suite_arch=aarch64
+```

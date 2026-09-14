@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0 (2026-09-14)
+
+## What's Changed
+* chore(deps): update pnpm to v12.3.3 by @renovate[bot] in https://github.com/celox-sim/celox/pull/815
+* fix(compiler)!: reduce resource use for large Heliodor benchmarks by @tignear in https://github.com/celox-sim/celox/pull/817
+* chore(deps): update pnpm to v12.3.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/818
+* fix(ci): prevent duplicate npm platform publication by @tignear in https://github.com/celox-sim/celox/pull/820
+* fix(compiler): reduce resource use for large Linux workloads by @tignear in https://github.com/celox-sim/celox/pull/819
+* fix(compiler): correct large Linux boot and reduce compiler memory by @tignear in https://github.com/celox-sim/celox/pull/822
+* fix(deps): update rust crate wasm-encoder to 0.259 by @renovate[bot] in https://github.com/celox-sim/celox/pull/823
+* chore(deps): update rust crate toml to v1.1.6 by @renovate[bot] in https://github.com/celox-sim/celox/pull/824
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.5.0...v0.6.0
+
+## 0.5.0 (2026-09-11)
+
+## What's Changed
+* chore(deps): update pnpm to v12.3.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/798
+* perf(x86): reduce MIR optimization work and emitted code size by @tignear in https://github.com/celox-sim/celox/pull/804
+* chore(deps): update pnpm to v12.3.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/802
+* perf(vcd)!: track writes and specialize waveform output by @tignear in https://github.com/celox-sim/celox/pull/799
+* fix(bench): restore standard Veryl execution for Heliodor by @tignear in https://github.com/celox-sim/celox/pull/808
+* chore(deps): update pnpm to v12.3.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/812
+* fix(bench): enable expanded Heliodor Linux benchmarks without false fold cycles by @tignear in https://github.com/celox-sim/celox/pull/813
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.4.8...v0.5.0
+
 ## 0.4.8 (2026-09-09)
 
 ## What's Changed
