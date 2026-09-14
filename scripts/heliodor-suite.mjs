@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -32,9 +32,9 @@ export function matrix({ test = "", runner = "", arch = "", profile = false } = 
   return { include: Object.entries(hosts).flatMap(([a, os]) =>
     workloads.flatMap(t => runners.map(r => ({
       arch: a, os, test: t, runner: r,
-      // ARM N=8 reference tiering reaches ~42M cycles in four hours;
-      // allow the measured ~44.3M-cycle boot to finish with headroom.
-      timeout_sec: t.endsWith("8hart") ? 18000 : t.endsWith("4hart") ? 10800 : 3600,
+      // ARM N=8 Celox tiering reached 41M cycles at the former five-hour
+      // limit; allow the measured ~44.3M-cycle boot to finish with headroom.
+      timeout_sec: t.endsWith("8hart") ? 19800 : t.endsWith("4hart") ? 10800 : 3600,
     }))),
   ).filter(job => (!test || job.test === test) && (!runner || job.runner === runner) && (!arch || job.arch === arch)) };
 }
@@ -71,6 +71,21 @@ function prepareSuite(directory) {
   console.log(`Heliodor suite testbench: ${suiteTestbench} (RTL ${head})`);
 }
 
+// Restore only our exact patch. Keep unrelated local edits intact, and reject
+// an edited suite wrapper rather than silently benchmarking a mixed variant.
+function restoreSuiteTestbench(directory) {
+  const relative = "tb/test_soc_smp_linux_boot.veryl";
+  const path = join(directory, relative);
+  if (!existsSync(path)) return;
+  const source = readFileSync(path, "utf8");
+  if (!source.includes(`// Celox suite testbench: ${suiteTestbench}.`)) return;
+  const original = execFileSync("git", ["-C", directory, "show", `HEAD:${relative}`], { encoding: "utf8" });
+  if (prepareSuiteTestbench(original) !== source) {
+    throw new Error("Suite testbench has additional local edits; refusing to overwrite them");
+  }
+  writeFileSync(path, original);
+}
+
 // Require each expected backend artifact, not merely a count of TSV files.
 // A partial manual rerun must never be accepted as a full nightly result.
 export function mergeArtifacts(root, outputPrefix) {
@@ -100,9 +115,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (process.argv[2] === "matrix") console.log(JSON.stringify(result));
   } else if (process.argv[2] === "prepare" && process.argv.length === 4) {
     prepareSuite(process.argv[3]);
+  } else if (process.argv[2] === "restore" && process.argv.length === 4) {
+    restoreSuiteTestbench(process.argv[3]);
   } else if (process.argv[2] === "merge" && process.argv.length === 5) {
     mergeArtifacts(process.argv[3], process.argv[4]);
   } else {
-    throw new Error("Usage: heliodor-suite.mjs validate | matrix | prepare <source-dir> | merge <artifact-dir> <output-prefix>");
+    throw new Error("Usage: heliodor-suite.mjs validate | matrix | prepare <source-dir> | restore <source-dir> | merge <artifact-dir> <output-prefix>");
   }
 }

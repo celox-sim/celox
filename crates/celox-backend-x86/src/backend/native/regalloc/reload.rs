@@ -312,6 +312,14 @@ pub(super) struct PureRecipeId(pub u32);
 /// separate variants; no arbitrary HDL bit width is attached to a VReg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PureRecipe {
+    MulImm64 {
+        source: VReg,
+        immediate: i32,
+    },
+    MulImm32 {
+        source: VReg,
+        immediate: i32,
+    },
     Copy64 {
         source: VReg,
     },
@@ -367,6 +375,8 @@ impl PureRecipe {
     fn source(self) -> VReg {
         match self {
             Self::Copy64 { source }
+            | Self::MulImm64 { source, .. }
+            | Self::MulImm32 { source, .. }
             | Self::Copy32 { source }
             | Self::AndImm64 { source, .. }
             | Self::AndImm32 { source, .. }
@@ -385,6 +395,8 @@ impl PureRecipe {
     fn step(self) -> PureStep {
         match self {
             Self::Copy64 { .. } => PureStep::Copy64,
+            Self::MulImm64 { immediate, .. } => PureStep::MulImm64 { immediate },
+            Self::MulImm32 { immediate, .. } => PureStep::MulImm32 { immediate },
             Self::Copy32 { .. } => PureStep::Copy32,
             Self::AndImm64 { immediate, .. } => PureStep::AndImm64 { immediate },
             Self::AndImm32 { immediate, .. } => PureStep::AndImm32 { immediate },
@@ -405,6 +417,8 @@ impl PureRecipe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PureStep {
+    MulImm64 { immediate: i32 },
+    MulImm32 { immediate: i32 },
     Copy64,
     Copy32,
     AndImm64 { immediate: u64 },
@@ -428,6 +442,16 @@ pub(super) enum PureStep {
 /// lowering path.
 pub(super) fn materialize_pure_step(step: PureStep, dst: VReg, source: VReg) -> MInst {
     match step {
+        PureStep::MulImm64 { immediate } => MInst::MulImm {
+            dst,
+            src: source,
+            imm: immediate,
+        },
+        PureStep::MulImm32 { immediate } => MInst::MulImm32 {
+            dst,
+            src: source,
+            imm: immediate,
+        },
         PureStep::Copy64 => MInst::Mov { dst, src: source },
         PureStep::Copy32 => MInst::Mov32 { dst, src: source },
         PureStep::AndImm64 { immediate } => MInst::AndImm {
@@ -1181,6 +1205,7 @@ struct MemoryDefinition {
     block: BlockId,
     ordinal: usize,
     write_index: usize,
+    write_end: usize,
 }
 
 /// Reload-specific adapter around the shared access graph. MIR effects and
@@ -1189,7 +1214,10 @@ struct MemoryDefinition {
 struct ReloadMemorySsa {
     graph: MemoryAccessGraph<MemoryDefinition>,
     points: MemoryPointMap<MemoryProgramPoint>,
-    writes: Vec<Vec<MemoryEffect<MemoryObject>>>,
+    // Keep effects contiguous: the clobber walker repeatedly visits writes
+    // across the graph, so a separate heap allocation per definition turns
+    // each alias check into another unrelated pointer chase.
+    writes: Vec<MemoryEffect<MemoryObject>>,
     block_ids: Vec<BlockId>,
     walker: ClobberWalker,
     clobber_cache: HashMap<(StateLoad, MemoryAccessId), MemoryAccessId>,
@@ -1246,12 +1274,14 @@ impl ReloadMemorySsa {
         let block_ids = &self.block_ids;
         let clobber_cache = &mut self.clobber_cache;
         let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
-            writes.get(definition.write_index).is_some_and(|effects| {
-                effects
-                    .iter()
-                    .copied()
-                    .any(|write| effects_may_alias(write, *query))
-            })
+            writes
+                .get(definition.write_index..definition.write_end)
+                .is_some_and(|effects| {
+                    effects
+                        .iter()
+                        .copied()
+                        .any(|write| effects_may_alias(write, *query))
+                })
         };
         let mut clobber_query = self.walker.query(graph, &query, &oracle);
         let mut clobber_access = |start| {
@@ -1885,7 +1915,10 @@ fn canonical_instruction_bits(
         MInst::LoadPtr { size, .. }
         | MInst::LoadIndexed { size, .. }
         | MInst::LoadPtrIndexed { size, .. } => (size.bytes() * 8) as u8,
-        MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => 32,
+        MInst::Add32 { .. }
+        | MInst::Sub32 { .. }
+        | MInst::Mul32 { .. }
+        | MInst::MulImm32 { .. } => 32,
         MInst::And { lhs, rhs, .. } => known(*lhs)?.min(known(*rhs)?),
         MInst::And32 { lhs, rhs, .. } => known(*lhs)?.min(known(*rhs)?).min(32),
         MInst::Or { lhs, rhs, .. } | MInst::Xor { lhs, rhs, .. } => known(*lhs)?.max(known(*rhs)?),
@@ -2066,6 +2099,14 @@ fn relevant_recipe_values(
 
 fn pure_expression(inst: &MInst) -> Option<PureRecipe> {
     match inst {
+        MInst::MulImm { src, imm, .. } => Some(PureRecipe::MulImm64 {
+            source: *src,
+            immediate: *imm,
+        }),
+        MInst::MulImm32 { src, imm, .. } => Some(PureRecipe::MulImm32 {
+            source: *src,
+            immediate: *imm,
+        }),
         MInst::Mov { src, .. } => Some(PureRecipe::Copy64 { source: *src }),
         MInst::Mov32 { src, .. } => Some(PureRecipe::Copy32 { source: *src }),
         MInst::AndImm { src, imm, .. } => Some(PureRecipe::AndImm64 {
@@ -2119,16 +2160,16 @@ fn build_reload_memory_ssa(
         Vec::<MemoryAccessEvent<MemoryDefinition, MemoryProgramPoint>>::new();
         func.blocks.len()
     ];
-    let mut writes = Vec::<Vec<MemoryEffect<MemoryObject>>>::new();
+    let mut writes = Vec::<MemoryEffect<MemoryObject>>::new();
     let sim_state = MemoryEffect::UnknownObject(MemoryObject::SimState);
 
     for (block, mir_block) in func.blocks.iter().enumerate() {
         let mut write_ordinal = 0usize;
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            let effects = analysis_effects(&memory_effect::writes(inst))
+            let write_index = writes.len();
+            for effect in analysis_effects(&memory_effect::writes(inst))
                 .filter(|effect| effects_may_alias(*effect, sim_state))
-                .collect::<Vec<_>>();
-            for effect in &effects {
+            {
                 if let MemoryEffect::Exact(location) = effect
                     && (location.byte_len == 0 || location.end().is_none())
                 {
@@ -2140,8 +2181,9 @@ fn build_reload_memory_ssa(
                         "MIR SimState write has an empty or overflowing range",
                     ));
                 }
+                writes.push(effect);
             }
-            let definition = if effects.is_empty() {
+            let definition = if writes.len() == write_index {
                 None
             } else {
                 let ordinal = write_ordinal;
@@ -2157,9 +2199,9 @@ fn build_reload_memory_ssa(
                 let definition = MemoryDefinition {
                     block: mir_block.id,
                     ordinal,
-                    write_index: writes.len(),
+                    write_index,
+                    write_end: writes.len(),
                 };
-                writes.push(effects);
                 Some(definition)
             };
             events[block].push(MemoryAccessEvent {
@@ -3608,6 +3650,86 @@ mod tests {
     }
 
     #[test]
+    fn immediate_product_recovery_preserves_width_and_rejects_clobbered_inputs() {
+        for word32 in [false, true] {
+            let (mut func, values) = function_with_values(5);
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::Load {
+                dst: values[0],
+                base: BaseReg::SimState,
+                offset: 16,
+                size: OpSize::S64,
+            });
+            let multiply = if word32 {
+                MInst::MulImm32 {
+                    dst: values[1],
+                    src: values[0],
+                    imm: -7,
+                }
+            } else {
+                MInst::MulImm {
+                    dst: values[1],
+                    src: values[0],
+                    imm: -7,
+                }
+            };
+            block.push(multiply.clone());
+            block.push(MInst::Mov {
+                dst: values[2],
+                src: values[1],
+            });
+            block.push(MInst::LoadImm {
+                dst: values[3],
+                value: 0,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 16,
+                src: values[3],
+                size: OpSize::S64,
+            });
+            block.push(MInst::Mov {
+                dst: values[4],
+                src: values[1],
+            });
+            block.push(MInst::Return);
+            func.push_block(block);
+            let (_, _, analysis) = analyze_function(func);
+            let expected = if word32 {
+                PureStep::MulImm32 { immediate: -7 }
+            } else {
+                PureStep::MulImm64 { immediate: -7 }
+            };
+            assert_eq!(
+                analysis.resolved_recipe(values[1]).unwrap().unwrap().steps,
+                vec![expected]
+            );
+            assert_eq!(
+                materialize_pure_step(expected, values[1], values[0]),
+                multiply
+            );
+            assert!(
+                analysis
+                    .resolved_recipe_at_point(PointUse {
+                        block: BlockId(0),
+                        instruction: 2,
+                        value: values[1],
+                    })
+                    .is_some()
+            );
+            assert!(
+                analysis
+                    .resolved_recipe_at_point(PointUse {
+                        block: BlockId(0),
+                        instruction: 5,
+                        value: values[1],
+                    })
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn sparse_mark_preserves_only_nonoverlapping_state_recipes() {
         fn fixture(load_offset: i32) -> (VReg, ReloadRecipeAnalysis) {
             let (mut func, values) = function_with_values(3);
@@ -4473,6 +4595,77 @@ mod tests {
             })
         ));
         assert!(recipe.steps.is_empty());
+    }
+
+    #[test]
+    fn contiguous_memory_effects_preserve_write_boundaries_and_clobbers() {
+        let (mut func, values) = function_with_values(1);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: values[0],
+            value: 1,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::SparseCommit {
+            src_offset: 0,
+            dst_offset: 100,
+            byte_size: 17,
+            dirty_words_offset: 200,
+            dirty_word_count: 2,
+            summary_words_offset: 300,
+            summary_word_count: 1,
+            four_state: true,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 104,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let mut memory = build_reload_memory_ssa(&func, &cfg).unwrap();
+        for instruction in 0..4 {
+            let point = memory.points.event((0, instruction)).unwrap().after;
+            for offset in 0..320 {
+                let ordinal = if instruction >= 3 && (104..112).contains(&offset) {
+                    Some(2)
+                } else if instruction >= 2
+                    && [(100..134), (200..216), (300..308)]
+                        .iter()
+                        .any(|range| range.contains(&offset))
+                {
+                    Some(1)
+                } else if instruction >= 1 && (8..16).contains(&offset) {
+                    Some(0)
+                } else {
+                    None
+                };
+                let expected = ordinal.map_or(SnapshotAccess::LiveOnEntry, |ordinal| {
+                    SnapshotAccess::Write {
+                        block: BlockId(0),
+                        ordinal,
+                    }
+                });
+                let actual = memory
+                    .snapshot_at(
+                        point,
+                        StateLoad {
+                            offset,
+                            size: OpSize::S8,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(actual.root, expected, "i{instruction} byte {offset}");
+                assert!(actual.phis.is_empty());
+            }
+        }
     }
 
     #[test]

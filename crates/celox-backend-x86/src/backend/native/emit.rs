@@ -3012,6 +3012,22 @@ fn emit_inst_with_memory(
     _func: &MFunction,
 ) -> Result<bool, IcedError> {
     match inst {
+        MInst::MulImm { dst, src, imm } if *src == memory_vreg => {
+            asm.imul_3(
+                preg_to_reg64(resolve(assignment, *dst)),
+                qword_ptr(memory),
+                *imm,
+            )?;
+            Ok(true)
+        }
+        MInst::MulImm32 { dst, src, imm } if *src == memory_vreg => {
+            asm.imul_3(
+                preg_to_reg32(resolve(assignment, *dst)),
+                dword_ptr(memory),
+                *imm,
+            )?;
+            Ok(true)
+        }
         MInst::Mov { dst, src } if *src == memory_vreg => {
             let d = preg_to_reg64(resolve(assignment, *dst));
             asm.mov(d, qword_ptr(memory))?;
@@ -4460,6 +4476,20 @@ fn emit_inst(
         }
         MInst::Mul32 { dst, lhs, rhs } => {
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul, true)?;
+        }
+        MInst::MulImm { dst, src, imm } => {
+            asm.imul_3(
+                preg_to_reg64(resolve(assignment, *dst)),
+                preg_to_reg64(resolve(assignment, *src)),
+                *imm,
+            )?;
+        }
+        MInst::MulImm32 { dst, src, imm } => {
+            asm.imul_3(
+                preg_to_reg32(resolve(assignment, *dst)),
+                preg_to_reg32(resolve(assignment, *src)),
+                *imm,
+            )?;
         }
         MInst::UMulHi { dst, lhs, rhs } => {
             // x86-64: mul r64 → RDX:RAX = RAX × r64. We want RDX (high 64).
@@ -6032,6 +6062,8 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 | MInst::Sar { .. } => alu += 1,
                 MInst::AndImm { .. }
                 | MInst::AndImm32 { .. }
+                | MInst::MulImm { .. }
+                | MInst::MulImm32 { .. }
                 | MInst::OrImm { .. }
                 | MInst::ShrImm { .. }
                 | MInst::ShlImm { .. }
@@ -6137,6 +6169,8 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                     | MInst::Sar { .. } => alu += 1,
                     MInst::AndImm { .. }
                     | MInst::AndImm32 { .. }
+                    | MInst::MulImm { .. }
+                    | MInst::MulImm32 { .. }
                     | MInst::OrImm { .. }
                     | MInst::ShrImm { .. }
                     | MInst::ShlImm { .. }
@@ -7259,6 +7293,109 @@ mod shift_encoding_tests {
                                     u64::from_le_bytes(state[8..16].try_into().unwrap()),
                                     value & mask,
                                     "word32={word32}, folded={folded_load}, {source:?} -> {destination:?}, value={value:#x}, mask={mask:#x}"
+                                );
+                                if !folded_load {
+                                    assert_eq!(
+                                        u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                                        value
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn immediate_multiplication_executes_with_aliases_and_folded_loads() {
+        for word32 in [false, true] {
+            for folded_load in [false, true] {
+                for source in [PhysReg::RAX, PhysReg::RBP, PhysReg::R12] {
+                    for destination in [source, PhysReg::R11] {
+                        for imm in [0, 1, -1, 3, 7, 8, 30, i32::MIN, i32::MAX] {
+                            let mut vregs = VRegAllocator::new();
+                            let input = vregs.alloc();
+                            let output = vregs.alloc();
+                            let mut function =
+                                MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+                            function.target_features = X86Features::for_test(false);
+                            let mut block = MBlock::new(BlockId(0));
+                            block.push(MInst::Load {
+                                dst: input,
+                                base: BaseReg::SimState,
+                                offset: 0,
+                                size: OpSize::S64,
+                            });
+                            if !folded_load {
+                                block.push(MInst::Store {
+                                    base: BaseReg::SimState,
+                                    offset: 16,
+                                    src: input,
+                                    size: OpSize::S64,
+                                });
+                            }
+                            block.push(if word32 {
+                                MInst::MulImm32 {
+                                    dst: output,
+                                    src: input,
+                                    imm,
+                                }
+                            } else {
+                                MInst::MulImm {
+                                    dst: output,
+                                    src: input,
+                                    imm,
+                                }
+                            });
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: 8,
+                                src: output,
+                                size: OpSize::S64,
+                            });
+                            block.push(MInst::Return);
+                            function.push_block(block);
+                            let mut assignment = AssignmentMap::default();
+                            assignment.set(input, source);
+                            assignment.set(output, destination);
+                            let emitted = emit(&function, &assignment, 0).unwrap();
+                            let decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
+                            let instructions = decoder
+                                .into_iter()
+                                .filter(|i| i.mnemonic() == Mnemonic::Imul)
+                                .collect::<Vec<_>>();
+                            assert_eq!(instructions.len(), 1);
+                            assert_eq!(instructions[0].op_count(), 3);
+                            assert_eq!(
+                                instructions[0].op1_kind() == iced_x86::OpKind::Memory,
+                                folded_load
+                            );
+                            let jit = JitCode::new(&emitted.code).unwrap();
+                            for value in [
+                                0u64,
+                                1,
+                                0xffff_ffff,
+                                1 << 32,
+                                1 << 63,
+                                0xfedc_ba98_7654_3210,
+                                u64::MAX,
+                            ] {
+                                let mut state =
+                                    vec![0xffu8; emitted.required_state_size.max(24) as usize];
+                                state[..8].copy_from_slice(&value.to_le_bytes());
+                                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                                let product = value.wrapping_mul(imm as u64);
+                                let expected = if word32 {
+                                    u64::from(product as u32)
+                                } else {
+                                    product
+                                };
+                                assert_eq!(
+                                    u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                                    expected,
+                                    "word32={word32} folded={folded_load} {source:?}->{destination:?} value={value:#x} imm={imm}"
                                 );
                                 if !folded_load {
                                     assert_eq!(

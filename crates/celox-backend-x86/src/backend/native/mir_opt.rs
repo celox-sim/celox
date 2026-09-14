@@ -683,6 +683,7 @@ fn unsigned_upper_bound<L: DefLookup>(
         | MInst::Add32 { .. }
         | MInst::Sub32 { .. }
         | MInst::Mul32 { .. }
+        | MInst::MulImm32 { .. }
         | MInst::And32 { .. }
         | MInst::Or32 { .. }
         | MInst::Xor32 { .. } => Some(u32::MAX as u64),
@@ -1158,6 +1159,20 @@ fn simplify_equal_value_selects(func: &mut MFunction) {
 
 fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
     match inst {
+        MInst::Mul { dst, lhs, rhs } if *rhs == imm_vreg || *lhs == imm_vreg => {
+            sign_extended_i32(value).map(|imm| MInst::MulImm {
+                dst: *dst,
+                src: if *rhs == imm_vreg { *lhs } else { *rhs },
+                imm,
+            })
+        }
+        MInst::Mul32 { dst, lhs, rhs } if *rhs == imm_vreg || *lhs == imm_vreg => {
+            Some(MInst::MulImm32 {
+                dst: *dst,
+                src: if *rhs == imm_vreg { *lhs } else { *rhs },
+                imm: value as i32,
+            })
+        }
         MInst::Cmp {
             dst,
             lhs,
@@ -1887,6 +1902,12 @@ fn constant_fold(func: &mut MFunction) {
                     MInst::Mul32 { dst, lhs, rhs } => {
                         fold_bin32(&consts, *dst, *lhs, *rhs, u32::wrapping_mul)
                     }
+                    MInst::MulImm { dst, src, imm } => consts
+                        .get(src)
+                        .map(|value| (*dst, value.wrapping_mul(*imm as u64))),
+                    MInst::MulImm32 { dst, src, imm } => consts
+                        .get(src)
+                        .map(|value| (*dst, u64::from((*value as u32).wrapping_mul(*imm as u32)))),
                     MInst::And { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a & b)
                     }
@@ -2420,7 +2441,10 @@ fn compute_possible_one_bits(
             (bits(*lhs) | bits(*rhs)) & low32
         }
         MInst::OrImm { src, imm, .. } => bits(*src) | *imm,
-        MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => low32,
+        MInst::Add32 { .. }
+        | MInst::Sub32 { .. }
+        | MInst::Mul32 { .. }
+        | MInst::MulImm32 { .. } => low32,
         MInst::ShrImm { src, imm, .. } => bits(*src).checked_shr(u32::from(*imm)).unwrap_or(0),
         MInst::ShlImm { src, imm, .. } => bits(*src).checked_shl(u32::from(*imm)).unwrap_or(0),
         MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
@@ -2468,6 +2492,8 @@ enum GvnOpcode {
     Add,
     Sub,
     Mul,
+    MulImm,
+    MulImm32,
     UMulHi,
     And,
     Or,
@@ -2578,6 +2604,8 @@ fn allocator_can_recover_extended_gvn_leader(inst: &MInst) -> bool {
     matches!(
         inst,
         MInst::AndImm { .. }
+            | MInst::MulImm { .. }
+            | MInst::MulImm32 { .. }
             | MInst::AndImm32 { .. }
             | MInst::OrImm { .. }
             | MInst::ShrImm { .. }
@@ -2612,6 +2640,12 @@ fn gvn_key(
         MInst::Add { lhs, rhs, .. } => Some(binary(GvnOpcode::Add, *lhs, *rhs)),
         MInst::Sub { lhs, rhs, .. } => Some(binary(GvnOpcode::Sub, *lhs, *rhs)),
         MInst::Mul { lhs, rhs, .. } => Some(binary(GvnOpcode::Mul, *lhs, *rhs)),
+        MInst::MulImm { src, imm, .. } => {
+            Some(GvnKey::BinaryImmI32(GvnOpcode::MulImm, value(*src), *imm))
+        }
+        MInst::MulImm32 { src, imm, .. } => {
+            Some(GvnKey::BinaryImmI32(GvnOpcode::MulImm32, value(*src), *imm))
+        }
         MInst::UMulHi { lhs, rhs, .. } => Some(binary(GvnOpcode::UMulHi, *lhs, *rhs)),
         MInst::And { lhs, rhs, .. } => Some(binary(GvnOpcode::And, *lhs, *rhs)),
         MInst::Or { lhs, rhs, .. } => Some(binary(GvnOpcode::Or, *lhs, *rhs)),
@@ -7555,6 +7589,82 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiply_immediates_preserve_full_and_low_word_constant_semantics() {
+        for word32 in [false, true] {
+            for constant_on_left in [false, true] {
+                for value in [
+                    0,
+                    3,
+                    30,
+                    i32::MAX as u64,
+                    0x8000_0000,
+                    0xffff_ffff,
+                    i32::MIN as u64,
+                    u64::MAX,
+                    0x1234_5678_89ab_cdef,
+                ] {
+                    let (lhs, rhs) = if constant_on_left {
+                        (VReg(0), VReg(1))
+                    } else {
+                        (VReg(1), VReg(0))
+                    };
+                    let inst = if word32 {
+                        MInst::Mul32 {
+                            dst: VReg(2),
+                            lhs,
+                            rhs,
+                        }
+                    } else {
+                        MInst::Mul {
+                            dst: VReg(2),
+                            lhs,
+                            rhs,
+                        }
+                    };
+                    let folded = fold_imm_use(&inst, VReg(0), value);
+                    if !word32 && (value as i32 as u64) != value {
+                        assert!(
+                            folded.is_none(),
+                            "unencodable full-word constant {value:#x}"
+                        );
+                        continue;
+                    }
+                    let folded = folded.unwrap();
+                    assert_eq!(
+                        folded.uses().iter().copied().collect::<Vec<_>>(),
+                        vec![VReg(1)]
+                    );
+                    let imm = match folded {
+                        MInst::MulImm {
+                            dst: VReg(2),
+                            src: VReg(1),
+                            imm,
+                        } if !word32 => imm,
+                        MInst::MulImm32 {
+                            dst: VReg(2),
+                            src: VReg(1),
+                            imm,
+                        } if word32 => imm,
+                        other => panic!("incorrect immediate form: {other:?}"),
+                    };
+                    for input in [0u64, 1, 0x8000_0000, 1 << 32, 1 << 63, u64::MAX] {
+                        let expected = input.wrapping_mul(value);
+                        let actual = input.wrapping_mul(imm as u64);
+                        assert_eq!(
+                            if word32 { actual as u32 as u64 } else { actual },
+                            if word32 {
+                                expected as u32 as u64
+                            } else {
+                                expected
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// A candidate window that is empty or wholly outside the i32 domain
     /// must never clamp into a nonempty in-domain window: an S8 store at

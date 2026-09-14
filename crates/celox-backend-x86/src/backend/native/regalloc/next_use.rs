@@ -210,14 +210,22 @@ pub(super) fn analyze(
         // With one ordinary edge and no phi-edge uses, the exit is exactly
         // the successor entry. Share its immutable storage rather than encode
         // another copy of every live value for this block.
-        let shared_successor = match cfg.successors[block].as_slice() {
-            &[successor] if edge_loop_exits[block][0] == 0 && phi_uses[block][0].is_empty() => {
-                Some(successor)
+        let shared_exit = match *cfg.successors[block].as_slice() {
+            [successor] if edge_loop_exits[block][0] == 0 && phi_uses[block][0].is_empty() => {
+                Some(entry[successor].clone())
+            }
+            [left, right] if edge_loop_exits[block].iter().all(|&exits| exits == 0) => {
+                DistanceMap::try_branch_join(
+                    &entry[left],
+                    &entry[right],
+                    &phi_uses[block][0],
+                    &phi_uses[block][1],
+                )
             }
             _ => None,
         };
-        let mut next_exit = if let Some(successor) = shared_successor {
-            entry[successor].clone()
+        let mut next_exit = if let Some(exit) = shared_exit {
+            exit
         } else {
             let mut next_exit = DistanceMap::default();
             for (edge, &successor) in cfg.successors[block].iter().enumerate() {
@@ -245,24 +253,36 @@ pub(super) fn analyze(
             next_exit
         };
         let transfer = &transfers[block];
-        let mut next_entry = DistanceMap::default();
-        for (&value, distance) in &next_exit {
-            if !transfer.definitions.contains(&value) {
-                let Some(distance) = distance.checked_prepend_instructions(transfer.length) else {
-                    return Err(NextUseError::new(
-                        "NEXT_USE.DISTANCE_RANGE",
-                        Some(func.blocks[block].id),
-                        Some(0),
-                        vec![value],
-                        "next-use instruction distance exceeds addressable MIR size",
-                    ));
-                };
-                next_entry.insert(value, distance);
+        next_exit.freeze(&value_keys);
+        let mut next_entry = if let Some(entry) = DistanceMap::try_block_entry(
+            &next_exit,
+            transfer.length,
+            &transfer.definitions,
+            &transfer.local_uses,
+        ) {
+            entry
+        } else {
+            let mut entry = DistanceMap::default();
+            for (&value, distance) in &next_exit {
+                if !transfer.definitions.contains(&value) {
+                    let Some(distance) = distance.checked_prepend_instructions(transfer.length)
+                    else {
+                        return Err(NextUseError::new(
+                            "NEXT_USE.DISTANCE_RANGE",
+                            Some(func.blocks[block].id),
+                            Some(0),
+                            vec![value],
+                            "next-use instruction distance exceeds addressable MIR size",
+                        ));
+                    };
+                    entry.insert(value, distance);
+                }
             }
-        }
-        for &(value, position) in &transfer.local_uses {
-            next_entry.insert(value, NextUseDistance::local(position));
-        }
+            for &(value, position) in &transfer.local_uses {
+                entry.insert(value, NextUseDistance::local(position));
+            }
+            entry
+        };
         let mut next_anticipated = anticipated_on_all_successors(
             &cfg.successors[block],
             &anticipated_after_phis,
@@ -275,7 +295,6 @@ pub(super) fn analyze(
             || next_exit != exit[block]
             || next_anticipated != anticipated_after_phis[block]
         {
-            next_exit.freeze(&value_keys);
             if !next_entry.freeze_block_entry(
                 &next_exit,
                 transfer.length,
@@ -1200,15 +1219,19 @@ fn block_region_summaries(
             used.insert(phi.dst);
             used.extend(phi.sources.iter().map(|(_, source)| *source));
         }
-        let mut live = exit[block].keys().copied().collect::<HashSet<_>>();
+        let mut live = super::live_count::LiveCount::new(exit[block].len(), |value| {
+            exit[block].contains_key(value)
+        });
         let mut maximum = live.len();
         for inst in mir_block.insts.iter().rev() {
             let instruction_uses = inst.uses();
             used.extend(instruction_uses.iter().copied());
             if let Some(definition) = inst.def() {
-                live.remove(&definition);
+                live.set(definition, false);
             }
-            live.extend(instruction_uses);
+            for value in instruction_uses {
+                live.set(value, true);
+            }
             maximum = maximum.max(live.len());
         }
         summaries.push(BlockRegionSummary {

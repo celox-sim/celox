@@ -776,18 +776,41 @@ pub(super) fn pressure_cost_for_order(
     live_out: &BTreeSet<VReg>,
     register_capacity: usize,
 ) -> (u128, usize) {
-    let mut live = live_out.clone();
+    pressure_cost_with_membership(
+        instructions,
+        order,
+        live_out.len(),
+        |value| live_out.contains(value),
+        register_capacity,
+    )
+}
+
+pub(super) fn pressure_cost_with_membership(
+    instructions: &[MInst],
+    order: &[usize],
+    live_count: usize,
+    contains: impl Fn(&VReg) -> bool,
+    register_capacity: usize,
+) -> (u128, usize) {
+    let mut live = super::live_count::LiveCount::new(live_count, contains);
     let mut maximum = live.len();
     let mut excess_area = live.len().saturating_sub(register_capacity) as u128;
     for &source in order.iter().rev() {
-        transfer_liveness_at(instructions, source, &mut live);
+        let inst = &instructions[source];
+        if let Some(definition) = inst.def() {
+            live.set(definition, false);
+        }
+        for value in inst.uses() {
+            live.set(value, true);
+        }
         maximum = maximum.max(live.len());
         excess_area += live.len().saturating_sub(register_capacity) as u128;
     }
     (excess_area, maximum)
 }
 
-pub(super) fn preserves_original_pressure(
+#[cfg(test)]
+fn preserves_original_pressure(
     instructions: &[MInst],
     candidate: &[usize],
     live_out: &BTreeSet<VReg>,
@@ -1209,6 +1232,8 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::Sub32 { .. }
         | MInst::Mul { .. }
         | MInst::Mul32 { .. }
+        | MInst::MulImm { .. }
+        | MInst::MulImm32 { .. }
         | MInst::And { .. }
         | MInst::And32 { .. }
         | MInst::Or { .. }
@@ -1271,6 +1296,40 @@ mod tests {
     use crate::native::mir::{
         BaseReg, BlockId, MBlock, MemoryAliasRange, OpSize, SpillDesc, VRegAllocator,
     };
+
+    #[test]
+    fn local_pressure_counts_match_materialized_oracle() {
+        for seed in 0..32u32 {
+            let instructions = (0..128u32)
+                .map(|index| MInst::AddImm {
+                    dst: VReg((index * 13 + seed) % 192),
+                    src: VReg((index * 31 + seed * 7) % 192),
+                    imm: 1,
+                })
+                .collect::<Vec<_>>();
+            let live_out = (0..8192)
+                .filter(|value| (value + seed) % 3 != 0)
+                .map(VReg)
+                .collect::<BTreeSet<_>>();
+            for reverse in [false, true] {
+                let mut order = (0..instructions.len()).collect::<Vec<_>>();
+                if reverse {
+                    order.reverse();
+                }
+                let ordered = order
+                    .iter()
+                    .map(|&index| instructions[index].clone())
+                    .collect::<Vec<_>>();
+                for capacity in [0, 16, 8192] {
+                    let expected = pressure_cost(&ordered, &live_out, capacity);
+                    assert_eq!(
+                        pressure_cost_for_order(&instructions, &order, &live_out, capacity),
+                        (expected.excess_area, expected.maximum)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn pressure_order_finishes_one_recurrence_before_starting_another() {

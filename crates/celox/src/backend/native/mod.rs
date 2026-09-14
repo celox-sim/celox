@@ -1,4 +1,5 @@
 pub mod backend;
+mod compile_resources;
 mod image_file;
 mod runtime_image;
 pub use backend::{
