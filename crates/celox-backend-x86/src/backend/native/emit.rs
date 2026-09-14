@@ -4477,19 +4477,40 @@ fn emit_inst(
         MInst::Mul32 { dst, lhs, rhs } => {
             emit_binop_rr(asm, assignment, *dst, *lhs, *rhs, BinOp::Mul, true)?;
         }
-        MInst::MulImm { dst, src, imm } => {
-            asm.imul_3(
-                preg_to_reg64(resolve(assignment, *dst)),
-                preg_to_reg64(resolve(assignment, *src)),
-                *imm,
-            )?;
-        }
-        MInst::MulImm32 { dst, src, imm } => {
-            asm.imul_3(
-                preg_to_reg32(resolve(assignment, *dst)),
-                preg_to_reg32(resolve(assignment, *src)),
-                *imm,
-            )?;
+        MInst::MulImm { dst, src, imm } | MInst::MulImm32 { dst, src, imm } => {
+            let destination = resolve(assignment, *dst);
+            let source = resolve(assignment, *src);
+            let word32 = matches!(inst, MInst::MulImm32 { .. });
+            let source64 = preg_to_reg64(source);
+            if destination == source && matches!(*imm, 2 | 4 | 8) {
+                let shift = (*imm as u32).trailing_zeros();
+                if word32 {
+                    asm.shl(preg_to_reg32(destination), shift)?;
+                } else {
+                    asm.shl(preg_to_reg64(destination), shift)?;
+                }
+            } else {
+                // Use the same scaled-address forms as small constant shifts.
+                // A 32-bit destination preserves multiplication modulo 2^32,
+                // even though address calculation uses the full source value.
+                let address = match *imm {
+                    2 => Some(ptr(source64 + source64)),
+                    3 | 5 | 9 => Some(ptr(source64 + source64 * (*imm as u32 - 1))),
+                    4 | 8 => Some(ptr(source64 * *imm as u32)),
+                    _ => None,
+                };
+                if let Some(address) = address {
+                    if word32 {
+                        asm.lea(preg_to_reg32(destination), address)?;
+                    } else {
+                        asm.lea(preg_to_reg64(destination), address)?;
+                    }
+                } else if word32 {
+                    asm.imul_3(preg_to_reg32(destination), preg_to_reg32(source), *imm)?;
+                } else {
+                    asm.imul_3(preg_to_reg64(destination), source64, *imm)?;
+                }
+            }
         }
         MInst::UMulHi { dst, lhs, rhs } => {
             // x86-64: mul r64 → RDX:RAX = RAX × r64. We want RDX (high 64).
@@ -7314,7 +7335,7 @@ mod shift_encoding_tests {
             for folded_load in [false, true] {
                 for source in [PhysReg::RAX, PhysReg::RBP, PhysReg::R12] {
                     for destination in [source, PhysReg::R11] {
-                        for imm in [0, 1, -1, 3, 7, 8, 30, i32::MIN, i32::MAX] {
+                        for imm in [0, 1, -1, 2, 3, 4, 5, 7, 8, 9, 30, i32::MIN, i32::MAX] {
                             let mut vregs = VRegAllocator::new();
                             let input = vregs.alloc();
                             let output = vregs.alloc();
@@ -7361,17 +7382,34 @@ mod shift_encoding_tests {
                             assignment.set(input, source);
                             assignment.set(output, destination);
                             let emitted = emit(&function, &assignment, 0).unwrap();
-                            let decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
-                            let instructions = decoder
+                            let decoded = Decoder::new(64, &emitted.code, DecoderOptions::NONE)
                                 .into_iter()
+                                .collect::<Vec<_>>();
+                            let instructions = decoded
+                                .iter()
                                 .filter(|i| i.mnemonic() == Mnemonic::Imul)
                                 .collect::<Vec<_>>();
-                            assert_eq!(instructions.len(), 1);
-                            assert_eq!(instructions[0].op_count(), 3);
-                            assert_eq!(
-                                instructions[0].op1_kind() == iced_x86::OpKind::Memory,
-                                folded_load
-                            );
+                            if !folded_load && matches!(imm, 2 | 3 | 4 | 5 | 8 | 9) {
+                                assert!(instructions.is_empty());
+                                let expected = if source == destination && matches!(imm, 2 | 4 | 8)
+                                {
+                                    Mnemonic::Shl
+                                } else {
+                                    Mnemonic::Lea
+                                };
+                                assert!(
+                                    decoded
+                                        .iter()
+                                        .any(|instruction| instruction.mnemonic() == expected)
+                                );
+                            } else {
+                                assert_eq!(instructions.len(), 1);
+                                assert_eq!(instructions[0].op_count(), 3);
+                                assert_eq!(
+                                    instructions[0].op1_kind() == iced_x86::OpKind::Memory,
+                                    folded_load
+                                );
+                            }
                             let jit = JitCode::new(&emitted.code).unwrap();
                             for value in [
                                 0u64,
