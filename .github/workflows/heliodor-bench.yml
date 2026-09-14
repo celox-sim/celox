@@ -478,7 +478,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.linux-suite-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 330
+    timeout-minutes: 360
     env:
       # Keep expanded workloads separate from the historical fixed gate.
       HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025

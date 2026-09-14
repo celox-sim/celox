@@ -1661,15 +1661,9 @@ fn compile_program(
     capture_trace: bool,
     cancel: Option<&CompileCancel>,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
-    const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
-
     let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
-    // Large CFGs retain several independent SIR/MIR and allocation analyses.
-    // Do not overlap their working sets with the next native function. Small
-    // programs retain the usual four-function compilation parallelism.
-    const SERIAL_NATIVE_BLOCK_THRESHOLD: usize = 65_536;
     let comb_blocks = sir
         .sir
         .eval_comb
@@ -1686,24 +1680,54 @@ fn compile_program(
         })
         .max()
         .unwrap_or(0);
-    let serial = comb_blocks.max(max_task_blocks) >= SERIAL_NATIVE_BLOCK_THRESHOLD;
+    let max_instructions = std::iter::once(sir.sir.eval_comb.iter().collect::<Vec<_>>())
+        .chain(compile_tasks.iter().map(|task| task.units.clone()))
+        .map(|units| {
+            units
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .map(|block| block.instructions.len())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let release_pages = || {
+        // Measure usable capacity after returning unused large-compiler pages.
+        // Small single-worker builds must not trim unrelated process heaps.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if comb_blocks.max(max_task_blocks) >= 65_536 {
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        }
+    };
+    release_pages();
+    let workers = super::compile_resources::workers(
+        comb_blocks.max(max_task_blocks),
+        max_instructions,
+        compile_tasks.len() + 1,
+    );
+    let serial = workers == 1;
+    // Start expensive functions early so the final fused function does not
+    // sit behind short FF entries. Stable task identities preserve image order.
+    let mut task_order = (0..compile_tasks.len()).collect::<Vec<_>>();
+    task_order.sort_by_key(|&id| {
+        std::cmp::Reverse(
+            compile_tasks[id]
+                .units
+                .iter()
+                .map(|unit| unit.blocks.len())
+                .sum::<usize>(),
+        )
+    });
     if options.x86_options.diagnostics.phase_timing {
         tracing::debug!(
-            "[native-timing] compile_program serial={serial} comb_blocks={comb_blocks} max_task_blocks={max_task_blocks} ff_tasks={}",
+            "[native-timing] compile_program serial={serial} workers={workers} comb_blocks={comb_blocks} max_task_blocks={max_task_blocks} max_instructions={max_instructions} ff_tasks={}",
             compile_tasks.len()
         );
     }
     let next_task = AtomicUsize::new(0);
     let (comb_jit, compiled_ff_codes) = if serial {
-        let release_pages = || {
-            // glibc can retain gigabytes of freed compiler allocations between
-            // functions. This only returns unused pages; live data is untouched.
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            unsafe {
-                libc::malloc_trim(0);
-            }
-        };
-        release_pages();
         let comb_jit = compile_units(
             &sir.sir.eval_comb,
             layout,
@@ -1730,7 +1754,6 @@ fn compile_program(
             )?;
             compiled.insert(task_id, code);
         }
-        release_pages();
         (comb_jit, compiled)
     } else {
         std::thread::scope(|scope| {
@@ -1751,23 +1774,23 @@ fn compile_program(
                     cancel,
                 )
             });
-            let task_worker_count = compile_tasks
-                .len()
-                .min(MAX_PARALLEL_NATIVE_FUNCTIONS.saturating_sub(1));
+            let task_worker_count = compile_tasks.len().min(workers.saturating_sub(1));
             let task_handles = (0..task_worker_count)
                 .map(|_| {
                     let next_task = &next_task;
                     let compile_tasks = &compile_tasks;
+                    let task_order = &task_order;
                     scope.spawn(move || {
                         let mut compiled = Vec::new();
                         loop {
                             if cancelled(cancel) {
                                 return Err(cancelled_error());
                             }
-                            let task_id = next_task.fetch_add(1, Ordering::Relaxed);
-                            let Some(task) = compile_tasks.get(task_id) else {
+                            let index = next_task.fetch_add(1, Ordering::Relaxed);
+                            let Some(&task_id) = task_order.get(index) else {
                                 break;
                             };
+                            let task = &compile_tasks[task_id];
                             let code = compile_unit_refs(
                                 &task.units,
                                 layout,
@@ -1799,6 +1822,7 @@ fn compile_program(
             Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
         })?
     };
+    release_pages();
     // A foreign-interface image can request per-unit entries so force/release
     // can reapply overrides between procedural store boundaries. Ordinary
     // images do not compile or retain this duplicate combinational code.

@@ -231,7 +231,39 @@ impl LogicalSet {
         self.mutable().retain(keep);
     }
     fn difference<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a LogicalValue> + 'a {
-        self.iter().filter(|value| !other.contains(value))
+        let mut membership = OrderedMembership::new(other, self.len());
+        self.iter().filter(move |value| !membership.contains(value))
+    }
+}
+
+/// Membership queries in ascending value order can share one merge cursor.
+/// Keep direct lookup for bitmaps and for a few queries into a much larger set.
+enum OrderedMembership<'a> {
+    Lookup(&'a LogicalSet),
+    Merge(std::iter::Peekable<LogicalIter<'a>>),
+}
+
+impl<'a> OrderedMembership<'a> {
+    fn new(set: &'a LogicalSet, queries: usize) -> Self {
+        if set.len() > queries.saturating_mul(8)
+            || matches!(set, LogicalSet::Frozen(row) if matches!(&row.storage, FrozenLogicalStorage::Dense { .. }))
+        {
+            Self::Lookup(set)
+        } else {
+            Self::Merge(set.iter().peekable())
+        }
+    }
+
+    fn contains(&mut self, value: &LogicalValue) -> bool {
+        match self {
+            Self::Lookup(set) => set.contains(value),
+            Self::Merge(values) => {
+                while values.peek().is_some_and(|&&next| next < *value) {
+                    values.next();
+                }
+                values.peek().is_some_and(|&&next| next == *value)
+            }
+        }
     }
 }
 
@@ -793,20 +825,15 @@ fn plan_internal(
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
             .collect::<Result<LogicalSet, _>>()?;
-        let exit_reload_costs = constraints
-            .map(|_| {
-                exit_reload_costs(
-                    func,
-                    cfg,
-                    next_use,
-                    planning_recipes,
-                    &result.logical,
-                    &edge_translations,
-                    block,
-                )
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let exit_reload_costs = LazyExitReloadCosts {
+            func,
+            cfg,
+            next_use,
+            recipes: planning_recipes,
+            translations: &edge_translations,
+            block,
+            cache: std::cell::RefCell::new(HashMap::default()),
+        };
         let (spilled, transition, order) = loop {
             // S means that a valid home exists on every path.  Every live
             // value omitted from W_entry therefore requires a home; edge
@@ -869,7 +896,9 @@ fn plan_internal(
             }
             entry.retain(|value| !rejected.contains(value));
         };
-        if let Some(order) = order {
+        if let Some(order) = order
+            && !order.iter().copied().eq(0..func.blocks[block].insts.len())
+        {
             let original = func.blocks[block].insts.clone();
             func.blocks[block].insts = order
                 .into_iter()
@@ -913,6 +942,7 @@ fn plan_internal(
             let mut resident_reloads = Vec::new();
             let predecessor_w = result.w_exit[predecessor].clone();
             let predecessor_s = result.s_exit[predecessor].clone();
+            let translation = edge_translations.by_edge.get(&(predecessor, successor));
             for &successor_value in &result.w_entry[successor] {
                 let value =
                     edge_translations.to_predecessor(predecessor, successor, successor_value);
@@ -924,36 +954,51 @@ fn plan_internal(
                     });
                 }
             }
-            for &successor_value in &result.s_entry[successor] {
-                let value =
-                    edge_translations.to_predecessor(predecessor, successor, successor_value);
-                let source_home = result.homes.of_logical(value);
-                let destination_home = result.homes.of_logical(successor_value);
-                if source_home == destination_home && predecessor_s.contains(&value) {
-                    continue;
-                }
-                if predecessor_w.contains(&value) {
-                    resident_spills.push(PlannedEdgeOp::Spill {
-                        source: value,
-                        destination: successor_value,
-                        destination_home,
-                    });
-                } else if predecessor_s.contains(&value) {
-                    // A phi transfer between independent homes is a short
-                    // edge-local reload/store pair.  Keeping the predecessor
-                    // SSA value live merely to copy its successor home would
-                    // recreate the phi-web live range this representation is
-                    // intended to remove.
-                    home_transfers.push(PlannedEdgeOp::Reload {
-                        source: value,
-                        source_home,
-                        destination: successor_value,
-                    });
-                    home_transfers.push(PlannedEdgeOp::Spill {
-                        source: successor_value,
-                        destination: successor_value,
-                        destination_home,
-                    });
+            let renamed = translation.is_some_and(|edge| {
+                edge.to_predecessor
+                    .iter()
+                    .any(|(destination, source)| destination != source)
+            });
+            if renamed || result.s_entry[successor] != predecessor_s {
+                let mut predecessor_membership =
+                    OrderedMembership::new(&predecessor_s, result.s_entry[successor].len());
+                for &successor_value in &result.s_entry[successor] {
+                    let value = translation
+                        .and_then(|edge| edge.to_predecessor.get(&successor_value))
+                        .copied()
+                        .unwrap_or(successor_value);
+                    let source_home = result.homes.of_logical(value);
+                    let destination_home = result.homes.of_logical(successor_value);
+                    // Only unchanged logical values query the merge cursor. Phi
+                    // sources can arrive in any order and retain direct lookup.
+                    if source_home == destination_home
+                        && predecessor_membership.contains(&successor_value)
+                    {
+                        continue;
+                    }
+                    if predecessor_w.contains(&value) {
+                        resident_spills.push(PlannedEdgeOp::Spill {
+                            source: value,
+                            destination: successor_value,
+                            destination_home,
+                        });
+                    } else if predecessor_s.contains(&value) {
+                        // A phi transfer between independent homes is a short
+                        // edge-local reload/store pair.  Keeping the predecessor
+                        // SSA value live merely to copy its successor home would
+                        // recreate the phi-web live range this representation is
+                        // intended to remove.
+                        home_transfers.push(PlannedEdgeOp::Reload {
+                            source: value,
+                            source_home,
+                            destination: successor_value,
+                        });
+                        home_transfers.push(PlannedEdgeOp::Spill {
+                            source: successor_value,
+                            destination: successor_value,
+                            destination_home,
+                        });
+                    }
                 }
             }
             for phi in &func.blocks[successor].phis {
@@ -1048,6 +1093,63 @@ fn plan_internal(
     Ok(result)
 }
 
+/// Scheduling only prices values considered for eviction. Large live-through
+/// sets must not cause every block to price every successor's entire live set.
+trait ExitReloadCosts {
+    fn cost(&self, value: LogicalValue) -> u32;
+}
+
+#[cfg(test)]
+impl ExitReloadCosts for HashMap<LogicalValue, u32> {
+    fn cost(&self, value: LogicalValue) -> u32 {
+        self.get(&value).copied().unwrap_or(0)
+    }
+}
+
+struct LazyExitReloadCosts<'a> {
+    func: &'a MFunction,
+    cfg: &'a NormalizedCfg,
+    next_use: &'a NextUseAnalysis,
+    recipes: &'a PlanningRecipes,
+    translations: &'a EdgeTranslations,
+    block: usize,
+    // Released after this block, with one entry per queried eviction candidate.
+    cache: std::cell::RefCell<HashMap<LogicalValue, u32>>,
+}
+
+impl ExitReloadCosts for LazyExitReloadCosts<'_> {
+    fn cost(&self, value: LogicalValue) -> u32 {
+        if let Some(&cost) = self.cache.borrow().get(&value) {
+            return cost;
+        }
+        let mut cost = 0u32;
+        for &successor in &self.cfg.successors[self.block] {
+            let translation = self.translations.by_edge.get(&(self.block, successor));
+            // A phi source is demanded once even if it feeds several phis or
+            // is also live through. Phi destinations belong to the successor;
+            // they must not be charged under their untranslated identity.
+            let phi_source = translation.is_some_and(|edge| edge.to_successor.contains_key(&value));
+            let untranslated =
+                translation.is_none_or(|edge| !edge.to_predecessor.contains_key(&value));
+            if phi_source
+                || (untranslated && self.next_use.entry[successor].contains_key(&VReg(value.0)))
+            {
+                cost = cost.saturating_add(u32::from(reload_cost_on_edge(
+                    self.func,
+                    self.recipes,
+                    self.block,
+                    successor,
+                    value,
+                )));
+            }
+        }
+        self.cache.borrow_mut().insert(value, cost);
+        cost
+    }
+}
+
+// Independent eager reference: enumerate and translate all successor demands.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn exit_reload_costs(
     func: &MFunction,
@@ -1392,7 +1494,7 @@ fn plan_scheduled_block_transition(
     w_entry: &LogicalSet,
     spilled: LogicalSet,
     constraints: &[super::constraints::InstructionConstraints],
-    exit_reload_costs: &HashMap<LogicalValue, u32>,
+    exit_reload_costs: &dyn ExitReloadCosts,
 ) -> Result<(BlockTransition, Vec<usize>), SpillPlanError> {
     let instructions = &func.blocks[block].insts;
     if instructions.len() != constraints.len() {
@@ -1544,12 +1646,25 @@ fn plan_scheduled_block_transition(
         }
     }
     let transition = planner.finish()?;
+    if order.iter().copied().eq(0..instructions.len()) {
+        // The original order has exactly the original pressure. In the many
+        // short blocks that do not move an instruction, avoid materializing
+        // the potentially large live-out set and measuring that same order
+        // twice merely to establish equality.
+        return Ok((transition, order));
+    }
     let identity = (0..instructions.len()).collect::<Vec<_>>();
-    let live_out = next_use.exit[block]
-        .keys()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    if super::schedule::preserves_original_pressure(instructions, &order, &live_out, registers) {
+    let exit = &next_use.exit[block];
+    let pressure = |order: &[usize]| {
+        super::schedule::pressure_cost_with_membership(
+            instructions,
+            order,
+            exit.len(),
+            |value| exit.contains_key(value),
+            registers,
+        )
+    };
+    if pressure(&order) <= pressure(&identity) {
         return Ok((transition, order));
     }
 
@@ -1561,7 +1676,7 @@ fn plan_scheduled_block_transition(
     let fallback = super::schedule::pressure_preferred_block_order(
         instructions,
         constraints,
-        live_out.iter().copied(),
+        exit.keys().copied(),
         registers,
     )
     .unwrap_or(identity);
@@ -1592,7 +1707,7 @@ fn plan_explicit_block_order(
     registers: usize,
     w_entry: &LogicalSet,
     spilled: LogicalSet,
-    exit_reload_costs: &HashMap<LogicalValue, u32>,
+    exit_reload_costs: &dyn ExitReloadCosts,
     order: &[usize],
 ) -> Result<BlockTransition, SpillPlanError> {
     let instructions = &func.blocks[block].insts;
@@ -2348,7 +2463,7 @@ struct RemainingBlockUses<'a> {
     preferred_rank: Vec<usize>,
     remaining: HashMap<LogicalValue, RemainingUses>,
     exit: &'a DistanceMap,
-    exit_reload_costs: &'a HashMap<LogicalValue, u32>,
+    exit_reload_costs: &'a dyn ExitReloadCosts,
     emitted: Vec<bool>,
     emitted_count: usize,
 }
@@ -2359,7 +2474,7 @@ impl<'a> RemainingBlockUses<'a> {
         next_use: &'a NextUseAnalysis,
         logical: &LogicalValues,
         block: usize,
-        exit_reload_costs: &'a HashMap<LogicalValue, u32>,
+        exit_reload_costs: &'a dyn ExitReloadCosts,
         preferred_order: Option<&[usize]>,
     ) -> Result<Self, SpillPlanError> {
         let instructions = func.blocks[block].insts.len();
@@ -2416,7 +2531,7 @@ impl<'a> RemainingBlockUses<'a> {
             uses.points.sort_unstable();
             uses.count = uses.points.len();
         }
-        for &value in next_use.exit[block].keys() {
+        if let Some(value) = next_use.exit[block].first_out_of_range(logical.count) {
             logical.checked_of(value, Some(func.blocks[block].id), Some(instructions))?;
         }
         Ok(Self {
@@ -2528,7 +2643,7 @@ impl<'a> RemainingBlockUses<'a> {
     }
 
     fn exit_reload_cost(&self, value: LogicalValue) -> u32 {
-        self.exit_reload_costs.get(&value).copied().unwrap_or(0)
+        self.exit_reload_costs.cost(value)
     }
 }
 
@@ -3663,6 +3778,55 @@ mod tests {
     }
 
     #[test]
+    fn ordered_spill_differences_match_tree_sets_across_storage_shapes() {
+        let pool = (0..200_000)
+            .map(LogicalValue)
+            .collect::<std::sync::Arc<[_]>>();
+        let shapes = [
+            Vec::new(),
+            vec![LogicalValue(0), LogicalValue(199_999)],
+            (0..512).map(LogicalValue).collect(),
+            (0..512).map(|i| LogicalValue(i * 7)).collect(),
+            (0..512).map(|i| LogicalValue(100_000 + i * 2)).collect(),
+            (0..130).map(|i| LogicalValue(i * 1025)).collect(),
+            (0..2000).map(|i| LogicalValue(i * 97)).collect(),
+        ];
+        for left in &shapes {
+            for right in &shapes {
+                let expected_left = left.iter().copied().collect::<BTreeSet<_>>();
+                let expected_right = right.iter().copied().collect::<BTreeSet<_>>();
+                let expected = expected_left
+                    .difference(&expected_right)
+                    .copied()
+                    .collect::<Vec<_>>();
+                for freeze_left in [false, true] {
+                    for freeze_right in [false, true] {
+                        let mut left = left.iter().copied().collect::<LogicalSet>();
+                        let mut right = right.iter().copied().collect::<LogicalSet>();
+                        if freeze_left {
+                            left.freeze(&pool);
+                        }
+                        if freeze_right {
+                            right.freeze(&pool);
+                        }
+                        assert_eq!(
+                            left.difference(&right).copied().collect::<Vec<_>>(),
+                            expected
+                        );
+                        // Edge coupling can omit renamed phi destinations from
+                        // its ordered queries and can query a value repeatedly.
+                        let mut membership = OrderedMembership::new(&right, left.len());
+                        for value in left.iter().step_by(3) {
+                            assert_eq!(membership.contains(value), expected_right.contains(value));
+                            assert_eq!(membership.contains(value), expected_right.contains(value));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn integrated_ready_walk_closes_resident_lanes_before_starting_new_roots() {
         const LANES: usize = 32;
         let mut vregs = VRegAllocator::new();
@@ -3959,6 +4123,103 @@ mod tests {
 
         assert_eq!(costs.get(&source), Some(&expected));
         assert_eq!(costs.len(), 1, "only the shared phi source is live out");
+        assert_lazy_exit_costs_match(&func, &cfg, &next_use, &recipes, &logical, &translations);
+    }
+
+    fn assert_lazy_exit_costs_match(
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        next_use: &NextUseAnalysis,
+        recipes: &PlanningRecipes,
+        logical: &LogicalValues,
+        translations: &EdgeTranslations,
+    ) {
+        for block in 0..func.blocks.len() {
+            let expected =
+                exit_reload_costs(func, cfg, next_use, recipes, logical, translations, block)
+                    .unwrap();
+            let lazy = LazyExitReloadCosts {
+                func,
+                cfg,
+                next_use,
+                recipes,
+                translations,
+                block,
+                cache: std::cell::RefCell::new(HashMap::default()),
+            };
+            assert!(lazy.cache.borrow().is_empty());
+            // Query one identity repeatedly before touching the rest. Neither
+            // live-set size nor repeated requests may grow the block cache.
+            for _ in 0..3 {
+                assert_eq!(lazy.cost(LogicalValue(0)), expected.cost(LogicalValue(0)));
+                assert_eq!(lazy.cache.borrow().len(), 1);
+            }
+            for value in (0..func.vregs.count()).rev().map(LogicalValue) {
+                assert_eq!(
+                    lazy.cost(value),
+                    expected.cost(value),
+                    "block {block}, {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_exit_prices_match_eager_demands_at_loops_and_duplicate_phis() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let initial = vregs.alloc();
+        let first = vregs.alloc();
+        let second = vregs.alloc();
+        let unused = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: initial,
+            value: 7,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        let mut header = MBlock::new(BlockId(1));
+        for (dst, backedge) in [(first, second), (second, first), (unused, first)] {
+            header.phis.push(PhiNode {
+                dst,
+                sources: vec![(BlockId(0), initial), (BlockId(2), backedge)],
+            });
+        }
+        header.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+        let mut body = MBlock::new(BlockId(2));
+        body.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: first,
+            size: OpSize::S64,
+        });
+        body.push(MInst::Jump { target: BlockId(1) });
+        let mut exit = MBlock::new(BlockId(3));
+        for (offset, src) in [(0, first), (8, second), (16, initial)] {
+            exit.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset,
+                src,
+                size: OpSize::S64,
+            });
+        }
+        exit.push(MInst::Return);
+        func.blocks = vec![entry, header, body, exit];
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let translations = EdgeTranslations::build(&func, &cfg, &logical).unwrap();
+        let recipes = super::super::reload::analyze_for_planning(&func, &cfg).unwrap();
+        assert_lazy_exit_costs_match(&func, &cfg, &next_use, &recipes, &logical, &translations);
     }
 
     #[test]
