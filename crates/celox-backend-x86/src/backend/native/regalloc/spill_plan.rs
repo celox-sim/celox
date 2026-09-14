@@ -231,7 +231,39 @@ impl LogicalSet {
         self.mutable().retain(keep);
     }
     fn difference<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a LogicalValue> + 'a {
-        self.iter().filter(|value| !other.contains(value))
+        let mut membership = OrderedMembership::new(other, self.len());
+        self.iter().filter(move |value| !membership.contains(value))
+    }
+}
+
+/// Membership queries in ascending value order can share one merge cursor.
+/// Keep direct lookup for bitmaps and for a few queries into a much larger set.
+enum OrderedMembership<'a> {
+    Lookup(&'a LogicalSet),
+    Merge(std::iter::Peekable<LogicalIter<'a>>),
+}
+
+impl<'a> OrderedMembership<'a> {
+    fn new(set: &'a LogicalSet, queries: usize) -> Self {
+        if set.len() > queries.saturating_mul(8)
+            || matches!(set, LogicalSet::Frozen(row) if matches!(&row.storage, FrozenLogicalStorage::Dense { .. }))
+        {
+            Self::Lookup(set)
+        } else {
+            Self::Merge(set.iter().peekable())
+        }
+    }
+
+    fn contains(&mut self, value: &LogicalValue) -> bool {
+        match self {
+            Self::Lookup(set) => set.contains(value),
+            Self::Merge(values) => {
+                while values.peek().is_some_and(|&&next| next < *value) {
+                    values.next();
+                }
+                values.peek().is_some_and(|&&next| next == *value)
+            }
+        }
     }
 }
 
@@ -864,7 +896,9 @@ fn plan_internal(
             }
             entry.retain(|value| !rejected.contains(value));
         };
-        if let Some(order) = order {
+        if let Some(order) = order
+            && !order.iter().copied().eq(0..func.blocks[block].insts.len())
+        {
             let original = func.blocks[block].insts.clone();
             func.blocks[block].insts = order
                 .into_iter()
@@ -908,6 +942,7 @@ fn plan_internal(
             let mut resident_reloads = Vec::new();
             let predecessor_w = result.w_exit[predecessor].clone();
             let predecessor_s = result.s_exit[predecessor].clone();
+            let translation = edge_translations.by_edge.get(&(predecessor, successor));
             for &successor_value in &result.w_entry[successor] {
                 let value =
                     edge_translations.to_predecessor(predecessor, successor, successor_value);
@@ -919,36 +954,51 @@ fn plan_internal(
                     });
                 }
             }
-            for &successor_value in &result.s_entry[successor] {
-                let value =
-                    edge_translations.to_predecessor(predecessor, successor, successor_value);
-                let source_home = result.homes.of_logical(value);
-                let destination_home = result.homes.of_logical(successor_value);
-                if source_home == destination_home && predecessor_s.contains(&value) {
-                    continue;
-                }
-                if predecessor_w.contains(&value) {
-                    resident_spills.push(PlannedEdgeOp::Spill {
-                        source: value,
-                        destination: successor_value,
-                        destination_home,
-                    });
-                } else if predecessor_s.contains(&value) {
-                    // A phi transfer between independent homes is a short
-                    // edge-local reload/store pair.  Keeping the predecessor
-                    // SSA value live merely to copy its successor home would
-                    // recreate the phi-web live range this representation is
-                    // intended to remove.
-                    home_transfers.push(PlannedEdgeOp::Reload {
-                        source: value,
-                        source_home,
-                        destination: successor_value,
-                    });
-                    home_transfers.push(PlannedEdgeOp::Spill {
-                        source: successor_value,
-                        destination: successor_value,
-                        destination_home,
-                    });
+            let renamed = translation.is_some_and(|edge| {
+                edge.to_predecessor
+                    .iter()
+                    .any(|(destination, source)| destination != source)
+            });
+            if renamed || result.s_entry[successor] != predecessor_s {
+                let mut predecessor_membership =
+                    OrderedMembership::new(&predecessor_s, result.s_entry[successor].len());
+                for &successor_value in &result.s_entry[successor] {
+                    let value = translation
+                        .and_then(|edge| edge.to_predecessor.get(&successor_value))
+                        .copied()
+                        .unwrap_or(successor_value);
+                    let source_home = result.homes.of_logical(value);
+                    let destination_home = result.homes.of_logical(successor_value);
+                    // Only unchanged logical values query the merge cursor. Phi
+                    // sources can arrive in any order and retain direct lookup.
+                    if source_home == destination_home
+                        && predecessor_membership.contains(&successor_value)
+                    {
+                        continue;
+                    }
+                    if predecessor_w.contains(&value) {
+                        resident_spills.push(PlannedEdgeOp::Spill {
+                            source: value,
+                            destination: successor_value,
+                            destination_home,
+                        });
+                    } else if predecessor_s.contains(&value) {
+                        // A phi transfer between independent homes is a short
+                        // edge-local reload/store pair.  Keeping the predecessor
+                        // SSA value live merely to copy its successor home would
+                        // recreate the phi-web live range this representation is
+                        // intended to remove.
+                        home_transfers.push(PlannedEdgeOp::Reload {
+                            source: value,
+                            source_home,
+                            destination: successor_value,
+                        });
+                        home_transfers.push(PlannedEdgeOp::Spill {
+                            source: successor_value,
+                            destination: successor_value,
+                            destination_home,
+                        });
+                    }
                 }
             }
             for phi in &func.blocks[successor].phis {
@@ -1596,12 +1646,25 @@ fn plan_scheduled_block_transition(
         }
     }
     let transition = planner.finish()?;
+    if order.iter().copied().eq(0..instructions.len()) {
+        // The original order has exactly the original pressure. In the many
+        // short blocks that do not move an instruction, avoid materializing
+        // the potentially large live-out set and measuring that same order
+        // twice merely to establish equality.
+        return Ok((transition, order));
+    }
     let identity = (0..instructions.len()).collect::<Vec<_>>();
-    let live_out = next_use.exit[block]
-        .keys()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    if super::schedule::preserves_original_pressure(instructions, &order, &live_out, registers) {
+    let exit = &next_use.exit[block];
+    let pressure = |order: &[usize]| {
+        super::schedule::pressure_cost_with_membership(
+            instructions,
+            order,
+            exit.len(),
+            |value| exit.contains_key(value),
+            registers,
+        )
+    };
+    if pressure(&order) <= pressure(&identity) {
         return Ok((transition, order));
     }
 
@@ -1613,7 +1676,7 @@ fn plan_scheduled_block_transition(
     let fallback = super::schedule::pressure_preferred_block_order(
         instructions,
         constraints,
-        live_out.iter().copied(),
+        exit.keys().copied(),
         registers,
     )
     .unwrap_or(identity);
@@ -2468,7 +2531,7 @@ impl<'a> RemainingBlockUses<'a> {
             uses.points.sort_unstable();
             uses.count = uses.points.len();
         }
-        for &value in next_use.exit[block].keys() {
+        if let Some(value) = next_use.exit[block].first_out_of_range(logical.count) {
             logical.checked_of(value, Some(func.blocks[block].id), Some(instructions))?;
         }
         Ok(Self {
@@ -3712,6 +3775,55 @@ mod tests {
         invalid.freeze(&pool);
         assert!(matches!(invalid, LogicalSet::Mutable(_)));
         assert!(invalid.contains(&LogicalValue(u32::MAX)));
+    }
+
+    #[test]
+    fn ordered_spill_differences_match_tree_sets_across_storage_shapes() {
+        let pool = (0..200_000)
+            .map(LogicalValue)
+            .collect::<std::sync::Arc<[_]>>();
+        let shapes = [
+            Vec::new(),
+            vec![LogicalValue(0), LogicalValue(199_999)],
+            (0..512).map(LogicalValue).collect(),
+            (0..512).map(|i| LogicalValue(i * 7)).collect(),
+            (0..512).map(|i| LogicalValue(100_000 + i * 2)).collect(),
+            (0..130).map(|i| LogicalValue(i * 1025)).collect(),
+            (0..2000).map(|i| LogicalValue(i * 97)).collect(),
+        ];
+        for left in &shapes {
+            for right in &shapes {
+                let expected_left = left.iter().copied().collect::<BTreeSet<_>>();
+                let expected_right = right.iter().copied().collect::<BTreeSet<_>>();
+                let expected = expected_left
+                    .difference(&expected_right)
+                    .copied()
+                    .collect::<Vec<_>>();
+                for freeze_left in [false, true] {
+                    for freeze_right in [false, true] {
+                        let mut left = left.iter().copied().collect::<LogicalSet>();
+                        let mut right = right.iter().copied().collect::<LogicalSet>();
+                        if freeze_left {
+                            left.freeze(&pool);
+                        }
+                        if freeze_right {
+                            right.freeze(&pool);
+                        }
+                        assert_eq!(
+                            left.difference(&right).copied().collect::<Vec<_>>(),
+                            expected
+                        );
+                        // Edge coupling can omit renamed phi destinations from
+                        // its ordered queries and can query a value repeatedly.
+                        let mut membership = OrderedMembership::new(&right, left.len());
+                        for value in left.iter().step_by(3) {
+                            assert_eq!(membership.contains(value), expected_right.contains(value));
+                            assert_eq!(membership.contains(value), expected_right.contains(value));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

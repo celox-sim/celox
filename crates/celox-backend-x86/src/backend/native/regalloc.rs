@@ -15,6 +15,7 @@ mod facts;
 mod home_verify;
 mod interval_union;
 mod legalize;
+mod live_count;
 mod live_interval;
 mod materialized_state_home;
 mod next_use;

@@ -1205,6 +1205,7 @@ struct MemoryDefinition {
     block: BlockId,
     ordinal: usize,
     write_index: usize,
+    write_end: usize,
 }
 
 /// Reload-specific adapter around the shared access graph. MIR effects and
@@ -1213,7 +1214,10 @@ struct MemoryDefinition {
 struct ReloadMemorySsa {
     graph: MemoryAccessGraph<MemoryDefinition>,
     points: MemoryPointMap<MemoryProgramPoint>,
-    writes: Vec<Vec<MemoryEffect<MemoryObject>>>,
+    // Keep effects contiguous: the clobber walker repeatedly visits writes
+    // across the graph, so a separate heap allocation per definition turns
+    // each alias check into another unrelated pointer chase.
+    writes: Vec<MemoryEffect<MemoryObject>>,
     block_ids: Vec<BlockId>,
     walker: ClobberWalker,
     clobber_cache: HashMap<(StateLoad, MemoryAccessId), MemoryAccessId>,
@@ -1270,12 +1274,14 @@ impl ReloadMemorySsa {
         let block_ids = &self.block_ids;
         let clobber_cache = &mut self.clobber_cache;
         let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
-            writes.get(definition.write_index).is_some_and(|effects| {
-                effects
-                    .iter()
-                    .copied()
-                    .any(|write| effects_may_alias(write, *query))
-            })
+            writes
+                .get(definition.write_index..definition.write_end)
+                .is_some_and(|effects| {
+                    effects
+                        .iter()
+                        .copied()
+                        .any(|write| effects_may_alias(write, *query))
+                })
         };
         let mut clobber_query = self.walker.query(graph, &query, &oracle);
         let mut clobber_access = |start| {
@@ -2154,16 +2160,16 @@ fn build_reload_memory_ssa(
         Vec::<MemoryAccessEvent<MemoryDefinition, MemoryProgramPoint>>::new();
         func.blocks.len()
     ];
-    let mut writes = Vec::<Vec<MemoryEffect<MemoryObject>>>::new();
+    let mut writes = Vec::<MemoryEffect<MemoryObject>>::new();
     let sim_state = MemoryEffect::UnknownObject(MemoryObject::SimState);
 
     for (block, mir_block) in func.blocks.iter().enumerate() {
         let mut write_ordinal = 0usize;
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
-            let effects = analysis_effects(&memory_effect::writes(inst))
+            let write_index = writes.len();
+            for effect in analysis_effects(&memory_effect::writes(inst))
                 .filter(|effect| effects_may_alias(*effect, sim_state))
-                .collect::<Vec<_>>();
-            for effect in &effects {
+            {
                 if let MemoryEffect::Exact(location) = effect
                     && (location.byte_len == 0 || location.end().is_none())
                 {
@@ -2175,8 +2181,9 @@ fn build_reload_memory_ssa(
                         "MIR SimState write has an empty or overflowing range",
                     ));
                 }
+                writes.push(effect);
             }
-            let definition = if effects.is_empty() {
+            let definition = if writes.len() == write_index {
                 None
             } else {
                 let ordinal = write_ordinal;
@@ -2192,9 +2199,9 @@ fn build_reload_memory_ssa(
                 let definition = MemoryDefinition {
                     block: mir_block.id,
                     ordinal,
-                    write_index: writes.len(),
+                    write_index,
+                    write_end: writes.len(),
                 };
-                writes.push(effects);
                 Some(definition)
             };
             events[block].push(MemoryAccessEvent {
@@ -4588,6 +4595,77 @@ mod tests {
             })
         ));
         assert!(recipe.steps.is_empty());
+    }
+
+    #[test]
+    fn contiguous_memory_effects_preserve_write_boundaries_and_clobbers() {
+        let (mut func, values) = function_with_values(1);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: values[0],
+            value: 1,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::SparseCommit {
+            src_offset: 0,
+            dst_offset: 100,
+            byte_size: 17,
+            dirty_words_offset: 200,
+            dirty_word_count: 2,
+            summary_words_offset: 300,
+            summary_word_count: 1,
+            four_state: true,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 104,
+            src: values[0],
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let mut memory = build_reload_memory_ssa(&func, &cfg).unwrap();
+        for instruction in 0..4 {
+            let point = memory.points.event((0, instruction)).unwrap().after;
+            for offset in 0..320 {
+                let ordinal = if instruction >= 3 && (104..112).contains(&offset) {
+                    Some(2)
+                } else if instruction >= 2
+                    && [(100..134), (200..216), (300..308)]
+                        .iter()
+                        .any(|range| range.contains(&offset))
+                {
+                    Some(1)
+                } else if instruction >= 1 && (8..16).contains(&offset) {
+                    Some(0)
+                } else {
+                    None
+                };
+                let expected = ordinal.map_or(SnapshotAccess::LiveOnEntry, |ordinal| {
+                    SnapshotAccess::Write {
+                        block: BlockId(0),
+                        ordinal,
+                    }
+                });
+                let actual = memory
+                    .snapshot_at(
+                        point,
+                        StateLoad {
+                            offset,
+                            size: OpSize::S8,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(actual.root, expected, "i{instruction} byte {offset}");
+                assert!(actual.phis.is_empty());
+            }
+        }
     }
 
     #[test]

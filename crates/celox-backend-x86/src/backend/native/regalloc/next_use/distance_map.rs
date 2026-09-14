@@ -92,6 +92,12 @@ impl PartialEq for DistanceMap {
             {
                 true
             }
+            (Self::Frozen(_) | Self::Relative(_), Self::Frozen(_) | Self::Relative(_)) => {
+                // Both representations iterate in key order. Comparing their
+                // streams avoids a fresh indexed chunk lookup for every live
+                // value when equivalent transfers have different bases.
+                self.len() == other.len() && self.iter().eq(other.iter())
+            }
             (Self::Compact(left), Self::Compact(right)) => left == right,
             (Self::Wide(left), Self::Wide(right)) => left == right,
             _ => {
@@ -171,23 +177,128 @@ impl DistanceMap {
         let Self::Packed(map) = &*self else {
             return false;
         };
+        let Some(entry) = Self::relative_entry(
+            base,
+            instructions,
+            definitions,
+            local_uses,
+            Some(map.len()),
+            |key| Some(map.get(&key).copied()),
+        ) else {
+            return false;
+        };
+        *self = entry;
+        true
+    }
+
+    /// Apply a small block transfer directly to an immutable row. Constructing
+    /// a complete temporary hash map first would decode and reinsert every
+    /// live-through value merely to discard that map after freezing it.
+    pub(super) fn try_block_entry(
+        base: &Self,
+        instructions: usize,
+        definitions: &crate::HashSet<VReg>,
+        local_uses: &[(VReg, usize)],
+    ) -> Option<Self> {
+        Self::relative_entry(base, instructions, definitions, local_uses, None, |key| {
+            let distance = if let Some(&(_, position)) =
+                local_uses.iter().rev().find(|&&(value, _)| value == key)
+            {
+                NextUseDistance::local(position)
+            } else if definitions.contains(&key) {
+                return Some(None);
+            } else if let Some(distance) = base.get(&key) {
+                distance.checked_prepend_instructions(instructions)?
+            } else {
+                return Some(None);
+            };
+            pack(distance).map(Some)
+        })
+    }
+
+    /// Join two small edits of the same live-through row without decoding the
+    /// whole row. Ordinary branch arms commonly share their merge's base;
+    /// outside the edited keys, minimum distance is just the smaller delta.
+    /// Loop-exit adjustments are deliberately handled by the caller's general
+    /// path, since they change a different component of the distance.
+    pub(super) fn try_branch_join(
+        left: &Self,
+        right: &Self,
+        left_phi_uses: &[VReg],
+        right_phi_uses: &[VReg],
+    ) -> Option<Self> {
+        let (left_base, left_delta, left_edits) = match left {
+            Self::Frozen(base) => (base, 0, &[][..]),
+            Self::Relative(row) => (&row.base, row.instruction_delta, row.overrides.as_ref()),
+            _ => return None,
+        };
+        let (right_base, right_delta, right_edits) = match right {
+            Self::Frozen(base) => (base, 0, &[][..]),
+            Self::Relative(row) => (&row.base, row.instruction_delta, row.overrides.as_ref()),
+            _ => return None,
+        };
+        if !Arc::ptr_eq(left_base, right_base)
+            || left_phi_uses.len().saturating_add(right_phi_uses.len()) > 32
+        {
+            return None;
+        }
+        let base = if left_delta <= right_delta {
+            left
+        } else {
+            right
+        };
+        if left_edits.is_empty()
+            && right_edits.is_empty()
+            && left_phi_uses.is_empty()
+            && right_phi_uses.is_empty()
+        {
+            return Some(base.clone());
+        }
+        let changed = left_edits
+            .iter()
+            .chain(right_edits)
+            .map(|&(key, _)| key)
+            .chain(left_phi_uses.iter().copied())
+            .chain(right_phi_uses.iter().copied())
+            .collect::<crate::HashSet<_>>();
+        Self::relative_entry(base, 0, &changed, &[], None, |key| {
+            let distance = if left_phi_uses.contains(&key) || right_phi_uses.contains(&key) {
+                Some(NextUseDistance::local(0))
+            } else {
+                match (left.get(&key), right.get(&key)) {
+                    (Some(left), Some(right)) => Some(left.min(right)),
+                    (left, right) => left.or(right),
+                }
+            };
+            match distance {
+                Some(distance) => pack(distance).map(Some),
+                None => Some(None),
+            }
+        })
+    }
+
+    fn relative_entry(
+        base: &Self,
+        instructions: usize,
+        definitions: &crate::HashSet<VReg>,
+        local_uses: &[(VReg, usize)],
+        expected_len: Option<usize>,
+        mut actual: impl FnMut(VReg) -> Option<Option<u32>>,
+    ) -> Option<Self> {
         let (base, previous_delta, previous_overrides) = match base {
             Self::Frozen(row) => (row, 0, &[][..]),
             Self::Relative(row) => (&row.base, row.instruction_delta, row.overrides.as_ref()),
-            _ => return false,
+            _ => return None,
         };
-        let Some(instruction_delta) = u32::try_from(instructions)
+        let instruction_delta = u32::try_from(instructions)
             .ok()
-            .and_then(|delta| delta.checked_add(previous_delta))
-        else {
-            return false;
-        };
-        if map.len() < CHUNK_SIZE
+            .and_then(|delta| delta.checked_add(previous_delta))?;
+        if expected_len.is_some_and(|len| len < CHUNK_SIZE)
             || definitions.len().saturating_add(local_uses.len()) > 32
             || instruction_delta > PACKED_INSTRUCTION_MASK
             || base.max_instructions > PACKED_INSTRUCTION_MASK - instruction_delta
         {
-            return false;
+            return None;
         }
         let mut changed = definitions
             .iter()
@@ -200,16 +311,16 @@ impl DistanceMap {
         // Flatten onto the original frozen row, keeping lookup and destruction
         // depth constant even across a long chain of single-successor blocks.
         if changed.len() > 32 {
-            return false;
+            return None;
         }
         let mut overrides = Vec::new();
         let mut len = base.len;
         for key in changed {
             if key.0 as usize >= base.values.len() {
-                return false;
+                return None;
             }
             let old = base.get(key);
-            let actual = map.get(&key).copied();
+            let actual = actual(key)?;
             match (old, actual) {
                 (None, Some(_)) => len += 1,
                 (Some(_), None) => len -= 1,
@@ -219,27 +330,25 @@ impl DistanceMap {
                 overrides.push((key, actual));
             }
         }
-        if len != map.len() {
-            return false;
+        if len < CHUNK_SIZE || expected_len.is_some_and(|expected| len != expected) {
+            return None;
         }
         if instruction_delta == 0 && overrides.is_empty() {
-            *self = Self::Frozen(Arc::clone(base));
-            return true;
+            return Some(Self::Frozen(Arc::clone(base)));
         }
         // An ordinary frozen row needs at least two encoded bytes per entry.
         if std::mem::size_of::<RelativeRow>()
             + overrides.len() * std::mem::size_of::<(VReg, Option<u32>)>()
-            >= map.len() * 2
+            >= len * 2
         {
-            return false;
+            return None;
         }
-        *self = Self::Relative(Arc::new(RelativeRow {
+        Some(Self::Relative(Arc::new(RelativeRow {
             base: Arc::clone(base),
             instruction_delta,
             overrides: overrides.into_boxed_slice(),
             len,
-        }));
-        true
+        })))
     }
 
     fn thaw(&mut self) {
@@ -265,6 +374,17 @@ impl DistanceMap {
             Self::Relative(row) => row.len,
             Self::Compact(map) => map.len(),
             Self::Wide(map) => map.len(),
+        }
+    }
+
+    /// Frozen rows and their local edits already validate every key against
+    /// their shared identity pool. Reuse that bound when checking a function,
+    /// retaining the full key check for a smaller function or mutable rows.
+    pub(in crate::native::regalloc) fn first_out_of_range(&self, limit: u32) -> Option<VReg> {
+        match self {
+            Self::Frozen(row) if row.values.len() <= limit as usize => None,
+            Self::Relative(row) if row.base.values.len() <= limit as usize => None,
+            _ => self.keys().copied().find(|value| value.0 >= limit),
         }
     }
 
@@ -560,6 +680,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_block_transfers_match_materialized_maps_across_relative_rows() {
+        let pool = (0..4096).map(VReg).collect::<Arc<[_]>>();
+        let mut base = DistanceMap::default();
+        for id in 0..1000 {
+            base.insert(
+                VReg(id * 3),
+                NextUseDistance::Finite {
+                    loop_exits: (id % 7) as usize,
+                    instructions: (id % 101) as usize,
+                },
+            );
+        }
+        base.freeze(&pool);
+        let definitions = [VReg(3), VReg(1500), VReg(4095)]
+            .into_iter()
+            .collect::<crate::HashSet<_>>();
+        for round in 0..12 {
+            let instructions = round + 3;
+            let local_uses = [(VReg(0), 1), (VReg(1501), 2), (VReg(0), round)];
+            let mut expected = DistanceMap::default();
+            for (&key, distance) in &base {
+                if !definitions.contains(&key) {
+                    expected.insert(
+                        key,
+                        distance.checked_prepend_instructions(instructions).unwrap(),
+                    );
+                }
+            }
+            for &(key, position) in &local_uses {
+                expected.insert(key, NextUseDistance::local(position));
+            }
+            let actual =
+                DistanceMap::try_block_entry(&base, instructions, &definitions, &local_uses)
+                    .expect("small exact transfer should share its frozen base");
+            assert_eq!(actual, expected);
+            for key in pool.iter() {
+                assert_eq!(actual.get(key), expected.get(key));
+            }
+            base = actual;
+        }
+    }
+
+    #[test]
+    fn direct_block_transfers_fall_back_for_range_and_edit_limits() {
+        let pool = (0..256).map(VReg).collect::<Arc<[_]>>();
+        let mut base = DistanceMap::default();
+        for id in 0..256 {
+            base.insert(VReg(id), NextUseDistance::local(id as usize));
+        }
+        base.freeze(&pool);
+        let empty = crate::HashSet::default();
+        let shared = DistanceMap::try_block_entry(&base, 0, &empty, &[]).unwrap();
+        let (DistanceMap::Frozen(left), DistanceMap::Frozen(right)) = (&base, &shared) else {
+            panic!("unchanged transfer should reuse the frozen row")
+        };
+        assert!(Arc::ptr_eq(left, right));
+        assert!(DistanceMap::try_block_entry(&base, usize::MAX, &empty, &[]).is_none());
+        assert!(
+            DistanceMap::try_block_entry(&base, 0, &(0..33).map(VReg).collect(), &[]).is_none()
+        );
+        assert!(DistanceMap::try_block_entry(&base, 0, &empty, &[(VReg(u32::MAX), 0)]).is_none());
+        assert!(
+            DistanceMap::try_block_entry(
+                &base,
+                0,
+                &empty,
+                &[(VReg(0), PACKED_INSTRUCTION_MASK as usize + 1)]
+            )
+            .is_none()
+        );
+        let relative = DistanceMap::try_block_entry(
+            &base,
+            0,
+            &empty,
+            &[(VReg(0), PACKED_INSTRUCTION_MASK as usize)],
+        )
+        .unwrap();
+        assert!(DistanceMap::try_block_entry(&relative, 1, &empty, &[]).is_none());
+    }
+
+    #[test]
     fn unchanged_entry_shares_the_frozen_exit_directly() {
         let pool = (0..256).map(VReg).collect::<Arc<[_]>>();
         let mut base = DistanceMap::default();
@@ -612,6 +813,20 @@ mod tests {
         assert!(matches!(entry, DistanceMap::Relative(_)));
         assert_eq!(entry, expected);
         assert_eq!(expected, entry);
+        let mut frozen = expected.clone();
+        frozen.freeze(&pool);
+        assert!(matches!(frozen, DistanceMap::Frozen(_)));
+        assert_eq!(entry, frozen);
+        assert_eq!(frozen, entry);
+        let shifted =
+            DistanceMap::try_block_entry(&frozen, 1, &crate::HashSet::default(), &[]).unwrap();
+        assert_ne!(entry, shifted);
+        assert_ne!(shifted, entry);
+        frozen.insert(VReg(1501), NextUseDistance::local(3));
+        frozen.freeze(&pool);
+        assert_eq!(entry.len(), frozen.len());
+        assert_ne!(entry, frozen);
+        assert_ne!(frozen, entry);
         let mut oracle = expected
             .iter()
             .map(|(&key, distance)| (key, distance))
@@ -948,5 +1163,115 @@ mod tests {
             assert_eq!(compact, wide);
         }
         assert_eq!(compact.get(&VReg(1)), Some(NextUseDistance::local(0)));
+    }
+}
+#[test]
+fn shared_base_branch_joins_match_materialized_minimums() {
+    let pool = (0..4096).map(VReg).collect::<Arc<[_]>>();
+    let mut base = DistanceMap::default();
+    for value in 0..1000 {
+        base.insert(
+            VReg(value * 3),
+            NextUseDistance::Finite {
+                loop_exits: (value % 7) as usize,
+                instructions: (value % 101) as usize,
+            },
+        );
+    }
+    base.freeze(&pool);
+    let mut rows = vec![base.clone()];
+    for seed in 0..8 {
+        rows.push(
+            DistanceMap::try_block_entry(
+                &base,
+                seed + 1,
+                &[VReg(0), VReg(seed as u32 * 3 + 3)].into_iter().collect(),
+                &[(VReg(15), seed), (VReg(3001 + seed as u32), 0)],
+            )
+            .unwrap(),
+        );
+    }
+    for left in &rows {
+        for right in &rows {
+            for phi in [&[][..], &[VReg(0), VReg(15), VReg(4095), VReg(15)][..]] {
+                let actual = DistanceMap::try_branch_join(left, right, phi, &[]).unwrap();
+                let reverse = DistanceMap::try_branch_join(right, left, &[], phi).unwrap();
+                let mut expected = std::collections::BTreeMap::new();
+                for (&key, distance) in left.iter().chain(right.iter()) {
+                    expected
+                        .entry(key)
+                        .and_modify(|value: &mut NextUseDistance| *value = (*value).min(distance))
+                        .or_insert(distance);
+                }
+                for &key in phi {
+                    expected.insert(key, NextUseDistance::local(0));
+                }
+                for row in [&actual, &reverse] {
+                    assert_eq!(row.len(), expected.len());
+                    assert_eq!(
+                        row.iter()
+                            .map(|(&key, value)| (key, value))
+                            .collect::<std::collections::BTreeMap<_, _>>(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+    assert!(DistanceMap::try_branch_join(&base, &DistanceMap::default(), &[], &[]).is_none());
+    assert!(
+        DistanceMap::try_branch_join(&base, &base, &(0..33).map(VReg).collect::<Vec<_>>(), &[])
+            .is_none()
+    );
+    let mut independent = DistanceMap::default();
+    for (&key, distance) in &base {
+        independent.insert(key, distance);
+    }
+    independent.freeze(&pool);
+    assert_eq!(base, independent);
+    assert!(DistanceMap::try_branch_join(&base, &independent, &[], &[]).is_none());
+}
+
+#[test]
+fn cached_key_bounds_preserve_invalid_value_checks() {
+    let pool = (0..512).map(VReg).collect::<Arc<[_]>>();
+    let mut packed = DistanceMap::default();
+    for value in 0..256 {
+        packed.insert(VReg(value * 2), NextUseDistance::local(1));
+    }
+    let mut frozen = packed.clone();
+    frozen.freeze(&pool);
+    assert!(matches!(frozen, DistanceMap::Frozen(_)));
+    let relative = DistanceMap::try_block_entry(
+        &frozen,
+        1,
+        &[VReg(510)].into_iter().collect(),
+        &[(VReg(511), 0)],
+    )
+    .unwrap();
+    let removed =
+        DistanceMap::try_block_entry(&frozen, 1, &[VReg(510)].into_iter().collect(), &[]).unwrap();
+    let mut malformed = packed.clone();
+    malformed.insert(VReg(512), NextUseDistance::local(0));
+    malformed.freeze(&pool);
+    assert!(matches!(malformed, DistanceMap::Packed(_)));
+    let compact = DistanceMap::Compact(packed.iter().map(|(&key, _)| (key, [0, 1])).collect());
+    let wide = DistanceMap::Wide(packed.iter().map(|(&key, value)| (key, value)).collect());
+    for row in [
+        packed,
+        frozen,
+        relative,
+        removed,
+        malformed,
+        compact,
+        wide,
+        DistanceMap::default(),
+    ] {
+        for limit in [0, 1, 256, 509, 510, 511, 512, 513, u32::MAX] {
+            assert_eq!(
+                row.first_out_of_range(limit),
+                row.keys().copied().find(|value| value.0 >= limit)
+            );
+        }
     }
 }
