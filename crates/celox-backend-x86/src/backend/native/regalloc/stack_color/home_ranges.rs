@@ -11,6 +11,53 @@ enum Blocks {
     Dense { words: Vec<u64>, count: usize },
 }
 
+/// Block exit slots for the whole CFG, shared by every home.
+///
+/// Stack coloring probes one endpoint per segment, so a large design issues
+/// one lookup per (home, block) segment. Mirror the table in a dense array
+/// indexed by block id when the id space is compact, so the common probe is
+/// an array read instead of a hash lookup. Endpoints are never zero, so a
+/// zero slot means "not a block of this CFG" and the two forms agree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct BlockEnds {
+    map: HashMap<u32, u64>,
+    dense: Option<Vec<u64>>,
+}
+
+impl BlockEnds {
+    pub(super) fn new(map: HashMap<u32, u64>) -> Self {
+        let dense = if map.values().all(|&end| end != 0) {
+            map.keys().copied().max().and_then(|max| {
+                let size = max as usize + 1;
+                // Guard against a sparse identity space expanding the mirror.
+                (size <= map.len().saturating_mul(2).max(64)).then(|| {
+                    let mut dense = vec![0u64; size];
+                    for (&block, &end) in &map {
+                        dense[block as usize] = end;
+                    }
+                    dense
+                })
+            })
+        } else {
+            None
+        };
+        Self { map, dense }
+    }
+
+    #[inline]
+    pub(super) fn get(&self, block: u32) -> Option<u64> {
+        match &self.dense {
+            Some(dense) => dense.get(block as usize).copied().filter(|&end| end != 0),
+            None => self.map.get(&block).copied(),
+        }
+    }
+
+    /// The lookup table for consumers that index by an arbitrary block id.
+    pub(super) fn as_map(&self) -> &HashMap<u32, u64> {
+        &self.map
+    }
+}
+
 impl Default for Blocks {
     fn default() -> Self {
         Self::Sparse(Vec::new())
@@ -120,13 +167,13 @@ impl Blocks {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct HomeRanges {
-    ends: Arc<HashMap<u32, u64>>,
+    ends: Arc<BlockEnds>,
     full: Blocks,
     partial: CompactSegments,
 }
 
 impl HomeRanges {
-    pub(super) fn new(ends: &Arc<HashMap<u32, u64>>) -> Self {
+    pub(super) fn new(ends: &Arc<BlockEnds>) -> Self {
         Self {
             ends: Arc::clone(ends),
             ..Self::default()
@@ -138,8 +185,8 @@ impl HomeRanges {
             if segment.start == 0
                 && u32::try_from(segment.block)
                     .ok()
-                    .and_then(|block| self.ends.get(&block))
-                    == Some(&segment.end)
+                    .and_then(|block| self.ends.get(block))
+                    == Some(segment.end)
             {
                 self.full.insert(segment.block as u32);
             } else {
@@ -161,7 +208,10 @@ impl HomeRanges {
                 if let Ok(block) = u32::try_from(segment.block)
                     && self.full.contains(block)
                 {
-                    let end = self.ends[&block];
+                    let end = self
+                        .ends
+                        .get(block)
+                        .expect("full blocks carry a recorded endpoint");
                     if segment.end <= end {
                         return None;
                     }
@@ -197,7 +247,10 @@ impl HomeRanges {
                 Some(LiveSegment {
                     block: block as usize,
                     start: 0,
-                    end: self.ends[&block],
+                    end: self
+                        .ends
+                        .get(block)
+                        .expect("full blocks carry a recorded endpoint"),
                 })
             } else {
                 partial.next()
@@ -213,11 +266,11 @@ mod tests {
     #[test]
     fn full_blocks_match_compact_union_across_batches_and_sparse_ids() {
         for base in [0, u32::MAX - 255] {
-            let ends = Arc::new(
+            let ends = Arc::new(BlockEnds::new(
                 (0..256)
                     .map(|i| (base + i, 10 + u64::from(i % 5)))
                     .collect(),
-            );
+            ));
             let source = (0..256)
                 .flat_map(|i| {
                     let block = (base + i) as usize;
@@ -262,7 +315,9 @@ mod tests {
 
     #[test]
     fn full_and_partial_union_is_exact_even_outside_shared_endpoints() {
-        let ends = Arc::new([(0, 10), (64, 10), (u32::MAX, 10)].into_iter().collect());
+        let ends = Arc::new(BlockEnds::new(
+            [(0, 10), (64, 10), (u32::MAX, 10)].into_iter().collect(),
+        ));
         for block in [0, 64, u32::MAX] {
             for (start, end) in [(0, 20), (5, 20), (10, 20), (11, 20)] {
                 let segments = [
@@ -294,7 +349,9 @@ mod tests {
 
     #[test]
     fn partial_holes_and_noncanonical_endpoints_remain_exact() {
-        let ends = Arc::new([(3, 100), (7, u64::MAX)].into_iter().collect());
+        let ends = Arc::new(BlockEnds::new(
+            [(3, 100), (7, u64::MAX)].into_iter().collect(),
+        ));
         let segments = [
             LiveSegment {
                 block: 3,

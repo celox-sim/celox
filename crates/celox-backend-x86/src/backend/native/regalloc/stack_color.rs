@@ -12,7 +12,7 @@ use std::fmt;
 use celox_backend_common::regalloc::LiveSegment as StoredSegment;
 
 mod home_ranges;
-use home_ranges::HomeRanges;
+use home_ranges::{BlockEnds, HomeRanges};
 
 use crate::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
 use crate::{HashMap, HashSet};
@@ -855,7 +855,7 @@ fn finish_home_segments(
 
 fn merge_home_segments(
     intervals: LiveIntervals,
-    ends: &std::sync::Arc<HashMap<u32, u64>>,
+    ends: &std::sync::Arc<BlockEnds>,
     version_homes: &[SpillHome],
     homes: &BTreeSet<SpillHome>,
 ) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
@@ -899,7 +899,7 @@ fn stream_home_segments(
     program: &PlannedStackLivenessProgram,
     cfg: &NormalizedCfg,
     homes: &BTreeSet<SpillHome>,
-    ends: &std::sync::Arc<HashMap<u32, u64>>,
+    ends: &std::sync::Arc<BlockEnds>,
 ) -> Result<BTreeMap<SpillHome, HomeRanges>, StackColorError> {
     let mut ranges = homes
         .iter()
@@ -975,7 +975,7 @@ fn color_planned_stack_program(
         });
     }
     let phase = timing.then(crate::timing::now);
-    let ends = std::sync::Arc::new(
+    let ends = std::sync::Arc::new(BlockEnds::new(
         (0..program.block_count())
             .map(|block| {
                 let slots = super::live_interval::assign_block_slots(&program, block)
@@ -992,7 +992,7 @@ fn color_planned_stack_program(
                 Ok((program.block_id(block).0, end.as_u64()))
             })
             .collect::<Result<HashMap<_, _>, StackColorError>>()?,
-    );
+    ));
     let ranges = if verify {
         let intervals = analyze_program_with_verification(&program, cfg, true)
             .map_err(|error| planned_live_error(error, &program.version_homes))?;
@@ -1050,7 +1050,7 @@ fn color_planned_stack_program(
     }
 
     let phase = timing.then(crate::timing::now);
-    let mut matrix = DynamicIntervalMatrix::with_block_ends(cfg, &ends)
+    let mut matrix = DynamicIntervalMatrix::with_block_ends(cfg, ends.as_map())
         .map_err(|error| planned_union_error(error, &bundle_homes))?;
     for &bundle in &order {
         let segments = if verify {
@@ -1084,7 +1084,7 @@ fn color_planned_stack_program(
         // Rebuild from the final immutable assignment, independently of the
         // mutation order used by first-fit coloring. This is a diagnostic
         // proof of the already-computed assignment, not part of coloring.
-        let mut rebuilt = DynamicIntervalMatrix::with_block_ends(cfg, &ends)
+        let mut rebuilt = DynamicIntervalMatrix::with_block_ends(cfg, ends.as_map())
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
         let mut rebuild_order = (0..bundle_homes.len())
             .map(|bundle| {

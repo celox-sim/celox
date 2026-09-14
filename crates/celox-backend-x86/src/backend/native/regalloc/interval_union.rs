@@ -106,6 +106,13 @@ impl std::error::Error for IntervalUnionError {}
 struct IntervalIndex {
     block_index: HashMap<BlockId, usize>,
     block_ids: Vec<BlockId>,
+    /// Reverse of `block_index` for a compact block-id space.
+    ///
+    /// Range construction probes this table once per sparse segment, which is
+    /// the hot path for large designs, so mirror it in an array indexed by
+    /// block id whenever the id space is not much larger than the block count.
+    /// `u32::MAX` marks a block the CFG does not name.
+    dense_rows: Option<Vec<u32>>,
 }
 
 impl IntervalIndex {
@@ -149,10 +156,35 @@ impl IntervalIndex {
                     "CFG index does not name every block row",
                 )
             })?;
+        let dense_rows = block_ids
+            .iter()
+            .map(|block| block.0 as usize)
+            .max()
+            .filter(|&max| max < block_count.saturating_mul(2).max(64))
+            .map(|max| {
+                let mut rows = vec![u32::MAX; max + 1];
+                for (row, block) in block_ids.iter().enumerate() {
+                    rows[block.0 as usize] = row as u32;
+                }
+                rows
+            });
         Ok(Self {
             block_index: cfg.block_index.clone(),
             block_ids,
+            dense_rows,
         })
+    }
+
+    #[inline]
+    fn row_of(&self, block: BlockId) -> Option<usize> {
+        match &self.dense_rows {
+            Some(rows) => rows
+                .get(block.0 as usize)
+                .copied()
+                .filter(|&row| row != u32::MAX)
+                .map(|row| row as usize),
+            None => self.block_index.get(&block).copied(),
+        }
     }
 
     fn make_range(
@@ -173,7 +205,7 @@ impl IntervalIndex {
                     ),
                 ));
             }
-            let Some(&block_index) = self.block_index.get(&segment.block) else {
+            let Some(block_index) = self.row_of(segment.block) else {
                 return Err(IntervalUnionError::new(
                     "INTERVAL_UNION.SEGMENT_BLOCK",
                     Some(segment.block),
