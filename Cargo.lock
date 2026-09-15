@@ -561,6 +561,7 @@ version = "0.6.0"
 dependencies = [
  "celox",
  "clap",
+ "fxhash",
  "libc",
  "tempfile",
  "thiserror 2.0.20",

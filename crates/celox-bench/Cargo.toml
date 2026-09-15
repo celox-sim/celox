@@ -16,6 +16,7 @@ x86_64-codegen = ["celox/x86_64-codegen"]
 [dependencies]
 celox           = { path = "../celox" }
 clap            = { workspace = true }
+fxhash          = { workspace = true }
 libc            = { workspace = true }
 thiserror       = { workspace = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }

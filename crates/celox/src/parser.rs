@@ -273,11 +273,11 @@ fn verify_region_contract(
 }
 
 pub(crate) fn finalize_scheduled_rtl(
-    mut scheduled: celox_frontend_core::ScheduledRtlOutput,
+    scheduled: celox_frontend_core::ScheduledRtlOutput,
     mut testbench_source: Option<celox_frontend_veryl::VerylTestbenchSource>,
     four_state: bool,
     trace_opts: &crate::debug::TraceOptions,
-    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
@@ -285,23 +285,44 @@ pub(crate) fn finalize_scheduled_rtl(
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
-    let phase_timing = diagnostics.phase_timing;
-    macro_rules! timed_phase {
-        ($label:expr, $body:expr) => {{
-            if phase_timing {
-                let start = crate::timing::now();
-                let result = $body;
-                tracing::debug!("[phase-timing] {}: {:?}", $label, start.elapsed());
-                result
-            } else {
-                $body
-            }
-        }};
-    }
+    project_scheduled_rtl(
+        scheduled,
+        testbench_source.as_mut(),
+        component_libraries,
+        component_file_base,
+        testbench_random_seed,
+        diagnostics,
+    )
+    .and_then(|(sir, runtime)| {
+        optimize_scheduled_program(
+            sir,
+            runtime,
+            four_state,
+            trace_opts,
+            trace,
+            optimize_options,
+            diagnostics,
+            preserve_element_storage_layout,
+        )
+    })
+}
 
+/// Lower scheduled RTL through testbench compilation and runtime projection,
+/// stopping before the SIR optimization pipeline. The returned
+/// [`UnoptimizedSir`] is complete input for either the cheap Tier-0 path or
+/// the full optimizing path via [`optimize_scheduled_program`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_scheduled_rtl(
+    mut scheduled: celox_frontend_core::ScheduledRtlOutput,
+    testbench_source: Option<&mut celox_frontend_veryl::VerylTestbenchSource>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
+    testbench_random_seed: Option<u64>,
+    diagnostics: &crate::RuntimeDiagnostics,
+) -> Result<(crate::ir::SirProgram, crate::ir::RuntimeProgram), ParserError> {
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
-    let testbench = if let Some(testbench_source) = testbench_source.as_mut() {
+    let testbench = if let Some(testbench_source) = testbench_source {
         testbench_source.component_libraries = component_libraries;
         testbench_source.component_file_base = component_file_base;
         crate::testbench_compile::project_observability(
@@ -324,6 +345,39 @@ pub(crate) fn finalize_scheduled_rtl(
         })?;
     runtime.testbench = testbench;
     dump_addr_map_if_requested(&runtime, diagnostics);
+    Ok((sir, runtime))
+}
+
+/// Run the SIR optimization pipeline over a projected program and finalize
+/// it into [`OptimizedSir`]. This is the second half of
+/// [`finalize_scheduled_rtl`], split out so the tiered fast-start path can
+/// build Tier-0 from [`project_scheduled_rtl`] output while the full
+/// pipeline runs in the background.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn optimize_scheduled_program(
+    sir: crate::ir::SirProgram,
+    runtime: crate::ir::RuntimeProgram,
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    preserve_element_storage_layout: bool,
+) -> Result<crate::ir::OptimizedSir, ParserError> {
+    let phase_timing = diagnostics.phase_timing;
+    macro_rules! timed_phase {
+        ($label:expr, $body:expr) => {{
+            if phase_timing {
+                let start = crate::timing::now();
+                let result = $body;
+                tracing::debug!("[phase-timing] {}: {:?}", $label, start.elapsed());
+                result
+            } else {
+                $body
+            }
+        }};
+    }
+
     let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
