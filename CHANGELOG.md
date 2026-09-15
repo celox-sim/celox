@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1 (2026-09-15)
+
+## What's Changed
+* perf(native): reduce large-design compile and execution overhead by @tignear in https://github.com/celox-sim/celox/pull/825
+* perf(compiler): reduce compile overhead and tighten x86 lowering by @tignear in https://github.com/celox-sim/celox/pull/827
+* chore(deps): update pnpm to v12.4.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/831
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.6.0...v0.6.1
+
 ## 0.6.0 (2026-09-14)
 
 ## What's Changed
