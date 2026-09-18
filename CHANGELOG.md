@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.1 (2026-09-18)
+
+## What's Changed
+* perf(native): reduce large-design compile and execution overhead by @tignear in https://github.com/celox-sim/celox/pull/825
+* perf(compiler): reduce compile overhead and tighten x86 lowering by @tignear in https://github.com/celox-sim/celox/pull/827
+* chore(deps): update pnpm to v12.4.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/831
+* chore(deps): update pnpm to v12.4.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/833
+* chore(deps): update updatecli/updatecli-action action to v3.7.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/835
+* chore(deps): update rust crate clap to v4.6.7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/834
+* chore(deps): update dependency ubuntu to v26 by @renovate[bot] in https://github.com/celox-sim/celox/pull/838
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.6.0...v0.6.1
+
 ## 0.6.0 (2026-09-14)
 
 ## What's Changed
