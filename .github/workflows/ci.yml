@@ -222,7 +222,7 @@ jobs:
     name: ARM64 Backend Test
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
         with:
