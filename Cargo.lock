@@ -560,6 +560,7 @@ name = "celox-bench"
 version = "0.6.0"
 dependencies = [
  "celox",
+ "celox-design",
  "clap",
  "fxhash",
  "libc",

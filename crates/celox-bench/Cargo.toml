@@ -26,6 +26,7 @@ veryl-parser    = { workspace = true }
 veryl-simulator = { workspace = true }
 
 [dev-dependencies]
+celox-design = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
