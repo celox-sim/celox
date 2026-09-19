@@ -98,7 +98,6 @@ pub fn merge_sir_eu_refs_with_provenance<A: Clone>(
             let new_block_id = BlockId(block_id.0 + bo);
             block_units.insert(new_block_id, eu_idx);
             let r = |reg: RegisterId| RegisterId(reg.0 + ro);
-            let b = |bid: BlockId| BlockId(bid.0 + bo);
 
             let new_params: Vec<RegisterId> = block.params.iter().map(|p| r(*p)).collect();
             let new_insts: Vec<SIRInstruction<A>> = block
@@ -107,49 +106,9 @@ pub fn merge_sir_eu_refs_with_provenance<A: Clone>(
                 .map(|inst| renumber_sir_inst(inst, ro, bo))
                 .collect();
 
-            let new_terminator = match &block.terminator {
-                SIRTerminator::Return => {
-                    if is_last {
-                        SIRTerminator::Return
-                    } else {
-                        SIRTerminator::Jump(next_entry.unwrap(), vec![])
-                    }
-                }
-                SIRTerminator::Error(code) => SIRTerminator::Error(*code),
-                SIRTerminator::Jump(target, args) => {
-                    let new_args: Vec<RegisterId> = args.iter().map(|a| r(*a)).collect();
-                    SIRTerminator::Jump(b(*target), new_args)
-                }
-                SIRTerminator::Branch {
-                    cond,
-                    true_block,
-                    false_block,
-                } => SIRTerminator::Branch {
-                    cond: r(*cond),
-                    true_block: (
-                        b(true_block.0),
-                        true_block.1.iter().map(|a| r(*a)).collect(),
-                    ),
-                    false_block: (
-                        b(false_block.0),
-                        false_block.1.iter().map(|a| r(*a)).collect(),
-                    ),
-                },
-                SIRTerminator::Switch {
-                    selector,
-                    cases,
-                    default,
-                } => SIRTerminator::Switch {
-                    selector: r(*selector),
-                    cases: cases
-                        .iter()
-                        .map(|case| SIRSwitchCase {
-                            value: case.value.clone(),
-                            target: b(case.target),
-                        })
-                        .collect(),
-                    default: b(*default),
-                },
+            let new_terminator = match (&block.terminator, next_entry) {
+                (SIRTerminator::Return, Some(next)) => SIRTerminator::Jump(next, vec![]),
+                _ => renumber_sir_terminator(&block.terminator, ro, bo),
             };
 
             merged_blocks.insert(
@@ -417,7 +376,48 @@ fn replace_sir_terminator_uses(
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
-fn renumber_sir_inst<A: Clone>(
+/// The caller must check that adding these offsets cannot overflow.
+pub(crate) fn renumber_sir_terminator(
+    terminator: &SIRTerminator,
+    ro: usize,
+    bo: usize,
+) -> SIRTerminator {
+    let r = |reg: &RegisterId| RegisterId(reg.0 + ro);
+    let b = |block: BlockId| BlockId(block.0 + bo);
+    match terminator {
+        SIRTerminator::Return => SIRTerminator::Return,
+        SIRTerminator::Error(code) => SIRTerminator::Error(*code),
+        SIRTerminator::Jump(target, args) => {
+            SIRTerminator::Jump(b(*target), args.iter().map(r).collect())
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => SIRTerminator::Branch {
+            cond: r(cond),
+            true_block: (b(true_block.0), true_block.1.iter().map(r).collect()),
+            false_block: (b(false_block.0), false_block.1.iter().map(r).collect()),
+        },
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => SIRTerminator::Switch {
+            selector: r(selector),
+            cases: cases
+                .iter()
+                .map(|case| SIRSwitchCase {
+                    value: case.value.clone(),
+                    target: b(case.target),
+                })
+                .collect(),
+            default: b(*default),
+        },
+    }
+}
+
+pub(crate) fn renumber_sir_inst<A: Clone>(
     inst: &SIRInstruction<A>,
     ro: usize,
     _bo: usize,

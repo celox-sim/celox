@@ -11,4 +11,5 @@ pub mod dependence;
 pub mod interval;
 pub mod memory;
 pub mod memory_ssa;
+pub mod polyhedral;
 pub mod ssa;
