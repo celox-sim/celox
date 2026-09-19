@@ -15,8 +15,9 @@
     "remoteEnv": {
         "CODEX_HOME": "/home/vscode/.codex",
         "PNPM_HOME": "/home/vscode/.local/share/pnpm",
-        "PATH": "/home/vscode/.local/share/celox/dev-tools/bin:/home/vscode/.local/share/celox/dev-tools/libexec/rust/bin:${containerEnv:PATH}:/home/vscode/.local/share/pnpm:/home/vscode/.local/bin",
-        "MBX_CACHE_DIR": "/home/vscode/mbx/container-cache"
+        "PATH": "/home/vscode/.local/share/npm/bin:/home/vscode/.local/share/celox/dev-tools/bin:/home/vscode/.local/share/celox/dev-tools/libexec/rust/bin:${containerEnv:PATH}:/home/vscode/.local/share/pnpm:/home/vscode/.local/bin",
+        "MBX_CACHE_DIR": "/home/vscode/mbx/container-cache",
+        "NPM_CONFIG_PREFIX": "/home/vscode/.local/share/npm"
     },
     "postCreateCommand": "bash .devcontainer/post-create.sh",
     "customizations": {

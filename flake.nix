@@ -111,6 +111,10 @@
           default = e.pkgs.mkShell {
             packages = e.tools;
             CELOX_COCOTB_PYTHON = "${e.python}/bin/python3";
+            shellHook = ''
+              export NPM_CONFIG_PREFIX="''${NPM_CONFIG_PREFIX:-$HOME/.local/share/npm}"
+              export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+            '';
           };
         }
       );

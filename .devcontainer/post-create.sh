@@ -119,6 +119,9 @@ main() {
     --out-link "${home_dir}/.local/share/celox/dev-tools"
   export PATH="${home_dir}/.local/share/celox/dev-tools/bin:${home_dir}/.local/share/celox/dev-tools/libexec/rust/bin:${PATH}"
   nix print-dev-env --no-update-lock-file > "${home_dir}/.local/share/celox/env.sh"
+  # print-dev-env defines shellHook but does not execute it when sourced.
+  # shellcheck disable=SC2016
+  printf '\neval "$shellHook"\n' >> "${home_dir}/.local/share/celox/env.sh"
   if ! grep -qF '.local/share/celox/env.sh' "${home_dir}/.bashrc"; then
     # Expand HOME when the new terminal starts, not during setup.
     # shellcheck disable=SC2016

@@ -34,16 +34,40 @@ For automatic activation, install direnv and nix-direnv once:
 ```bash
 nix profile install nixpkgs#direnv nixpkgs#nix-direnv
 mkdir -p ~/.config/direnv
-# Add this line to ~/.config/direnv/direnvrc:
-# source "$HOME/.nix-profile/share/nix-direnv/direnvrc"
-# Add this line to ~/.bashrc (use `direnv hook zsh` for zsh):
-# eval "$(direnv hook bash)"
+printf '\n%s\n' 'source "$HOME/.nix-profile/share/nix-direnv/direnvrc"' >> ~/.config/direnv/direnvrc
+printf '\n%s\n' 'eval "$(direnv hook bash)"' >> ~/.bashrc
+eval "$(direnv hook bash)"
 direnv allow
+```
+
+For zsh, replace the two Bash hook commands with:
+
+```zsh
+printf '\n%s\n' 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+eval "$(direnv hook zsh)"
 ```
 
 The checked-in `.envrc` loads the flake through nix-direnv. Review and allow it
 again when it changes. Launch editors from the activated shell, or use an
 editor's direnv integration, so subprocesses get the same tools.
+
+## Global npm tools
+
+The devShell directs global npm installs (including CLI self-updates) to
+`~/.local/share/npm` and adds its `bin` directory to PATH. Set
+`NPM_CONFIG_PREFIX` before entering the shell to use another writable location.
+The devcontainer configures the same location for its user. Do not use sudo or
+try to change permissions in `/nix/store`.
+
+After changing the flake, re-enter `nix develop` or run `direnv reload`.
+An already-running shell can apply the same settings immediately:
+
+```bash
+export NPM_CONFIG_PREFIX="$HOME/.local/share/npm"
+export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+npm install -g @openai/codex
+hash -r
+```
 
 ## mbx and filesystem placement
 
