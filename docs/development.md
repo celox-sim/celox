@@ -190,7 +190,7 @@ then restart terminals and reload the editor to refresh its tool profile.
 ```bash
 nix flake update
 nix flake check
-nix fmt -- --check flake.nix nix/mbx.nix
+nix fmt -- --check flake.nix
 nix develop --command bash -c 'rustc --version; node --version; pnpm --version; mbx doctor'
 ```
 
@@ -199,8 +199,8 @@ update the rust-overlay input if its locked revision predates the release.
 When updating pnpm, update `packageManager` in `package.json` and the pnpm
 lockfile as needed; no Nix version or hash update is required. Verify with
 `nix develop --command pnpm --version` (also from a workspace package directory).
-mbx release URLs and per-architecture hashes live in
-`nix/mbx.nix`; update both hashes when changing its version.
+mbx comes from [tignear/nix-packages](https://github.com/tignear/nix-packages).
+Run `nix flake update nix-packages` to update its pinned package definition.
 
 The shell pins development tools, not the complete host OS or all build inputs.
 Use the committed Cargo/pnpm lockfiles and locked dependency installation for
