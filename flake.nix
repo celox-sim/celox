@@ -24,12 +24,16 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+          toolchain = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
           rust = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-            extensions = [
-              "rust-src"
-              "rust-analyzer"
-            ];
-            targets = [ "wasm32-unknown-unknown" ];
+            extensions = pkgs.lib.unique (
+              (toolchain.components or [ ])
+              ++ [
+                "rust-src"
+                "rust-analyzer"
+              ]
+            );
+            targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [ "wasm32-unknown-unknown" ]);
           };
           mbx = import ./nix/mbx.nix { inherit pkgs; };
           # mbx recognizes a symlink named cargo and preserves Cargo's CLI,
@@ -116,6 +120,21 @@
               export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
             '';
           };
+        }
+      );
+      checks = forAllSystems (
+        system:
+        let
+          e = environments.${system};
+        in
+        {
+          rust-toolchain = e.pkgs.runCommand "celox-rust-toolchain-check" { } ''
+            ${e.rust}/bin/cargo-fmt --version
+            ${e.rust}/bin/cargo-clippy --version
+            ${e.rust}/bin/rustfmt --version
+            ${e.rust}/bin/clippy-driver --version
+            touch $out
+          '';
         }
       );
       formatter = forAllSystems (system: environments.${system}.pkgs.nixfmt);
