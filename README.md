@@ -204,7 +204,12 @@ and API changes while the design is still evolving.
 
 ## Development
 
-Celox is a Rust and pnpm workspace. The main local checks are:
+Celox is a Rust and pnpm workspace. On Linux, run `nix develop` to enter the
+locked development environment (also used by both devcontainer variants).
+See [Development environment](docs/development.md) for nix-direnv setup, mbx
+cache placement on Btrfs, and devcontainer host-directory configuration.
+
+The main local checks are:
 
 ```bash
 cargo test
@@ -217,8 +222,9 @@ pnpm test
 Architecture discussions, bug reports, and focused experiments are welcome in
 [GitHub Issues](https://github.com/celox-sim/celox/issues).
 
-The repository dev container includes cocotb 2.0.1 and Verilator for native
-VPI integration tests and SystemVerilog benchmarks.
+The development environment includes cocotb and Verilator for native VPI
+integration tests and SystemVerilog benchmarks. Cargo runs through mbx to share
+compiler outputs and manage target directories.
 
 ## License
 
