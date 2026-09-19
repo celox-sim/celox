@@ -541,4 +541,34 @@ if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
     fail "run_one accepted compile-only tiered Veryl"
 fi
 
+# A selected comparison must wait for each backend on this host and retain
+# failures while still attempting the other selected backend for diagnostics.
+(
+    HELIODOR_COMPILE_ONLY=0
+    HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered"
+    HELIODOR_TESTS="comparison"
+    HELIODOR_RESULTS_DIR="$TMP/comparison"
+    prepare() { :; }
+    build_celox_runner() { :; }
+    build_timed_veryl_runner() { :; }
+    comparison_calls=()
+    comparison_failed=0
+    run_one() {
+        comparison_calls+=("$1:$2")
+        if [[ "$1" == celox-tiered ]]; then
+            return "$comparison_failed"
+        fi
+    }
+    run_all || fail "selected comparison failed"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison" \
+        "comparison runs serially in the requested order"
+    comparison_calls=()
+    comparison_failed=124
+    comparison_status=0
+    run_all || comparison_status=$?
+    assert_eq "$comparison_status" 124 "comparison preserves timeout failure"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison" \
+        "comparison attempts both backends after a failure"
+)
+
 echo "run-heliodor-bench result fixture tests: PASS"

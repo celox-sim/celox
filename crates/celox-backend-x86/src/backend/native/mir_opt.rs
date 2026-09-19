@@ -23,6 +23,8 @@ mod loop_guard;
 #[cfg(test)]
 mod memory_forward_tests;
 mod pipeline;
+#[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
+pub(crate) use pipeline::optimize_baseline;
 pub use pipeline::{optimize, optimize_with_diagnostics};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
