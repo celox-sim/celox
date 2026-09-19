@@ -26,6 +26,7 @@ pub(super) fn allocate(
     trace: Option<&mut super::RegallocTrace>,
     timing: bool,
     verify: bool,
+    baseline_spill_budget: Option<usize>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<Allocation, super::RegallocError> {
     // Observed between allocation stages so a cancelled compile unwinds at
@@ -236,18 +237,25 @@ pub(super) fn allocate(
     checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
-    let reconstruction =
-        super::reconstruct::reconstruct(func, cfg, &plan, &reload_recipes, timing, verify)
-            .map_err(|error| {
-                super::RegallocError::new(
-                    "SSA reconstruction",
-                    error.rule,
-                    error.block,
-                    error.instruction,
-                    error.values,
-                    error.message,
-                )
-            })?;
+    let reconstruction = super::reconstruct::reconstruct_with_spill_budget(
+        func,
+        cfg,
+        &plan,
+        &reload_recipes,
+        timing,
+        verify,
+        baseline_spill_budget,
+    )
+    .map_err(|error| {
+        super::RegallocError::new(
+            "SSA reconstruction",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} shared_reload_blocks={} elapsed={:?}",

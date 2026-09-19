@@ -567,8 +567,19 @@ fn prepare_merged_sir(
     first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
+    baseline: bool,
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
     let verify_enabled = cfg!(debug_assertions) || diagnostics.verify_boundaries;
+    let mut phase_start = diagnostics.pass_timing.then(crate::timing::now);
+    let mut report_phase = |phase: &str| {
+        if let Some(start) = phase_start {
+            tracing::debug!(
+                "[native-sir-timing] label={label} phase={phase} elapsed={:?}",
+                start.elapsed()
+            );
+            phase_start = Some(crate::timing::now());
+        }
+    };
     if verify_enabled {
         for (unit_index, unit) in units.iter().enumerate() {
             if let Err(error) = unit.verify_result() {
@@ -599,8 +610,15 @@ fn prepare_merged_sir(
     };
 
     verify(&sir_eu, "before x86 merged-SIR optimization")?;
+    report_phase("merge");
     if cancelled(cancel) {
         return Err(cancelled_error());
+    }
+    // The baseline tier keeps the finalized source-unit order and every
+    // state store; the optional cross-unit transforms belong to the
+    // optimizing tier. ISel/legalize/regalloc/emit still run below.
+    if baseline {
+        return Ok(sir_eu);
     }
     if let Some(first_ff_unit) = first_ff_unit {
         let removed = crate::optimizer::sir::eliminate_unobserved_comb_state_stores(
@@ -619,6 +637,7 @@ fn prepare_merged_sir(
             verify(&sir_eu, "after comb/FF state-publication DSE")?;
         }
     }
+    report_phase("comb_state_dse");
     if label == "eval_comb_apply_ff"
         && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
             |source| {
@@ -632,6 +651,7 @@ fn prepare_merged_sir(
         crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
+    report_phase("comb_state_ssa");
     crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
         &mut sir_eu,
         &boundaries,
@@ -647,6 +667,7 @@ fn prepare_merged_sir(
         crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after x86 working StateSSA DCE")?;
     }
+    report_phase("working_state_ssa");
     if cancelled(cancel) {
         return Err(cancelled_error());
     }
@@ -669,6 +690,7 @@ fn prepare_merged_sir(
         }
     })?;
     verify(&sir_eu, "after x86 merged-chain cleanup")?;
+    report_phase("merged_chain");
     Ok(sir_eu)
 }
 
@@ -792,6 +814,7 @@ fn compile_unit_refs(
         first_ff_unit,
         diagnostics,
         cancel,
+        x86_options.baseline,
     )?;
     if cancelled(cancel) {
         return Err(cancelled_error());
@@ -2410,6 +2433,25 @@ impl NativeBackend {
     /// Start a fresh opt-in measurement of generated native function calls.
     pub fn start_execution_timing(&mut self) {
         self.execution_timing = Some(NativeExecutionTiming::default());
+    }
+
+    /// Total capacity of the live image in `u64` words.
+    pub(crate) fn memory_word_capacity(&self) -> usize {
+        self.memory.capacity_words()
+    }
+
+    /// Swap the compiled code image for a newly compiled one in place,
+    /// keeping the live state, event buffers, capture flags, and timing.
+    /// The caller must supply code from the same laid-out program and only
+    /// replace it outside a split evaluate/apply pair: backend scratch may
+    /// differ, but semantic state and trigger IDs must remain identical.
+    /// The image capacity must cover the new `native_memory_size` requirement.
+    pub(crate) fn replace_shared_code(&mut self, shared: Arc<SharedNativeCode>) {
+        let mem_size_words = shared.native_memory_size.div_ceil(8) + 1;
+        if self.memory.len_words() < mem_size_words {
+            self.memory.resize_zeroed_within_capacity(mem_size_words);
+        }
+        self.compiled = shared;
     }
 
     /// Stop timing and return the accumulated generated-code interval.
