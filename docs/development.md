@@ -3,8 +3,11 @@
 The Linux development environment is defined in `flake.nix` and `flake.lock`.
 It supports x86-64 and AArch64. The host and both devcontainer variants use the
 same tools: Rust, Node.js 24, pnpm, Python with cocotb, Verilator, C/C++ build
-tools, cargo-insta, and mbx. Rust reads `rust-toolchain.toml`; evaluation fails
-if the locked nixpkgs pnpm differs from `package.json`.
+tools, cargo-insta, and mbx. Rust reads `rust-toolchain.toml`. Corepack selects
+pnpm from the nearest `package.json` with a `packageManager` field, so pnpm
+updates do not depend on the version available in nixpkgs. The first use of a
+version requires network access to download it into the user's Corepack cache;
+subsequent uses can run offline. No `corepack enable` step is needed.
 
 ## Enter the environment
 
@@ -193,8 +196,10 @@ nix develop --command bash -c 'rustc --version; node --version; pnpm --version; 
 
 Commit `flake.lock` together with environment changes. When updating Rust,
 update the rust-overlay input if its locked revision predates the release.
-When updating pnpm, select a nixpkgs revision providing the version pinned in
-`package.json`. mbx release URLs and per-architecture hashes live in
+When updating pnpm, update `packageManager` in `package.json` and the pnpm
+lockfile as needed; no Nix version or hash update is required. Verify with
+`nix develop --command pnpm --version` (also from a workspace package directory).
+mbx release URLs and per-architecture hashes live in
 `nix/mbx.nix`; update both hashes when changing its version.
 
 The shell pins development tools, not the complete host OS or all build inputs.
