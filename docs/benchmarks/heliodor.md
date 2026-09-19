@@ -4,7 +4,10 @@ Heliodor is Celox's large external Veryl workload. It boots a pinned Linux image
 and compares Celox's native and tiered JIT backends with synchronous and tiered
 Veryl-CC using the same design revision and input workload on each architecture.
 Celox tiered starts on the interpreter while native code is generated in the
-background. Veryl-CC tiered starts on Cranelift and switches to C code as its
+background. On x86-64 it first adopts a baseline native image, then replaces it
+with the optimizing image at a safe point, preserving live state and event buffers.
+Code-generation tracing uses the optimizing pipeline directly.
+Veryl-CC tiered starts on Cranelift and switches to C code as its
 background compilation completes, matching `veryl test --backend cc`'s default
 `aot_c_async=true` setting. The synchronous Veryl-CC runner explicitly sets
 `aot_c_async=false` and waits for C compilation before simulation. Standalone
@@ -88,9 +91,20 @@ x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backend
 
 These 9 workloads use Heliodor revision
 `6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
-simulated guest, not the benchmark host OS. Backends run in separate jobs (72 jobs
-for the complete suite). These jobs use separate hosted machines; their CPU and
-memory details are retained in each artifact for interpreting comparisons.
+simulated guest, not the benchmark host OS. Backends execute sequentially on the
+same VM within each group below (26 jobs for the complete suite):
+
+| Workload | Comparison groups per architecture |
+| --- | --- |
+| 1/2 harts, or x86-64 4 harts | All four backends in one job |
+| AArch64 4 harts | Two jobs: Celox native + Veryl-CC sync; Celox tiered + Veryl-CC tiered |
+| 8 harts, either architecture | Four jobs, one per backend |
+
+Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
+AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
+execution modes preserves useful same-CPU comparisons with time for builds.
+Different groups may use different CPUs. CPU and host identity are retained in
+each artifact, and publication requires every group's complete successful results.
 Each runner has a one-hour timeout for 1/2 harts,
 three hours for 4 harts, and five and a half hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
@@ -138,3 +152,22 @@ gh workflow run heliodor-bench.yml --ref <branch> \
   -f suite_test=test_soc_66_smp_linux_boot_4hart \
   -f suite_runner=celox -f suite_arch=aarch64
 ```
+
+Nightly and manual runs use the same grouping above. To compare a subset, give
+`suite_runner` a space-separated list; this narrows the groups without combining
+them. Backends execute in the supplied order within each group. CPU, runner,
+group, run/attempt, and boot identifiers are saved with the
+results. Every Veryl-CC run still gets a fresh AOT-C cache.
+
+```bash
+gh workflow run heliodor-bench.yml --ref <branch> \
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=aarch64
+```
+
+Each group has a shared 5.5-hour budget, including building the runners,
+to preserve logs before the [hosted job's six-hour limit](https://docs.github.com/en/actions/reference/limits).
+A timeout or missing backend fails the comparison, and partial results are never
+published as completed boots. The per-backend limits above also apply within
+this shared budget. Separate workflow runs, including different commits, can use different
+CPUs; their history is not a same-host comparison.

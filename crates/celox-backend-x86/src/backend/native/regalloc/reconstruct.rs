@@ -144,6 +144,7 @@ struct SharedReloadPlan {
     phi_replacements: Vec<VReg>,
 }
 
+#[cfg(test)]
 pub(super) fn reconstruct(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
@@ -152,10 +153,29 @@ pub(super) fn reconstruct(
     timing: bool,
     verify: bool,
 ) -> Result<ReconstructionResult, ReconstructError> {
+    reconstruct_with_spill_budget(func, cfg, plan, reload_recipes, timing, verify, None)
+}
+
+pub(super) fn reconstruct_with_spill_budget(
+    func: &mut MFunction,
+    cfg: &NormalizedCfg,
+    plan: &SpillPlan,
+    reload_recipes: &ReloadRecipeAnalysis,
+    timing: bool,
+    verify: bool,
+    baseline_spill_budget: Option<usize>,
+) -> Result<ReconstructionResult, ReconstructError> {
     let recipe_homes = &plan.recipe_homes;
     let phase = timing.then(crate::timing::now);
-    let stack_coloring = super::stack_color::color_spill_plan(func, cfg, plan, timing, verify)
-        .map_err(stack_color_error)?;
+    let stack_coloring = super::stack_color::color_spill_plan(
+        func,
+        cfg,
+        plan,
+        timing,
+        verify,
+        baseline_spill_budget,
+    )
+    .map_err(stack_color_error)?;
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] reconstruct stack_color homes={} slots={} elapsed={:?}",
