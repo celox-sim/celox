@@ -91,11 +91,20 @@ x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backend
 
 These 9 workloads use Heliodor revision
 `6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
-simulated guest, not the benchmark host OS. Each workload/architecture runs in
-one job (18 jobs for the complete suite). All four backends execute sequentially
-on that job's VM, so results for the same problem share the same CPU. Different
-workloads may use different machines. CPU and host identity are retained in each
-artifact, and publication requires all four successful results from each job.
+simulated guest, not the benchmark host OS. Backends execute sequentially on the
+same VM within each group below (26 jobs for the complete suite):
+
+| Workload | Comparison groups per architecture |
+| --- | --- |
+| 1/2 harts, or x86-64 4 harts | All four backends in one job |
+| AArch64 4 harts | Two jobs: Celox native + Veryl-CC sync; Celox tiered + Veryl-CC tiered |
+| 8 harts, either architecture | Four jobs, one per backend |
+
+Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
+AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
+execution modes preserves useful same-CPU comparisons with time for builds.
+Different groups may use different CPUs. CPU and host identity are retained in
+each artifact, and publication requires every group's complete successful results.
 Each runner has a one-hour timeout for 1/2 harts,
 three hours for 4 harts, and five and a half hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
@@ -144,21 +153,20 @@ gh workflow run heliodor-bench.yml --ref <branch> \
   -f suite_runner=celox -f suite_arch=aarch64
 ```
 
-By default, every selected workload/architecture gets **one job** containing all
-four backends, for both nightly and manual runs. To compare a subset, give
-`suite_runner` a space-separated list; the backends execute on that VM in the
-supplied order. CPU, runner, run/attempt, and boot identifiers are saved with the
+Nightly and manual runs use the same grouping above. To compare a subset, give
+`suite_runner` a space-separated list; this narrows the groups without combining
+them. Backends execute in the supplied order within each group. CPU, runner,
+group, run/attempt, and boot identifiers are saved with the
 results. Every Veryl-CC run still gets a fresh AOT-C cache.
 
 ```bash
 gh workflow run heliodor-bench.yml --ref <branch> \
-  -f suite_test=test_soc_smp_linux_boot_8hart \
-  -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=x86_64
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=aarch64
 ```
 
-These comparisons have a shared 5.5-hour budget, including building the runners,
+Each group has a shared 5.5-hour budget, including building the runners,
 to preserve logs before the [hosted job's six-hour limit](https://docs.github.com/en/actions/reference/limits).
-Choose only the backends needed; several large ARM boots may not fit in one job.
 A timeout or missing backend fails the comparison, and partial results are never
 published as completed boots. The per-backend limits above also apply within
 this shared budget. Separate workflow runs, including different commits, can use different

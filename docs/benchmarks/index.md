@@ -32,8 +32,10 @@ The regular Benchmark workflow runs Rust, Verilator, and TypeScript sequentially
 in one job, so backend comparisons within that run share a VM and CPU. The
 `bench-host` artifact records its CPU and runner identity. Separate workflow runs
 can receive different CPUs; use history to spot trends rather than to establish
-small changes between commits. Large Heliodor workloads likewise group all
-backends for each problem in [one job](./heliodor.md#expanded-linux-suite).
+small changes between commits. The [Heliodor suite](./heliodor.md#expanded-linux-suite)
+groups backends on one host where runtimes allow it; ARM four-hart comparisons
+use two pairs, and eight-hart runs use separate jobs. Only results within the same
+group share a CPU.
 
 - Compare the same workload, backend, revision, and host environment.
 - Treat small changes on shared CI runners as noise until repeated.

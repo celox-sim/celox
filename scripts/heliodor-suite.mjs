@@ -20,6 +20,19 @@ export const workloads = [
 export const runners = ["veryl-cc-sync", "celox", "celox-tiered", "veryl-cc-tiered"];
 const hosts = { x86_64: "ubuntu-24.04", aarch64: "ubuntu-24.04-arm" };
 
+function backendGroups(test, arch) {
+  // Recent complete N=8 boots total 10–13 hours on x86 and 17–18 on ARM.
+  // Even pairs can exceed the hosted job limit, so keep those runs separate.
+  if (test.endsWith("8hart")) return runners.map(r => ({ group: r, runners: [r] }));
+  // ARM N=4 totals 5–7 hours. Pair equivalent execution modes so Celox and
+  // Veryl-CC still share a CPU, with room for builds and runtime variation.
+  if (arch === "aarch64" && test.endsWith("4hart")) return [
+    { group: "sync", runners: ["veryl-cc-sync", "celox"] },
+    { group: "tiered", runners: ["celox-tiered", "veryl-cc-tiered"] },
+  ];
+  return [{ group: "all", runners }];
+}
+
 export function matrix({ test = "", runner = "", arch = "", profile = false } = {}) {
   if (profile && (test || runner || arch)) {
     throw new Error("arm64_profile cannot be combined with suite_test, suite_runner, or suite_arch");
@@ -34,17 +47,18 @@ export function matrix({ test = "", runner = "", arch = "", profile = false } = 
     if (!runners.includes(value)) throw new Error(`Unknown suite runner: ${value}`);
   }
   if (new Set(selected).size !== selected.length) throw new Error("Duplicate suite runner");
-  // The scheduling unit is a workload and architecture, never a backend.
-  // Every backend being compared runs sequentially on that job's VM.
-  const group = selected.length ? selected : runners;
+  // Run each comparison group sequentially on one VM. Selection narrows a
+  // group; it never combines long runs that were deliberately split apart.
+  const requested = selected.length ? selected : runners;
   return { include: Object.entries(hosts).flatMap(([a, os]) =>
-    workloads.map(t => ({
-      arch: a, os, test: t, runner: group.join(" "),
+    workloads.flatMap(t => backendGroups(t, a).map(g => ({
+      arch: a, os, test: t, group: g.group,
+      runner: requested.filter(r => g.runners.includes(r)).join(" "),
       // ARM N=8 Celox tiering reached 41M cycles at the former five-hour
       // limit; allow the measured ~44.3M-cycle boot to finish with headroom.
       timeout_sec: t.endsWith("8hart") ? 19800 : t.endsWith("4hart") ? 10800 : 3600,
-    })),
-  ).filter(job => (!test || job.test === test) && (!arch || job.arch === arch)) };
+    }))),
+  ).filter(job => job.runner && (!test || job.test === test) && (!arch || job.arch === arch)) };
 }
 
 // Accept only complete, successful samples from the selected backends. This
@@ -116,16 +130,16 @@ function restoreSuiteTestbench(directory) {
   writeFileSync(path, original);
 }
 
-// Require one complete comparison artifact per workload and architecture.
-// Never assemble a comparison from backend artifacts produced on separate VMs.
+// Require every planned group, including the explicitly split long runs.
+// Do not accept separate-host artifacts in place of a same-host group.
 // A partial manual rerun must never be accepted as a full nightly result.
 export function mergeArtifacts(root, outputPrefix) {
   const output = new Map();
   let header;
   for (const job of matrix().include) {
-    const name = `heliodor-suite-${job.arch}-${job.test}`;
+    const name = `heliodor-suite-${job.arch}-${job.test}-${job.group}`;
     const file = join(root, name, "target/heliodor/results/results.tsv");
-    const lines = validateResults(file, job.test, runners);
+    const lines = validateResults(file, job.test, job.runner.split(" "));
     header ??= lines[0];
     if (lines[0] !== header) throw new Error(`${name}: inconsistent TSV header`);
     if (!output.has(job.arch)) output.set(job.arch, []);

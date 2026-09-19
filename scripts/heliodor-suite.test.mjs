@@ -4,31 +4,52 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { matrix, mergeArtifacts, prepareSuiteTestbench, validateResults, runners } from "./heliodor-suite.mjs";
+import { matrix, mergeArtifacts, prepareSuiteTestbench, validateResults, runners, workloads } from "./heliodor-suite.mjs";
 
-test("suite keeps all four backends in one job for each workload and architecture", () => {
+test("suite splits only long comparisons and runs all 72 backend cases exactly once", () => {
   const jobs = matrix().include;
-  assert.equal(jobs.length, 18);
-  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}`)).size, 18);
+  assert.equal(jobs.length, 26);
+  assert.equal(new Set(jobs.map(j => `${j.arch}/${j.test}/${j.group}`)).size, 26);
+  const cases = jobs.flatMap(j => j.runner.split(" ").map(r => `${j.arch}/${j.test}/${r}`));
+  assert.equal(cases.length, 72);
+  assert.equal(new Set(cases).size, 72);
+  for (const arch of ["x86_64", "aarch64"]) {
+    for (const test of workloads) {
+      const groups = jobs.filter(j => j.arch === arch && j.test === test).map(j => j.runner.split(" "));
+      if (test.endsWith("8hart")) assert.deepEqual(groups, runners.map(r => [r]));
+      else if (arch === "aarch64" && test.endsWith("4hart")) assert.deepEqual(groups, [
+        ["veryl-cc-sync", "celox"], ["celox-tiered", "veryl-cc-tiered"],
+      ]);
+      else assert.deepEqual(groups, [runners]);
+    }
+  }
   for (const job of jobs) {
     assert.ok(job.timeout_sec + 30 * 60 <= 360 * 60);
-    assert.deepEqual(job.runner.split(" "), runners);
     if (job.test.endsWith("4hart") || job.test.endsWith("8hart")) assert.ok(job.timeout_sec > 3600);
   }
   assert.deepEqual(matrix({ test: "test_soc_66_smp_linux_boot_4hart", runner: "celox", arch: "aarch64" }).include,
-    jobs.filter(j => j.test === "test_soc_66_smp_linux_boot_4hart" && j.arch === "aarch64").map(j => ({ ...j, runner: "celox" })));
+    jobs.filter(j => j.test === "test_soc_66_smp_linux_boot_4hart" && j.arch === "aarch64" && j.group === "sync").map(j => ({ ...j, runner: "celox" })));
   for (const field of ["test", "runner", "arch"]) assert.throws(() => matrix({ [field]: "invalid" }), /Unknown suite/);
 });
 
-test("explicit backends share one job per workload and architecture in the requested order", () => {
-  const options = { test: "test_soc_smp_linux_boot_8hart", arch: "x86_64", runner: "celox-tiered veryl-cc-tiered" };
+test("explicit backends retain their groups and run in the requested order within each group", () => {
+  const options = { test: "test_soc_smp_linux_boot_4hart", arch: "x86_64", runner: "veryl-cc-tiered celox-tiered" };
   const jobs = matrix(options).include;
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].runner, options.runner);
   assert.equal(jobs[0].os, matrix({ ...options, runner: "celox-tiered" }).include[0].os);
-  assert.equal(jobs[0].timeout_sec, 19800);
-  assert.deepEqual(matrix({ ...options, runner: "  celox-tiered\tveryl-cc-tiered  " }).include, jobs);
-  assert.equal(matrix({ runner: options.runner }).include.length, 18);
+  assert.equal(jobs[0].timeout_sec, 10800);
+  assert.deepEqual(matrix({ ...options, runner: "  veryl-cc-tiered\tcelox-tiered  " }).include, jobs);
+  assert.equal(matrix({ runner: options.runner }).include.length, 20);
+  for (const arch of ["x86_64", "aarch64"]) {
+    const longJobs = matrix({ ...options, arch, test: "test_soc_smp_linux_boot_8hart" }).include;
+    assert.equal(longJobs.length, 2);
+    assert.deepEqual(longJobs.map(j => j.runner).sort(), options.runner.split(" ").sort());
+    assert.ok(longJobs.every(j => j.timeout_sec === 19800));
+  }
+  const paired = matrix({ test: "test_soc_66_smp_linux_boot_4hart", arch: "aarch64", runner: "celox veryl-cc-sync veryl-cc-tiered" }).include;
+  assert.deepEqual(paired.map(j => [j.group, j.runner]), [["sync", "celox veryl-cc-sync"], ["tiered", "veryl-cc-tiered"]]);
+  assert.equal(matrix({ runner: "celox" }).include.length, 18);
   assert.equal(matrix({ runner: "celox" }).include.every(job => job.runner === "celox"), true);
   assert.throws(() => matrix({ runner: "celox celox" }), /Duplicate/);
   assert.throws(() => matrix({ runner: "celox invalid" }), /Unknown suite runner/);
@@ -66,23 +87,26 @@ test("publication requires one successful matching result from every backend", (
   try {
     const files = [];
     for (const job of matrix().include) {
-      const dir = join(root, `heliodor-suite-${job.arch}-${job.test}`, "target/heliodor/results");
+      const dir = join(root, `heliodor-suite-${job.arch}-${job.test}-${job.group}`, "target/heliodor/results");
       mkdirSync(dir, { recursive: true });
       const file = join(dir, "results.tsv");
-      const content = "runner\ttest\texit_status\tsemantic_status\n" + runners.map(runner => `${runner}\t${job.test}\t0\tpass\n`).join("");
+      const content = "runner\ttest\texit_status\tsemantic_status\n" + job.runner.split(" ").map(runner => `${runner}\t${job.test}\t0\tpass\n`).join("");
       writeFileSync(file, content);
       files.push([file, content]);
     }
     const output = join(root, "suite");
     mergeArtifacts(root, output);
     for (const arch of ["x86_64", "aarch64"]) assert.equal(readFileSync(`${output}-${arch}.tsv`, "utf8").trim().split("\n").length, 37);
-    const [file, content] = files[0];
-    for (const invalid of [content.replace("\tpass", "\tfail"), content.replace("\t0\t", "\t124\t"), content.replace("veryl-cc-sync\t", "celox\t"), content + content.split("\n")[1] + "\n"]) {
-      writeFileSync(file, invalid);
-      assert.throws(() => mergeArtifacts(root, output));
+    // Exercise both same-host groups and the individually scheduled N=8 runs.
+    for (const [file, content] of files) {
+      for (const invalid of [content.replace("\tpass", "\tfail"), content.replace("\t0\t", "\t124\t"), content.replace(/\n[^\t]+\t/, "\nunknown\t"), content + content.split("\n")[1] + "\n"]) {
+        writeFileSync(file, invalid);
+        assert.throws(() => mergeArtifacts(root, output));
+      }
+      rmSync(file);
+      assert.throws(() => mergeArtifacts(root, output), /ENOENT/);
+      writeFileSync(file, content);
     }
-    rmSync(file);
-    assert.throws(() => mergeArtifacts(root, output), /ENOENT/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -110,11 +134,11 @@ test("dispatch validation rejects profile/filter conflicts instead of succeeding
   assert.notEqual(validate({ SUITE_ARCH: "invalid" }).status, 0);
 });
 
-test("publication rejects the former separate-host backend artifacts", () => {
+test("publication rejects separate-host artifacts in place of same-host groups", () => {
   const root = mkdtempSync(join(tmpdir(), "heliodor-separate-hosts-"));
   try {
     for (const job of matrix().include) {
-      for (const runner of runners) {
+      for (const runner of job.runner.split(" ")) {
         const dir = join(root, `heliodor-suite-${job.arch}-${job.test}-${runner}`, "target/heliodor/results");
         mkdirSync(dir, { recursive: true });
         writeFileSync(join(dir, "results.tsv"), `runner\ttest\texit_status\tsemantic_status\n${runner}\t${job.test}\t0\tpass\n`);

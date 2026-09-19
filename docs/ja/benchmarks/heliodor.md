@@ -85,10 +85,18 @@ nightly とプロファイルを取らない手動実行では、次の 9 ケー
 
 Heliodor のリビジョンは `6285682fa0a514077da9d17fee385c7841160025` に固定します。
 Linux バージョンはシミュレーション内で起動するゲストのもので、ホスト OS の違いではありません。
-同じ workload・アーキテクチャを一つのジョブにまとめ、全体で 18 ジョブを実行します。
-各ジョブ内で 4 バックエンドを順番に実行するため、同じ問題の結果は同じ CPU で比較できます。
-別の workload は別ホストでも構いません。CPU とホストの識別情報を成果物に記録し、
-公開時には各ジョブの 4 バックエンドすべての成功を検証します。
+次のグループごとに同じ VM で順番に測定し、全体で 26 ジョブを実行します。
+
+| 構成 | アーキテクチャごとの比較グループ |
+| --- | --- |
+| 1・2 hart、および x86-64 の 4 hart | 4 バックエンドを 1 ジョブで比較 |
+| AArch64 の 4 hart | 2 ジョブ：Celox native と Veryl-CC 同期版、Celox tiered と Veryl-CC tiered |
+| 両アーキテクチャの 8 hart | バックエンドごとに別ジョブ |
+
+直近の完走結果では、8 hart の合計は x86-64 で 10〜13 時間、AArch64 で 17〜18 時間です。
+AArch64 の 4 hart も合計 5〜7 時間なので、同じ実行方式のペアに分け、ビルド時間を確保しつつ
+Celox と Veryl-CC を同じ CPU で比較します。別グループ間では同じ CPU を保証しません。
+CPU とホストの識別情報を成果物に記録し、公開時には全グループの結果が揃い、成功したことを検証します。
 各実行のタイムアウトは 1・2 hart が 1 時間、4 hart が 3 時間、8 hart が 5.5 時間です。未完了・失敗は計測値として公開せず、
 両アーキテクチャの全ケースが成功した場合に nightly の結果を公開します。
 8 hart の Veryl テストには `8hart-100m-v1` の調整を適用し、古い 3,000 万サイクルの
@@ -130,21 +138,20 @@ gh workflow run heliodor-bench.yml --ref <branch> \
   -f suite_runner=celox -f suite_arch=aarch64
 ```
 
-nightly・手動実行とも、既定では各 workload・アーキテクチャにつき **1 ジョブ**を作り、
-4 バックエンドを同じ VM で順番に実行します。一部だけを比較する場合は、
-`suite_runner` にスペース区切りで指定すると、その順序で実行します。
-CPU 情報、ランナー名、run/attempt、boot ID を結果と一緒に保存します。
+nightly・手動実行とも、上のグループ分けを使います。一部だけを比較する場合は、
+`suite_runner` にスペース区切りで指定すると、各グループ内でその順序に実行します。
+選択したバックエンドが別グループに属する場合、グループは結合しません。
+CPU 情報、ランナー名、グループ、run/attempt、boot ID を結果と一緒に保存します。
 Veryl-CC の AOT-C キャッシュは各測定で新しく作成します。
 
 ```bash
 gh workflow run heliodor-bench.yml --ref <branch> \
-  -f suite_test=test_soc_smp_linux_boot_8hart \
-  -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=x86_64
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=aarch64
 ```
 
-比較実行全体の上限はビルドを含めて 5.5 時間です。
+各グループの実行上限はビルドを含めて 5.5 時間です。
 [GitHub ホストジョブの 6 時間上限](https://docs.github.com/en/actions/reference/limits)までにログを保存するためです。
-必要なバックエンドだけを選んでください。大規模な ARM の起動を複数並べると上限内に
-収まらない場合があります。時間切れやバックエンドの結果欠落は比較失敗とし、途中結果を
+時間切れやバックエンドの結果欠落は比較失敗とし、途中結果を
 完走ベンチマークとして公開しません。各バックエンドの個別上限もこの共通予算内で適用します。
 別コミットを含む別 workflow run の履歴は、同一 CPU での比較ではありません。

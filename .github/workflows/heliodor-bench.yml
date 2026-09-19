@@ -29,7 +29,7 @@ on:
         type: string
         default: ""
       suite_runner:
-        description: Backends to compare on one host, space-separated (empty compares all four)
+        description: Backends to run, space-separated (empty runs all four; long workloads use separate groups)
         type: string
         default: ""
       suite_arch:
@@ -470,7 +470,7 @@ jobs:
         run: echo "matrix=$(node scripts/heliodor-suite.mjs matrix)" >> "$GITHUB_OUTPUT"
 
   linux-suite:
-    name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }})
+    name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }}, ${{ matrix.group }})
     needs: linux-suite-matrix
     permissions:
       contents: read
@@ -508,6 +508,7 @@ jobs:
             echo "run_id=$GITHUB_RUN_ID"
             echo "run_attempt=$GITHUB_RUN_ATTEMPT"
             echo "backends=$HELIODOR_RUNNERS"
+            echo "backend_group=${{ matrix.group }}"
             echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
             uname -a
           } > heliodor-suite-host.txt
@@ -531,7 +532,7 @@ jobs:
           trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
           set -o pipefail
           # run_all waits for each backend before starting the next one. Bound
-          # the whole comparison so artifacts survive the six-hour job limit.
+          # each group so artifacts survive the six-hour job limit.
           /usr/bin/time -v timeout --kill-after=30s 19800s bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
       - name: Verify complete selected results
         run: node scripts/heliodor-suite.mjs validate-results target/heliodor/results/results.tsv "$HELIODOR_TESTS" "$HELIODOR_RUNNERS"
@@ -547,7 +548,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: heliodor-suite-${{ matrix.arch }}-${{ matrix.test }}
+          name: heliodor-suite-${{ matrix.arch }}-${{ matrix.test }}-${{ matrix.group }}
           path: |
             heliodor-suite-host.txt
             heliodor-suite-output.txt
