@@ -68,6 +68,7 @@ pub fn optimize_with_diagnostics(func: &mut MFunction, diagnostics: &crate::Nati
 /// Canonicalize the first native tier without the optimizing tier's global
 /// value numbering, bit analysis, or loop and branch restructuring. Keep the
 /// local cleanup that avoids assigning registers to ISel's dead temporaries.
+#[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
 pub(crate) fn optimize_baseline(func: &mut MFunction, diagnostics: &crate::NativeDiagnostics) {
     let mut runner = PassRunner::new(func, diagnostics);
     runner.run("constant_fold", constant_fold);
