@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -u
+set -eu
 
 log() {
   printf '[post-create] %s\n' "$1"
@@ -40,33 +40,6 @@ ensure_root_owned_setup() {
   fi
 
   warn "could not adjust ownership for: $*"
-}
-
-maybe_install_fuse_overlayfs() {
-  if command -v fuse-overlayfs >/dev/null 2>&1; then
-    log "fuse-overlayfs already installed"
-    return
-  fi
-
-  if ! command -v apt-get >/dev/null 2>&1; then
-    warn "apt-get is unavailable; skipping fuse-overlayfs install"
-    return
-  fi
-
-  if ! run_as_root true >/dev/null 2>&1; then
-    warn "root access is unavailable; skipping fuse-overlayfs install"
-    return
-  fi
-
-  log "installing fuse-overlayfs"
-  if ! run_as_root apt-get update -qq; then
-    warn "apt-get update failed; skipping fuse-overlayfs install"
-    return
-  fi
-
-  if ! run_as_root apt-get install -y -qq fuse-overlayfs; then
-    warn "apt-get install fuse-overlayfs failed"
-  fi
 }
 
 maybe_install_claude() {
@@ -124,23 +97,6 @@ maybe_update_submodules() {
   fi
 }
 
-maybe_install_cargo_insta() {
-  if ! command -v cargo >/dev/null 2>&1; then
-    warn "cargo is unavailable; skipping cargo-insta install"
-    return
-  fi
-
-  if cargo insta --version >/dev/null 2>&1; then
-    log "cargo-insta already installed"
-    return
-  fi
-
-  log "installing cargo-insta"
-  if ! cargo install cargo-insta; then
-    warn "cargo install cargo-insta failed"
-  fi
-}
-
 main() {
   local home_dir="${HOME:-/home/vscode}"
   local pnpm_store_dir
@@ -157,16 +113,26 @@ main() {
   ensure_dir "${PNPM_HOME}/global/5"
   ensure_dir "${PNPM_HOME}/.tools"
 
+  log "building development tools from flake.lock"
+  ensure_dir "${home_dir}/.local/share/celox"
+  nix build --no-update-lock-file .#dev-tools \
+    --out-link "${home_dir}/.local/share/celox/dev-tools"
+  export PATH="${home_dir}/.local/share/celox/dev-tools/bin:${home_dir}/.local/share/celox/dev-tools/libexec/rust/bin:${PATH}"
+  nix print-dev-env --no-update-lock-file > "${home_dir}/.local/share/celox/env.sh"
+  if ! grep -qF '.local/share/celox/env.sh' "${home_dir}/.bashrc"; then
+    # Expand HOME when the new terminal starts, not during setup.
+    # shellcheck disable=SC2016
+    printf '\nsource "$HOME/.local/share/celox/env.sh"\n' >> "${home_dir}/.bashrc"
+  fi
+
   if command -v pnpm >/dev/null 2>&1; then
     pnpm config set global-bin-dir "$PNPM_HOME" || warn "pnpm global-bin-dir setup failed"
     pnpm config set store-dir "$pnpm_store_dir" || warn "pnpm store-dir setup failed"
   fi
 
-  maybe_install_fuse_overlayfs
   maybe_install_claude
   maybe_install_codex
   maybe_update_submodules
-  maybe_install_cargo_insta
 }
 
 main "$@"
