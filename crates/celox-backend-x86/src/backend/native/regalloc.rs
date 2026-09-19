@@ -285,6 +285,7 @@ pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
         trace,
         diagnostics,
         native_tick_loop,
+        None,
         is_cancelled,
     )?;
     *func = working;
@@ -303,6 +304,7 @@ pub(crate) fn run_regalloc_for_codegen(
     trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
+    baseline_spill_budget: Option<usize>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
     run_regalloc_in_place(
@@ -311,6 +313,7 @@ pub(crate) fn run_regalloc_for_codegen(
         trace,
         diagnostics,
         native_tick_loop,
+        baseline_spill_budget,
         is_cancelled,
     )
 }
@@ -321,6 +324,7 @@ fn run_regalloc_in_place(
     mut trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
+    baseline_spill_budget: Option<usize>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
     // Shared borrow so the checkpoint closure and downstream callees observe
@@ -464,6 +468,7 @@ fn run_regalloc_in_place(
         trace,
         timing,
         verify,
+        baseline_spill_budget,
         is_cancelled,
     )?;
     let mut assignment = allocation.assignment;

@@ -481,15 +481,6 @@ fn allocate_planned_version(
     Ok(value)
 }
 
-fn build_planned_stack_program(
-    func: &MFunction,
-    cfg: &NormalizedCfg,
-    plan: &SpillPlan,
-) -> Result<(PlannedStackLivenessProgram, BTreeSet<SpillHome>), StackColorError> {
-    let (events, homes) = collect_planned_stack_events(func, cfg, plan)?;
-    build_planned_stack_program_from_events(func, cfg, events, homes)
-}
-
 // Homes have independent liveness and iterated dominance frontiers. Process
 // one home at a time so transient relations scale with the CFG, rather than
 // the product of all live homes and blocks.
@@ -946,9 +937,31 @@ pub(super) fn color_spill_plan(
     plan: &SpillPlan,
     timing: bool,
     verify: bool,
+    baseline_spill_budget: Option<usize>,
 ) -> Result<PlannedStackColoring, StackColorError> {
     let phase = timing.then(crate::timing::now);
-    let (program, homes) = build_planned_stack_program(func, cfg, plan)?;
+    let (events, homes) = collect_planned_stack_events(func, cfg, plan)?;
+    if let Some(coloring) =
+        baseline_spill_budget.and_then(|budget| unique_stack_slots(&homes, budget))
+    {
+        // Distinct homes cannot interfere when each owns a distinct slot.
+        // Keep the independent MemorySSA checks when verification is requested.
+        if verify {
+            let (program, _) = build_planned_stack_program_from_events(func, cfg, events, homes)?;
+            analyze_program_with_verification(&program, cfg, true)
+                .map_err(|error| planned_live_error(error, &program.version_homes))?;
+        }
+        if let Some(start) = phase {
+            tracing::debug!(
+                "[regalloc-timing] stack_color baseline slots={} frame={} elapsed={:?}",
+                coloring.slot_count,
+                coloring.frame_size,
+                start.elapsed()
+            );
+        }
+        return Ok(coloring);
+    }
+    let (program, homes) = build_planned_stack_program_from_events(func, cfg, events, homes)?;
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] stack_color build_program versions={} homes={} elapsed={:?}",
@@ -958,6 +971,25 @@ pub(super) fn color_spill_plan(
         );
     }
     color_planned_stack_program(program, homes, cfg, timing, verify)
+}
+
+/// The first tier trades bounded scratch space for avoiding global stack-slot
+/// liveness and coloring. Exceeding the budget uses normal exact coloring.
+fn unique_stack_slots(homes: &BTreeSet<SpillHome>, budget: usize) -> Option<PlannedStackColoring> {
+    let frame_size = homes.len().checked_mul(8)?;
+    if frame_size > budget || frame_size > i32::MAX as usize {
+        return None;
+    }
+    Some(PlannedStackColoring {
+        offsets: homes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, home)| (home, (slot * 8) as i32))
+            .collect(),
+        frame_size: frame_size as u32,
+        slot_count: homes.len(),
+    })
 }
 
 fn color_planned_stack_program(
@@ -1191,6 +1223,24 @@ mod tests {
     use super::super::cfg;
     use super::*;
     use crate::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
+
+    #[test]
+    fn baseline_slots_keep_sparse_homes_disjoint_within_the_budget() {
+        let homes = [SpillHome(1), SpillHome(27), SpillHome(u32::MAX)]
+            .into_iter()
+            .collect();
+        assert!(unique_stack_slots(&homes, 23).is_none());
+        let coloring = unique_stack_slots(&homes, 24).unwrap();
+        assert_eq!(coloring.frame_size, 24);
+        assert_eq!(coloring.slot_count, 3);
+        let mut offsets = coloring.offsets.values().copied().collect::<Vec<_>>();
+        offsets.sort_unstable();
+        assert_eq!(offsets, [0, 8, 16]);
+        assert_eq!(coloring.offsets[&SpillHome(u32::MAX)], 16);
+        let empty = unique_stack_slots(&BTreeSet::new(), 0).unwrap();
+        assert_eq!(empty.frame_size, 0);
+        assert!(empty.offsets.is_empty());
+    }
 
     fn function(value_count: u32, instructions: Vec<MInst>) -> MFunction {
         let mut values = VRegAllocator::new();

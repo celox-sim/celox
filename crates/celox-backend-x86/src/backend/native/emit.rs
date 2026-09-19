@@ -5786,7 +5786,11 @@ fn emit_prepared_eu_inner(
     verify_mir(&mfunc, "after MIR legalization")?;
     checkpoint()?;
     let opt_start = timing.then(crate::timing::now);
-    super::mir_opt::optimize_with_diagnostics(&mut mfunc, diagnostics);
+    if options.baseline {
+        super::mir_opt::optimize_baseline(&mut mfunc, diagnostics);
+    } else {
+        super::mir_opt::optimize_with_diagnostics(&mut mfunc, diagnostics);
+    }
     if let Some(start) = opt_start {
         tracing::debug!(
             "[native-timing] emit_chained mir_opt label={label} mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
@@ -5798,7 +5802,7 @@ fn emit_prepared_eu_inner(
     }
     verify_mir(&mfunc, "after MIR optimization before x86 SLP")?;
     checkpoint()?;
-    let slp_stats = if options.slp {
+    let slp_stats = if options.slp && !options.baseline {
         super::x86_slp::select(&mut mfunc)
     } else {
         super::x86_slp::SlpStats::default()
@@ -5845,12 +5849,19 @@ fn emit_prepared_eu_inner(
     }
     let regalloc_start = timing.then(crate::timing::now);
     let mut regalloc_trace = trace.as_ref().map(|_| regalloc::RegallocTrace::default());
+    // Unique first-tier spill slots avoid global stack liveness/coloring.
+    // Bound their frame below half the tiered image's reserved headroom;
+    // larger frames fall back to exact slot reuse, including on tiny designs.
+    let baseline_spill_budget = options
+        .baseline
+        .then_some((layout.merged_total_size / 8).max(4096));
     let ra = regalloc::run_regalloc_for_codegen(
         &mut mfunc,
         label,
         regalloc_trace.as_mut(),
         diagnostics,
         options.native_tick_loop,
+        baseline_spill_budget,
         is_cancelled,
     )
     .map_err(|error| {

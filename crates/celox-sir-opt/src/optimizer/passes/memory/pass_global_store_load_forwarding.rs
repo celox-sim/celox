@@ -155,6 +155,29 @@ fn rewrite_global_static_slots_in_place(
 ) -> Option<bool> {
     let cfg = SirCfg::analyze(eu).ok()?;
     let state = StateSsa::analyze(eu, &cfg, region, eligible_load_blocks).ok()?;
+    rewrite_analyzed_static_slots(
+        eu,
+        &cfg,
+        &state,
+        promotion,
+        fallback_definitions,
+        eligible_load_blocks,
+        stable_passthroughs,
+    )
+}
+
+// The caller must analyze the same, unchanged execution unit. In particular,
+// fused comb promotion can reuse the analysis that selected promotable slots
+// instead of rebuilding the CFG and StateSSA while the first copy is live.
+fn rewrite_analyzed_static_slots(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    state: &StateSsa,
+    promotion: PromotionPolicy<'_>,
+    fallback_definitions: &HashMap<RegisterId, StateFragment>,
+    eligible_load_blocks: Option<&HashSet<BlockId>>,
+    stable_passthroughs: &mut HashMap<RegisterId, StateFragment>,
+) -> Option<bool> {
     let mut candidates = state
         .slots
         .iter()
@@ -486,9 +509,10 @@ pub(crate) fn promote_fused_comb_static_slots(
     }
 
     let mut stable_passthroughs = HashMap::default();
-    let changed = rewrite_global_static_slots_in_place(
+    let changed = rewrite_analyzed_static_slots(
         eu,
-        STABLE_REGION,
+        &cfg,
+        &state,
         PromotionPolicy::Exact(&promotable),
         &HashMap::default(),
         None,
@@ -981,7 +1005,7 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
 
     let all_slots = layout.fragments();
     let mut preview = eu.clone();
-    normalize_working_commits(&mut preview, &cfg.block_ids, &layout);
+    let preview_fallbacks = normalize_working_commits(&mut preview, &cfg.block_ids, &layout);
     let Ok(preview_cfg) = SirCfg::analyze(&preview) else {
         return false;
     };
@@ -1013,17 +1037,39 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
         return false;
     }
     let slots = layout.fragments();
-    let mut rewritten = eu.clone();
-    let fallback_definitions = normalize_working_commits(&mut rewritten, &cfg.block_ids, &layout);
     let mut stable_passthroughs = HashMap::default();
-    let Some(changed) = rewrite_global_static_slots_in_place(
-        &mut rewritten,
-        WORKING_REGION,
-        PromotionPolicy::Exact(&slots),
-        &fallback_definitions,
-        None,
-        &mut stable_passthroughs,
-    ) else {
+    // If every normalized address survived selection, the preview is already
+    // the exact rewrite input. Reuse its CFG and StateSSA instead of keeping
+    // two complete normalized programs and analyses live at the same time.
+    let mut rewritten;
+    let changed = if slots == all_slots {
+        rewritten = preview;
+        rewrite_analyzed_static_slots(
+            &mut rewritten,
+            &preview_cfg,
+            &preview_state,
+            PromotionPolicy::Exact(&slots),
+            &preview_fallbacks,
+            None,
+            &mut stable_passthroughs,
+        )
+    } else {
+        // Partial promotion needs the original memory representation for
+        // rejected addresses. Release the preview before rebuilding it.
+        drop((preview, preview_cfg, preview_state, preview_fallbacks));
+        rewritten = eu.clone();
+        let fallback_definitions =
+            normalize_working_commits(&mut rewritten, &cfg.block_ids, &layout);
+        rewrite_global_static_slots_in_place(
+            &mut rewritten,
+            WORKING_REGION,
+            PromotionPolicy::Exact(&slots),
+            &fallback_definitions,
+            None,
+            &mut stable_passthroughs,
+        )
+    };
+    let Some(changed) = changed else {
         return false;
     };
     if !changed {
@@ -1485,6 +1531,10 @@ mod tests {
             ],
         );
 
+        let mut promoted = eu.clone();
+        assert!(promote_fused_comb_static_slots(&mut promoted).unwrap());
+        promoted.verify_result().unwrap();
+
         assert!(forward_stable_static_slots(&mut eu));
         eu.verify_result().unwrap();
         let join_param = eu.blocks[&BlockId(3)].params[0];
@@ -1500,6 +1550,15 @@ mod tests {
             eu.blocks[&BlockId(3)].instructions[0],
             SIRInstruction::Unary(_, UnaryOp::Ident, source) if source == join_param
         ));
+        // Both arms define this comb temporary before the join. Promotion
+        // must produce the same phi and uses, while removing its state stores.
+        for block in eu.blocks.values_mut() {
+            block
+                .instructions
+                .retain(|instruction| !matches!(instruction, SIRInstruction::Store(..)));
+        }
+        assert_eq!(promoted.blocks, eu.blocks);
+        assert_eq!(promoted.register_map, eu.register_map);
     }
 
     #[test]
