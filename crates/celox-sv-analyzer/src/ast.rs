@@ -1634,7 +1634,7 @@ fn reject_silently_ignored_constructs(
     type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
     let inactive_nodes =
-        inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env, type_aliases);
+        inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env, type_aliases)?;
     let has_leaking_conditional_generate_local =
         conditional_generate_has_leaking_local(node.clone(), syntax_tree);
     reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
@@ -2077,13 +2077,21 @@ fn reject_silently_ignored_constructs(
     Ok(())
 }
 
+const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
+
+#[derive(Default)]
+struct GenerateSelections<'a> {
+    blocks: Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    iterations: usize,
+}
+
 fn inactive_conditional_generate_nodes<'a>(
     node: RefNode<'a>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-) -> Vec<RefNode<'a>> {
-    let mut selections = Vec::new();
+) -> Result<Vec<RefNode<'a>>, AnalyzerError> {
+    let mut selections = GenerateSelections::default();
     for item in module_non_port_items(node) {
         generate_selections_from_non_port_item(
             item,
@@ -2093,25 +2101,32 @@ fn inactive_conditional_generate_nodes<'a>(
             &mut selections,
         );
     }
-    selections
+    if selections.iterations > MAX_GENERATE_LOOP_EXPANSION {
+        return Err(AnalyzerError::Unsupported(
+            "loop-generate unroll limit exceeded".to_string(),
+        ));
+    }
+    Ok(selections
+        .blocks
         .into_iter()
         .filter(|(_, selected)| !selected)
         .flat_map(|(block, _)| RefNode::GenerateBlock(block))
-        .collect()
+        .collect())
 }
 
 fn record_generate_block_selection<'a>(
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
     block: &'a sv_parser::GenerateBlock,
     selected: bool,
 ) {
     if let Some((_, previously_selected)) = selections
+        .blocks
         .iter_mut()
         .find(|(candidate, _)| *candidate == block)
     {
         *previously_selected |= selected;
     } else {
-        selections.push((block, selected));
+        selections.blocks.push((block, selected));
     }
 }
 
@@ -2120,8 +2135,11 @@ fn generate_selections_from_non_port_item<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
 ) {
+    if selections.iterations > MAX_GENERATE_LOOP_EXPANSION {
+        return;
+    }
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
             for item in &region.nodes.1 {
@@ -2152,7 +2170,7 @@ fn generate_selections_from_generate_item<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
 ) {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
         generate_selections_from_module_or_generate_item(
@@ -2170,7 +2188,7 @@ fn generate_selections_from_module_or_generate_item<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
 ) {
     let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
         return;
@@ -2203,7 +2221,7 @@ fn generate_selections_from_conditional_generate<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
 ) {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
         return;
@@ -2246,7 +2264,7 @@ fn generate_selections_from_loop_generate<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
 ) {
     let Some(name) = identifier_text(
         RefNode::GenvarIdentifier(&generate.nodes.1.nodes.1.0.nodes.1),
@@ -2298,7 +2316,10 @@ fn generate_selections_from_loop_generate<'a>(
 
     let mut value = init;
     let mut selected = false;
-    for _ in 0..10_000 {
+    loop {
+        if selections.iterations > MAX_GENERATE_LOOP_EXPANSION {
+            return;
+        }
         let mut loop_env = const_env.clone();
         loop_env.insert(name.clone(), value);
         let Some(condition_value) = eval_ast_const_expr(&condition, &loop_env) else {
@@ -2314,6 +2335,10 @@ fn generate_selections_from_loop_generate<'a>(
         };
         if condition_value == 0 {
             break;
+        }
+        selections.iterations += 1;
+        if selections.iterations > MAX_GENERATE_LOOP_EXPANSION {
+            return;
         }
         selected = true;
         generate_selections_from_generate_block(
@@ -2342,8 +2367,11 @@ fn generate_selections_from_generate_block<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    selections: &mut GenerateSelections<'a>,
 ) {
+    if selections.iterations > MAX_GENERATE_LOOP_EXPANSION {
+        return;
+    }
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
             generate_selections_from_generate_item(
@@ -5769,14 +5797,51 @@ fn functions_from_module_node(
     let type_aliases =
         type_aliases_from_module_node_with_env(node.clone(), syntax_tree, const_env)?;
     let inactive_nodes =
-        inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env, &type_aliases);
-    for child in node {
+        inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env, &type_aliases)?;
+    for child in node.clone() {
         if inactive_nodes.iter().any(|inactive| inactive == &child) {
             continue;
         }
         let RefNode::FunctionDeclaration(declaration) = child else {
             continue;
         };
+        let mut function_env = const_env.clone();
+        let mut literals = HashMap::default();
+        let declaration_span = ref_node_source_span(RefNode::FunctionDeclaration(declaration));
+        for ancestor in node.clone() {
+            let RefNode::GenerateBlock(block) = ancestor else {
+                continue;
+            };
+            let Some((start, end)) = ref_node_source_span(RefNode::GenerateBlock(block)) else {
+                continue;
+            };
+            let Some((function_start, function_end)) = declaration_span else {
+                continue;
+            };
+            if start > function_start || end < function_end {
+                continue;
+            }
+            if let sv_parser::GenerateBlock::Multiple(block) = block {
+                for item in &block.nodes.3 {
+                    if ref_node_source_span(RefNode::GenerateItem(item))
+                        .is_some_and(|(start, _)| start >= function_start)
+                    {
+                        break;
+                    }
+                    add_localparams_from_generate_item_with_literals(
+                        item,
+                        syntax_tree,
+                        &mut function_env,
+                        &type_aliases,
+                        Some(&mut literals),
+                    );
+                }
+            }
+        }
+        let const_env = &function_env;
+        let mut function_dimensions = packed_dimensions.clone();
+        function_dimensions.const_env = function_env.clone();
+        let packed_dimensions = &function_dimensions;
         validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_local_names(declaration, syntax_tree, const_env, &type_aliases)?;
@@ -5787,13 +5852,17 @@ fn functions_from_module_node(
             &type_aliases,
             packed_dimensions,
         )?;
-        if let Some(function) = function_from_declaration(
+        if let Some(mut function) = function_from_declaration(
             declaration,
             syntax_tree,
             const_env,
             &type_aliases,
             packed_dimensions,
         ) {
+            for parameter in &function.params {
+                literals.remove(&parameter.name);
+            }
+            function.body = substitute_expr_idents(function.body, &literals);
             let name = function.name.clone();
             let mut parameter_names = HashSet::default();
             if let Some(parameter) = function
@@ -6773,10 +6842,97 @@ fn function_body_expr(
             (name.clone(), initial)
         })
         .collect::<HashMap<_, _>>();
-    for statement in statements {
-        if let Some(expr) = function_expr_from_statement_or_null(
+    let statements = statements
+        .iter()
+        .filter_map(|statement| {
+            let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
+                return None;
+            };
+            Some(&statement.nodes.0)
+        })
+        .collect::<Vec<_>>();
+    function_expr_from_sequence(
+        &statements,
+        &mut locals,
+        syntax_tree,
+        packed_dimensions,
+        local_types,
+    )
+}
+
+/// Lower a returning branch with the remaining statements as its continuation.
+/// Each branch owns its local state, so assignments after a return cannot alter
+/// that path's result or leak into a sibling path.
+fn function_expr_from_sequence(
+    statements: &[&sv_parser::Statement],
+    locals: &mut HashMap<String, Expr>,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+    local_types: &HashMap<String, FunctionLocalType>,
+) -> Option<Expr> {
+    for (index, statement) in statements.iter().enumerate() {
+        let rest = &statements[index + 1..];
+        if let sv_parser::StatementItem::SeqBlock(block) = &statement.nodes.2 {
+            let sequence = block
+                .nodes
+                .3
+                .iter()
+                .filter_map(function_statement_ref)
+                .chain(rest.iter().copied())
+                .collect::<Vec<_>>();
+            return function_expr_from_sequence(
+                &sequence,
+                locals,
+                syntax_tree,
+                packed_dimensions,
+                local_types,
+            );
+        }
+        if let sv_parser::StatementItem::ConditionalStatement(conditional) = &statement.nodes.2
+            && RefNode::ConditionalStatement(conditional)
+                .into_iter()
+                .any(|node| matches!(node, RefNode::JumpStatement(_)))
+        {
+            let lower_branch = |branch: Option<&sv_parser::StatementOrNull>| {
+                let sequence = branch
+                    .and_then(function_statement_ref)
+                    .into_iter()
+                    .chain(rest.iter().copied())
+                    .collect::<Vec<_>>();
+                function_expr_from_sequence(
+                    &sequence,
+                    &mut locals.clone(),
+                    syntax_tree,
+                    packed_dimensions,
+                    local_types,
+                )
+            };
+            let mut result = lower_branch(conditional.nodes.5.as_ref().map(|(_, branch)| branch))?;
+            let branches = std::iter::once((&conditional.nodes.2.nodes.1, &conditional.nodes.3))
+                .chain(
+                    conditional
+                        .nodes
+                        .4
+                        .iter()
+                        .map(|(_, _, predicate, branch)| (&predicate.nodes.1, branch)),
+                )
+                .collect::<Vec<_>>();
+            for (predicate, branch) in branches.into_iter().rev() {
+                let condition =
+                    expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions)?;
+                result = Expr::Mux {
+                    condition: Box::new(procedural_truth_condition(substitute_expr_idents(
+                        condition, locals,
+                    ))),
+                    then_expr: Box::new(lower_branch(Some(branch))?),
+                    else_expr: Box::new(result),
+                };
+            }
+            return Some(result);
+        }
+        if let Some(expr) = function_expr_from_statement(
             statement,
-            &mut locals,
+            locals,
             syntax_tree,
             packed_dimensions,
             local_types,
@@ -6787,23 +6943,11 @@ fn function_body_expr(
     None
 }
 
-fn function_expr_from_statement_or_null(
-    statement: &sv_parser::FunctionStatementOrNull,
-    locals: &mut HashMap<String, Expr>,
-    syntax_tree: &SyntaxTree,
-    packed_dimensions: &PackedDimensions,
-    local_types: &HashMap<String, FunctionLocalType>,
-) -> Option<Expr> {
-    let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
-        return None;
-    };
-    function_expr_from_statement(
-        &statement.nodes.0,
-        locals,
-        syntax_tree,
-        packed_dimensions,
-        local_types,
-    )
+fn function_statement_ref(statement: &sv_parser::StatementOrNull) -> Option<&sv_parser::Statement> {
+    match statement {
+        sv_parser::StatementOrNull::Statement(statement) => Some(statement),
+        _ => None,
+    }
 }
 
 fn function_expr_from_statement_or_null_stmt(
@@ -7198,6 +7342,7 @@ fn comb_processes_from_module_node(
     parameter_literals: &HashMap<String, Expr>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
+    let mut remaining_expansion = MAX_GENERATE_LOOP_EXPANSION;
     for item in module_non_port_items(node) {
         comb_processes_from_non_port_module_item(
             item,
@@ -7209,6 +7354,7 @@ fn comb_processes_from_module_node(
             expression_signedness,
             parameter_literals,
             &mut processes,
+            &mut remaining_expansion,
         )?;
     }
     Ok(processes)
@@ -7224,6 +7370,7 @@ fn comb_processes_from_non_port_module_item(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
@@ -7238,6 +7385,7 @@ fn comb_processes_from_non_port_module_item(
                     expression_signedness,
                     parameter_literals,
                     processes,
+                    remaining_expansion,
                 )?;
             }
         }
@@ -7252,6 +7400,7 @@ fn comb_processes_from_non_port_module_item(
                 expression_signedness,
                 parameter_literals,
                 processes,
+                remaining_expansion,
             )?;
         }
         _ => {}
@@ -7269,6 +7418,7 @@ fn comb_processes_from_generate_item(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
         comb_processes_from_module_or_generate_item(
@@ -7281,6 +7431,7 @@ fn comb_processes_from_generate_item(
             expression_signedness,
             parameter_literals,
             processes,
+            remaining_expansion,
         )?;
     }
     Ok(())
@@ -7296,6 +7447,7 @@ fn comb_processes_from_module_or_generate_item(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
         comb_processes_from_module_common_item(
@@ -7308,6 +7460,7 @@ fn comb_processes_from_module_or_generate_item(
             expression_signedness,
             parameter_literals,
             processes,
+            remaining_expansion,
         )?;
     }
     Ok(())
@@ -7323,6 +7476,7 @@ fn comb_processes_from_module_common_item(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::ModuleCommonItem::ContinuousAssign(assign) => {
@@ -7367,6 +7521,7 @@ fn comb_processes_from_module_common_item(
                 expression_signedness,
                 parameter_literals,
                 processes,
+                remaining_expansion,
             )?;
         }
         sv_parser::ModuleCommonItem::LoopGenerateConstruct(generate) => {
@@ -7380,6 +7535,7 @@ fn comb_processes_from_module_common_item(
                 expression_signedness,
                 parameter_literals,
                 processes,
+                remaining_expansion,
             )?;
         }
         sv_parser::ModuleCommonItem::NetAlias(_) => {
@@ -7402,6 +7558,7 @@ fn comb_processes_from_conditional_generate(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
         return Ok(());
@@ -7433,6 +7590,7 @@ fn comb_processes_from_conditional_generate(
                 expression_signedness,
                 parameter_literals,
                 processes,
+                remaining_expansion,
             )?;
         }
         return Ok(());
@@ -7456,6 +7614,7 @@ fn comb_processes_from_conditional_generate(
         expression_signedness,
         parameter_literals,
         processes,
+        remaining_expansion,
     )?;
     if let Some((_, block)) = &generate.nodes.3 {
         let else_condition = combine_conditions(
@@ -7475,6 +7634,7 @@ fn comb_processes_from_conditional_generate(
             expression_signedness,
             parameter_literals,
             processes,
+            remaining_expansion,
         )?;
     }
     Ok(())
@@ -7490,6 +7650,7 @@ fn comb_processes_from_loop_generate(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     if generate_block_has_data_declaration(&generate.nodes.2) {
         return Ok(());
@@ -7517,8 +7678,7 @@ fn comb_processes_from_loop_generate(
     .ok_or_else(|| AnalyzerError::Unsupported("loop-generate condition".to_string()))?;
 
     let mut value = init;
-    let mut iterations = 0;
-    for _ in 0..10_000 {
+    loop {
         let mut loop_env = const_env.clone();
         loop_env.insert(name.clone(), value);
         let condition_value = eval_ast_const_expr(&condition_expr, &loop_env)
@@ -7526,6 +7686,9 @@ fn comb_processes_from_loop_generate(
         if condition_value == 0 {
             break;
         }
+        *remaining_expansion = remaining_expansion.checked_sub(1).ok_or_else(|| {
+            AnalyzerError::Unsupported("loop-generate unroll limit exceeded".to_string())
+        })?;
         comb_processes_from_generate_block(
             &generate.nodes.2,
             condition.clone(),
@@ -7536,8 +7699,8 @@ fn comb_processes_from_loop_generate(
             expression_signedness,
             parameter_literals,
             processes,
+            remaining_expansion,
         )?;
-        iterations += 1;
         let next = next_genvar_value(
             value,
             &generate.nodes.1.nodes.1.4,
@@ -7547,15 +7710,6 @@ fn comb_processes_from_loop_generate(
         )
         .ok_or_else(|| AnalyzerError::Unsupported("genvar update operator".to_string()))?;
         value = next;
-    }
-    let mut loop_env = const_env.clone();
-    loop_env.insert(name, value);
-    if iterations == 10_000
-        && eval_ast_const_expr(&condition_expr, &loop_env).is_some_and(|value| value != 0)
-    {
-        return Err(AnalyzerError::Unsupported(
-            "loop-generate unroll limit exceeded".to_string(),
-        ));
     }
     Ok(())
 }
@@ -7847,6 +8001,7 @@ fn comb_processes_from_generate_block(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
     processes: &mut Vec<CombProcess>,
+    remaining_expansion: &mut usize,
 ) -> Result<(), AnalyzerError> {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
@@ -7860,6 +8015,7 @@ fn comb_processes_from_generate_block(
                 expression_signedness,
                 parameter_literals,
                 processes,
+                remaining_expansion,
             )?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
@@ -7883,6 +8039,7 @@ fn comb_processes_from_generate_block(
                     expression_signedness,
                     parameter_literals,
                     processes,
+                    remaining_expansion,
                 )?;
             }
         }

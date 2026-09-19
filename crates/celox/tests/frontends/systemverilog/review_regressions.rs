@@ -8412,3 +8412,64 @@ fn collapses_unknown_initializers_in_two_state_native_images() {
     let y = runtime.signal_ref("Top.y").unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(y), 0);
 }
+
+#[test]
+fn generate_function_uses_lexical_constants() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            localparam W = 7;
+            if (1) begin : g
+                localparam W = 2;
+                if (1) begin : nested
+                    localparam V = W;
+                    function automatic logic [W-1:0] f();
+                        return V + 7;
+                    endfunction
+                    assign y = f();
+                end
+            end
+        endmodule
+    "#;
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, Path::new("generate_function.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(simulator.get(simulator.signal("y")), 1u8.into());
+}
+
+#[test]
+fn function_partial_returns_preserve_continuations() {
+    let source = r#"
+        module Top(input logic c, d, output logic [3:0] y);
+            function automatic logic [3:0] f(input logic c, d);
+                logic [3:0] x;
+                x = 4'd3;
+                if (c) begin
+                    if (d) return 4'd9;
+                    else x = 4'd4;
+                    x = x + 1;
+                end else if (d) return 4'd7;
+                else x = 4'd1;
+                x = x + 1;
+                return x;
+            endfunction
+            assign y = f(c, d);
+        endmodule
+    "#;
+    let mut simulator =
+        Simulator::from_sv_sources(vec![(source, Path::new("partial_return.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let c = simulator.signal("c");
+    let d = simulator.signal("d");
+    let y = simulator.signal("y");
+    for (cv, dv, expected) in [(0u8, 0u8, 2u8), (0, 1, 7), (1, 0, 6), (1, 1, 9)] {
+        simulator
+            .modify(|io| {
+                io.set(c, cv);
+                io.set(d, dv);
+            })
+            .unwrap();
+        assert_eq!(simulator.get(y), expected.into());
+    }
+}

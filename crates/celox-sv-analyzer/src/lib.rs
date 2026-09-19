@@ -156,6 +156,35 @@ mod tests {
     }
 
     #[test]
+    fn caps_aggregate_nested_generate_expansion() {
+        for (outer, inner, accepted) in [(2, 3, true), (100, 100, false), (10_000, 10_000, false)] {
+            let source = format!(
+                r#"
+                module Top(output wire y);
+                    for (genvar i = 0; i < {outer}; i++) begin : outer_loop
+                        for (genvar j = 0; j < {inner}; j++) begin : inner_loop
+                            assign y = 1'b1;
+                        end
+                    end
+                endmodule
+            "#
+            );
+            let syntax = syntax::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
+            let result = ast::Source::from_syntax(&syntax);
+            if accepted {
+                result.expect("small nested loops should expand");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("loop-generate unroll limit exceeded")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn keeps_case_item_guards_on_nested_comb_branches() {
         let ir = analyze_source(
             r#"
