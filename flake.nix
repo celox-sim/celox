@@ -43,34 +43,30 @@
             ln -s ${mbx}/bin/mbx $out/bin/cargo
           '';
           python = pkgs.python313.withPackages (ps: [ ps.cocotb ]);
-          pnpmVersion = nixpkgs.lib.removePrefix "pnpm@" (builtins.fromJSON (
-            builtins.readFile ./package.json
-          )).packageManager;
-          tools =
-            assert pkgs.pnpm.version == pnpmVersion;
-            [
-              (pkgs.lib.hiPrio cargoShim)
-              rust
-              mbx
-              pkgs.nodejs_24
-              pkgs.pnpm
-              python
-              pkgs.verilator
-              pkgs.stdenv.cc
-              pkgs.gnumake
-              pkgs.cmake
-              pkgs.pkg-config
-              pkgs.openssl
-              pkgs.fuse-overlayfs
-              pkgs.cargo-insta
-              pkgs.git
-              pkgs.curl
-              pkgs.jq
-              pkgs.direnv
-              pkgs.nix-direnv
-              pkgs.nixfmt
-              pkgs.shellcheck
-            ];
+          # Corepack resolves pnpm from package.json at runtime, independently of nixpkgs.
+          tools = [
+            (pkgs.lib.hiPrio cargoShim)
+            rust
+            mbx
+            pkgs.nodejs_24
+            (pkgs.lib.hiPrio pkgs.corepack)
+            python
+            pkgs.verilator
+            pkgs.stdenv.cc
+            pkgs.gnumake
+            pkgs.cmake
+            pkgs.pkg-config
+            pkgs.openssl
+            pkgs.fuse-overlayfs
+            pkgs.cargo-insta
+            pkgs.git
+            pkgs.curl
+            pkgs.jq
+            pkgs.direnv
+            pkgs.nix-direnv
+            pkgs.nixfmt
+            pkgs.shellcheck
+          ];
         in
         {
           inherit
