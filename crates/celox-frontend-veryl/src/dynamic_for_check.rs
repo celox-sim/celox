@@ -2021,6 +2021,7 @@ mod tests {
                 comptime: bound_comptime,
                 token,
             }],
+            hier_dst: None,
             width: Some(8),
             expr: bound.clone(),
             token,
