@@ -46,14 +46,49 @@
           pnpmVersion = nixpkgs.lib.removePrefix "pnpm@" (builtins.fromJSON (
             builtins.readFile ./package.json
           )).packageManager;
+          # nixpkgs still ships 12.3.4; pin the official static release until it catches up.
+          pnpmRelease =
+            {
+              x86_64-linux = {
+                arch = "x64";
+                hash = "sha256:b72cfc2140e2f3380e26555a474f8e091a4431374face630a50b00e4db992ddb";
+              };
+              aarch64-linux = {
+                arch = "arm64";
+                hash = "sha256:26eba6156b6b47d8c589e2ed76af9b3d3a001d9d87dd4769754a1d09f07505bb";
+              };
+            }
+            .${system};
+          pnpm = pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
+            pname = "pnpm";
+            version = "12.4.1";
+            src = pkgs.fetchurl {
+              url = "https://github.com/pnpm/pnpm/releases/download/v${finalAttrs.version}/pnpm-linux-${pnpmRelease.arch}-musl.tar.gz";
+              hash = pnpmRelease.hash;
+            };
+            sourceRoot = ".";
+            dontConfigure = true;
+            dontBuild = true;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/libexec/pnpm $out/bin
+              cp -r pnpm dist $out/libexec/pnpm/
+              makeWrapper $out/libexec/pnpm/pnpm $out/bin/pnpm
+              makeWrapper $out/libexec/pnpm/pnpm $out/bin/pnpx --add-flags dlx
+              runHook postInstall
+            '';
+          });
           tools =
-            assert pkgs.pnpm.version == pnpmVersion;
+            assert pkgs.lib.assertMsg (
+              pnpm.version == pnpmVersion
+            ) "Update the pnpm version and release hashes in flake.nix to match package.json (${pnpmVersion}).";
             [
               (pkgs.lib.hiPrio cargoShim)
               rust
               mbx
               pkgs.nodejs_24
-              pkgs.pnpm
+              pnpm
               python
               pkgs.verilator
               pkgs.stdenv.cc
@@ -79,6 +114,8 @@
             tools
             python
             rust
+            pnpm
+            pnpmVersion
             ;
         }
       );
@@ -128,6 +165,10 @@
           e = environments.${system};
         in
         {
+          pnpm-version = e.pkgs.runCommand "celox-pnpm-version-check" { } ''
+            test "$(${e.pnpm}/bin/pnpm --version)" = "${e.pnpmVersion}"
+            touch $out
+          '';
           rust-toolchain = e.pkgs.runCommand "celox-rust-toolchain-check" { } ''
             ${e.rust}/bin/cargo-fmt --version
             ${e.rust}/bin/cargo-clippy --version
