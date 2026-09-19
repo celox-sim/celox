@@ -43,7 +43,7 @@ module LinearSorter #(
     var c_val: logic<WIDTH> [DEPTH + 1];
     assign c_val[0] = d_in;
 
-    for i in 0..DEPTH :cell {
+    for i in 0..DEPTH :g_cell {
         inst s: SorterCell (
             clk  ,
             rst  ,
