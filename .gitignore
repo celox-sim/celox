@@ -1,5 +1,6 @@
 # Rust
 target/
+/target
 
 # Node
 node_modules/
@@ -62,3 +63,8 @@ linear_sec_p6_*.txt
 crates/celox/examples/bench_n4000.rs
 crates/celox/examples/bench_scaling.rs
 .aider*
+
+# Nix development environment
+.direnv/
+/result
+/result-*
