@@ -7873,6 +7873,53 @@ sv_backends! {
         }
     }
 
+    fn preserves_four_state_shift_and_bit_select_constants(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic a, output logic y0, y1, y2, y3, y4, y5);
+                    always_comb begin
+                        case (2'bx0 >> 1) 2'b0x: y0 = a; endcase
+                        case (4'sbz101 >>> 2) 4'bzzz1: y1 = a; endcase
+                        case (4'b10xz << 1) 4'b0xz0: y2 = a; endcase
+                        case ({2'bx0}[1]) 1'bx: y3 = a; endcase
+                        case (1'bz) ({2'bz0}[1]): y4 = a; endcase
+                        case (4'bxxxx) (4'b0000 << 1'bz): y5 = a; endcase
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("shift_and_select_constants.sv"))], "Top"
+        ).four_state(true);
+        let a = sim.signal("a");
+        let outputs = (0..6).map(|index| sim.signal(&format!("y{index}"))).collect::<Vec<_>>();
+        for value in [true, false, true] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            for &output in &outputs {
+                assert_eq!(sim.get(output), value.into());
+            }
+        }
+    }
+
+    fn preserves_unsigned_128_bit_enum_arithmetic(sim) {
+        @setup {
+            let source = r#"
+                module Top(output logic [127:0] y, output logic greater);
+                    typedef enum logic [127:0] {
+                        A = 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff + 128'h1
+                    } E;
+                    assign y = A;
+                    assign greater = A > 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(source, Path::new("unsigned_128_bit_enum_arithmetic.sv"))], "Top"
+        );
+        assert_eq!(sim.get(sim.signal("y")), BigUint::from(1u8) << 127);
+        assert_eq!(sim.get(sim.signal("greater")), 1u8.into());
+    }
+
     fn preserves_four_state_reduction_case_constants(sim) {
         @setup {
             let source = r#"

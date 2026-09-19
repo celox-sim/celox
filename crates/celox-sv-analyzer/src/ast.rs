@@ -9484,6 +9484,17 @@ fn eval_const_integral_expr_preserving_mask(
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<typecheck::IntegralLiteral> {
     match expr {
+        Expr::Select { expr, msb, lsb, .. } if msb == lsb => {
+            let operand =
+                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+            let constant = crate::ir::ConstExpr::Select {
+                expr: Box::new(crate::ir::ConstExpr::Literal(
+                    typecheck::format_integral_literal_binary(&operand),
+                )),
+                bit: Box::new(msb.clone().into()),
+            };
+            typecheck::eval_const_integral_literal_with_types(&constant, const_env, parameter_types)
+        }
         Expr::Concat(parts) => concat_integral_literals(
             parts
                 .iter()

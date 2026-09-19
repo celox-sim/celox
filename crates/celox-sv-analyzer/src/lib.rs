@@ -1756,6 +1756,88 @@ mod tests {
     }
 
     #[test]
+    fn preserves_four_state_shift_and_select_case_constants() {
+        for (expression, expected) in [
+            ("2'bx0 >> 1", "2'b0x"),
+            ("2'bz0 >> 1", "2'b0z"),
+            ("4'b10xz << 1", "4'b0xz0"),
+            ("4'sbxz01 >>> 2", "4'bxxxz"),
+            ("4'sbz101 >>> 2", "4'bzzz1"),
+            ("4'bx101 >>> 2", "4'b00x1"),
+            ("2'bx0 >> 1000", "2'b00"),
+            ("2'sbz0 >>> 1000", "2'bzz"),
+            ("2'b00 << 1'bx", "2'bxx"),
+            ("2'b11 >> 1'bz", "2'bxx"),
+            ("{2'bx0}[1]", "1'bx"),
+            ("{2'bz0}[1]", "1'bz"),
+            ("{2'bx0}[0]", "1'b0"),
+            ("{2'bx0}[2]", "1'bx"),
+        ] {
+            for (selector, label) in [(expression, expected), (expected, expression)] {
+                let source = format!(
+                    "module Top(input logic a, output logic y); \
+                     always_comb case ({selector}) ({label}): y = a; endcase endmodule"
+                );
+                analyze_source(&source, Path::new("shift_select_case_constants.sv"))
+                    .unwrap_or_else(|error| panic!("{selector}, {label}: {error}"));
+            }
+        }
+        for selector in ["2'bx0 >> 1", "{2'bx0}[1]"] {
+            let source = format!(
+                "module Top(input logic a, output logic y); \
+                 always_comb case ({selector}) 1'b0, 1'b1, 1'bz: y = a; endcase endmodule"
+            );
+            let error = analyze_source(&source, Path::new("unmatched_shift_select.sv"))
+                .expect_err("X must not match a known value or Z");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
+    fn preserves_unsigned_128_bit_enum_expression_results() {
+        let ir = analyze_source(
+            "module Top(output logic [127:0] y);
+             typedef enum logic [127:0] {
+                 A = 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff + 128'h1
+             } E;
+             localparam logic [127:0] P = A;
+             assign y = P;
+             endmodule",
+            Path::new("unsigned_128_bit_enum.sv"),
+        )
+        .expect("unsigned enum arithmetic must retain all 128 bits");
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(i128::MIN)
+        );
+    }
+
+    #[test]
+    fn rejects_nonblocking_comb_assignments_before_coverage() {
+        // These are intentionally unsupported: treating NBA writes as blocking
+        // writes would change reads of the destination within the same process.
+        for body in [
+            "if (s) y <= a; else y <= b;",
+            "case (s) 1'b0: y <= a; default: y <= b; endcase",
+            "if (s) begin if (t) y <= a; else y <= b; end else y <= b;",
+            "if (s) y <= a;",
+        ] {
+            let source = format!(
+                "module Top(input logic s, t, a, b, output logic y); \
+                 always_comb begin {body} end endmodule"
+            );
+            let error = analyze_source(&source, Path::new("nonblocking_comb.sv"))
+                .expect_err("nonblocking assignments must fail before latch analysis");
+            assert!(
+                error
+                    .to_string()
+                    .contains("nonblocking assignment inside always_comb"),
+                "{body}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn preserves_four_state_reduction_case_constants() {
         for (expression, expected) in [
             ("&1'bx", "1'bx"),
