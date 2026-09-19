@@ -1,26 +1,35 @@
 {
     "name": "Celox (with Claude)",
-    "build": {
-        "dockerfile": "../Dockerfile",
-        "context": "../.."
-    },
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
     "remoteUser": "vscode",
     "features": {
-        "ghcr.io/devcontainers/features/rust:1": {},
-        "ghcr.io/devcontainers/features/node:2": {},
-        "ghcr.io/devcontainers-extra/features/pnpm:2": {}
+        "ghcr.io/devcontainers/features/nix:1": {
+            "version": "2.34.1",
+            "extraNixConfig": "experimental-features = nix-command flakes"
+        }
     },
     "mounts": [
         "source=celox-claude-config,target=/home/vscode/.claude,type=volume",
-        "source=celox-codex-config,target=/home/vscode/.codex,type=volume"
+        "source=celox-codex-config,target=/home/vscode/.codex,type=volume",
+        "source=${localEnv:HOME}/mbx,target=/home/vscode/mbx,type=bind"
     ],
     "remoteEnv": {
         "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
         "CODEX_HOME": "/home/vscode/.codex",
         "PNPM_HOME": "/home/vscode/.local/share/pnpm",
-        "PATH": "${containerEnv:PATH}:/home/vscode/.local/share/pnpm",
+        "PATH": "/home/vscode/.local/share/npm/bin:/home/vscode/.local/share/celox/dev-tools/bin:/home/vscode/.local/share/celox/dev-tools/libexec/rust/bin:${containerEnv:PATH}:/home/vscode/.local/share/pnpm:/home/vscode/.local/bin",
         "INSTALL_CODEX": "1",
-        "INSTALL_CLAUDE": "1"
+        "INSTALL_CLAUDE": "1",
+        "MBX_CACHE_DIR": "/home/vscode/mbx/container-cache",
+        "NPM_CONFIG_PREFIX": "/home/vscode/.local/share/npm"
     },
-    "postCreateCommand": "bash .devcontainer/post-create.sh"
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "mkhl.direnv"
+            ]
+        }
+    }
 }
