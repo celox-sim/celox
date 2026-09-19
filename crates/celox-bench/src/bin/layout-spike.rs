@@ -60,7 +60,12 @@ fn main() {
 
     let mut failures = 0;
     let mut check = |name: &str, same: bool, detail: String| {
-        println!("{} {} {}", if same { "SAME " } else { "DIFFER" }, name, detail);
+        println!(
+            "{} {} {}",
+            if same { "SAME " } else { "DIFFER" },
+            name,
+            detail
+        );
         if !same {
             failures += 1;
         }
@@ -69,12 +74,20 @@ fn main() {
     check(
         "stable-offsets",
         cheap.0.offsets == full.0.offsets,
-        format!("cheap={} full={}", cheap.0.offsets.len(), full.0.offsets.len()),
+        format!(
+            "cheap={} full={}",
+            cheap.0.offsets.len(),
+            full.0.offsets.len()
+        ),
     );
     check(
         "stable-widths",
         cheap.0.widths == full.0.widths,
-        format!("cheap={} full={}", cheap.0.widths.len(), full.0.widths.len()),
+        format!(
+            "cheap={} full={}",
+            cheap.0.widths.len(),
+            full.0.widths.len()
+        ),
     );
     check(
         "stable-sizes",
@@ -139,7 +152,10 @@ fn main() {
             println!("event-only-on-one-side {:?}", id);
         }
     }
-    println!("layout-spike {}", if failures == 0 { "AGREE" } else { "DISAGREE" });
+    println!(
+        "layout-spike {}",
+        if failures == 0 { "AGREE" } else { "DISAGREE" }
+    );
     std::process::exit(if failures == 0 { 0 } else { 1 });
 }
 

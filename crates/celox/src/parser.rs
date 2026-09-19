@@ -15,16 +15,35 @@ use celox_frontend_veryl::parse_ir_with_loop_provenance;
 fn apply_fused_optimization_hints(
     scheduled: &mut celox_frontend_core::ScheduledRtl,
     hints: celox_frontend_core::FusedSirOptimizationHints,
+    diagnostics: &crate::RuntimeDiagnostics,
 ) -> Result<(), ParserError> {
-    for (event, direct_ff_writes) in hints.direct_ff_writes {
-        let Some(units) = scheduled.sir.eval_comb_apply_ffs.get_mut(&event) else {
+    let mut pending = hints.direct_ff_writes.into_iter().collect::<Vec<_>>();
+    pending.sort_unstable_by_key(|(event, _)| *event);
+    while let Some((event, direct_ff_writes)) = pending.pop() {
+        let Some(units) = scheduled.sir.eval_comb_apply_ffs.get(&event) else {
             return Err(ParserError::illegal_context(
                 "fused comb/FF optimization hints",
                 format!("event {event} has hints but no scheduled SIR"),
                 None,
             ));
         };
+        // Clock and reset events can share the exact same fused source SIR.
+        // Establish equivalence before rewriting either copy; event-specific
+        // triggers are injected after this pass. Hints must agree as well.
+        let mut aliases = Vec::new();
+        pending.retain(|(candidate, writes)| {
+            if writes == &direct_ff_writes
+                && scheduled.sir.eval_comb_apply_ffs.get(candidate) == Some(units)
+            {
+                aliases.push(*candidate);
+                false
+            } else {
+                true
+            }
+        });
+        let units = scheduled.sir.eval_comb_apply_ffs.get_mut(&event).unwrap();
         for unit in units {
+            let start = diagnostics.phase_timing.then(crate::timing::now);
             let removed =
                 crate::optimizer::sir::eliminate_shared_comb_state_stores(unit, &direct_ff_writes)
                     .map_err(|error| {
@@ -37,6 +56,10 @@ fn apply_fused_optimization_hints(
             if removed != 0 {
                 crate::optimizer::sir::remove_dead_sir_definitions(unit);
             }
+            if let Some(start) = start {
+                tracing::debug!("[phase-timing] fused_state_dse: {:?}", start.elapsed());
+            }
+            let start = diagnostics.phase_timing.then(crate::timing::now);
             if crate::optimizer::sir::promote_fused_comb_static_slots(unit).map_err(|error| {
                 ParserError::illegal_context(
                     "fused comb StateSSA promotion",
@@ -46,6 +69,19 @@ fn apply_fused_optimization_hints(
             })? {
                 crate::optimizer::sir::remove_dead_sir_definitions(unit);
             }
+            if let Some(start) = start {
+                tracing::debug!("[phase-timing] fused_state_ssa: {:?}", start.elapsed());
+            }
+        }
+        if diagnostics.phase_timing {
+            tracing::debug!(
+                "[fused-state-cache] event={event} aliases={}",
+                aliases.len()
+            );
+        }
+        for alias in aliases {
+            let optimized = scheduled.sir.eval_comb_apply_ffs[&event].clone();
+            scheduled.sir.eval_comb_apply_ffs.insert(alias, optimized);
         }
     }
     Ok(())
@@ -320,7 +356,11 @@ pub(crate) fn project_scheduled_rtl(
     testbench_random_seed: Option<u64>,
     diagnostics: &crate::RuntimeDiagnostics,
 ) -> Result<(crate::ir::SirProgram, crate::ir::RuntimeProgram), ParserError> {
-    apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
+    apply_fused_optimization_hints(
+        &mut scheduled.scheduled,
+        scheduled.fused_optimization_hints,
+        diagnostics,
+    )?;
     scheduled.scheduled.inject_triggers();
     let testbench = if let Some(testbench_source) = testbench_source {
         testbench_source.component_libraries = component_libraries;
@@ -814,4 +854,97 @@ fn reachable_external_sv_roots(ir: &veryl_analyzer::ir::Ir, top: &StrId) -> Hash
         }
     }
     roots
+}
+
+#[cfg(test)]
+mod fused_hint_tests {
+    use super::*;
+    use crate::ir::{
+        AbsoluteAddr, BasicBlock, BlockId, ExecutionUnit, InstanceId, RegisterId, RegisterType,
+        SIRInstruction, SIROffset, SIRTerminator, SIRValue,
+    };
+
+    #[test]
+    fn cached_fused_hints_require_equal_code_and_protected_writes() {
+        let event = |id| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: celox_design::StateObjectId::from_raw(id),
+        };
+        let address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, event(10));
+        let unit = |value: u8| ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(value)),
+                        SIRInstruction::Store(
+                            address,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(0),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 8,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let original = unit(23);
+        let distinct = unit(77);
+        let mut scheduled = celox_frontend_core::ScheduledRtl {
+            sir: SirProgram {
+                eval_comb: Vec::new(),
+                eval_apply_ffs: Default::default(),
+                eval_comb_apply_ffs: [
+                    (event(0), vec![original.clone()]),
+                    (event(1), vec![original.clone()]),
+                    (event(2), vec![distinct.clone()]),
+                    (event(3), vec![original.clone()]),
+                ]
+                .into_iter()
+                .collect(),
+                eval_only_ffs: Default::default(),
+                apply_ffs: Default::default(),
+            },
+            design: Default::default(),
+            frontend_lookup: Default::default(),
+            runtime_schema: Default::default(),
+        };
+        let protected = vec![celox_design::VarAtomBase::new(address, 0, 7)];
+        let hints = celox_frontend_core::FusedSirOptimizationHints {
+            direct_ff_writes: [
+                (event(0), protected.clone()),
+                (event(1), Vec::new()),
+                (event(2), protected.clone()),
+                (event(3), protected),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        apply_fused_optimization_hints(&mut scheduled, hints, &Default::default()).unwrap();
+        let groups = &scheduled.sir.eval_comb_apply_ffs;
+        assert_eq!(groups[&event(0)], vec![original.clone()]);
+        assert_eq!(groups[&event(3)], vec![original]);
+        assert_eq!(groups[&event(2)], vec![distinct]);
+        assert!(
+            groups[&event(1)][0].blocks[&BlockId(0)]
+                .instructions
+                .is_empty()
+        );
+    }
 }

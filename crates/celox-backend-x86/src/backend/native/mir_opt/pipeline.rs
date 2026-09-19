@@ -5,6 +5,7 @@ use super::*;
 struct PassRunner<'a> {
     func: &'a mut MFunction,
     verify_each: bool,
+    timing: bool,
 }
 
 impl<'a> PassRunner<'a> {
@@ -12,11 +13,21 @@ impl<'a> PassRunner<'a> {
         Self {
             func,
             verify_each: diagnostics.verify_mir_passes,
+            timing: diagnostics.phase_timing,
         }
     }
 
     fn run(&mut self, name: &'static str, pass: impl FnOnce(&mut MFunction)) {
+        let start = self.timing.then(crate::timing::now);
         pass(self.func);
+        if let Some(start) = start {
+            tracing::debug!(
+                "[mir-pass-timing] {name}: {:?} blocks={} vregs={}",
+                start.elapsed(),
+                self.func.blocks.len(),
+                self.func.vregs.count(),
+            );
+        }
         if self.verify_each
             && let Err(error) = self.func.verify_result()
         {
@@ -52,6 +63,21 @@ pub fn optimize_with_diagnostics(func: &mut MFunction, diagnostics: &crate::Nati
             panic!("after MIR optimizer: {error}");
         }
     }
+}
+
+/// Canonicalize the first native tier without the optimizing tier's global
+/// value numbering, bit analysis, or loop and branch restructuring. Keep the
+/// local cleanup that avoids assigning registers to ISel's dead temporaries.
+pub(crate) fn optimize_baseline(func: &mut MFunction, diagnostics: &crate::NativeDiagnostics) {
+    let mut runner = PassRunner::new(func, diagnostics);
+    runner.run("constant_fold", constant_fold);
+    runner.run("copy_propagate", copy_propagate);
+    runner.run("dead_code_eliminate", dead_code_eliminate);
+    runner.run("lower_to_imm_forms", lower_to_imm_forms);
+    runner.run("dead_code_eliminate", dead_code_eliminate);
+    runner.run("simplify_cfg", simplify_cfg);
+    runner.run("sink_loads", sink_loads);
+    runner.run("refresh_constant_spill_descs", refresh_constant_spill_descs);
 }
 
 fn run_high_pressure_pipeline(runner: &mut PassRunner<'_>) {

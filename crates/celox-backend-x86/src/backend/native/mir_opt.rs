@@ -23,6 +23,7 @@ mod loop_guard;
 #[cfg(test)]
 mod memory_forward_tests;
 mod pipeline;
+pub(crate) use pipeline::optimize_baseline;
 pub use pipeline::{optimize, optimize_with_diagnostics};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

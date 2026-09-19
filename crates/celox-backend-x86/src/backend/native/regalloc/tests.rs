@@ -642,6 +642,7 @@ fn cancelled_allocation_reports_a_cancellation_error() {
         None,
         &crate::NativeDiagnostics::default(),
         false,
+        None,
         || true,
     ) {
         Ok(_) => panic!("a cancelled allocation must not return a result"),
