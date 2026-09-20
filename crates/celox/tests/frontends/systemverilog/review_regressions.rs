@@ -8513,3 +8513,53 @@ fn dynamic_case_label_matches_two_state_selector() {
         }
     }
 }
+
+#[test]
+fn constant_case_coverage_preserves_declared_coordinates_and_equality() {
+    for (declaration, selector, label) in [
+        ("localparam logic [0:3] P = 4'bxx00;", "P[0:1]", "2'bxx"),
+        ("localparam logic [4:7] P = 4'bxx00;", "P[6:7]", "2'b00"),
+        ("", "(1'bx | 1'b0) === 1'bx", "1'b1"),
+        ("", "(1'bx | 1'b0) !== 1'bx", "1'b0"),
+        ("", "(2'bx0 | 2'b00) ==? 2'bx0", "1'b1"),
+        ("", "(2'bx0 | 2'b00) !=? 2'b00", "1'bx"),
+    ] {
+        let source = format!(
+            "module Top(input logic a, output logic y);
+             {declaration}
+             always_comb case ({selector}) {label}: y = a; endcase endmodule"
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("constant_case_coverage.sv"))],
+            "Top",
+        )
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+        let a = sim.signal("a");
+        let y = sim.signal("y");
+        for value in [0u8, 1, 0] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(y), value.into(), "{selector}");
+        }
+    }
+}
+
+#[test]
+fn function_size_cast_uses_formal_and_local_dimensions() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic [15:0] x;
+            function automatic logic [7:0] f(input logic [3:0] x);
+                logic [1:0][3:0] local_value;
+                return {~$bits(x)'(0), ~$size(local_value)'(0), 2'b00};
+            endfunction
+            assign y = f(0);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_size_cast.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xfcu8.into());
+}

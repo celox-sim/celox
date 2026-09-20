@@ -1667,6 +1667,80 @@ mod tests {
     }
 
     #[test]
+    fn folds_declared_constant_part_select_coordinates() {
+        for (range, selection, expected) in [
+            ("0:3", "0:1", "2'bxx"),
+            ("0:3", "2:3", "2'b00"),
+            ("4:7", "4:5", "2'bxx"),
+            ("7:4", "7:6", "2'bxx"),
+            ("-3:0", "-3:-2", "2'bxx"),
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y);
+                 localparam logic [{range}] P = 4'bxx00;
+                 always_comb case (P[{selection}]) {expected}: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("constant_select_coordinates.sv"))
+                .unwrap_or_else(|error| panic!("{range}, {selection}: {error}"));
+            let source = source.replace(&format!("{expected}: y"), "2'b11: y");
+            let error = analyze_source(&source, Path::new("unmatched_select_coordinates.sv"))
+                .expect_err("a nonmatching selected constant must not cover the case");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
+    fn folds_compound_case_and_wildcard_equalities() {
+        for (expression, expected) in [
+            ("(1'bx | 1'b0) === 1'bx", "1'b1"),
+            ("(1'bx | 1'b0) !== 1'bx", "1'b0"),
+            ("(1'bx | 1'b0) === 1'bz", "1'b0"),
+            ("(2'bx0 | 2'b00) ==? 2'bx0", "1'b1"),
+            ("(2'bx0 | 2'b00) !=? 2'bx0", "1'b0"),
+            ("(2'bx0 | 2'b00) ==? 2'b01", "1'b0"),
+            ("(2'bx0 | 2'b00) ==? 2'b00", "1'bx"),
+            ("(2'bx0 | 2'b00) !=? 2'b00", "1'bx"),
+            ("(1'sb1 | 1'sb0) === 2'sb11", "1'b1"),
+            ("(1'b1 | 1'b0) === 2'b11", "1'b0"),
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y);
+                 always_comb case ({expression}) {expected}: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("compound_equality.sv"))
+                .unwrap_or_else(|error| panic!("{expression}: {error}"));
+            let wrong = if expected == "1'b1" { "1'b0" } else { "1'b1" };
+            let source = source.replace(&format!("{expected}: y"), &format!("{wrong}: y"));
+            let error = analyze_source(&source, Path::new("unmatched_compound_equality.sv"))
+                .expect_err("a nonmatching equality result must not cover the case");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
+    fn resolves_function_scope_size_casts() {
+        for function in [
+            "function automatic logic [7:0] f(input logic [3:0] x);
+             return $bits(x)'(0); endfunction",
+            "function automatic logic [7:0] f;
+             input logic [3:0] x; return $bits(x)'(0); endfunction",
+            "function automatic logic [7:0] f(input logic [3:0] x);
+             logic [3:0] local_value; return $size(local_value)'(0); endfunction",
+            "function automatic logic [7:0] f(input logic [1:0][3:0] x);
+             return $bits(x[0])'(0); endfunction",
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y);
+                 logic [15:0] x;
+                 {function}
+                 always_comb case (f(0)) 8'h00: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("function_scope_size_cast.sv"))
+                .unwrap_or_else(|error| panic!("{function}: {error}"));
+        }
+    }
+
+    #[test]
     fn folds_constant_part_selects_and_resized_concatenations() {
         for (selector, label) in [
             ("p()", "2'bxx"),

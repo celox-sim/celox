@@ -322,6 +322,25 @@ impl Module {
         }
         let mut packed_dimensions =
             packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
+        // Four-state parameter values cannot be represented by the numeric
+        // environment. Keep their expressions for constant case analysis.
+        packed_dimensions.parameter_values = parameter_value_env(&parameters, &const_env);
+        packed_dimensions
+            .parameter_values
+            .retain(|name, _| !const_env.contains_key(name));
+        for parameter in &parameters {
+            if !parameter.packed_ranges.is_empty() {
+                packed_dimensions.insert(
+                    parameter.name.clone(),
+                    VariableDimensions {
+                        packed: function_packed_dimension_widths(&parameter.packed_ranges),
+                        unpacked: Vec::new(),
+                        signed: parameter.declared_signed.unwrap_or(false),
+                        is_2state: parameter.declared_is_2state,
+                    },
+                );
+            }
+        }
         let mut instances =
             instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let mut instance_names = HashSet::default();
@@ -1058,6 +1077,11 @@ fn size_function_expression_type(
             .strip_prefix(VARIABLE_SIGNED_PREFIX)
             .map(|name| (name.to_string(), *signed != 0))
     }));
+    identifier_signedness.extend(
+        packed_dimensions
+            .iter()
+            .map(|(name, dimensions)| (name.clone(), dimensions.signed)),
+    );
     let signed = expr_signedness_with_return_types(
         &expression,
         &identifier_signedness,
@@ -1157,13 +1181,66 @@ fn containing_packed_dimensions(
         let ports =
             ports_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
         let signals =
-            signals_from_module_node(module, syntax_tree, const_env, type_aliases).ok()?;
-        return Some(packed_dimensions_from_ports_and_signals(
-            &ports,
-            &signals,
-            const_env,
-            type_aliases,
-        ));
+            signals_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
+        let mut dimensions =
+            packed_dimensions_from_ports_and_signals(&ports, &signals, const_env, type_aliases);
+        for child in module {
+            let RefNode::FunctionDeclaration(declaration) = child else {
+                continue;
+            };
+            let (start, end) = ref_node_source_span(RefNode::FunctionDeclaration(declaration))?;
+            if target_start < start || target_end > end {
+                continue;
+            }
+            let (params, locals) = match &declaration.nodes.2 {
+                sv_parser::FunctionBodyDeclaration::WithPort(body) => {
+                    let params = body
+                        .nodes
+                        .3
+                        .nodes
+                        .1
+                        .as_ref()
+                        .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
+                        .unwrap_or_default();
+                    let locals = function_local_packed_dimensions_from_block_items(
+                        &body.nodes.5,
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                    )?;
+                    (params, locals)
+                }
+                sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
+                    let params =
+                        tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
+                    let items = body.nodes.4.iter().filter_map(|item| match item {
+                        sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
+                        sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
+                    });
+                    let locals = function_local_packed_dimensions_from_block_item_iter(
+                        items,
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                    )?;
+                    (params, locals)
+                }
+            };
+            dimensions.extend(params.into_iter().map(|param| {
+                (
+                    param.name,
+                    VariableDimensions {
+                        packed: param.packed_dimensions,
+                        unpacked: Vec::new(),
+                        signed: param.signed,
+                        is_2state: param.is_2state,
+                    },
+                )
+            }));
+            dimensions.extend(locals);
+            break;
+        }
+        return Some(dimensions);
     }
     None
 }
@@ -2507,6 +2584,7 @@ pub struct Parameter {
     name: String,
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
+    packed_ranges: Vec<PackedRange>,
     declared_signed: Option<bool>,
     declared_is_2state: bool,
     has_declared_type: bool,
@@ -2527,6 +2605,7 @@ impl Parameter {
             name,
             value,
             declared_width,
+            packed_ranges: Vec::new(),
             declared_signed,
             declared_is_2state,
             has_declared_type,
@@ -4160,6 +4239,10 @@ fn parameters_from_ref_node(
                     .unwrap_or_else(|| is_signed_from_ref_node(type_node.clone()).unwrap_or(false))
             })
     });
+    let parameter_ranges =
+        function_type_from_ref_node(type_node.clone(), syntax_tree, base_const_env, type_aliases)
+            .map(|ty| ty.packed_ranges().to_vec())
+            .unwrap_or_default();
     let parameter_is_2state = declared_alias
         .or_else(|| type_from_ref_node(type_node, syntax_tree))
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
@@ -4180,7 +4263,7 @@ fn parameters_from_ref_node(
             if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
                 value = Some(override_value.clone());
             }
-            parameters.push(Parameter::new(
+            let mut parameter = Parameter::new(
                 name,
                 value,
                 parameter_width,
@@ -4188,7 +4271,9 @@ fn parameters_from_ref_node(
                 parameter_is_2state,
                 has_declared_type,
                 is_local,
-            ));
+            );
+            parameter.packed_ranges = parameter_ranges.clone();
+            parameters.push(parameter);
         }
     }
     Ok(())
@@ -4990,6 +5075,7 @@ struct PackedDimensions {
     type_aliases: HashMap<String, Type>,
     function_return_types: HashMap<String, FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
+    parameter_values: HashMap<String, Expr>,
     expression_signedness: Arc<HashMap<String, bool>>,
 }
 
@@ -5005,6 +5091,7 @@ impl PackedDimensions {
             type_aliases: type_aliases.clone(),
             function_return_types: HashMap::default(),
             functions: Arc::default(),
+            parameter_values: HashMap::default(),
             expression_signedness: Arc::default(),
         }
     }
@@ -12131,6 +12218,15 @@ fn two_state_case_item_reachability(
         0,
         true,
     );
+    let parameter_values = packed_dimensions
+        .parameter_values
+        .iter()
+        // A generate-local numeric constant may shadow a module parameter.
+        .filter(|(name, _)| !const_env.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let selector =
+        substitute_expr_constants_with_parameter_literals(selector, const_env, &parameter_values);
     let selector = simplify_constant_mux_conditions(selector, const_env);
     let selector = fold_const_integral_expr_preserving_mask(selector, const_env);
     let mut labels_by_item = Vec::new();

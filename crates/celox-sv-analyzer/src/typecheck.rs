@@ -304,6 +304,10 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
             | BinaryOp::LogicOr
             | BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
             | BinaryOp::Lt
             | BinaryOp::Le
             | BinaryOp::Gt
@@ -432,6 +436,28 @@ fn eval_four_state_binary_literal(
             _ => unreachable!(),
         };
         return Some(integral_literal_from_truth(Some(truth)));
+    }
+    if matches!(
+        op,
+        BinaryOp::EqCase | BinaryOp::NeCase | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+    ) {
+        let equal = if matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+            Some(left.value == right.value && left.mask == right.mask)
+        } else {
+            let width_mask = (BigUint::from(1u8) << left.width) - BigUint::from(1u8);
+            let compare_mask = &width_mask ^ &right.mask;
+            let definite_compare = &compare_mask & (&width_mask ^ &left.mask);
+            if ((&left.value ^ &right.value) & definite_compare) != BigUint::default() {
+                Some(false)
+            } else if (&left.mask & compare_mask) != BigUint::default() {
+                None
+            } else {
+                Some(true)
+            }
+        };
+        return Some(integral_literal_from_truth(equal.map(|equal| {
+            equal ^ matches!(op, BinaryOp::NeCase | BinaryOp::NeWildcard)
+        })));
     }
     if !matches!(
         op,
@@ -656,6 +682,10 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                     | BinaryOp::BitXor
                     | BinaryOp::Eq
                     | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
+                    | BinaryOp::EqWildcard
+                    | BinaryOp::NeWildcard
                     | BinaryOp::Lt
                     | BinaryOp::Le
                     | BinaryOp::Gt
@@ -819,29 +849,7 @@ fn eval_literal_four_state_equality(
     let right_extension = signed_extension(&right, signed);
     left = resize_integral_literal(left, width, signed, left_extension);
     right = resize_integral_literal(right, width, signed, right_extension);
-    let equal = match op {
-        BinaryOp::EqCase | BinaryOp::NeCase => left.value == right.value && left.mask == right.mask,
-        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
-            let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-            let compare_mask = &width_mask ^ &right.mask;
-            let lhs_definite = &width_mask ^ &left.mask;
-            let definite_compare = &compare_mask & lhs_definite;
-            let mismatch = (&left.value ^ &right.value) & definite_compare;
-            if mismatch != BigUint::default() {
-                false
-            } else if (&left.mask & compare_mask) != BigUint::default() {
-                return None;
-            } else {
-                true
-            }
-        }
-        _ => return None,
-    };
-    Some(if matches!(op, BinaryOp::NeCase | BinaryOp::NeWildcard) {
-        !equal
-    } else {
-        equal
-    })
+    integral_literal_truth(&eval_four_state_binary_literal(&left, op, &right, signed)?)
 }
 
 fn unbased_fill_literal(value: &str) -> Option<char> {
