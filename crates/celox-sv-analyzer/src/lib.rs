@@ -1667,6 +1667,51 @@ mod tests {
     }
 
     #[test]
+    fn folds_constant_part_selects_and_resized_concatenations() {
+        for (selector, label) in [
+            ("p()", "2'bxx"),
+            ("q()", "3'bxz1"),
+            ("r()", "2'b01"),
+            ("f()", "4'b00xz"),
+            ("g()", "4'b1111"),
+        ] {
+            let source = format!(
+                "module Top(input logic a, output logic y);
+                 function automatic logic [1:0] p();
+                   logic [3:0] v; v = 4'bxx00; return v[3:2]; endfunction
+                 function automatic logic [2:0] q();
+                   logic [3:0] v; v = 4'bxz10; return v[3:1]; endfunction
+                 function automatic logic [1:0] r();
+                   logic [3:0] v; v = 4'b1010; return v[2:1]; endfunction
+                 function automatic logic [3:0] f(); return {{1'bx, 1'bz}}; endfunction
+                 function automatic logic signed [3:0] g(); return 2'sb11; endfunction
+                 always_comb case ({selector}) {label}: y = a; endcase endmodule"
+            );
+            analyze_source(&source, Path::new("constant_case.sv"))
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
+            let source = source.replace(&format!("{label}: y"), "5'b10000: y");
+            let error = analyze_source(&source, Path::new("unmatched_constant_case.sv"))
+                .expect_err("a nonmatching label must still infer a latch");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
+    fn retains_dynamic_case_labels_for_two_state_selectors() {
+        let source = "module Top(input bit selector, dynamic_label, input logic a, b,
+                      output logic y);
+                      always_comb case (selector)
+                      dynamic_label: y = a;
+                      default: y = b;
+                      endcase endmodule";
+        let ir = analyze_source(source, Path::new("dynamic_case.sv")).unwrap();
+        let rhs = ir.modules()[0].comb_processes()[0].assignments()[0].rhs();
+        assert!(expr_references_ident_name(rhs, "dynamic_label"), "{rhs:?}");
+        assert!(expr_references_ident_name(rhs, "a"), "{rhs:?}");
+        assert!(expr_references_ident_name(rhs, "b"), "{rhs:?}");
+    }
+
+    #[test]
     fn folds_compound_four_state_case_labels() {
         for (selector, label) in [
             ("1'bx", "(1'bx | 1'b0)"),

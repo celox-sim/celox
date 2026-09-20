@@ -8473,3 +8473,43 @@ fn function_partial_returns_preserve_continuations() {
         assert_eq!(simulator.get(y), expected.into());
     }
 }
+
+#[test]
+fn dynamic_case_label_matches_two_state_selector() {
+    let source = r#"
+        module Top(input bit selector, dynamic_label, input logic a, b, output logic y);
+            always_comb case (selector)
+                dynamic_label: y = a;
+                default: y = b;
+            endcase
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("dynamic_case_label.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let selector = sim.signal("selector");
+    let label = sim.signal("dynamic_label");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    for selector_value in 0..=1u8 {
+        for label_value in 0..=1u8 {
+            for a_value in 0..=1u8 {
+                sim.modify(|io| {
+                    io.set(selector, selector_value);
+                    io.set(label, label_value);
+                    io.set(a, a_value);
+                    io.set(b, 1 - a_value);
+                })
+                .unwrap();
+                let expected = if selector_value == label_value {
+                    a_value
+                } else {
+                    1 - a_value
+                };
+                assert_eq!(sim.get(y), expected.into());
+            }
+        }
+    }
+}

@@ -9641,16 +9641,46 @@ fn eval_const_integral_expr_preserving_mask(
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<typecheck::IntegralLiteral> {
     match expr {
-        Expr::Select { expr, msb, lsb, .. } if msb == lsb => {
+        Expr::Select { expr, msb, lsb, .. } => {
             let operand =
                 eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
-            let constant = crate::ir::ConstExpr::Select {
-                expr: Box::new(crate::ir::ConstExpr::Literal(
-                    typecheck::format_integral_literal_binary(&operand),
-                )),
-                bit: Box::new(msb.clone().into()),
-            };
-            typecheck::eval_const_integral_literal_with_types(&constant, const_env, parameter_types)
+            let msb = eval_ast_const_expr(msb, const_env)?;
+            let lsb = eval_ast_const_expr(lsb, const_env)?;
+            let width = usize::try_from(msb.checked_sub(lsb)?.checked_add(1)?).ok()?;
+            let mut value = num_bigint::BigUint::default();
+            let mut mask = num_bigint::BigUint::default();
+            for offset in 0..width {
+                let bit = lsb.checked_add(i128::try_from(offset).ok()?)?;
+                let index = usize::try_from(bit).ok().filter(|bit| *bit < operand.width);
+                let (value_bit, mask_bit) = match index {
+                    Some(index) => (
+                        operand.value.bit(index as u64),
+                        operand.mask.bit(index as u64),
+                    ),
+                    // Out-of-range bits of a constant part-select are X.
+                    None => (true, true),
+                };
+                value.set_bit(offset as u64, value_bit);
+                mask.set_bit(offset as u64, mask_bit);
+            }
+            Some(typecheck::IntegralLiteral {
+                width,
+                signed: false,
+                value,
+                mask,
+            })
+        }
+
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let operand =
+                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+            typecheck::parse_integral_literal(&resize_integral_literal_for_cast(
+                operand, *width, *signed,
+            ))
         }
         Expr::Concat(parts) => concat_integral_literals(
             parts
@@ -12259,7 +12289,20 @@ fn two_state_case_item_reachability(
         };
         for label in labels {
             let Some(label_value) = eval_ast_const_expr(label, const_env) else {
-                // X/Z-bearing labels cannot match a two-state selector.
+                // Only proven X/Z constants are unreachable. An unresolved
+                // runtime label requires conservative branch reachability.
+                let constant: crate::ir::ConstExpr = label.clone().into();
+                let literal = typecheck::eval_const_integral_literal_with_types(
+                    &constant,
+                    const_env,
+                    &parameter_types_from_const_env(const_env)
+                        .into_iter()
+                        .map(|(name, ty)| (name, (ty.width, ty.signed)))
+                        .collect(),
+                )?;
+                if literal.mask == num_bigint::BigUint::default() {
+                    return None;
+                }
                 continue;
             };
             let pattern = if width == 128 {
