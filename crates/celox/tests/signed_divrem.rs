@@ -6,8 +6,7 @@ mod test_utils;
 
 all_backends! {
     fn signed_divrem_i8(sim) {
-        // Veryl 0.20.3 ignores the explicit unsigned cast in division.
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     a: input i8,

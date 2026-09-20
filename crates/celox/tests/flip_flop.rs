@@ -2554,7 +2554,6 @@ fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
 }
 
 fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
-    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6902,7 +6901,7 @@ fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
 }
 
 fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7080,7 +7079,7 @@ fn test_ff_function_call_keeps_array_view_active_for_output_index(sim) {
 }
 
 fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7103,7 +7102,7 @@ fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
 }
 
 fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7132,7 +7131,7 @@ fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(s
 }
 
 fn test_ff_function_call_bits_and_size_evaluate_effectful_array_argument(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7178,7 +7177,7 @@ fn test_ff_function_call_bits_and_size_evaluate_effectful_array_argument(sim) {
 }
 
 fn test_ff_function_call_nested_bits_evaluates_effectful_array_argument(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
