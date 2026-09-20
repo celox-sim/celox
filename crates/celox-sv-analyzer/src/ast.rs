@@ -7017,6 +7017,81 @@ fn function_expr_from_sequence(
             }
             return Some(result);
         }
+        if let sv_parser::StatementItem::CaseStatement(case) = &statement.nodes.2
+            && RefNode::CaseStatement(case)
+                .into_iter()
+                .any(|node| matches!(node, RefNode::JumpStatement(_)))
+        {
+            let sv_parser::CaseStatement::Normal(case) = &**case else {
+                return None;
+            };
+            let selector = substitute_expr_idents(
+                expr_from_expression_with_types(
+                    &case.nodes.2.nodes.1.nodes.0,
+                    syntax_tree,
+                    packed_dimensions,
+                )?,
+                locals,
+            );
+            let lower_branch = |branch: Option<&sv_parser::StatementOrNull>| {
+                let sequence = branch
+                    .and_then(function_statement_ref)
+                    .into_iter()
+                    .chain(rest.iter().copied())
+                    .collect::<Vec<_>>();
+                function_expr_from_sequence(
+                    &sequence,
+                    &mut locals.clone(),
+                    syntax_tree,
+                    packed_dimensions,
+                    local_types,
+                )
+            };
+            let mut default = None;
+            let mut branches = Vec::new();
+            for item in std::iter::once(&case.nodes.3).chain(case.nodes.4.iter()) {
+                match item {
+                    sv_parser::CaseItem::NonDefault(item) => {
+                        let condition = item
+                            .nodes
+                            .0
+                            .contents()
+                            .into_iter()
+                            .map(|expr| {
+                                let label = expr_from_expression_with_types(
+                                    &expr.nodes.0,
+                                    syntax_tree,
+                                    packed_dimensions,
+                                )?;
+                                Some(case_item_condition(
+                                    selector.clone(),
+                                    substitute_expr_idents(label, locals),
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()?
+                            .into_iter()
+                            .reduce(|left, right| Expr::Binary {
+                                left: Box::new(left),
+                                op: BinaryOp::LogicOr,
+                                right: Box::new(right),
+                            })?;
+                        branches.push((condition, &item.nodes.2));
+                    }
+                    sv_parser::CaseItem::Default(item) => default = Some(&item.nodes.2),
+                }
+            }
+            // A missing default follows the continuation with the incoming
+            // locals. Earlier matching labels retain priority over later ones.
+            let mut result = lower_branch(default)?;
+            for (condition, branch) in branches.into_iter().rev() {
+                result = Expr::Mux {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(lower_branch(Some(branch))?),
+                    else_expr: Box::new(result),
+                };
+            }
+            return Some(result);
+        }
         if let Some(expr) = function_expr_from_statement(
             statement,
             locals,

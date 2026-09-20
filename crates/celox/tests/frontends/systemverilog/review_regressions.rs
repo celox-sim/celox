@@ -8563,3 +8563,94 @@ fn function_size_cast_uses_formal_and_local_dimensions() {
             .unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0xfcu8.into());
 }
+
+#[test]
+fn function_case_partial_returns_preserve_continuations() {
+    for (body, expected) in [
+        (
+            "case (v) 0: return 1; default: x = 0; endcase return x;",
+            [1u8, 0, 0, 0],
+        ),
+        (
+            "x = 3; case (v) 0: return 9; 1, 2: x = 4; endcase
+             x = x + 1; return x;",
+            [9, 5, 5, 4],
+        ),
+        (
+            "x = 3; case (v)
+             default: x = 1;
+             0, 1: begin
+                 case (v) 0: return 9; default: x = 4; endcase
+                 x = x + 1;
+             end
+             1: return 12;
+             2: begin if (v == 2) return 7; else x = 8; end
+             endcase x = x + 1; return x;",
+            [9, 6, 7, 2],
+        ),
+        (
+            "x = v; case (x)
+             0: begin x = 2; return 9; end
+             1: x = 3;
+             2: return 7;
+             default: ;
+             endcase x = x + 1; return x;",
+            [9, 4, 7, 4],
+        ),
+    ] {
+        let source = format!(
+            "module Top(input logic [1:0] v, output logic [3:0] y);
+             function automatic logic [3:0] f(input logic [1:0] v);
+                 logic [3:0] x;
+                 {body}
+             endfunction
+             assign y = f(v);
+             endmodule"
+        );
+        let mut sim =
+            Simulator::from_sv_sources(vec![(&source, Path::new("case_partial_return.sv"))], "Top")
+                .build_cranelift()
+                .unwrap();
+        let v = sim.signal("v");
+        let y = sim.signal("y");
+        for (input, expected) in expected.into_iter().enumerate() {
+            sim.modify(|io| io.set(v, input as u8)).unwrap();
+            assert_eq!(sim.get(y), expected.into(), "v={input}, {body}");
+        }
+    }
+}
+
+#[test]
+fn function_case_partial_returns_match_four_state_labels() {
+    use num_bigint::BigUint;
+
+    let source = r#"
+        module Top(input logic v, output logic [3:0] y);
+            function automatic logic [3:0] f(input logic v);
+                logic [3:0] x;
+                case (v)
+                    1'bx: return 9;
+                    1'bz: x = 4;
+                    default: x = 1;
+                endcase
+                x = x + 1;
+                return x;
+            endfunction
+            assign y = f(v);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("four_state_case_return.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    let v = sim.signal("v");
+    let y = sim.signal("y");
+    for (value, mask, expected) in [(0u8, 0u8, 2u8), (1, 0, 2), (1, 1, 9), (0, 1, 5)] {
+        sim.modify(|io| io.set_four_state(v, BigUint::from(value), BigUint::from(mask)))
+            .unwrap();
+        assert_eq!(sim.get(y), expected.into());
+    }
+}
