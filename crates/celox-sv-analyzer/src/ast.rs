@@ -197,6 +197,10 @@ impl Module {
                 insert_parameter_type_markers(&mut const_env, name, *r#type);
             }
         }
+        // Alias ranges may themselves contain casts sized by enum members.
+        // Rebuild them before assigning declared parameter widths.
+        type_aliases =
+            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
         // Constant casts are evaluated while parameter syntax is lowered.
         // Repeat that lowering after enum constants become available so a
         // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
@@ -2003,26 +2007,6 @@ fn reject_silently_ignored_constructs(
             {
                 return Err(AnalyzerError::Unsupported(
                     "static function-local state".to_string(),
-                ));
-            }
-            RefNode::FunctionDeclaration(function)
-                if RefNode::FunctionDeclaration(function)
-                    .into_iter()
-                    .any(|node| {
-                        matches!(
-                            node,
-                            RefNode::ConditionalStatement(statement)
-                                if statement.nodes.5.is_none()
-                                    && RefNode::ConditionalStatement(statement)
-                                        .into_iter()
-                                        .any(|node| matches!(node, RefNode::JumpStatement(
-                                            sv_parser::JumpStatement::Return(_)
-                                        )))
-                        )
-                    }) =>
-            {
-                return Err(AnalyzerError::Unsupported(
-                    "conditional function return without else".to_string(),
                 ));
             }
             RefNode::FunctionDeclaration(function)
@@ -12327,6 +12311,13 @@ fn two_state_case_item_reachability(
                                 &packed_dimensions.expression_signedness,
                                 0,
                                 true,
+                            )
+                        })
+                        .map(|label| {
+                            substitute_expr_constants_with_parameter_literals(
+                                label,
+                                const_env,
+                                &parameter_values,
                             )
                         })
                         .map(|label| simplify_constant_mux_conditions(label, const_env))

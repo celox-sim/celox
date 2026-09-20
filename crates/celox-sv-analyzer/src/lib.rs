@@ -1786,6 +1786,23 @@ mod tests {
     }
 
     #[test]
+    fn substitutes_masked_parameter_case_labels() {
+        for (value, label) in [("1'bx", "P"), ("1'bz", "P"), ("1'bx", "(P | 1'b0)")] {
+            let source = format!(
+                "module Top(input logic a, output logic y);
+                 localparam logic P = {value};
+                 always_comb if (a) case ({value}) {label}: y = a; endcase else y = a; endmodule"
+            );
+            analyze_source(&source, Path::new("masked_parameter_case_label.sv"))
+                .unwrap_or_else(|error| panic!("{value}, {label}: {error}"));
+            let mismatch = source.replace(&format!("case ({value})"), "case (1'b1)");
+            let error = analyze_source(&mismatch, Path::new("unmatched_parameter_case_label.sv"))
+                .expect_err("an X/Z label must not cover a known selector");
+            assert!(error.to_string().contains("latch inference"), "{error}");
+        }
+    }
+
+    #[test]
     fn folds_compound_four_state_case_labels() {
         for (selector, label) in [
             ("1'bx", "(1'bx | 1'b0)"),

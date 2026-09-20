@@ -5614,12 +5614,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "conditional function return without else",
+            "combinational expression",
             r#"
             module Top(input logic a, output logic y);
                 function automatic logic choose(input logic x);
                     if (x) return 1'b1;
-                    return 1'b0;
                 endfunction
                 assign y = choose(a);
             endmodule
@@ -8651,6 +8650,105 @@ fn function_case_partial_returns_match_four_state_labels() {
     for (value, mask, expected) in [(0u8, 0u8, 2u8), (1, 0, 2), (1, 1, 9), (0, 1, 5)] {
         sim.modify(|io| io.set_four_state(v, BigUint::from(value), BigUint::from(mask)))
             .unwrap();
+        assert_eq!(sim.get(y), expected.into());
+    }
+}
+
+#[test]
+fn masked_parameter_case_labels_are_exhaustive() {
+    for (value, selector, label) in [
+        ("1'bx", "1'bx", "P"),
+        ("1'bz", "1'bz", "P"),
+        ("2'bxz", "2'bxz", "P"),
+        ("1'bx", "1'bx", "(P | 1'b0)"),
+    ] {
+        let source = format!(
+            "module Top(input logic a, output logic y);
+             localparam P = {value};
+             always_comb case ({selector}) {label}: y = a; endcase endmodule"
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("masked_parameter_label.sv"))],
+            "Top",
+        )
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+        let a = sim.signal("a");
+        let y = sim.signal("y");
+        for value in [0u8, 1, 0] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(y), value.into());
+        }
+        let mismatch = source.replace(&format!("case ({selector})"), "case (3'b111)");
+        assert!(four_state_cranelift_build_error(&mismatch).contains("latch inference"));
+    }
+}
+
+#[test]
+fn function_early_returns_without_else_preserve_continuations() {
+    for (body, expected) in [
+        ("if (c) return 1; return 0;", [0u8, 0, 1, 1]),
+        (
+            "x = 2; if (c) begin if (d) return 9; x = 4; end
+          x = x + 1; return x;",
+            [3, 3, 5, 9],
+        ),
+        (
+            "case (c) 1: begin if (d) return 9; x = 4; end
+          default: x = 2; endcase return x;",
+            [2, 2, 4, 9],
+        ),
+    ] {
+        let source = format!(
+            "module Top(input logic c, d, output logic [3:0] y);
+             function automatic logic [3:0] f(input logic c, d);
+             logic [3:0] x; {body} endfunction
+             assign y = f(c, d); endmodule"
+        );
+        let mut sim =
+            Simulator::from_sv_sources(vec![(&source, Path::new("early_return.sv"))], "Top")
+                .build_cranelift()
+                .unwrap();
+        let c = sim.signal("c");
+        let d = sim.signal("d");
+        let y = sim.signal("y");
+        for (input, expected) in expected.into_iter().enumerate() {
+            sim.modify(|io| {
+                io.set(c, (input >> 1) as u8);
+                io.set(d, (input & 1) as u8);
+            })
+            .unwrap();
+            assert_eq!(sim.get(y), expected.into(), "{body}, {input}");
+        }
+    }
+}
+
+#[test]
+fn enum_dependent_aliases_preserve_parameter_widths() {
+    // An unsized signed 3 becomes -1 after a two-bit size cast, giving
+    // [-1:0]. An unsigned operand instead gives [3:0].
+    for (bound, signing, expected) in [
+        ("3", "", 0x02u8),
+        ("3", "signed", 0xfe),
+        ("32'd3", "", 0x0a),
+        ("32'd3", "signed", 0xfa),
+    ] {
+        let source = format!(
+            "module Top(output logic [7:0] y);
+             typedef enum logic [1:0] {{ W = 2 }} E;
+             typedef logic {signing} [W'({bound}):0] word_t;
+             localparam word_t P = 4'b1010;
+             assign y = P;
+             endmodule"
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("enum_alias_parameter.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap();
+        let y = sim.signal("y");
         assert_eq!(sim.get(y), expected.into());
     }
 }
