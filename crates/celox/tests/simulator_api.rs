@@ -249,7 +249,6 @@ assign out = x;
 
     fn test_tick_by_id_validates_before_ticking(sim) {
         @omit_veryl;
-        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 clk: input clock,

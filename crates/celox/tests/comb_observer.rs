@@ -8,7 +8,7 @@ mod test_utils;
 all_backends! {
 fn test_comb_display_preserves_argument_value_before_later_output_writeback(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -44,7 +44,7 @@ module Top (
 
 fn test_comb_display_preserves_unbound_argument_with_local_bindings(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -87,7 +87,7 @@ module Top (
 
 fn test_comb_display_arguments_observe_output_call_writeback_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -122,7 +122,7 @@ module Top (
 
 fn test_comb_callee_observer_inputs_follow_output_writeback_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -166,7 +166,7 @@ module Top (
 
 fn test_comb_callee_observer_snapshots_formal_before_later_actual_writeback(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -209,7 +209,7 @@ module Top (
 
 fn test_comb_callee_observer_sees_actual_output_writeback_in_module_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -250,7 +250,7 @@ module Top (
 
 fn test_comb_callee_observer_converts_two_state_formal(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -284,7 +284,7 @@ module Top (
 
 fn test_comb_output_destination_observer_uses_return_aware_loop_value(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic,
@@ -337,7 +337,7 @@ module Top (
 
 fn test_comb_runtime_effect_inside_if_condition_is_collected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -381,7 +381,7 @@ module Top (
 
 fn test_comb_condition_runtime_effect_respects_short_circuit(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     and_enable: input logic,
@@ -433,7 +433,7 @@ module Top (
 
 fn test_comb_runtime_effect_inside_case_target_is_collected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<2>,
@@ -478,7 +478,7 @@ module Top (
 
 fn test_comb_runtime_effect_inside_assignment_destination_is_collected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     sel: input logic<2>,
@@ -520,7 +520,7 @@ module Top (
 
 fn test_comb_runtime_effect_inside_value_system_statement_is_collected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -558,7 +558,7 @@ module Top (
 
 fn test_comb_observer_after_case_uses_selected_arm_store(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     sel: input logic<2>,
@@ -590,7 +590,7 @@ module Top (
 
 fn test_comb_runtime_effect_inside_loop_bound_is_collected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -634,7 +634,7 @@ module Top (
 
 fn test_comb_display_follows_always_comb_sensitivity_after_settle(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<2>,
@@ -686,7 +686,7 @@ module Top (
 
 fn test_comb_display_survives_dead_store_elimination(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -727,7 +727,7 @@ module Top (
 
 fn test_comb_constant_display_runs_on_initial_eval_only(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -759,7 +759,7 @@ module Top (
 
 fn test_comb_constant_fatal_assert_runs_on_initial_eval(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top {
     always_comb {
@@ -788,7 +788,7 @@ module Top {
 }
 
 fn test_veryl_adapter_preserves_fatal_from_initial_settle(sim) {
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top {
     always_comb {
@@ -831,7 +831,7 @@ module Top (
 }
 
 fn test_veryl_adapter_does_not_parse_user_assertion_as_true_loop(sim) {
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top {
     always_comb {
@@ -855,7 +855,7 @@ module Top {
 
 fn test_comb_sensitive_display_runs_on_initial_eval(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -880,7 +880,7 @@ module Top (
 
 fn test_comb_sensitive_fatal_assert_runs_on_initial_eval(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -909,7 +909,7 @@ module Top (
 
 fn test_comb_runtime_event_drain_settles_dirty_comb_before_reading_events(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -1130,7 +1130,7 @@ module Top (
 
 fn test_comb_assert_continue_follows_always_comb_sensitivity_after_settle(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<2>,
@@ -1181,7 +1181,7 @@ module Top (
 
 fn test_comb_assert_fatal_stops_comb_eval_and_keeps_event(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -1218,7 +1218,7 @@ module Top (
 
 fn test_comb_assert_fatal_inactive_site_does_not_error(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -1253,7 +1253,7 @@ module Top (
 
 fn test_comb_display_pending_events_drain_before_later_ff_events(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -1299,7 +1299,7 @@ module Top (
 
 fn test_comb_display_ff_triggered_comb_only_captures_active_sites(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -1351,7 +1351,7 @@ module Top (
 
 fn test_comb_display_tracks_downstream_comb_settle_sensitivity(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -1387,7 +1387,7 @@ module Top (
 
 fn test_comb_display_coalesces_sensitive_changes_before_observer_executes(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     src: input logic<8>,
@@ -1439,7 +1439,7 @@ fn test_comb_display_inside_writer_reactivates_after_assign_chain(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop: x[0] and x[1] have
     // non-overlapping longest static prefixes and are independent SV writers.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1481,7 +1481,7 @@ module Top (
 
 fn test_comb_display_inside_writer_reactivates_through_scalar_assign_chain(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1523,7 +1523,7 @@ module Top (
 fn test_comb_display_inside_writer_reactivates_after_multi_stage_assign_chain(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop for independent bits.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1566,7 +1566,7 @@ module Top (
 fn test_comb_display_inside_writer_preserves_ordered_downstream_reactivations(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop for independent bits.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1610,7 +1610,7 @@ module Top (
 
 fn test_comb_display_inside_writer_reactivates_through_dynamic_index_read(sim) {
     @omit_veryl;
-    @ignore_on(native, cranelift, wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1666,7 +1666,7 @@ module Top (
 fn test_comb_display_guard_reactivates_after_assign_chain_changes_guard(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop for independent bits.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1704,7 +1704,7 @@ module Top (
 fn test_comb_assert_fatal_reactivates_after_assign_chain_changes_assert_input(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop for independent bits.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1746,7 +1746,7 @@ module Top (
 fn test_comb_multiple_observers_inside_writer_reactivate_in_statement_order(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop for independent bits.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1801,7 +1801,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_reactivates_after_assign_chain(sim) {
     @omit_veryl;
-    @ignore_on(native, cranelift, wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic,
@@ -1859,7 +1859,7 @@ module Top (
 fn test_comb_display_inside_writer_reactivates_through_instance_port_chain(sim) {
     @omit_veryl;
     // Veryl 0.20.3 falsely reports a CombinationalLoop for independent bits.
-    @ignore_on(native, cranelift, wasm, interp, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Passthrough (
     i: input logic,
@@ -1912,7 +1912,7 @@ module Top (
 
 fn test_comb_display_after_ff_runtime_event_preserves_drain_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -1958,7 +1958,7 @@ module Top (
 
 fn test_comb_display_capture_defers_context_formatting_until_drain(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -1991,7 +1991,7 @@ module Top (
 
 fn test_comb_inactive_display_and_assert_do_not_leak_or_duplicate(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2056,7 +2056,7 @@ module Top (
 
 fn test_comb_multiple_active_captures_skip_inactive_site_between_evals(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2120,7 +2120,7 @@ module Top (
 
 fn test_comb_capture_before_dynamic_for_backedge_keeps_loop_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -2170,7 +2170,7 @@ module Top (
 
 fn test_comb_capture_after_branch_preserves_phi_args(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     sel: input logic,
@@ -2226,7 +2226,7 @@ module Top (
 
 fn test_comb_capture_preserves_wide_four_state_args(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<80>,
@@ -2264,7 +2264,7 @@ module Top (
 
 fn test_comb_display_inside_statement_function_call(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2301,7 +2301,7 @@ module Top (
 
 fn test_outputless_statement_call_after_conditional_return_stays_inactive(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2367,7 +2367,7 @@ module Top (
 
 fn test_outputless_statement_call_after_loop_return_stays_inactive(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2445,7 +2445,7 @@ module Top (
 
 fn test_return_before_dynamic_loop_suppresses_loop_effects(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2499,7 +2499,7 @@ module Top (
 
 fn test_function_loop_with_return_and_break_preserves_effects(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -2555,7 +2555,7 @@ module Top (
 
 fn test_function_break_keeps_post_loop_effect_live(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     value: input logic<8>,
@@ -2639,7 +2639,7 @@ module Top (
 }
 
 fn test_comb_function_nested_array_literals_preserve_each_dimension_order(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     q00: output logic<4>,
@@ -2675,7 +2675,7 @@ module Top (
 }
 
 fn test_comb_function_array_literal_converts_scalar_items_per_element(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     q0: output signed logic<8>,
@@ -2882,7 +2882,7 @@ module Top (
 
 fn test_comb_function_effects_use_typed_array_arguments(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     q: output signed logic<8>,
@@ -2980,7 +2980,7 @@ module Top (
 
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3078,7 +3078,7 @@ module Top (
 
 fn test_comb_display_inside_expression_function_call(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3114,7 +3114,7 @@ module Top (
 
 fn test_comb_assert_inside_function_call_uses_caller_sensitivity(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3165,7 +3165,7 @@ module Top (
 
 fn test_comb_display_keeps_static_unrolled_execution_count(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3206,7 +3206,7 @@ module Top (
 
 fn test_comb_display_uses_statement_position_symbolic_values(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3243,7 +3243,7 @@ module Top (
 
 fn test_comb_display_runtime_excludes_written_lhs_from_sensitivity(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3298,7 +3298,7 @@ module Top (
 
 fn test_comb_display_snapshots_after_dynamic_bit_write_before_later_same_var_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     idx: input logic<3>,
@@ -3351,7 +3351,7 @@ module Top (
 
 fn test_comb_display_snapshots_after_dynamic_array_write_before_later_same_array_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     idx: input logic<2>,
@@ -3407,7 +3407,7 @@ module Top (
 
 fn test_comb_display_snapshots_between_dynamic_writes_to_same_var(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     base: input logic<8>,
@@ -3482,7 +3482,7 @@ module Top (
 
 fn test_comb_display_snapshots_repeated_full_var_writes(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3527,7 +3527,7 @@ module Top (
 
 fn test_comb_display_snapshots_inside_if_branch(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     en: input logic,
@@ -3587,7 +3587,7 @@ module Top (
 
 fn test_comb_display_snapshots_repeated_writes_in_unrolled_loop(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3631,7 +3631,7 @@ module Top (
 
 fn test_comb_display_snapshots_after_function_output_argument(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3678,7 +3678,7 @@ module Top (
 
 fn test_comb_display_snapshots_after_multiple_function_output_arguments(sim) {
     @omit_veryl;
-    @ignore_on(native, cranelift, wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -3729,7 +3729,7 @@ module Top (
 
 fn test_comb_display_snapshots_partial_overlap_position(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     lo: input logic<4>,
@@ -3770,7 +3770,7 @@ module Top (
 
 fn test_comb_display_snapshots_after_dynamic_for(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3812,7 +3812,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_runs_each_iteration(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3865,7 +3865,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_remaps_site_after_prior_comb_event(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3925,7 +3925,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_preserves_repeated_identical_events(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -3962,7 +3962,7 @@ module Top (
 
 fn test_comb_display_inside_dynamic_for_with_multiple_updates_emits_once_per_iteration(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -4016,7 +4016,7 @@ module Top (
 
 fn test_comb_display_preserves_order_around_dynamic_for(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     count: input logic<4>,
@@ -4074,7 +4074,7 @@ module Top (
 
 fn test_comb_display_downstream_wide_store_enables_observer(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<128>,
@@ -4121,7 +4121,7 @@ module Top (
 
 fn test_comb_display_downstream_dynamic_write_crossing_word_boundary(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     idx: input logic<7>,
@@ -4167,7 +4167,7 @@ module Top (
 
 fn test_comb_display_store_coalesce_does_not_enable_unrelated_chunk(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     lo: input logic<8>,
@@ -4214,7 +4214,7 @@ module Top (
 
 fn test_comb_display_ff_to_downstream_comb_store_enables_observer(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -4262,7 +4262,7 @@ module Top (
 
 fn test_comb_display_port_alias_write_enables_downstream_observer(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Child (
     a: input logic<8>,
@@ -4311,7 +4311,7 @@ module Top (
 
 fn test_comb_display_four_state_mask_only_input_change_triggers(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -4367,7 +4367,7 @@ module Top (
 
 fn test_comb_display_unaligned_wide_store_enables_downstream_observer(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<127>,
@@ -4405,7 +4405,7 @@ module Top (
 
 fn test_comb_display_wide_four_state_mask_store_enables_downstream_observer(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<80>,
@@ -4467,7 +4467,7 @@ module Top (
 
 fn test_comb_display_function_output_dynamic_actual_excludes_only_prefix(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     idx: input logic,
@@ -4513,7 +4513,7 @@ module Top (
 
 fn test_comb_display_conditional_write_excludes_lhs_even_on_unwritten_branch(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     sel: input logic,
@@ -4560,7 +4560,7 @@ module Top (
 
 fn test_comb_display_dynamic_port_alias_write_excludes_only_prefix(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Child (
     a: input logic,
@@ -4623,7 +4623,7 @@ module Top (
 
 fn test_comb_display_duplicate_store_alias_keeps_capture_activation(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     a: input logic<8>,
@@ -4664,7 +4664,7 @@ module Top (
 
 fn test_comb_expression_operands_observe_prior_output_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (a: input logic<8>, out: output logic<8>) {
     function write_tmp (x: input logic<8>, y: output logic<8>) -> logic<8> {
@@ -4695,7 +4695,7 @@ module Top (a: input logic<8>, out: output logic<8>) {
 
 fn test_comb_ternary_collects_only_executed_runtime_arm(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (sel: input logic, a: input logic<8>, b: input logic<8>, out: output logic<8>) {
     function left (x: input logic<8>) -> logic<8> {
@@ -4735,7 +4735,7 @@ module Top (sel: input logic, a: input logic<8>, b: input logic<8>, out: output 
 
 fn test_comb_runtime_effect_in_nested_function_actual_is_detected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (a: input logic<8>, out: output logic<8>) {
     function inner (x: input logic<8>) -> logic<8> {
@@ -4763,7 +4763,7 @@ module Top (a: input logic<8>, out: output logic<8>) {
 
 fn test_comb_runtime_effect_in_function_output_destination_is_detected(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (index: input logic<2>, value: input logic<8>, out: output logic<8>) {
     function choose_index (
@@ -4807,7 +4807,7 @@ module Top (index: input logic<2>, value: input logic<8>, out: output logic<8>) 
 
 fn test_comb_if_merge_preserves_selected_output_write_for_later_observer(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
     function set_tmp (x: input logic<8>, y: output logic<8>) {
@@ -4849,7 +4849,7 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
 
 fn test_comb_function_loop_bounds_apply_output_effects_left_to_right(sim) {
     // Veryl 0.20.3 executes the design but drops the function output effects.
-    @ignore_on(wasm, veryl, sv);
+    @ignore_on(veryl, sv);
     @build Simulator::builder(r#"
 module Top (value: input logic<4>, out: output logic<8>) {
     function start_bound (x: input logic<4>, seen: output logic<8>) -> logic<4> {
@@ -4879,7 +4879,7 @@ module Top (value: input logic<4>, out: output logic<8>) {
 
 fn test_comb_function_loop_skips_conditions_after_break(sim) {
     // Veryl 0.20.3 executes the design but drops the function output effects.
-    @ignore_on(wasm, veryl, sv);
+    @ignore_on(veryl, sv);
     @build Simulator::builder(r#"
 module Top (
     stop: input logic,
@@ -4940,7 +4940,7 @@ module Top (
 
 fn test_comb_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     value: input logic<8>,
@@ -4993,7 +4993,7 @@ module Top (
 
 fn test_comb_outputless_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     value: input logic<8>,
@@ -5044,7 +5044,7 @@ module Top (
 
 fn test_comb_return_aware_function_loop_collects_bound_effects(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (value: input logic<8>, out: output logic<8>) {
     function bound (x: input logic<8>, seen: output logic<8>) -> logic<2> {
@@ -5082,7 +5082,7 @@ module Top (value: input logic<8>, out: output logic<8>) {
 
 fn test_comb_variable_indices_observe_prior_index_output_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (value: input logic, out: output logic) {
     function set_index (x: input logic, seen: output logic) -> logic {
@@ -5116,7 +5116,7 @@ module Top (value: input logic, out: output logic) {
 
 fn test_comb_function_loop_bound_write_is_guarded_after_return(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     skip: input logic,
@@ -5165,7 +5165,7 @@ module Top (
 
 fn test_comb_concat_destination_observes_prior_destination_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (trigger: input logic, out: output logic<2>) {
     function observe (x: input logic) -> logic {
@@ -5192,7 +5192,7 @@ module Top (trigger: input logic, out: output logic<2>) {
 
 fn test_comb_function_output_concat_observes_prior_destination_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (trigger: input logic, out: output logic<2>) {
     function observe (x: input logic) -> logic {

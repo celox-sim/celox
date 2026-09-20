@@ -103,7 +103,6 @@ fn test_ff_statement_after_if_reset_keeps_source_order(sim) {
 }
 
 fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -150,7 +149,7 @@ fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
 
 fn test_ff_runtime_display_and_assert_continue(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, a: input logic<8>, q: output logic<8>) {
             always_ff (clk) {
@@ -227,7 +226,7 @@ fn test_ff_assert_message_output_argument_is_eager(sim) {
 
 fn test_ff_assert_message_runtime_effect_is_eager(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, ok: input logic, d: input logic<8>) {
             function message_value (x: input logic<8>) -> logic<8> {
@@ -279,7 +278,7 @@ fn test_ff_assert_message_runtime_effect_is_eager(sim) {
 
 fn test_ff_unknown_ternary_retains_then_arm_output_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -338,7 +337,7 @@ fn test_ff_unknown_ternary_retains_then_arm_output_state(sim) {
 
 fn test_ff_ternary_runtime_effect_only_evaluates_selected_arm(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, choose: input logic, q: output logic<8>) {
             function observed_value (x: input logic<8>) -> logic<8> {
@@ -376,7 +375,7 @@ fn test_ff_ternary_runtime_effect_only_evaluates_selected_arm(sim) {
 
 fn test_ff_effectful_function_input_is_evaluated_once(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
             function inner (x: input logic<8>) -> logic<8> {
@@ -417,7 +416,7 @@ fn test_ff_effectful_function_input_is_evaluated_once(sim) {
 
 fn test_ff_assert_message_args_preserve_left_to_right_snapshots(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, effect: output logic<8>) {
             function update (
@@ -450,7 +449,7 @@ fn test_ff_assert_message_args_preserve_left_to_right_snapshots(sim) {
 
 fn test_ff_runtime_effect_function_snapshots_input_that_aliases_output(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, effect: output logic<8>, q: output logic<8>) {
             function observed (
@@ -486,7 +485,7 @@ fn test_ff_runtime_effect_function_snapshots_input_that_aliases_output(sim) {
 
 fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, ok: input logic, d: input logic<8>) {
             function observed_value (x: input logic<8>) -> logic<8> {
@@ -527,7 +526,7 @@ fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
 
 fn test_ff_statement_function_materializes_effectful_case_controls(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>) {
             function observed (
@@ -572,7 +571,7 @@ fn test_ff_statement_function_materializes_effectful_case_controls(sim) {
 
 fn test_ff_case_controls_apply_nested_output_writes_to_function_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -633,7 +632,7 @@ fn test_ff_case_controls_apply_nested_output_writes_to_function_state(sim) {
 
 fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>) {
             function observed (
@@ -673,7 +672,7 @@ fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
 
 fn test_ff_assignment_snapshots_dynamic_rhs_access(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>, q: output logic) {
             function observed (value: input logic<8>) -> logic {
@@ -709,7 +708,7 @@ fn test_ff_assignment_snapshots_dynamic_rhs_access(sim) {
 
 fn test_ff_assignment_substitutes_through_evaluating_system_function(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
             function observed (value: input logic<8>) -> logic<8> {
@@ -745,7 +744,7 @@ fn test_ff_assignment_substitutes_through_evaluating_system_function(sim) {
 
 fn test_ff_if_snapshots_dynamic_predicate_before_state_merge(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<2>, q: output logic) {
             function observed (value: input logic<2>) -> logic {
@@ -784,7 +783,7 @@ fn test_ff_if_snapshots_dynamic_predicate_before_state_merge(sim) {
 
 fn test_ff_case_snapshots_dynamic_target_before_state_merge(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<2>, q: output logic) {
             function observed (value: input logic<2>) -> logic {
@@ -824,7 +823,7 @@ fn test_ff_case_snapshots_dynamic_target_before_state_merge(sim) {
 
 fn test_ff_case_merges_nested_output_state_from_selected_arm(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -901,7 +900,7 @@ fn test_ff_case_merges_nested_output_state_from_selected_arm(sim) {
 
 fn test_ff_variable_select_captures_nested_output(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -957,7 +956,7 @@ fn test_ff_variable_select_captures_nested_output(sim) {
 
 fn test_ff_effectful_assignment_executes_only_on_selected_if_path(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1019,7 +1018,7 @@ fn test_ff_effectful_assignment_executes_only_on_selected_if_path(sim) {
 
 fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1075,7 +1074,7 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
 
 fn test_ff_case_after_conditional_return_preserves_returned_path(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1164,7 +1163,7 @@ fn test_ff_case_after_conditional_return_preserves_returned_path(sim) {
 
 fn test_ff_statement_call_evaluates_effectful_inputs(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>) {
             function observed (x: input logic<8>) -> logic<8> {
@@ -1200,7 +1199,7 @@ fn test_ff_statement_call_evaluates_effectful_inputs(sim) {
 
 fn test_ff_top_level_statement_call_evaluates_discarded_effectful_input(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>) {
             function observed (x: input logic<8>) -> logic<8> {
@@ -1231,7 +1230,7 @@ fn test_ff_top_level_statement_call_evaluates_discarded_effectful_input(sim) {
 
 fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1280,7 +1279,7 @@ fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
 
 fn test_ff_nested_output_to_module_variable_survives_runtime_function(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1328,7 +1327,7 @@ fn test_ff_nested_output_to_module_variable_survives_runtime_function(sim) {
 
 fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1382,7 +1381,7 @@ fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
 }
 
 fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1415,7 +1414,7 @@ fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
 }
 
 fn test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write(sim) {
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1453,7 +1452,7 @@ fn test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write(
 
 fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1749,7 +1748,7 @@ fn test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable(s
 
 fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
             function read_global () -> logic<8> {
@@ -1821,7 +1820,7 @@ fn test_ff_dynamic_nonlocal_store_follows_pending_whole_write(sim) {
 
 fn test_ff_guarded_system_task_merges_definition_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1884,7 +1883,7 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
 
 fn test_ff_nonlocal_source_ternary_preserves_unknown_merge(sim) {
     // Veryl 0.20.3 selects one arm instead of merging an X/Z condition.
-    @ignore_on(wasm, veryl, sv);
+    @ignore_on(veryl, sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1918,7 +1917,7 @@ fn test_ff_nonlocal_source_ternary_preserves_unknown_merge(sim) {
 
 fn test_ff_statement_helper_dynamic_nonlocal_copyout_is_observable(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1957,7 +1956,7 @@ fn test_ff_statement_helper_dynamic_nonlocal_copyout_is_observable(sim) {
 
 fn test_ff_nested_dynamic_nonlocal_store_flushes_pending_outer_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1997,7 +1996,7 @@ fn test_ff_nested_dynamic_nonlocal_store_flushes_pending_outer_state(sim) {
 
 fn test_ff_retained_dynamic_copyout_does_not_repeat_nonlocal_body_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2066,7 +2065,7 @@ fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
 
 fn test_ff_guarded_runtime_expression_merges_definition_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2125,7 +2124,7 @@ fn test_ff_guarded_runtime_expression_merges_definition_state(sim) {
 
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2238,7 +2237,7 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
 
 fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
     // Veryl 0.20.3 exposes the same-edge write to a later FF read.
-    @ignore_on(wasm, veryl, sv);
+    @ignore_on(veryl, sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2288,7 +2287,7 @@ fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
 
 fn test_ff_pure_predicate_output_updates_outer_function_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2339,7 +2338,7 @@ fn test_ff_pure_predicate_output_updates_outer_function_state(sim) {
 
 fn test_ff_nested_wrapper_predicate_output_updates_caller_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2397,7 +2396,7 @@ fn test_ff_nested_wrapper_predicate_output_updates_caller_state(sim) {
 
 fn test_ff_nested_call_predicate_uses_pre_copyout_input(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2457,7 +2456,7 @@ fn test_ff_nested_call_predicate_uses_pre_copyout_input(sim) {
 
 fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2511,7 +2510,7 @@ fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
 
 fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
     // Veryl 0.20.3 evaluates the $bits/$size operand and applies its effects.
-    @ignore_on(wasm, veryl, sv);
+    @ignore_on(veryl, sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2556,7 +2555,7 @@ fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
 
 fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2594,7 +2593,7 @@ fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
 
 fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2647,7 +2646,7 @@ fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
 
 fn test_ff_nested_statement_call_copies_outputs_in_declaration_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2691,7 +2690,7 @@ fn test_ff_nested_statement_call_copies_outputs_in_declaration_order(sim) {
 
 fn test_ff_nested_statement_call_coerces_output_to_actual_width(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2731,7 +2730,7 @@ fn test_ff_nested_statement_call_coerces_output_to_actual_width(sim) {
 
 fn test_ff_state_only_statement_call_materializes_nested_input_output(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2791,7 +2790,7 @@ fn test_ff_state_only_statement_call_materializes_nested_input_output(sim) {
 
 fn test_ff_statement_call_copies_outputs_in_declaration_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2844,7 +2843,7 @@ fn test_ff_statement_call_copies_outputs_in_declaration_order(sim) {
 
 fn test_ff_composite_runtime_arg_preserves_left_to_right_snapshot(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2894,7 +2893,7 @@ fn test_ff_composite_runtime_arg_preserves_left_to_right_snapshot(sim) {
 
 fn test_ff_nested_call_inputs_capture_outputs_in_declaration_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2962,7 +2961,7 @@ fn test_ff_nested_call_inputs_capture_outputs_in_declaration_order(sim) {
 
 fn test_ff_nested_call_freezes_all_outputs_before_copy_out(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3011,7 +3010,7 @@ fn test_ff_nested_call_freezes_all_outputs_before_copy_out(sim) {
 
 fn test_ff_nested_call_output_preserves_conditional_early_return_path(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3086,7 +3085,7 @@ fn test_ff_nested_call_output_preserves_conditional_early_return_path(sim) {
 
 fn test_ff_short_circuit_state_reuses_evaluated_lhs(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3162,7 +3161,7 @@ fn test_ff_short_circuit_state_reuses_evaluated_lhs(sim) {
 
 fn test_ff_concatenation_effects_follow_source_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3230,7 +3229,7 @@ fn test_ff_concatenation_effects_follow_source_order(sim) {
 
 fn test_ff_materialized_formal_slice_uses_expression_context(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>, q: output logic<16>) {
             function inner (x: input logic<8>) -> logic<8> {
@@ -3265,7 +3264,7 @@ fn test_ff_materialized_formal_slice_uses_expression_context(sim) {
 
 fn test_ff_runtime_event_reads_updated_formal_slice(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3307,7 +3306,7 @@ fn test_ff_runtime_event_reads_updated_formal_slice(sim) {
 
 fn test_ff_case_assignment_is_visible_to_later_runtime_event(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3371,7 +3370,7 @@ fn test_ff_case_assignment_is_visible_to_later_runtime_event(sim) {
 
 fn test_ff_statement_function_with_output_emits_runtime_effect(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>, effect: output logic<8>) {
             function observed (
@@ -3405,7 +3404,7 @@ fn test_ff_statement_function_with_output_emits_runtime_effect(sim) {
 
 fn test_ff_effectful_if_predicate_is_evaluated_once(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3451,7 +3450,7 @@ fn test_ff_effectful_if_predicate_is_evaluated_once(sim) {
 
 fn test_ff_nested_output_is_captured_through_signed_cast(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3500,7 +3499,7 @@ fn test_ff_nested_output_is_captured_through_signed_cast(sim) {
 
 fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
             function observed (
@@ -3614,7 +3613,7 @@ fn test_ff_pure_input_is_snapshotted_before_later_effectful_input(sim) {
 
 fn test_ff_runtime_event_arguments_use_per_argument_state(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3664,7 +3663,7 @@ fn test_ff_runtime_event_arguments_use_per_argument_state(sim) {
 
 fn test_ff_runtime_event_formal_uses_declared_type(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3701,7 +3700,7 @@ fn test_ff_runtime_event_formal_uses_declared_type(sim) {
 
 fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3743,7 +3742,7 @@ fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
 }
 
 fn test_ff_effectful_array_item_output_is_not_a_read_alias(sim) {
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3780,7 +3779,7 @@ fn test_ff_effectful_array_item_output_is_not_a_read_alias(sim) {
 
 fn test_ff_symbolic_runtime_input_uses_declared_formal_type(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3812,7 +3811,7 @@ fn test_ff_symbolic_runtime_input_uses_declared_formal_type(sim) {
 
 fn test_ff_runtime_effectful_return_uses_declared_signed_type(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3857,7 +3856,7 @@ fn test_ff_runtime_effectful_return_uses_declared_signed_type(sim) {
 
 fn test_ff_runtime_effectful_output_uses_declared_formal_type(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3905,7 +3904,7 @@ fn test_ff_runtime_effectful_output_uses_declared_formal_type(sim) {
 
 fn test_ff_runtime_effectful_merge_preserves_signed_return_type(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3954,7 +3953,7 @@ fn test_ff_runtime_effectful_merge_preserves_signed_return_type(sim) {
 
 fn test_ff_runtime_effectful_local_assignment_uses_declared_type(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3995,7 +3994,7 @@ fn test_ff_runtime_effectful_local_assignment_uses_declared_type(sim) {
 
 fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -4030,7 +4029,7 @@ fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
 
 fn test_ff_runtime_events_format_verilog_radices(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, a: input logic<8>) {
             always_ff (clk) {
@@ -4054,7 +4053,7 @@ fn test_ff_runtime_events_format_verilog_radices(sim) {
 
 fn test_ff_runtime_events_preserve_four_state_args(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, a: input logic<4>) {
             always_ff (clk) {
@@ -4088,7 +4087,7 @@ fn test_ff_runtime_events_preserve_four_state_args(sim) {
 
 fn test_ff_runtime_events_support_design_sized_arg_count(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -4130,7 +4129,7 @@ fn test_ff_runtime_events_support_design_sized_arg_count(sim) {
 
 fn test_ff_runtime_events_support_wide_four_state_args(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, a: input logic<80>) {
             always_ff (clk) {
@@ -4257,7 +4256,7 @@ fn test_runtime_event_drain_handle_is_exclusive(sim) {
 
 fn test_ff_runtime_fatal_assert_records_event(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, a: input logic<8>) {
             always_ff (clk) {
@@ -4282,7 +4281,7 @@ fn test_ff_runtime_fatal_assert_records_event(sim) {
 
 fn test_ff_message_less_runtime_fatal_assert_uses_default_message(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock) {
             always_ff (clk) {
@@ -4726,7 +4725,6 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
 }
 
 fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
-    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5361,7 +5359,7 @@ fn test_ff_struct_constructor_expression_literal_order(sim) {
 }
 
 fn test_ff_struct_constructor_signed_member_extension(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6284,7 +6282,7 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) 
 }
 
 fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim) {
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6320,7 +6318,7 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim)
 
 fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,

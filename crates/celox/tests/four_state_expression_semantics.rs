@@ -6,7 +6,6 @@ mod test_utils;
 
 all_backends! {
     fn indeterminate_short_circuit_lhs_executes_effectful_rhs(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
@@ -36,8 +35,10 @@ module Top (
         })
         .unwrap();
 
-        assert_eq!(sim.get(sim.signal("and_output")), 1u8.into());
-        assert_eq!(sim.get(sim.signal("or_output")), 1u8.into());
+        let signal = sim.signal("and_output");
+        assert_eq!(sim.get(signal), 1u8.into());
+        let signal = sim.signal("or_output");
+        assert_eq!(sim.get(signal), 1u8.into());
     }
 
     fn indeterminate_ternary_executes_effectful_arms_in_order(sim) {
@@ -97,7 +98,6 @@ module Top (
     }
 
     fn logical_unknown_truth_table_matches_comb_and_ff(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
@@ -151,15 +151,17 @@ module Top (
                 }
 
                 let zero_and = format!("{prefix}_zero_and");
+                let signal = sim.signal(&zero_and);
                 assert_eq!(
-                    sim.get_four_state(sim.signal(&zero_and)),
+                    sim.get_four_state(signal),
                     (BigUint::from(0u8), BigUint::from(0u8)),
                     "{zero_and}, rhs={label}",
                 );
 
                 let one_or = format!("{prefix}_one_or");
+                let signal = sim.signal(&one_or);
                 assert_eq!(
-                    sim.get_four_state(sim.signal(&one_or)),
+                    sim.get_four_state(signal),
                     (BigUint::from(1u8), BigUint::from(0u8)),
                     "{one_or}, rhs={label}",
                 );
@@ -228,7 +230,6 @@ module Top (
     }
 
     fn wide_logical_unknown_truth_table_uses_dominant_values(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
@@ -272,8 +273,9 @@ module Top (
             for prefix in ["c", "f"] {
                 for suffix in ["and_one", "or_zero"] {
                     let name = format!("{prefix}_{suffix}");
+                    let signal = sim.signal(&name);
                     assert_eq!(
-                        sim.get_four_state(sim.signal(&name)),
+                        sim.get_four_state(signal),
                         (BigUint::from(1u8), BigUint::from(1u8)),
                         "{name}, {label}",
                     );
@@ -436,7 +438,6 @@ module Top (
     }
 
     fn ff_procedural_control_uses_known_nonzero_truth(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
@@ -506,14 +507,16 @@ module Top (
                 "function_result",
                 "function_side",
             ] {
+                let signal = sim.signal(name);
                 assert_eq!(
-                    sim.get_four_state(sim.signal(name)),
+                    sim.get_four_state(signal),
                     (BigUint::from(1u8), BigUint::from(0u8)),
                     "{name}, known one plus {label}",
                 );
             }
+            let signal = sim.signal("case_result");
             assert_eq!(
-                sim.get_four_state(sim.signal("case_result")),
+                sim.get_four_state(signal),
                 (BigUint::from(0u8), BigUint::from(0u8)),
                 "an unknown equality must not select a case arm ({label})",
             );
@@ -531,8 +534,9 @@ module Top (
                 "function_result",
                 "function_side",
             ] {
+                let signal = sim.signal(name);
                 assert_eq!(
-                    sim.get_four_state(sim.signal(name)),
+                    sim.get_four_state(signal),
                     (BigUint::from(0u8), BigUint::from(0u8)),
                     "{name}, only {label}",
                 );
@@ -545,8 +549,9 @@ module Top (
         })
         .unwrap();
         sim.tick(clk).unwrap();
+        let signal = sim.signal("case_result");
         assert_eq!(
-            sim.get_four_state(sim.signal("case_result")),
+            sim.get_four_state(signal),
             (BigUint::from(1u8), BigUint::from(0u8)),
         );
     }
@@ -623,7 +628,7 @@ module Top (
 
     fn ff_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -669,7 +674,7 @@ module Top (
 
     fn comb_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     cond: input logic<130>,

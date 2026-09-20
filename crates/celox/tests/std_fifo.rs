@@ -1,4 +1,4 @@
-use celox::{SimBackend, Simulator};
+use celox::Simulator;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -47,34 +47,37 @@ fn fifo_source() -> String {
     )
 }
 
-fn reset<B: SimBackend>(sim: &mut Simulator<B>) {
-    let clk = sim.event("clk");
-    let rst = sim.signal("rst");
-    let i_clear = sim.signal("i_clear");
-    let i_push = sim.signal("i_push");
-    let i_pop = sim.signal("i_pop");
-    sim.modify(|io| {
-        io.set(rst, 0u8);
-        io.set(i_clear, 0u8);
-        io.set(i_push, 0u8);
-        io.set(i_pop, 0u8);
-    })
-    .unwrap();
-    sim.tick(clk).unwrap();
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
-    // One more tick to settle flags after reset
-    sim.tick(clk).unwrap();
+// Expand against each backend so the Veryl adapter can share the reset sequence.
+macro_rules! reset {
+    ($sim:expr) => {{
+        let sim = $sim;
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let i_clear = sim.signal("i_clear");
+        let i_push = sim.signal("i_push");
+        let i_pop = sim.signal("i_pop");
+        sim.modify(|io| {
+            io.set(rst, 0u8);
+            io.set(i_clear, 0u8);
+            io.set(i_push, 0u8);
+            io.set(i_pop, 0u8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(rst, 1u8)).unwrap();
+        // One more tick to settle flags after reset
+        sim.tick(clk).unwrap();
+    }};
 }
 
 all_backends! {
 
 // After reset, FIFO should be empty
 fn test_fifo_initial_empty(sim) {
-    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
-    reset(&mut sim);
+    reset!(&mut sim);
 
     let o_empty = sim.signal("o_empty");
     let o_full = sim.signal("o_full");
@@ -91,11 +94,10 @@ fn test_fifo_initial_empty(sim) {
 
 // Push one item, verify not empty, pop it back
 fn test_fifo_push_pop_single(sim) {
-    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
-    reset(&mut sim);
+    reset!(&mut sim);
 
     let clk = sim.event("clk");
     let i_push = sim.signal("i_push");
@@ -137,11 +139,10 @@ fn test_fifo_push_pop_single(sim) {
 
 // Push until full (DEPTH=4), verify full flag
 fn test_fifo_full(sim) {
-    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
-    reset(&mut sim);
+    reset!(&mut sim);
 
     let clk = sim.event("clk");
     let i_push = sim.signal("i_push");
@@ -167,11 +168,10 @@ fn test_fifo_full(sim) {
 
 // Push 4 items then pop all, verify FIFO ordering
 fn test_fifo_ordering(sim) {
-    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
-    reset(&mut sim);
+    reset!(&mut sim);
 
     let clk = sim.event("clk");
     let i_push = sim.signal("i_push");
@@ -207,11 +207,10 @@ fn test_fifo_ordering(sim) {
 
 // Clear resets the FIFO to empty
 fn test_fifo_clear(sim) {
-    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
-    reset(&mut sim);
+    reset!(&mut sim);
 
     let clk = sim.event("clk");
     let i_push = sim.signal("i_push");

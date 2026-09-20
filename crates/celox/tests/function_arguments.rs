@@ -313,7 +313,7 @@ fn test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body(sim)
 
 fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
     @omit_veryl;
-    @ignore_on(wasm, sv);
+    @ignore_on(sv);
     @build Simulator::builder(r#"
         module Top (
             d: input logic<8>, copied: output logic<16>,
