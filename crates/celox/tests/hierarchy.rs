@@ -276,9 +276,9 @@ assign seen_o = seen;
 
     fn test_instance_input_function_output_preserves_runtime_display(sim) {
         // veryl-simulator does not write the connection's function output
-        // actual back; wasm does not currently expose runtime event draining.
+        // actual back.
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (
 i: input logic,
@@ -371,9 +371,9 @@ assign tmp_o = tmp;
 
     fn test_instance_output_dynamic_index_preserves_runtime_display(sim) {
         // veryl-simulator does not write the dynamic connection index call's
-        // output actual back; wasm does not currently expose runtime events.
+        // output actual back.
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic, o: output logic) {
 assign o = i;
@@ -421,7 +421,7 @@ assign tmp_o = tmp;
 
     fn test_instance_output_index_runtime_effect_tracks_plain_sibling_source(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic, o: output logic) {
 assign o = i;
@@ -533,7 +533,7 @@ assign tmp_o = tmp;
 
     fn test_instance_output_concat_runtime_effect_observes_prior_slice(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic<2>, o: output logic<2>) {
 assign o = i;
@@ -575,7 +575,7 @@ assign tmp_o = tmp;
 
     fn test_instance_output_index_runtime_effect_triggers_on_child_change(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic, o: output logic) {
 assign o = i;
@@ -619,7 +619,7 @@ assign mem_o = mem;
 
     fn test_instance_output_index_effect_triggers_when_two_state_parent_is_unchanged(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (mode: input logic<2>, o: output logic) {
 always_comb {
@@ -909,7 +909,6 @@ assign out = mem;
 
 fn test_dynamic_prefix_colon_output_port_allows_zero_lsb(sim) {
     @omit_veryl;
-    @ignore_on(sv);
         @setup { let code = r#"
 module Child (a: input logic<8>, y: output logic<8>) {
 assign y = a;

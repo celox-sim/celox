@@ -623,7 +623,7 @@ module Top (
 
     fn ff_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -669,7 +669,7 @@ module Top (
 
     fn comb_assert_uses_procedural_four_state_truth(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     cond: input logic<130>,
