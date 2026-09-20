@@ -10,9 +10,10 @@
 //! live memory image across without any translation because both tiers run
 //! against the same finalized layout.
 //!
-//! Promotion is whole-program: once the compiled tier is adopted it is used
-//! for the remainder of the simulation. The interpreter remains the permanent
-//! fallback whenever background compilation fails, and
+//! Promotion is whole-program. On x86-64, a baseline native image is prepared
+//! first, followed by an optimizing image which replaces it at a safe point.
+//! Both images use the same live state and event buffers. The interpreter
+//! remains the permanent fallback whenever baseline compilation fails, and
 //! [`TierPromotion::Never`] skips background compilation entirely so the
 //! simulation stays interpreted without paying for a worker thread.
 //! [`TierPromotion::AfterSteps`] keeps compiling eagerly but delays adoption
@@ -45,6 +46,7 @@ use num_bigint::BigUint;
 use super::compile_cancel::CompileCancel;
 use super::{
     EventHandle, MemoryLayout, RuntimeEventBuffer, SharedJitCode, SimBackend, SimulatorErrorCode,
+    memory_image::MemoryImage,
 };
 #[cfg(any(
     target_arch = "x86_64",
@@ -146,14 +148,13 @@ impl CompiledTier {
     /// which external views (zero-copy host buffers) may still reference.
     fn adopt(
         code: CompiledCode,
-        mut memory: Vec<u64>,
+        mut memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
-        debug_assert!(memory.capacity() >= code.required_image_words());
-        if memory.len() < code.required_image_words() {
-            // Growth within capacity never reallocates.
-            memory.resize(code.required_image_words(), 0);
+        debug_assert!(memory.capacity_words() >= code.required_image_words());
+        if memory.len_words() < code.required_image_words() {
+            memory.resize_zeroed_within_capacity(code.required_image_words());
         }
         match code {
             CompiledCode::Cranelift(shared) => {
@@ -194,14 +195,59 @@ impl CompiledTier {
 
     fn memory_base_mut(&mut self) -> *mut u8 {
         match self {
-            Self::Jit(jit) => jit.memory_as_mut_ptr().0,
+            Self::Jit(jit) => jit.memory_as_ptr().0.cast_mut(),
             #[cfg(any(
                 target_arch = "x86_64",
                 feature = "arm64-codegen",
                 target_arch = "aarch64"
             ))]
-            Self::Native(native) => native.memory_as_mut_ptr().0,
+            Self::Native(native) => native.memory_as_ptr().0.cast_mut(),
         }
+    }
+
+    /// Logical capacity of the live image in `u64` words.
+    fn memory_word_capacity(&self) -> usize {
+        match self {
+            Self::Jit(jit) => {
+                let (_, size_bytes) = jit.memory_as_ptr();
+                size_bytes.div_ceil(8)
+            }
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Self::Native(native) => native.memory_word_capacity(),
+        }
+    }
+
+    /// Replace a native tier's shared code in place, keeping the live image.
+    /// Returns false when the tier is not native; the caller keeps the
+    /// previous code in that case.
+    fn replace_native_code(&mut self, code: CompiledCode) -> bool {
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        ))]
+        if let CompiledCode::Native(shared) = code {
+            return match self {
+                Self::Native(native) => {
+                    native.replace_shared_code(shared);
+                    true
+                }
+                Self::Jit(_) => false,
+            };
+        }
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        )))]
+        {
+            let _ = code;
+        }
+        false
     }
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
@@ -475,6 +521,10 @@ pub struct TieredBackend {
     /// cancel and join compilation instead of leaking work into later users
     /// of the process (notably subsequent benchmark samples).
     compiler_worker: Option<JoinHandle<()>>,
+    /// Second-stage receiver for a native baseline-pipeline build. After the
+    /// first stage adopts a low-latency baseline image, this receiver yields
+    /// the optimizing image for an in-place shared-code replacement.
+    upgrade_receiver: Option<mpsc::Receiver<Result<CompiledCode, SimulatorError>>>,
     /// Evaluate-only events whose apply phase has not run yet. Promotion is
     /// deferred while this is non-zero so the compiled apply phase always
     /// observes the interpreted evaluate-only results through an intact
@@ -517,6 +567,37 @@ impl TieredBackend {
                 target_arch = "aarch64"
             ))]
             {
+                // The baseline pipeline only pays off when the first stage
+                // will actually be adopted and no codegen trace needs the
+                // optimizing pipeline's diagnostics.
+                if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+                    && !options.trace.native
+                    && !options.trace.mir
+                    && !matches!(
+                        options.tier_promotion,
+                        crate::simulator::TierPromotion::Never
+                    )
+                {
+                    let mut baseline_options = options.clone();
+                    baseline_options.x86_options.baseline = true;
+                    let mut optimizing_options = options.clone();
+                    optimizing_options.x86_options.baseline = false;
+                    return Self::with_two_stage_compiler(
+                        laid_out,
+                        &baseline_options,
+                        optimizing_options,
+                        |laid_out, options, cancel| {
+                            use crate::backend::native::{NativeBackend, SharedNativeCode};
+                            // Safety: the image was produced in-process by the
+                            // Celox compiler above.
+                            let image = NativeBackend::compile_image_with_cancel(
+                                laid_out, options, cancel,
+                            )?;
+                            let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+                            Ok(CompiledCode::Native(shared))
+                        },
+                    );
+                }
                 Self::with_compiler(laid_out, options, |laid_out, options, cancel| {
                     use crate::backend::native::{NativeBackend, SharedNativeCode};
                     // Honor native/MIR tracing requests the same way the
@@ -695,6 +776,137 @@ impl TieredBackend {
             events,
             cancel,
             compiler_worker,
+            upgrade_receiver: None,
+            pending_split_applies: 0,
+            promotion_threshold,
+            interpreted_steps: 0,
+            compiled_steps: 0,
+            promoted_after_interpreted_steps: None,
+            safe_point_polls: 0,
+            split_apply_deferrals: 0,
+            threshold_deferrals: 0,
+            execution_timing: None,
+        }
+    }
+
+    /// Build a tiered simulation whose native worker compiles a low-latency
+    /// baseline image first (`baseline_options`) and then keeps compiling the
+    /// optimizing image (`optimizing_options`) on the same worker thread.
+    ///
+    /// The baseline result adopts exactly like a single-stage build; the
+    /// optimizing result is later swapped in at a scheduler safe point. A
+    /// failed baseline leaves the interpreter as the permanent tier, and a
+    /// failed or cancelled optimizing stage keeps the baseline code.
+    pub(crate) fn with_two_stage_compiler<F>(
+        laid_out: &LaidOutProgram,
+        baseline_options: &SimulatorOptions,
+        optimizing_options: SimulatorOptions,
+        compile: F,
+    ) -> Self
+    where
+        F: Fn(
+                &LaidOutProgram,
+                &SimulatorOptions,
+                &CompileCancel,
+            ) -> Result<CompiledCode, SimulatorError>
+            + Send
+            + 'static,
+    {
+        let mut interp = Box::new(
+            InterpBackend::new(laid_out, baseline_options)
+                .expect("interpreter construction cannot fail for a laid-out program"),
+        );
+        // Two-stage builds must fit both native images inside one
+        // allocation. The baseline image omits the optimizing tier's
+        // cross-unit cleanup, so its spill arenas run larger; reserve double
+        // the single-stage slack before the image can be observed.
+        let len = interp.image_word_len();
+        let slack = len.max(1024) / 4;
+        interp.reserve_image_capacity(len + slack.max(1024));
+        let events = interp
+            .id_to_event_slice()
+            .iter()
+            .map(|ev| TieredEventRef {
+                addr: ev.addr(),
+                id: ev.id(),
+            })
+            .collect();
+
+        let cancel = CompileCancel::new();
+        let worker_cancel = cancel.clone();
+        let (baseline_sender, baseline_receiver) = mpsc::channel();
+        let (upgrade_sender, upgrade_receiver) = mpsc::channel();
+        let background_laid_out = laid_out.clone();
+        let worker_baseline_options = baseline_options.clone();
+        // A failed spawn keeps the interpreter as the permanent tier with the
+        // reason recorded, matching the single-stage background-failure policy.
+        let (promotion, compiler_worker) = match std::thread::Builder::new()
+            .name("celox-jit-compile".to_string())
+            .spawn(move || {
+                let span = tracing::info_span!("celox.tiered.compile", target = "native");
+                span.in_scope(|| {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compile(
+                            &background_laid_out,
+                            &worker_baseline_options,
+                            &worker_cancel,
+                        )
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    });
+                    match &result {
+                        Ok(_) => tracing::info!("tiered baseline compilation completed"),
+                        Err(error) => {
+                            tracing::warn!(error = %error, "tiered baseline compilation failed")
+                        }
+                    }
+                    let ready = result.is_ok();
+                    let delivered = baseline_sender.send(result).is_ok();
+                    // A failed baseline leaves nothing to replace; the
+                    // simulation stays interpreted and the worker retires.
+                    if !delivered || !ready || worker_cancel.is_cancelled() {
+                        return;
+                    }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compile(&background_laid_out, &optimizing_options, &worker_cancel)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    });
+                    match &result {
+                        Ok(_) => tracing::info!("tiered optimizing compilation completed"),
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            "tiered optimizing compilation failed"
+                        ),
+                    }
+                    let _ = upgrade_sender.send(result);
+                });
+            }) {
+            Ok(handle) => (Promotion::Pending(baseline_receiver), Some(handle)),
+            Err(error) => (
+                Promotion::Failed(SimulatorError::new(crate::SimulatorErrorKind::Codegen(
+                    crate::CodegenError::message(format!(
+                        "failed to spawn the background compiler thread: {error}"
+                    )),
+                ))),
+                None,
+            ),
+        };
+
+        let promotion_threshold = match baseline_options.tier_promotion {
+            crate::simulator::TierPromotion::AfterSteps(steps) => steps,
+            _ => 0,
+        };
+
+        Self {
+            phase: Phase::Interpreting(Some(interp)),
+            promotion,
+            events,
+            cancel,
+            compiler_worker,
+            upgrade_receiver: Some(upgrade_receiver),
             pending_split_applies: 0,
             promotion_threshold,
             interpreted_steps: 0,
@@ -765,21 +977,23 @@ impl TieredBackend {
 
     /// Request cancellation of background compilation.
     ///
-    /// The native-tier worker unwinds at its next task boundary and the
-    /// simulation stays on the interpreter permanently; the reason becomes
-    /// retrievable through [`TieredBackend::promotion_error`]. A result that
-    /// already reached the channel (or arrives afterwards, for example from
+    /// The native-tier worker unwinds at its next task boundary. Before the
+    /// first promotion, the simulation stays interpreted and the reason is
+    /// available through [`TieredBackend::promotion_error`]; after baseline
+    /// adoption, cancellation keeps that code running without an upgrade.
+    /// A result that already reached the channel (or arrives afterwards from
     /// a tier that ignores the token) is rejected so cancellation is
     /// honored regardless of compiler timing. Returns whether a background
     /// compilation was still pending, so callers that only want to reclaim
     /// a finished worker can ignore the call cheaply.
     pub fn cancel_background_compilation(&mut self) -> bool {
-        let pending = matches!(self.promotion, Promotion::Pending(_));
+        let promotion_pending = matches!(self.promotion, Promotion::Pending(_));
+        let upgrade_pending = self.upgrade_receiver.take().is_some();
         self.cancel.cancel();
-        if pending {
+        if promotion_pending {
             self.promotion = Promotion::Failed(super::compile_cancel::cancelled_error());
         }
-        pending
+        promotion_pending || upgrade_pending
     }
 
     /// Record one evaluation iteration against the currently active tier.
@@ -835,6 +1049,7 @@ impl TieredBackend {
                 Err(error) => Promotion::Failed(error),
                 Ok(_) => unreachable!("checked above"),
             };
+            self.cancel_background_compilation();
             return;
         };
         // Adoption grows the transferred image within its existing allocation
@@ -853,6 +1068,7 @@ impl TieredBackend {
                         interp.image_word_capacity()
                     ))),
                 ));
+                self.cancel_background_compilation();
                 return;
             }
         }
@@ -911,6 +1127,62 @@ impl TieredBackend {
             tracing::info!("tiered backend adopted generated code");
         }
     }
+
+    /// Swap the adopted native image for the optimizing replacement when a
+    /// baseline-pipeline build finishes its second compilation stage.
+    ///
+    /// Like interpreter promotion, the replacement grows the live image
+    /// within its existing allocation; the allocation never moves, so
+    /// external views stay valid. Failure or cancellation keeps the
+    /// baseline code running for the rest of the simulation.
+    fn maybe_upgrade(&mut self) {
+        if self.cancel.is_cancelled() {
+            self.upgrade_receiver = None;
+            return;
+        }
+        if !matches!(self.phase, Phase::Compiled(_)) || self.pending_split_applies > 0 {
+            return;
+        }
+        let Some(receiver) = self.upgrade_receiver.take() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            // The optimizing stage retired without a result (worker died or
+            // the baseline never adopted): stop polling; the baseline code
+            // runs for the rest of the simulation.
+            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Empty) => {
+                self.upgrade_receiver = Some(receiver);
+                return;
+            }
+        };
+        let code = match result {
+            Ok(code) => code,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "tiered optimizing compilation failed; keeping baseline code"
+                );
+                return;
+            }
+        };
+        let required = code.required_image_words();
+        if let Phase::Compiled(compiled) = &mut self.phase
+            && compiled.memory_word_capacity() < required
+        {
+            tracing::warn!(
+                required_words = required,
+                "tiered optimizing image exceeds the reserved image; keeping baseline code"
+            );
+            return;
+        }
+        if let Phase::Compiled(compiled) = &mut self.phase
+            && compiled.replace_native_code(code)
+        {
+            tracing::info!("tiered backend adopted optimizing native code");
+        }
+    }
 }
 
 impl Drop for TieredBackend {
@@ -927,6 +1199,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.maybe_upgrade();
         self.count_evaluation_for_current_tier();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb(),
@@ -937,6 +1210,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.maybe_upgrade();
         self.count_evaluation_for_current_tier();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_apply_ff_at(
@@ -949,6 +1223,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_comb_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.maybe_upgrade();
         self.count_evaluation_for_current_tier();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_comb_apply_ff_at(
@@ -970,6 +1245,7 @@ impl SimBackend for TieredBackend {
             return (0, Ok(()));
         }
         self.maybe_promote();
+        self.maybe_upgrade();
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => {
                 self.interpreted_steps = self.interpreted_steps.saturating_add(1);
@@ -992,6 +1268,7 @@ impl SimBackend for TieredBackend {
 
     fn eval_only_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
+        self.maybe_upgrade();
         self.count_evaluation_for_current_tier();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.eval_only_ff_at(
@@ -1009,6 +1286,7 @@ impl SimBackend for TieredBackend {
     fn apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         // Never promote between the evaluate-only and apply phases.
         self.maybe_promote();
+        self.maybe_upgrade();
         self.count_evaluation_for_current_tier();
         let result = match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.apply_ff_at(
@@ -1266,6 +1544,34 @@ impl SimBackend for TieredBackend {
                 target_arch = "aarch64"
             ))]
             Phase::Compiled(CompiledTier::Native(native)) => native.memory_as_mut_ptr(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.memory_owner(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.memory_owner(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.memory_owner(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn vcd_tracking_enabled(&self) -> bool {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.vcd_tracking_enabled(),
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.vcd_tracking_enabled(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.vcd_tracking_enabled(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -1528,8 +1834,9 @@ module Top (
         inputs.to_vec()
     }
 
-    #[test]
-    fn unpacked_array_works_across_promotion_on_strided_layout() {
+    #[test_case::test_case(false; "optimizing")]
+    #[test_case::test_case(true; "baseline")]
+    fn unpacked_array_works_across_promotion_on_strided_layout(baseline: bool) {
         // On native-default hosts this runs the interpreter against an
         // element-strided layout, exercising strided element addressing and
         // plane-sized state before and after promotion.
@@ -1557,7 +1864,11 @@ module Top (
             .build_tiered_with_compiler(move |laid_out, options, cancel| {
                 wait_for_gate_or_cancel(&worker_gate, cancel)?;
                 {
-                    let image = NativeBackend::compile_image(laid_out, options)?;
+                    let mut options = options.clone();
+                    options.x86_options.baseline = baseline;
+                    options.x86_options.diagnostics.verify_mir_passes = true;
+                    options.x86_options.diagnostics.verify_regalloc = true;
+                    let image = NativeBackend::compile_image(laid_out, &options)?;
                     let shared = unsafe { SharedNativeCode::from_image(image)? };
                     Ok(CompiledCode::Native(Arc::new(shared)))
                 }
@@ -1622,8 +1933,9 @@ module Top (
     ///
     /// Exercises element-strided addressing, sparse commit, and mask plane
     /// handling across the tier boundary.
-    #[test]
-    fn four_state_unpacked_array_planes_initialize_and_survive_promotion() {
+    #[test_case::test_case(false; "optimizing")]
+    #[test_case::test_case(true; "baseline")]
+    fn four_state_unpacked_array_planes_initialize_and_survive_promotion(baseline: bool) {
         let code = r#"
 module Top (
     clk: input clock,
@@ -1648,7 +1960,11 @@ module Top (
             .four_state(true)
             .build_tiered_with_compiler(move |laid_out, options, cancel| {
                 wait_for_gate_or_cancel(&worker_gate, cancel)?;
-                let image = NativeBackend::compile_image(laid_out, options)?;
+                let mut options = options.clone();
+                options.x86_options.baseline = baseline;
+                options.x86_options.diagnostics.verify_mir_passes = true;
+                options.x86_options.diagnostics.verify_regalloc = true;
+                let image = NativeBackend::compile_image(laid_out, &options)?;
                 let shared = unsafe { SharedNativeCode::from_image(image)? };
                 Ok(CompiledCode::Native(Arc::new(shared)))
             })
@@ -1708,6 +2024,17 @@ module Top (
         sim.modify(|io| io.set(we, 0u8)).unwrap();
         sim.modify(|io| io.set(raddr, 2u8)).unwrap();
         assert_eq!(sim.get_as::<u8>(q), 200u8, "native-tier write");
+
+        // Exercise the mask plane too: baseline lowering must preserve X/Z
+        // bits when a dynamic store is committed and read through the array.
+        sim.modify(|io| {
+            io.set(we, 1u8);
+            io.set_four_state(wdata, 0xa5u8.into(), 0x3cu8.into());
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(we, 0u8)).unwrap();
+        assert_eq!(sim.get_four_state(q), (0xa5u8.into(), 0x3cu8.into()));
     }
 
     /// Compare Packed-mode interpreter vs ElementStrided-mode interpreter
@@ -1862,6 +2189,90 @@ module Top (
         }
 
         assert_eq!(observed, reference_outputs(&inputs));
+    }
+
+    #[test]
+    fn waveform_activity_survives_promotion_before_dump() {
+        for expose_raw in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("promotion.vcd");
+            let gate = Gate::closed();
+            let worker_gate = gate.0.clone();
+            let mut sim: Simulator<TieredBackend> =
+                SimulatorBuilder::<Simulator>::new(PIPELINE, "Top")
+                    .vcd(&path)
+                    .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                        wait_for_gate_or_cancel(&worker_gate, cancel)?;
+                        let image = NativeBackend::compile_image(laid_out, options)?;
+                        let shared = unsafe { SharedNativeCode::from_image(image)? };
+                        Ok(CompiledCode::Native(Arc::new(shared)))
+                    })
+                    .unwrap();
+            let descs = sim.build_vcd_descs(false);
+            let mut reference = crate::VcdWriter::from_writer(Vec::new(), &descs);
+            let dump = |sim: &mut Simulator<TieredBackend>,
+                        reference: &mut crate::VcdWriter<Vec<u8>>,
+                        time| {
+                sim.dump(time);
+                let (ptr, size) = sim.memory_as_ptr();
+                reference
+                    .dump(time, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
+            };
+            let clk = sim.event("clk");
+            let rst = sim.signal("rst");
+            let d = sim.signal("d");
+            sim.set(rst, 0u8);
+            sim.tick(clk).unwrap();
+            dump(&mut sim, &mut reference, 0);
+            let raw = expose_raw.then(|| {
+                let (ptr, size) = sim.memory_as_ptr();
+                // Snapshot before exposing a pointer, then restore the full image.
+                let snapshot = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+                let (ptr, _) = sim.memory_as_mut_ptr();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(snapshot.as_ptr(), ptr, size);
+                }
+                ptr
+            });
+            sim.set(rst, 1u8);
+            sim.set(d, 0xa5u8);
+            sim.tick(clk).unwrap();
+            sim.tick(clk).unwrap();
+            assert!(!sim.is_compiled());
+            // Leave interpreted writes pending while the compiled tier is adopted.
+            gate.open();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !sim.is_compiled() && std::time::Instant::now() < deadline {
+                sim.tick(clk).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(sim.is_compiled(), "{:?}", sim.promotion_error());
+            dump(&mut sim, &mut reference, 1);
+            let before = sim.vcd_statistics().unwrap().comparisons;
+            if let Some(raw) = raw {
+                // Reuse the pointer obtained while interpreting, without exposing
+                // a new pointer from the compiled backend or notifying a setter.
+                unsafe {
+                    *raw.add(d.offset) = 0x3c;
+                }
+            }
+            dump(&mut sim, &mut reference, 2);
+            assert_eq!(
+                sim.vcd_statistics().unwrap().comparisons,
+                before + if expose_raw { descs.len() as u64 } else { 0 }
+            );
+            sim.flush_vcd().unwrap();
+            let parse = |bytes: Vec<u8>| {
+                let mut parser = vcd::Parser::new(bytes.as_slice());
+                parser.parse_header().unwrap();
+                parser.map(Result::unwrap).collect::<Vec<_>>()
+            };
+            assert_eq!(
+                parse(std::fs::read(path).unwrap()),
+                parse(reference.into_inner().unwrap())
+            );
+        }
     }
 
     #[test]
@@ -2158,5 +2569,242 @@ module Top (
             base_before, base_after,
             "promotion must not move the live memory image"
         );
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    fn build_gated_two_stage(
+        baseline_gate: &Gate,
+        upgrade_gate: &Gate,
+        fail_upgrade: bool,
+    ) -> (Simulator<TieredBackend>, mpsc::Receiver<()>) {
+        // Reuse the existing test builder to obtain the finalized layout;
+        // the temporary backend never compiles or executes generated code.
+        let (layout_sender, layout_receiver) = mpsc::channel();
+        let code = PIPELINE.replace(
+            "assign q = stage2;",
+            "always_comb { q = stage2; $display(\"q %0d\", q); }",
+        );
+        let mut sim = SimulatorBuilder::<Simulator>::new(&code, "Top")
+            .build_tiered_with_compiler(move |laid_out, options, _| {
+                layout_sender
+                    .send((laid_out.clone(), options.clone()))
+                    .unwrap();
+                Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+            })
+            .unwrap();
+        let (laid_out, mut baseline_options) = layout_receiver
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap();
+        let mut optimizing_options = baseline_options.clone();
+        baseline_options.x86_options.baseline = true;
+        optimizing_options.x86_options.baseline = false;
+        let worker_baseline_gate = baseline_gate.0.clone();
+        let worker_upgrade_gate = upgrade_gate.0.clone();
+        let (baseline_ready_sender, baseline_ready_receiver) = mpsc::channel();
+        sim.backend = TieredBackend::with_two_stage_compiler(
+            &laid_out,
+            &baseline_options,
+            optimizing_options,
+            move |laid_out, options, cancel| {
+                if options.x86_options.baseline {
+                    wait_for_gate_or_cancel(&worker_baseline_gate, cancel)?;
+                } else {
+                    // Entering stage two proves the baseline is already queued.
+                    baseline_ready_sender.send(()).unwrap();
+                    wait_for_gate_or_cancel(&worker_upgrade_gate, cancel)?;
+                    if fail_upgrade {
+                        return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
+                    }
+                }
+                let image = NativeBackend::compile_image_with_cancel(laid_out, options, cancel)?;
+                let shared = unsafe { SharedNativeCode::from_image(image)? };
+                if !options.x86_options.baseline {
+                    baseline_ready_sender.send(()).unwrap();
+                }
+                Ok(CompiledCode::Native(Arc::new(shared)))
+            },
+        );
+        (sim, baseline_ready_receiver)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    fn adopted_native_code(backend: &TieredBackend) -> Arc<SharedNativeCode> {
+        let Phase::Compiled(CompiledTier::Native(native)) = &backend.phase else {
+            panic!("native code was not adopted");
+        };
+        native.shared_code()
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn native_two_stage_preserves_live_pipeline_across_split_apply() {
+        let baseline_gate = Gate::closed();
+        let upgrade_gate = Gate::closed();
+        let (mut sim, baseline_ready) = build_gated_two_stage(&baseline_gate, &upgrade_gate, false);
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+        let backend = &mut sim.backend;
+        let base = backend.memory_as_ptr().0;
+        let events: Vec<_> = backend
+            .id_to_event_slice()
+            .iter()
+            .map(|e| (e.addr(), e.id()))
+            .collect();
+        backend.set(rst, 0u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.set(rst, 1u8);
+        backend.set(d, 17u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.eval_comb().unwrap();
+        assert_eq!(backend.get_as::<u8>(q), 0);
+
+        baseline_gate.open();
+        baseline_ready
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap();
+        backend.maybe_promote();
+        let baseline = adopted_native_code(backend);
+        assert_eq!(backend.memory_as_ptr().0, base);
+
+        // The second edge must retain stage1=17 from interpreted execution,
+        // rather than producing d=29 or resetting the pipeline on adoption.
+        backend.set(d, 29u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.eval_comb().unwrap();
+        assert_eq!(backend.get_as::<u8>(q), 17, "after2");
+
+        let eval = backend.resolve_eval_only_event(&clk.addr()).unwrap();
+        let apply = backend.resolve_apply_event(&clk.addr()).unwrap();
+        backend.set(d, 43u8);
+        backend.eval_only_ff_at(eval).unwrap();
+        upgrade_gate.open();
+        // Joining proves the optimizing result is queued, without advancing
+        // the simulation by an unbounded number of clock edges.
+        backend.compiler_worker.take().unwrap().join().unwrap();
+        backend.maybe_upgrade();
+        assert!(Arc::ptr_eq(&baseline, &adopted_native_code(backend)));
+        assert_eq!(backend.memory_as_ptr().0, base);
+        backend.apply_ff_at(apply).unwrap();
+        assert!(Arc::ptr_eq(&baseline, &adopted_native_code(backend)));
+
+        // Keep a capture queued and its flag enabled across code replacement.
+        backend.set_comb_capture_event_enabled(&[true]);
+        let capture_start = crate::simulator::runtime_event_write_seq_for_backend(backend);
+        if let Phase::Compiled(compiled) = &mut backend.phase {
+            compiled.eval_comb().unwrap();
+        }
+        assert_eq!(backend.get_as::<u8>(q), 29);
+        let event_buffer = backend.runtime_event_buffer().unwrap();
+        let (buffer_ptr, buffer_size) = backend.runtime_event_buffer_as_ptr();
+        let queued = unsafe { std::slice::from_raw_parts(buffer_ptr, buffer_size) }.to_vec();
+        let before = crate::simulator::runtime_event_write_seq_for_backend(backend);
+        assert_eq!(before, capture_start + 1);
+        // Capture emission may consume its enable flag. Re-arm it before
+        // replacement to prove the next image uses the same live flags.
+        backend.set_comb_capture_event_enabled(&[true]);
+        backend.clear_triggered_bits();
+        backend.mark_triggered_bit(clk.id());
+        let triggered = backend.get_triggered_bits();
+        backend.maybe_upgrade();
+        assert!(!Arc::ptr_eq(&baseline, &adopted_native_code(backend)));
+        assert_eq!(backend.memory_as_ptr().0, base);
+        assert_eq!(backend.get_as::<u8>(q), 29);
+        assert_eq!(backend.get_triggered_bits(), triggered);
+        assert_eq!(
+            backend.runtime_event_buffer_as_ptr(),
+            (buffer_ptr, buffer_size)
+        );
+        assert!(Arc::ptr_eq(
+            &event_buffer,
+            &backend.runtime_event_buffer().unwrap()
+        ));
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(buffer_ptr, buffer_size) },
+            queued
+        );
+        assert_eq!(
+            backend
+                .id_to_event_slice()
+                .iter()
+                .map(|e| (e.addr(), e.id()))
+                .collect::<Vec<_>>(),
+            events
+        );
+        for (addr, id) in events {
+            assert_eq!(backend.resolve_event(&addr).id(), id);
+        }
+
+        backend.eval_comb().unwrap();
+        assert_eq!(
+            crate::simulator::runtime_event_write_seq_for_backend(backend),
+            before + 1
+        );
+        backend.set_comb_capture_event_enabled(&[false]);
+        backend.eval_comb().unwrap();
+        assert_eq!(
+            crate::simulator::runtime_event_write_seq_for_backend(backend),
+            before + 1
+        );
+        // Handles resolved before either replacement still address the right
+        // event, and the next edge observes stage1=43 from baseline execution.
+        backend.set(d, 61u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.eval_comb().unwrap();
+        assert_eq!(backend.get_as::<u8>(q), 43);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.eval_comb().unwrap();
+        assert_eq!(backend.get_as::<u8>(q), 61);
+        assert_eq!(backend.memory_as_ptr().0, base);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test_case::test_case(false; "cancelled")]
+    #[test_case::test_case(true; "failed")]
+    fn unsuccessful_optimization_keeps_baseline_code(fail_upgrade: bool) {
+        let baseline_gate = Gate::closed();
+        let upgrade_gate = Gate::closed();
+        let (mut sim, baseline_ready) =
+            build_gated_two_stage(&baseline_gate, &upgrade_gate, fail_upgrade);
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+        let backend = &mut sim.backend;
+        backend.set(rst, 0u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.set(rst, 1u8);
+        backend.set(d, 37u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        baseline_gate.open();
+        baseline_ready
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap();
+        backend.maybe_promote();
+        let baseline = adopted_native_code(backend);
+        let base = backend.memory_as_ptr().0;
+        upgrade_gate.open();
+        backend.compiler_worker.take().unwrap().join().unwrap();
+        if fail_upgrade {
+            backend.maybe_upgrade();
+        } else {
+            assert!(backend.cancel_background_compilation());
+        }
+        assert!(!backend.cancel_background_compilation());
+        backend.set(d, 53u8);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.eval_comb().unwrap();
+        assert!(Arc::ptr_eq(&baseline, &adopted_native_code(backend)));
+        assert_eq!(backend.get_as::<u8>(q), 37);
+        backend.eval_apply_ff_at(clk).unwrap();
+        backend.eval_comb().unwrap();
+        assert_eq!(backend.get_as::<u8>(q), 53);
+        assert_eq!(backend.memory_as_ptr().0, base);
+        assert_eq!(
+            backend.execution_stats().promotion,
+            TieredPromotionStatus::Promoted
+        );
+        assert!(backend.promotion_error().is_none());
     }
 }

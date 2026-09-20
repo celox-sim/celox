@@ -9,7 +9,6 @@ all_backends! {
 
 
 fn test_four_state_and_or(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -242,7 +241,6 @@ fn test_four_state_mixing_propagation(sim) {
 }
 
 fn test_read_a(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -262,7 +260,6 @@ fn test_read_a(sim) {
 }
 
 fn test_four_state_arithmetic_ops(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -304,7 +301,6 @@ fn test_four_state_arithmetic_ops(sim) {
 }
 
 fn test_four_state_unary_ops(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -352,7 +348,6 @@ fn test_four_state_unary_ops(sim) {
 // Bitwise XOR with partial X
 // ==========================================================================
 fn test_four_state_xor_partial_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -391,7 +386,6 @@ fn test_four_state_xor_partial_x(sim) {
 // Concatenation with X
 // ==========================================================================
 fn test_four_state_concat(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -432,7 +426,6 @@ fn test_four_state_concat(sim) {
 // Shift with constant amount (mask should shift too)
 // ==========================================================================
 fn test_four_state_shift_by_constant(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -480,7 +473,6 @@ fn test_four_state_shift_by_constant(sim) {
 // Shift by X amount → full X output
 // ==========================================================================
 fn test_four_state_shift_by_x_amount(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -609,7 +601,6 @@ fn test_four_state_mux_x_condition(sim) {
 // Mux with defined condition, X in selected branch
 // ==========================================================================
 fn test_four_state_mux_x_in_branch(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -665,7 +656,6 @@ fn test_four_state_mux_x_in_branch(sim) {
 // Multi-word (128-bit) with X mask
 // ==========================================================================
 fn test_four_state_wide_128bit(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -720,7 +710,6 @@ fn test_four_state_wide_128bit(sim) {
 // always_comb chain with X propagation
 // ==========================================================================
 fn test_four_state_always_comb_chain(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -767,7 +756,7 @@ fn test_four_state_always_comb_chain(sim) {
 // always_ff: X captured in FF, reset clears X
 // ==========================================================================
 fn test_four_state_ff_capture_and_reset(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (
@@ -842,7 +831,6 @@ fn test_four_state_ff_capture_and_reset(sim) {
 // Defined inputs in 4-state mode → same as 2-state behavior
 // ==========================================================================
 fn test_four_state_all_defined(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -900,7 +888,6 @@ fn test_four_state_all_defined(sim) {
 }
 
 fn test_four_state_wide_128bit_simple(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1002,7 +989,6 @@ fn test_four_state_wide_shifts(sim) {
 // Multi-word (128-bit) Arithmetic with X (Conservative all-X)
 // ==========================================================================
 fn test_four_state_wide_arith(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1047,7 +1033,6 @@ fn test_four_state_wide_arith(sim) {
 // Multi-word (128-bit) Signed Ops with X
 // ==========================================================================
 fn test_four_state_wide_signed(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1105,7 +1090,6 @@ fn test_four_state_wide_signed(sim) {
 // Multi-word (128-bit) Concatenation with Mixed 2-state/4-state
 // ==========================================================================
 fn test_four_state_wide_concat_mixed(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1147,7 +1131,6 @@ fn test_four_state_wide_concat_mixed(sim) {
 // P0: MUL / DIV / MOD + X (conservative all-X)
 // ==========================================================================
 fn test_four_state_mul_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1195,7 +1178,6 @@ fn test_four_state_mul_with_x(sim) {
 }
 
 fn test_four_state_div_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1243,7 +1225,6 @@ fn test_four_state_div_with_x(sim) {
 }
 
 fn test_four_state_mod_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1333,7 +1314,6 @@ fn test_four_state_ne_with_x(sim) {
 }
 
 fn test_four_state_gt_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1372,7 +1352,6 @@ fn test_four_state_gt_with_x(sim) {
 }
 
 fn test_four_state_ge_le_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1419,7 +1398,6 @@ fn test_four_state_ge_le_with_x(sim) {
 }
 
 fn test_four_state_signed_comparison_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1479,7 +1457,6 @@ fn test_four_state_signed_comparison_with_x(sim) {
 // P0: Reduction XOR + X
 // ==========================================================================
 fn test_four_state_reduction_xor_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1522,7 +1499,6 @@ fn test_four_state_reduction_xor_with_x(sim) {
 // P0: 65-bit width (1→2 chunk boundary)
 // ==========================================================================
 fn test_four_state_65bit_boundary(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1583,7 +1559,6 @@ fn test_four_state_65bit_boundary(sim) {
 // P1: Negation (-) + X
 // ==========================================================================
 fn test_four_state_negation_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1628,7 +1603,6 @@ fn test_four_state_negation_with_x(sim) {
 // P1: Logical NOT (!) + X
 // ==========================================================================
 fn test_four_state_logical_not_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1676,7 +1650,6 @@ fn test_four_state_logical_not_with_x(sim) {
 // P1: SAR + X shift amount
 // ==========================================================================
 fn test_four_state_sar_x_shift_amount(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1724,7 +1697,6 @@ fn test_four_state_sar_x_shift_amount(sim) {
 // P1: 3+ element concatenation with X
 // ==========================================================================
 fn test_four_state_concat_three_elements(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1817,7 +1789,7 @@ fn test_four_state_wide_comparison_with_x(sim) {
 // P2: Multi-bit selector (case) with X
 // ==========================================================================
 fn test_four_state_multibit_mux_with_x(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (
@@ -1868,7 +1840,7 @@ fn test_four_state_multibit_mux_with_x(sim) {
 }
 
 fn test_four_state_procedural_case_x_uses_default(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (
@@ -1901,7 +1873,7 @@ fn test_four_state_procedural_case_x_uses_default(sim) {
 }
 
 fn test_four_state_procedural_if_known_nonzero_with_x_is_true(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (
@@ -1938,7 +1910,6 @@ fn test_four_state_procedural_if_known_nonzero_with_x_is_true(sim) {
 // P2: Width narrowing (wide → narrow) with X
 // ==========================================================================
 fn test_four_state_width_narrowing_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1978,7 +1949,6 @@ fn test_four_state_width_narrowing_with_x(sim) {
 // P2: Width widening (narrow → wide) with X
 // ==========================================================================
 fn test_four_state_width_widening_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2019,7 +1989,7 @@ fn test_four_state_width_widening_with_x(sim) {
 // P2: FF with conditional assignment + X
 // ==========================================================================
 fn test_four_state_ff_conditional_with_x(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (
@@ -2095,7 +2065,6 @@ fn test_four_state_ff_conditional_with_x(sim) {
 // P2: Odd-width concatenation (3bit + 5bit) with X
 // ==========================================================================
 fn test_four_state_concat_odd_width(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2139,7 +2108,6 @@ fn test_four_state_concat_odd_width(sim) {
 // P2: 127-bit width test
 // ==========================================================================
 fn test_four_state_127bit(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2178,7 +2146,6 @@ fn test_four_state_127bit(sim) {
 // Wide (128-bit) Unary NOT + X
 // ==========================================================================
 fn test_four_state_wide_unary_not_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2218,7 +2185,6 @@ fn test_four_state_wide_unary_not_with_x(sim) {
 // Wide (128-bit) Negation + X
 // ==========================================================================
 fn test_four_state_wide_negation_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2254,7 +2220,6 @@ fn test_four_state_wide_negation_with_x(sim) {
 // Wide (128-bit) Reduction AND/OR/XOR + X
 // ==========================================================================
 fn test_four_state_wide_reduction_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2315,7 +2280,6 @@ fn test_four_state_wide_reduction_with_x(sim) {
 // Mux: both branches X
 // ==========================================================================
 fn test_four_state_mux_both_branches_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2448,7 +2412,6 @@ fn test_four_state_cascaded_mux_with_x(sim) {
 // Shift: both data and amount have X
 // ==========================================================================
 fn test_four_state_shift_both_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2487,7 +2450,6 @@ fn test_four_state_shift_both_x(sim) {
 // Case statement with 4-state (EqWildcard)
 // ==========================================================================
 fn test_four_state_case_defined_selector(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2563,7 +2525,6 @@ fn test_four_state_case_x_in_selector(sim) {
 // Reduction OR/AND dominant-value semantics
 // ==========================================================================
 fn test_four_state_reduction_or_dominant_one(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2613,7 +2574,6 @@ fn test_four_state_reduction_or_dominant_one(sim) {
 }
 
 fn test_four_state_reduction_and_dominant_zero(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2663,7 +2623,6 @@ fn test_four_state_reduction_and_dominant_zero(sim) {
 }
 
 fn test_four_state_wide_reduction_or_dominant(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2702,7 +2661,6 @@ fn test_four_state_wide_reduction_or_dominant(sim) {
 }
 
 fn test_four_state_wide_reduction_and_dominant(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2816,7 +2774,6 @@ fn test_four_state_logic_and_dominant_zero(sim) {
 // IEEE 1800 LogicOr (||) dominant-value: 1 || x = 1
 // ==========================================================================
 fn test_four_state_logic_or_dominant_one(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -2888,7 +2845,6 @@ fn test_four_state_logic_or_dominant_one(sim) {
 // IEEE 1800 EqWildcard (==?) with LHS value at wildcard positions
 // ==========================================================================
 fn test_four_state_eq_wildcard_value_at_wildcard_pos(sim) {
-    @ignore_on(veryl);
     @setup {
     // Test that LHS values at RHS wildcard (X) positions are correctly ignored
     let code = r#"
@@ -2985,7 +2941,6 @@ fn test_four_state_eq_wildcard_value_at_wildcard_pos(sim) {
 }
 
 fn test_four_state_ne_wildcard_value_at_wildcard_pos(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3036,7 +2991,6 @@ fn test_four_state_ne_wildcard_value_at_wildcard_pos(sim) {
 }
 
 fn test_four_state_wide_wildcard_equality(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3113,7 +3067,6 @@ fn test_four_state_wide_wildcard_equality(sim) {
 // Wide MUL + X (128-bit)
 // ==========================================================================
 fn test_four_state_wide_mul_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3160,7 +3113,6 @@ fn test_four_state_wide_mul_with_x(sim) {
 // Wide DIV + X (128-bit)
 // ==========================================================================
 fn test_four_state_wide_div_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3205,7 +3157,6 @@ fn test_four_state_wide_div_with_x(sim) {
 // Wide MOD + X (128-bit)
 // ==========================================================================
 fn test_four_state_wide_mod_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3251,7 +3202,6 @@ fn test_four_state_wide_mod_with_x(sim) {
 // SAR with both data and shift amount having X
 // ==========================================================================
 fn test_four_state_sar_both_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3348,7 +3298,6 @@ fn test_four_state_wide_ne_with_x(sim) {
 // Wide GT + X (128-bit unsigned)
 // ==========================================================================
 fn test_four_state_wide_gt_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3397,7 +3346,6 @@ fn test_four_state_wide_gt_with_x(sim) {
 // Wide GE/LE + X (128-bit unsigned)
 // ==========================================================================
 fn test_four_state_wide_ge_le_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3449,7 +3397,6 @@ fn test_four_state_wide_ge_le_with_x(sim) {
 // Wide signed comparison + X (128-bit)
 // ==========================================================================
 fn test_four_state_wide_signed_comparison_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3535,7 +3482,6 @@ fn test_four_state_wide_signed_comparison_with_x(sim) {
 // Wide logical NOT + X (128-bit)
 // ==========================================================================
 fn test_four_state_wide_logical_not_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -3589,7 +3535,6 @@ fn test_four_state_wide_logical_not_with_x(sim) {
 // Concat: X crossing chunk boundary (64-bit)
 // ==========================================================================
 fn test_four_state_concat_chunk_boundary_x(sim) {
-    @ignore_on(veryl);
     @setup {
     // a (48-bit) is placed at bits [127:80] — no X
     // b (32-bit) is placed at bits [79:48] — all X, crosses the 64-bit chunk boundary
@@ -3653,7 +3598,7 @@ fn test_four_state_concat_chunk_boundary_x(sim) {
 // FF: synchronous reset + X
 // ==========================================================================
 fn test_four_state_ff_sync_reset_with_x(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
     let code = r#"
         module Top (
@@ -3752,7 +3697,6 @@ fn test_four_state_ff_sync_reset_with_x(sim) {
 // Explicit cast + X: signed↔unsigned conversion preserves X
 // ==========================================================================
 fn test_four_state_explicit_cast_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     // Test signed → unsigned reinterpretation with X propagation
     let code = r#"
@@ -3844,7 +3788,6 @@ fn test_four_state_explicit_cast_with_x(sim) {
 // ==========================================================================
 
 fn test_z_literal_passthrough(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (a: input logic<8>, y: output logic<8>) {
@@ -3865,7 +3808,6 @@ fn test_z_literal_passthrough(sim) {
 }
 
 fn test_z_mux_tristate_pattern(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (en: input logic, d: input logic<8>, y: output logic<8>) {
@@ -3910,7 +3852,6 @@ fn test_z_mux_tristate_pattern(sim) {
 }
 
 fn test_x_literal_encoding(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (y: output logic<8>) {

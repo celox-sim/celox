@@ -12,6 +12,7 @@ use veryl_analyzer::{Analyzer, Context, attribute_table, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
 use veryl_simulator::Simulator as VerylSim;
+use veryl_simulator::assert_buffer;
 use veryl_simulator::ir::{Config, Event, build_ir};
 
 // ---------------------------------------------------------------------------
@@ -31,15 +32,22 @@ pub struct VerylEventRef(usize);
 pub struct VerylIOContext<'a> {
     sim: &'a mut VerylSim,
     names: &'a [String],
+    input_written: &'a mut bool,
 }
 
 impl VerylIOContext<'_> {
+    fn note_input_write(&mut self) {
+        *self.input_written = true;
+    }
+
     pub fn set<T: Copy>(&mut self, signal: VerylSignalRef, val: T) {
+        self.note_input_write();
         let name = &self.names[signal.0];
         self.sim.set(name, t_to_value(val));
     }
 
     pub fn set_wide(&mut self, signal: VerylSignalRef, val: BigUint) {
+        self.note_input_write();
         let name = &self.names[signal.0];
         let width = val.bits() as usize;
         self.sim
@@ -47,6 +55,7 @@ impl VerylIOContext<'_> {
     }
 
     pub fn set_four_state(&mut self, signal: VerylSignalRef, val: BigUint, mask: BigUint) {
+        self.note_input_write();
         let name = &self.names[signal.0];
         let width = self
             .sim
@@ -103,12 +112,62 @@ fn four_state_value(payload: BigUint, mask: BigUint, width: usize) -> Value {
     }
 }
 
+fn is_non_progressing_loop_diagnostic(message: &str) -> bool {
+    let Some(rest) =
+        message.strip_prefix("for-loop step does not advance the loop variable (stuck at ")
+    else {
+        return false;
+    };
+    let Some((stuck_at, location)) = rest.split_once(") at ") else {
+        return false;
+    };
+    if stuck_at.parse::<u64>().is_err() {
+        return false;
+    }
+
+    let mut location = location.rsplitn(3, ':');
+    let Some(column) = location.next() else {
+        return false;
+    };
+    let Some(line) = location.next() else {
+        return false;
+    };
+    let Some(_source) = location.next() else {
+        return false;
+    };
+    line.parse::<u32>().is_ok() && column.parse::<u32>().is_ok()
+}
+
+fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
+    if !assert_buffer::has_fatal() {
+        // `$assert_continue` reports are not execution errors for this adapter,
+        // but must not leak into the next comparison test.
+        let _ = assert_buffer::take_failure();
+        return Ok(());
+    }
+
+    let Some(message) = assert_buffer::take_failure() else {
+        return Ok(());
+    };
+    if is_non_progressing_loop_diagnostic(&message) {
+        Err(RuntimeErrorCode::DetectedTrueLoop)
+    } else {
+        Err(RuntimeErrorCode::Runtime {
+            message,
+            signals: Vec::new(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
 pub struct VerylSimAdapter {
     sim: VerylSim,
+    /// The constructor settles once so undriven outputs are readable. Keep its
+    /// diagnostics until either the caller observes them or drives an input.
+    initial_diagnostics_pending: bool,
     /// Signal name table: VerylSignalRef(i) → names[i]
     names: Vec<String>,
     /// Event table: VerylEventRef(i) → events[i]
@@ -116,6 +175,18 @@ pub struct VerylSimAdapter {
 }
 
 impl VerylSimAdapter {
+    fn discard_initial_diagnostics(&mut self) {
+        if self.initial_diagnostics_pending {
+            assert_buffer::reset();
+            self.initial_diagnostics_pending = false;
+        }
+    }
+
+    fn finish_runtime_operation(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.initial_diagnostics_pending = false;
+        take_runtime_error()
+    }
+
     pub fn signal(&mut self, name: &str) -> VerylSignalRef {
         // Reuse existing entry if present
         if let Some(idx) = self.names.iter().position(|n| n == name) {
@@ -140,14 +211,26 @@ impl VerylSimAdapter {
     where
         F: FnOnce(&mut VerylIOContext<'_>),
     {
-        // Split borrow: names is read-only, sim is mutated through ctx
-        let names_ptr = &self.names as *const Vec<String>;
-        let mut ctx = VerylIOContext {
-            sim: &mut self.sim,
-            names: unsafe { &*names_ptr },
-        };
-        f(&mut ctx);
-        Ok(())
+        let mut input_written = false;
+        {
+            let mut ctx = VerylIOContext {
+                sim: &mut self.sim,
+                names: &self.names,
+                input_written: &mut input_written,
+            };
+            f(&mut ctx);
+        }
+        if input_written && self.initial_diagnostics_pending {
+            // The constructor settled with provisional input values. Replace
+            // those diagnostics with a forced settle after the first write;
+            // constant processes must run again even though they do not depend
+            // on the input that changed.
+            assert_buffer::reset();
+            self.initial_diagnostics_pending = false;
+            self.sim.mark_comb_dirty();
+            self.sim.ensure_comb_updated();
+        }
+        self.finish_runtime_operation()
     }
 
     pub fn get(&mut self, signal: VerylSignalRef) -> BigUint {
@@ -190,16 +273,18 @@ impl VerylSimAdapter {
 
     pub fn tick(&mut self, event: VerylEventRef) -> Result<(), RuntimeErrorCode> {
         self.sim.step(&self.events[event.0]);
-        Ok(())
+        self.finish_runtime_operation()
     }
 
     pub fn set<T: Copy>(&mut self, signal: VerylSignalRef, val: T) {
+        self.discard_initial_diagnostics();
         let name = &self.names[signal.0];
         self.sim.set(name, t_to_value(val));
         self.sim.mark_comb_dirty();
     }
 
     pub fn set_wide(&mut self, signal: VerylSignalRef, val: BigUint) {
+        self.discard_initial_diagnostics();
         let name = &self.names[signal.0];
         let width = val.bits() as usize;
         self.sim
@@ -223,7 +308,7 @@ impl VerylSimAdapter {
 
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         self.sim.ensure_comb_updated();
-        Ok(())
+        self.finish_runtime_operation()
     }
 
     pub fn try_event(&mut self, port: &str) -> Result<VerylEventRef, AddrLookupError> {
@@ -252,6 +337,7 @@ pub fn build_veryl_adapter(
     // Clear global tables (same as Celox does)
     symbol_table::clear();
     attribute_table::clear();
+    assert_buffer::reset();
 
     let metadata = Metadata::create_default("prj").unwrap();
     let analyzer = Analyzer::new(&metadata);
@@ -288,6 +374,7 @@ pub fn build_veryl_adapter(
 
     VerylSimAdapter {
         sim,
+        initial_diagnostics_pending: true,
         names: Vec::new(),
         events: Vec::new(),
     }

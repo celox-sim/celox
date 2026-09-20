@@ -18,7 +18,6 @@ fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
 all_backends! {
 
     fn test_dynamic_index_read(sim) {
-        @ignore_on(sv);
         @setup { let code = r#"
 module Top (i: input logic<2>, o: output logic<8>) {
 var a: logic<8> [4];

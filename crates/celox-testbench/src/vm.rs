@@ -88,12 +88,23 @@ impl CompiledExpr {
     /// signals on a single stack.  The common case (all ≤64-bit operands)
     /// stays in the `TestbenchValue::U64` variant and never allocates.
     fn eval(&self, memory: *mut u8) -> TestbenchValue {
+        self.eval_value_with_write_observer(memory, |_, _| {})
+    }
+
+    /// Evaluate with a notification for each executed memory write. Expression
+    /// function calls can store arguments and results; ordinary reads do not
+    /// notify the observer or require a retained mutable view of the image.
+    pub fn eval_value_with_write_observer(
+        &self,
+        memory: *mut u8,
+        mut on_write: impl FnMut(usize, usize),
+    ) -> TestbenchValue {
         let mut stack: Vec<TestbenchValue> = Vec::with_capacity(16);
         let mut pc: usize = 0;
         let ops = self.bytecode.ops();
 
         while pc < ops.len() {
-            self.exec_at(ops, &mut pc, &mut stack, memory);
+            self.exec_at(ops, &mut pc, &mut stack, memory, &mut on_write);
         }
         stack.pop().unwrap_or_else(|| {
             debug_assert!(false, "testbench bytecode: stack empty after evaluation");
@@ -110,6 +121,7 @@ impl CompiledExpr {
         pc: &mut usize,
         stack: &mut Vec<TestbenchValue>,
         memory: *mut u8,
+        on_write: &mut impl FnMut(usize, usize),
     ) {
         match &ops[*pc] {
             TbOpcode::ConstU64(v) => {
@@ -246,14 +258,14 @@ impl CompiledExpr {
                 if !cond.is_zero() {
                     let then_end = *pc + then_len;
                     while *pc < then_end {
-                        self.exec_at(ops, pc, stack, memory);
+                        self.exec_at(ops, pc, stack, memory, on_write);
                     }
                     *pc += else_len; // skip else block
                 } else {
                     *pc += then_len; // skip then block
                     let else_end = *pc + else_len;
                     while *pc < else_end {
-                        self.exec_at(ops, pc, stack, memory);
+                        self.exec_at(ops, pc, stack, memory, on_write);
                     }
                 }
             }
@@ -314,6 +326,7 @@ impl CompiledExpr {
                 unsafe {
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), memory.add(*location), n);
                 }
+                on_write(*location, n);
                 *pc += 1;
             }
         }

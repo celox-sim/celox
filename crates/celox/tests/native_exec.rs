@@ -7,6 +7,111 @@
 use celox::{MemoryLayout, MemoryLayoutMode, OptimizedSir, Simulator, SimulatorBuilder};
 
 #[test]
+fn zero_reset_keeps_narrow_arrays_strided_and_preserves_dynamic_ff_writes() {
+    for width in [1, 3, 7, 8, 17, 24, 33, 51, 57] {
+        for four_state in [false, true] {
+            for opt_level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+                let code = format!(
+                    r#"
+                    module Top (
+                        clk: input clock, clear: input logic, write: input logic,
+                        index: input logic<3>, probe: input logic<3>,
+                        d: input logic<{width}>, q: output logic<{width}>,
+                        old: output logic<{width}>, low: output logic, high: output logic,
+                    ) {{
+                        var lanes: logic<{width}> [8];
+                        always_ff (clk) {{
+                            old = lanes[index];
+                            if clear {{
+                                for i in 0..8 {{ lanes[i] = '0; }}
+                            }} else if write {{
+                                lanes[index] = d;
+                            }}
+                        }}
+                        assign q = lanes[probe];
+                        assign low = q[0];
+                        assign high = q[{high_bit}];
+                    }}
+                    "#,
+                    high_bit = width - 1,
+                );
+                let result = SimulatorBuilder::new(&code, "Top")
+                    .four_state(four_state)
+                    .opt_level(opt_level)
+                    .trace_post_optimized_sir()
+                    .build_with_trace();
+                let mut sim = result.res.unwrap();
+                let program = result.trace.post_optimized_sir.unwrap();
+                let layout =
+                    MemoryLayout::build(&program, four_state, MemoryLayoutMode::ElementStrided);
+                let address = program.get_addr(&[], &["lanes"]).unwrap();
+                assert!(
+                    layout.unpacked_arrays.contains_key(&address),
+                    "zero reset must permit strided storage: width={width}, four_state={four_state}, opt={opt_level:?}"
+                );
+
+                let clk = sim.event("clk");
+                let clear = sim.signal("clear");
+                let write = sim.signal("write");
+                let index = sim.signal("index");
+                let probe = sim.signal("probe");
+                let d = sim.signal("d");
+                let q = sim.signal("q");
+                let old = sim.signal("old");
+                let low = sim.signal("low");
+                let high = sim.signal("high");
+                let full = (1u64 << width) - 1;
+                // Reset again after dirty writes, including unknown bits, so
+                // the whole-object fill must clear every physical lane/plane.
+                for round in 0..2 {
+                    sim.modify(|io| io.set(clear, 1u8)).unwrap();
+                    sim.tick(clk).unwrap();
+                    let mut expected = [(0u64, 0u64); 8];
+                    for lane in 0..8 {
+                        sim.modify(|io| io.set(probe, lane as u8)).unwrap();
+                        assert_eq!(sim.get_four_state(q), (0u8.into(), 0u8.into()));
+                    }
+                    sim.modify(|io| {
+                        io.set(clear, 0u8);
+                        io.set(write, 1u8);
+                    })
+                    .unwrap();
+                    for lane in [7, 0, 4, 2, 6, 1, 5, 3, 7] {
+                        let mask = if four_state {
+                            ((lane as u64 ^ round) | ((lane as u64 & 1) << (width - 1))) & full
+                        } else {
+                            0
+                        };
+                        let value = ((full ^ lane as u64 ^ round) | mask) & full;
+                        sim.modify(|io| {
+                            io.set(index, lane as u8);
+                            io.set_four_state(d, value.into(), mask.into());
+                        })
+                        .unwrap();
+                        sim.tick(clk).unwrap();
+                        let (old_value, old_mask) = expected[lane];
+                        assert_eq!(sim.get_four_state(old), (old_value.into(), old_mask.into()));
+                        expected[lane] = (value, mask);
+                        for (lane, &(value, mask)) in expected.iter().enumerate() {
+                            sim.modify(|io| io.set(probe, lane as u8)).unwrap();
+                            assert_eq!(sim.get_four_state(q), (value.into(), mask.into()));
+                            assert_eq!(
+                                sim.get_four_state(low),
+                                ((value & 1).into(), (mask & 1).into())
+                            );
+                            assert_eq!(
+                                sim.get_four_state(high),
+                                ((value >> (width - 1)).into(), (mask >> (width - 1)).into())
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn native_compilation_can_be_initialized_later() {
     let code = r#"
         module Top (o: output logic<8>) {
@@ -90,6 +195,7 @@ fn native_image_restores_four_state_mode_for_vcd() {
 
     sim.set_four_state(sim.signal("a"), 0xffu8.into(), 0xffu8.into());
     sim.dump(0);
+    sim.flush_vcd().unwrap();
     let dump = std::fs::read_to_string(vcd_path).unwrap();
     assert!(dump.contains("xxxxxxxx"), "{dump}");
 }
@@ -173,7 +279,8 @@ fn compile_and_run_inner(
     let emit_result = {
         use celox::native_backend::emit;
 
-        emit::emit_prepared_eu(eu, &layout, false, "native_exec", false, None).expect("emit failed")
+        emit::emit_prepared_eu(eu, &layout, false, "native_exec", false, None, || false)
+            .expect("emit failed")
     };
 
     if debug {
@@ -635,6 +742,7 @@ fn test_debug_let_bitslice_write() {
             "native_exec_debug",
             false,
             None,
+            || false,
         )
         .expect("emit failed");
         println!(
@@ -679,4 +787,71 @@ fn test_native_dynamic_index_pattern() {
         state[val_off] = 0x55;
     });
     assert_eq!(read_u32_at(&state, &sir, &layout, "z"), 0x04550201);
+}
+
+#[test]
+fn native_image_roundtrip_preserves_waveform_write_activity() {
+    let code = r#"module Top (a: input logic<8>, q: output logic<8>) { assign q = a + 1; }"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.vcd");
+    let image = Simulator::builder(code, "Top")
+        .vcd(&path)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    assert!(image.layout().trace.is_some());
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+            .unwrap();
+    let mut sim = Simulator::from_sources(Vec::new(), "Top")
+        .vcd(&path)
+        .build_native_from_image(image)
+        .unwrap();
+    sim.dump(0);
+    sim.set(sim.signal("a"), 41u8);
+    sim.dump(1);
+    assert_eq!(sim.get_as::<u8>(sim.signal("q")), 42);
+    let before = sim.vcd_statistics().unwrap();
+    sim.dump(2);
+    assert_eq!(
+        sim.vcd_statistics().unwrap().comparisons,
+        before.comparisons
+    );
+    assert!(before.changes >= 4);
+    sim.flush_vcd().unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let mut parser = vcd::Parser::new(bytes.as_slice());
+    parser.parse_header().unwrap();
+    assert!(parser.map(Result::unwrap).any(|command| {
+        matches!(command, vcd::Command::ChangeVector(_, ref value) if value.to_string() == "101010")
+    }));
+}
+
+#[test]
+fn tracing_an_imported_strided_image_requests_compatible_recompilation() {
+    let code = r#"
+        module Top (clk: input clock, d: input logic<3>, index: input logic<2>, q: output logic<3>) {
+            var mem: logic<3>[4];
+            always_ff (clk) { mem[index] = d; }
+            assign q = mem[index];
+        }
+    "#;
+    let image = Simulator::builder(code, "Top")
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    assert!(!image.layout().unpacked_arrays.is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    let result = Simulator::from_sources(Vec::new(), "Top")
+        .vcd(dir.path().join("incompatible.vcd"))
+        .build_native_from_image(image);
+    let Err(error) = result else {
+        panic!("an incompatible waveform layout was accepted");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("compile this native image with VCD enabled"),
+        "{error}"
+    );
 }

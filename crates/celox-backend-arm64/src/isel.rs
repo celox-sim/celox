@@ -7,6 +7,7 @@
 mod dynamic_load_cache;
 mod packed_compare;
 mod sparse;
+mod strided;
 
 use super::mir::*;
 use super::sparse_write_state::{
@@ -80,6 +81,8 @@ pub fn lower_execution_unit_with_diagnostics(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
 ) -> MFunction {
+    let expanded = strided::expand_strided_accesses(eu, layout);
+    let eu = expanded.as_ref();
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         if let Err(error) = eu.verify_result() {
             panic!("before native ISel: {error}");
@@ -299,8 +302,36 @@ pub fn lower_execution_unit_with_diagnostics(
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
+        // Waveform observers share Store/Commit notification sites with clock
+        // triggers. Mark before specialized store/commit lowering can absorb a
+        // run (packed stores and sparse worklists included). Repeated writes
+        // in this basic block need only one notification per physical group.
+        let mut trace_marks = HashSet::default();
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            let target = match inst {
+                SIRInstruction::Store(addr, _, width, _, _, _)
+                | SIRInstruction::Commit(_, addr, _, width, _)
+                    if *width != 0 =>
+                {
+                    Some(addr)
+                }
+                _ => None,
+            };
+            if let Some(offsets) = target.and_then(|addr| layout.trace_notification_offsets(addr)) {
+                for offset in offsets {
+                    if trace_marks.insert(offset) {
+                        let one = ctx.alloc_vreg(SpillDesc::remat(1));
+                        mblock.push(MInst::LoadImm { dst: one, value: 1 });
+                        mblock.push(MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: offset as i32,
+                            src: one,
+                            size: OpSize::S8,
+                        });
+                    }
+                }
+            }
             if branch_table_plan.is_some_and(|plan| plan.skip_indices.contains(&inst_idx)) {
                 continue;
             }
@@ -5501,12 +5532,27 @@ fn lower_instruction(
                         && let Some(load_size) =
                             ctx.full_static_load_size(addr, *bit_off, *width_bits)
                     {
+                        // Padding can retain unrelated bits after partial writes.
+                        // Strip it before the element participates in a concat.
+                        let padded_element = ctx
+                            .layout
+                            .unpacked_arrays
+                            .contains_key(&addr.absolute_addr())
+                            && ISelContext::access_size_has_padding(load_size, *width_bits);
+                        let raw = if padded_element {
+                            ctx.alloc_vreg(SpillDesc::transient())
+                        } else {
+                            vreg
+                        };
                         block.push(MInst::Load {
-                            dst: vreg,
+                            dst: raw,
                             base: BaseReg::SimState,
                             offset: byte_off,
                             size: load_size,
                         });
+                        if padded_element {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        }
                         ctx.known_bits.insert(vreg, *width_bits);
                     } else if intra_byte == 0 && OpSize::from_bits(*width_bits).is_some() {
                         // Word-aligned, native size: single load.
@@ -13093,6 +13139,8 @@ fn lower_wide_unary_mask(
 }
 #[cfg(test)]
 mod tests {
+    mod strided;
+
     use super::*;
     use crate::{AbsoluteAddr, SIRValue};
     use celox_design::{InstanceId, StateObjectId};
@@ -13103,6 +13151,7 @@ mod tests {
         let plane_size = width.div_ceil(8);
         let total_size = plane_size * if four_state { 2 } else { 1 };
         MemoryLayout {
+            trace: None,
             four_state,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),

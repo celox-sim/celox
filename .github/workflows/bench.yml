@@ -16,9 +16,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Rust benchmarks (Criterion) ──
-  bench-rust:
+  # Keep all compared backends on the same VM. Separate jobs with the same
+  # runs-on label can receive different CPU models and are not paired samples.
+  bench-comparison:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     env:
       CARGO_PROFILE_BENCH_DEBUG: "0"
     steps:
@@ -29,6 +31,23 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
+      - name: Record comparison host
+        run: |
+          {
+            echo "runner_name=$RUNNER_NAME"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+            uname -a
+            lscpu
+            free -h
+          } > benchmark-host.txt
+
+      # rust-cache prunes Criterion's sample data while retaining its baseline
+      # directories, which makes Criterion try to compare against incomplete data.
+      - name: Discard cached Criterion data
+        run: rm -rf target/criterion
+
       - name: Run Rust benchmarks
         shell: bash
         run: set -o pipefail && cargo bench --locked -p celox --bench simulation --bench overhead --bench tiered -- --output-format bencher | tee rust-output.txt
@@ -38,16 +57,7 @@ jobs:
           name: bench-rust
           path: rust-output.txt
 
-  # ── Verilator benchmarks (C++ reference) ──
-  bench-verilator:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # Verilator benchmarks (C++ reference), after Rust has finished.
       - uses: veryl-lang/setup-verilator@v2
 
       - name: Install Google Benchmark
@@ -62,16 +72,7 @@ jobs:
           name: bench-verilator
           path: verilator-output.txt
 
-  # ── TypeScript benchmarks (Vitest) ──
-  bench-ts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # TypeScript benchmarks (Vitest), on the same comparison host.
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -98,9 +99,16 @@ jobs:
           name: bench-ts
           path: packages/celox/ts-output.json
 
+      - name: Upload comparison host
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-host
+          path: benchmark-host.txt
+
   # ── Convert & publish results ──
   publish:
-    needs: [bench-rust, bench-verilator, bench-ts]
+    needs: bench-comparison
     runs-on: ubuntu-latest
     permissions:
       contents: write

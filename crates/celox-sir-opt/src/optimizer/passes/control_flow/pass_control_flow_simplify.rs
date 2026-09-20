@@ -585,17 +585,58 @@ impl Hash for ExactCaseConstant {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CorrelatedFacts {
-    booleans: HashMap<RegisterId, bool>,
-    equalities: HashMap<RegisterId, ExactCaseConstant>,
+    booleans: Arc<HashMap<RegisterId, bool>>,
+    equalities: Arc<HashMap<RegisterId, ExactCaseConstant>>,
 }
 
 impl CorrelatedFacts {
-    fn meet_with(&mut self, other: &Self) {
-        self.booleans
-            .retain(|register, truth| other.booleans.get(register) == Some(truth));
-        self.equalities
-            .retain(|register, constant| other.equalities.get(register) == Some(constant));
+    fn intersection(left: &Arc<Self>, right: &Arc<Self>) -> Arc<Self> {
+        if Arc::ptr_eq(left, right) {
+            return Arc::clone(left);
+        }
+        // Boolean decisions and case equalities evolve independently. Share
+        // each domain separately so changing one boolean cannot copy all of
+        // the accumulated case constants.
+        let booleans = intersect_fact_maps(&left.booleans, &right.booleans);
+        let equalities = intersect_fact_maps(&left.equalities, &right.equalities);
+        if booleans == left.booleans && equalities == left.equalities {
+            Arc::clone(left)
+        } else if booleans == right.booleans && equalities == right.equalities {
+            Arc::clone(right)
+        } else {
+            Arc::new(Self {
+                booleans,
+                equalities,
+            })
+        }
     }
+}
+
+fn intersect_fact_maps<T: Clone + PartialEq>(
+    left: &Arc<HashMap<RegisterId, T>>,
+    right: &Arc<HashMap<RegisterId, T>>,
+) -> Arc<HashMap<RegisterId, T>> {
+    if Arc::ptr_eq(left, right) {
+        return Arc::clone(left);
+    }
+    let (smaller, larger) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    if smaller
+        .iter()
+        .all(|(register, value)| larger.get(register) == Some(value))
+    {
+        return Arc::clone(smaller);
+    }
+    Arc::new(
+        smaller
+            .iter()
+            .filter(|&(register, value)| larger.get(register) == Some(value))
+            .map(|(&register, value)| (register, value.clone()))
+            .collect(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1116,11 +1157,7 @@ fn analyze_correlated_facts(
                     continue;
                 };
                 if let Some(intersection) = next_entry.as_mut() {
-                    if !Arc::ptr_eq(intersection, facts) {
-                        let mut narrowed = (**intersection).clone();
-                        narrowed.meet_with(facts);
-                        *intersection = Arc::new(narrowed);
-                    }
+                    *intersection = CorrelatedFacts::intersection(intersection, facts);
                 } else {
                     next_entry = Some(Arc::clone(facts));
                 }
@@ -1169,7 +1206,7 @@ fn facts_on_correlated_edge(
                 return None;
             }
             let mut updated = (**facts).clone();
-            updated.equalities.insert(selector, constant);
+            Arc::make_mut(&mut updated.equalities).insert(selector, constant);
             result = Some(updated);
         }
     } else {
@@ -1184,7 +1221,7 @@ fn facts_on_correlated_edge(
                 return None;
             }
             let mut updated = (**facts).clone();
-            updated.booleans.insert(root, root_truth);
+            Arc::make_mut(&mut updated.booleans).insert(root, root_truth);
             result = Some(updated);
         }
     }
@@ -2260,6 +2297,53 @@ mod tests {
     use super::*;
     use crate::ir::InstanceId;
     use celox_design::StateObjectId as VarId;
+
+    #[test]
+    fn correlated_fact_intersections_match_set_intersection_and_share_subsets() {
+        let mut cases = vec![Arc::new(CorrelatedFacts::default())];
+        for seed in 0..24 {
+            let mut facts = CorrelatedFacts::default();
+            for value in 0..64 {
+                if (value + seed) % 3 != 0 {
+                    Arc::make_mut(&mut facts.booleans)
+                        .insert(RegisterId(value), (value + seed) % 5 != 0);
+                }
+                if (value + seed) % 4 != 0 {
+                    Arc::make_mut(&mut facts.equalities).insert(
+                        RegisterId(value),
+                        ExactCaseConstant::new(65, vec![value as u64, (seed % 2) as u64]),
+                    );
+                }
+            }
+            let mut subset = facts.clone();
+            Arc::make_mut(&mut subset.booleans).retain(|register, _| register.0 % 2 == 0);
+            Arc::make_mut(&mut subset.equalities).retain(|register, _| register.0 % 2 == 0);
+            cases.push(Arc::new(facts));
+            cases.push(Arc::new(subset));
+        }
+        for left in &cases {
+            for right in &cases {
+                let mut expected = (**left).clone();
+                Arc::make_mut(&mut expected.booleans)
+                    .retain(|register, truth| right.booleans.get(register) == Some(truth));
+                Arc::make_mut(&mut expected.equalities)
+                    .retain(|register, constant| right.equalities.get(register) == Some(constant));
+                let actual = CorrelatedFacts::intersection(left, right);
+                assert_eq!(*actual, expected);
+                if expected == **left || expected == **right {
+                    assert!(Arc::ptr_eq(&actual, left) || Arc::ptr_eq(&actual, right));
+                }
+            }
+        }
+        let left = &cases[1];
+        let mut right = (**left).clone();
+        let original_truth = left.booleans[&RegisterId(1)];
+        Arc::make_mut(&mut right.booleans).insert(RegisterId(1), !original_truth);
+        assert_eq!(left.booleans[&RegisterId(1)], original_truth);
+        let actual = CorrelatedFacts::intersection(left, &Arc::new(right));
+        assert!(!actual.booleans.contains_key(&RegisterId(1)));
+        assert!(Arc::ptr_eq(&actual.equalities, &left.equalities));
+    }
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

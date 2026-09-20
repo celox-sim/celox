@@ -176,6 +176,20 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
     }
 }
 
+/// Reserved state-base registers do not consume allocator capacity. The
+/// worklist caches the same state pointer in R15 on both target strategies;
+/// only the segment-base strategy makes R15 an allocatable value to evict.
+pub(super) fn allocatable_clobber_count(inst: &MInst, func: &MFunction) -> usize {
+    clobbers(inst)
+        .iter()
+        .filter(|&&register| {
+            register != PhysReg::R15
+                || func.target_features.state_base()
+                    != crate::native::features::StateBaseStrategy::R15
+        })
+        .count()
+}
+
 /// Returns true if the instruction is a register-register shift (needs RCX).
 pub fn is_reg_shift(inst: &MInst) -> bool {
     matches!(

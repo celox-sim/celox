@@ -28,6 +28,7 @@ fn test_initial_readmemh_loads_unpacked_array(sim) {
                 out2: output logic<8>,
                 out3: output logic<8>,
             ) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     $readmemh("{}", mem);
@@ -61,6 +62,7 @@ fn test_initial_readmemh_supports_comments_address_and_xz(sim) {
                 out2: output logic<8>,
                 out3: output logic<8>,
             ) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     $readmemh("{}", mem);
@@ -87,6 +89,7 @@ fn test_initial_readmemh_supports_const_if(sim) {
         let other_path = temp_mem_file("readmemh_if_dead", "00\n00\n00\n00\n");
         let code = format!(r#"
             module Top (out0: output logic<8>, out3: output logic<8>) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     if 1'd1 {{
@@ -112,6 +115,7 @@ fn test_initial_readmemh_supports_const_for(sim) {
         let mem_path = temp_mem_file("readmemh_for", "11\n22\n33\n44\n");
         let code = format!(r#"
             module Top (out0: output logic<8>, out2: output logic<8>) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     for i in 0..2 {{
@@ -142,6 +146,7 @@ fn test_initial_readmemh_supports_indexed_destination(sim) {
                 out2: output logic<8>,
                 out3: output logic<8>,
             ) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     $readmemh("{}", mem[1]);
@@ -173,6 +178,7 @@ fn test_initial_readmemh_multiple_files_merge_in_order(sim) {
                 out2: output logic<8>,
                 out3: output logic<8>,
             ) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     $readmemh("{}", mem);
@@ -200,6 +206,7 @@ fn test_initial_readmemb_reports_illegal_context() {
     let code = format!(
         r#"
             module Top (out0: output logic<8>) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[4];
                 initial {{
                     $readmemb("{}", mem);
@@ -231,6 +238,7 @@ fn test_initial_readmemh_applies_to_shared_native_simulator() {
     let code = format!(
         r#"
             module Top (out0: output logic<8>, out1: output logic<8>) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[2];
                 initial {{
                     $readmemh("{}", mem);

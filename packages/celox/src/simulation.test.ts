@@ -4,6 +4,7 @@ import type {
 	CreateResult,
 	ModuleDefinition,
 	NativeSimulationHandle,
+	SimulatorOptions,
 } from "./types.js";
 import { SimulationTimeoutError } from "./types.js";
 
@@ -33,6 +34,7 @@ const TopModule: ModuleDefinition<TopPorts> = {
 function createMockNative(opts?: {
 	resetTypeKind?: string;
 	associatedClock?: string;
+	emptyEventQueue?: boolean;
 }): {
 	create: NativeCreateSimulationFn;
 	handle: NativeSimulationHandle;
@@ -40,26 +42,32 @@ function createMockNative(opts?: {
 } {
 	const buffer = new SharedArrayBuffer(64);
 	let currentTime = 0;
+	let nextScheduledTime: number | null = opts?.emptyEventQueue ? null : 5;
+	const processNextEvent = (): number | null => {
+		if (nextScheduledTime == null) return null;
+		currentTime = nextScheduledTime;
+		nextScheduledTime += 5;
+		const view = new DataView(buffer);
+		view.setUint8(4, view.getUint8(2));
+		// Toggle clock (offset 6) on each step to simulate half-period=5
+		view.setUint8(6, view.getUint8(6) === 0 ? 1 : 0);
+		return currentTime;
+	};
 
 	const handle: NativeSimulationHandle = {
 		addClock: vi.fn(),
 		schedule: vi.fn(),
 		runUntil: vi.fn().mockImplementation((endTime: number) => {
-			// Simulate: q = d after running
+			while (nextScheduledTime != null && nextScheduledTime <= endTime) {
+				processNextEvent();
+			}
 			const view = new DataView(buffer);
 			view.setUint8(4, view.getUint8(2));
 			currentTime = endTime;
 		}),
-		step: vi.fn().mockImplementation(() => {
-			currentTime += 5;
-			const view = new DataView(buffer);
-			view.setUint8(4, view.getUint8(2));
-			// Toggle clock (offset 6) on each step to simulate half-period=5
-			view.setUint8(6, view.getUint8(6) === 0 ? 1 : 0);
-			return currentTime;
-		}),
+		step: vi.fn().mockImplementation(processNextEvent),
 		time: vi.fn().mockImplementation(() => currentTime),
-		nextEventTime: vi.fn().mockReturnValue(null),
+		nextEventTime: vi.fn().mockImplementation(() => nextScheduledTime),
 		evalComb: vi.fn().mockImplementation(() => {
 			const view = new DataView(buffer);
 			view.setUint8(4, view.getUint8(2));
@@ -128,6 +136,56 @@ describe("Simulation", () => {
 
 		sim.addClock("clk", { period: 10 });
 		expect(mock.handle.addClock).toHaveBeenCalledWith(0, 10, 0);
+	});
+
+	test("create forwards merged public options without the native override", () => {
+		const mock = createMockNative();
+		const defaultOptions = {
+			fourState: true,
+			vcd: "default.vcd",
+			optLevel: "O2",
+			passOverrides: ["-sir:gvn"],
+			optimize: true,
+			optimizeOptions: { reschedule: true },
+			craneliftOptLevel: "speed",
+			regallocAlgorithm: "backtracking",
+			enableAliasAnalysis: true,
+			enableVerifier: true,
+			falseLoops: [{ from: "d", to: "q" }],
+			trueLoops: [{ from: "rst", to: "q", maxIter: 8 }],
+			clockType: "posedge",
+			resetType: "async_low",
+			extraSource: "module DefaultHelper {}",
+			parameters: [{ name: "WIDTH", value: 8 }],
+			deadStorePolicy: "preserveTopPorts",
+		} satisfies SimulatorOptions;
+		const module = { ...TopModule, defaultOptions };
+
+		const sim = Simulation.create(module, {
+			__nativeCreate: mock.create,
+			optLevel: "O0",
+			optimizeOptions: { reschedule: false },
+			craneliftOptLevel: "none",
+			regallocAlgorithm: "singlePass",
+			enableAliasAnalysis: false,
+			enableVerifier: false,
+			extraSource: "module OverrideHelper {}",
+		});
+
+		expect(mock.create).toHaveBeenCalledWith(module.sources, module.name, {
+			...defaultOptions,
+			optLevel: "O0",
+			optimizeOptions: { reschedule: false },
+			craneliftOptLevel: "none",
+			regallocAlgorithm: "singlePass",
+			enableAliasAnalysis: false,
+			enableVerifier: false,
+			extraSource: "module OverrideHelper {}",
+		});
+		expect(vi.mocked(mock.create).mock.calls[0]?.[2]).not.toHaveProperty(
+			"__nativeCreate",
+		);
+		sim.dispose();
 	});
 
 	test("addClock with initialDelay", () => {
@@ -263,6 +321,91 @@ describe("Simulation", () => {
 		}
 	});
 
+	test("runUntil with maxSteps: succeeds when the final step uses the exact budget", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.runUntil(25, { maxSteps: 5 });
+
+		expect(sim.time()).toBe(25);
+		expect(mock.handle.step).toHaveBeenCalledTimes(5);
+		expect(mock.handle.runUntil).toHaveBeenCalledWith(25);
+	});
+
+	test("runUntil with maxSteps: times out when one more step is required", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		expect(() => sim.runUntil(25, { maxSteps: 4 })).toThrow(
+			SimulationTimeoutError,
+		);
+		expect(sim.time()).toBe(20);
+		expect(mock.handle.step).toHaveBeenCalledTimes(4);
+		expect(mock.handle.runUntil).not.toHaveBeenCalled();
+	});
+
+	test("runUntil with maxSteps: preserves dirty inputs when no step is allowed", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.dut.d = 42n;
+
+		expect(() => sim.runUntil(5, { maxSteps: 0 })).toThrow(
+			SimulationTimeoutError,
+		);
+
+		expect(mock.handle.step).not.toHaveBeenCalled();
+		expect(sim.dut.q).toBe(42n);
+		expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+	});
+
+	test("runUntil with maxSteps: does not process an event after the target", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.runUntil(23, { maxSteps: 4 });
+
+		expect(mock.handle.step).toHaveBeenCalledTimes(4);
+		expect(sim.time()).toBe(23);
+		expect(sim.nextEventTime()).toBe(25);
+		expect(mock.handle.runUntil).toHaveBeenCalledWith(23);
+	});
+
+	test("runUntil with maxSteps: advances an empty queue without stepping", () => {
+		const mock = createMockNative({ emptyEventQueue: true });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.runUntil(23, { maxSteps: 0 });
+
+		expect(mock.handle.step).not.toHaveBeenCalled();
+		expect(mock.handle.runUntil).toHaveBeenCalledWith(23);
+		expect(sim.time()).toBe(23);
+	});
+
+	test("runUntil with maxSteps: remains a no-op after the target time", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.runUntil(10);
+		vi.mocked(mock.handle.runUntil).mockClear();
+
+		sim.runUntil(5, { maxSteps: 0 });
+
+		expect(sim.time()).toBe(10);
+		expect(mock.handle.step).not.toHaveBeenCalled();
+		expect(mock.handle.runUntil).not.toHaveBeenCalled();
+	});
+
 	test("waitUntil: returns time when condition is met", () => {
 		const mock = createMockNative();
 		const sim = Simulation.create(TopModule, {
@@ -289,6 +432,43 @@ describe("Simulation", () => {
 		expect(() => sim.waitUntil(() => false, { maxSteps: 5 })).toThrow(
 			SimulationTimeoutError,
 		);
+	});
+
+	test("waitUntil: succeeds when the condition uses the exact step budget", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		const time = sim.waitUntil(() => sim.time() >= 25, { maxSteps: 5 });
+
+		expect(time).toBe(25);
+		expect(mock.handle.step).toHaveBeenCalledTimes(5);
+	});
+
+	test("waitUntil: times out when the condition needs one more step", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		expect(() =>
+			sim.waitUntil(() => sim.time() >= 25, { maxSteps: 4 }),
+		).toThrow(SimulationTimeoutError);
+		expect(sim.time()).toBe(20);
+		expect(mock.handle.step).toHaveBeenCalledTimes(4);
+	});
+
+	test("waitUntil: returns normally when the event queue is exhausted", () => {
+		const mock = createMockNative({ emptyEventQueue: true });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		const time = sim.waitUntil(() => false, { maxSteps: 0 });
+
+		expect(time).toBe(0);
+		expect(mock.handle.step).toHaveBeenCalledOnce();
 	});
 
 	test("waitForCycles: counts rising edges", () => {
@@ -370,6 +550,24 @@ describe("Simulation", () => {
 		expect(mock.handle.step).toHaveBeenCalledTimes(3);
 	});
 
+	test("reset: releasing reset leaves outputs ready for lazy re-evaluation", () => {
+		const mock = createMockNative({ associatedClock: "clk" });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		const view = new DataView(mock.buffer);
+		vi.mocked(mock.handle.evalComb).mockImplementation(() => {
+			view.setUint8(4, view.getUint8(0));
+		});
+
+		sim.dut.d = 42n;
+		sim.addClock("clk", { period: 10 });
+		sim.reset("rst");
+
+		expect(sim.dut.q).toBe(0n);
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+	});
+
 	test("reset: throws when no associatedClock and no duration", () => {
 		// No associatedClock in layout
 		const mock = createMockNative();
@@ -378,6 +576,7 @@ describe("Simulation", () => {
 		});
 
 		expect(() => sim.reset("rst")).toThrow("has no associated clock");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
 	});
 
 	test("reset: no associatedClock but duration specified works", () => {
@@ -398,6 +597,37 @@ describe("Simulation", () => {
 		});
 		// addClock not called
 		expect(() => sim.reset("rst")).toThrow("No clock registered for 'clk'");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
+	});
+
+	test("reset: releases the signal when advancing the simulation fails", () => {
+		const mock = createMockNative({ associatedClock: "clk" });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.addClock("clk", { period: 10 });
+		vi.mocked(mock.handle.step).mockImplementationOnce(() => {
+			throw new Error("step failed");
+		});
+
+		expect(() => sim.reset("rst")).toThrow("step failed");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+		void sim.dut.q;
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+	});
+
+	test("reset: releases the signal when duration-based advancement fails", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		vi.mocked(mock.handle.runUntil).mockImplementationOnce(() => {
+			throw new Error("runUntil failed");
+		});
+
+		expect(() => sim.reset("rst", { duration: 10 })).toThrow("runUntil failed");
+		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
 	});
 
 	test("reset: throws on non-reset port", () => {

@@ -54,7 +54,6 @@ module Top (
     }
 
     fn test_child_dynamic_ff_read_reaches_parent_after_same_edge_enable(sim) {
-        @ignore_on(sv);
         @setup { let code = r#"
 module Cache (
     clk  : input  clock,
@@ -323,7 +322,6 @@ module Top (
     }
 
     fn test_wide_dynamic_ff_checkpoint_round_trip(sim) {
-        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
     clk    : input  clock,
@@ -392,7 +390,7 @@ module Top (
     }
 
     fn test_unaligned_309_bit_dynamic_ff_round_trip(sim) {
-        @ignore_on(wasm, sv);
+        @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
     clk    : input  clock,

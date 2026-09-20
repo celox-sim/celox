@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:vite-components": "vitest run --config test/fixtures/injected-components/vitest.config.ts && node test/fixtures/injected-components/dependency-e2e.mjs",
+    "test:vite-components": "vitest run test/vite-plugin-cache.test.ts && vitest run --config test/fixtures/injected-components/vitest.config.ts && node test/fixtures/injected-components/dependency-e2e.mjs",
     "test:lsp-components": "pnpm run test:vite-components && node test/fixtures/injected-components/lsp-e2e.mjs",
     "test:e2e": "pnpm run build && playwright test",
     "test:watch": "vitest",
@@ -23,10 +23,10 @@
     "vite": "^8.0.0",
     "vite-plugin-monaco-editor": "^1.1.0",
     "vite-plugin-monaco-editor-nls": "^3.0.1",
-    "vitest": "^4.0.0"
+    "vitest": "^5.0.0"
   },
   "dependencies": {
-    "@vitest/expect": "^4.1.1",
+    "@vitest/expect": "^5.0.0",
     "@vitest/runner": "^4.1.1",
     "coi-serviceworker": "^0.1.7"
   }

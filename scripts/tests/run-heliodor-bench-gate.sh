@@ -38,19 +38,26 @@ write_valid_gate_logs() {
     local tiered_reported="$((tiered_startup + tiered_execute + 1))"
     mkdir -p "$directory"
     printf '%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=00d83790 x3=00000000000000aa pass=1" \
+        "v4 SoC linux boot smoke: cy=0087cda0 x3=00000000000000aa pass=1" \
         "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false compile_only=false" \
         "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$veryl_compile execute_ns=$veryl_execute" \
         "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$veryl_reported" \
         >"$directory/veryl.log"
+    printf '%s\n' \
+        "v4 SoC linux boot smoke: cy=0087cda0 x3=00000000000000aa pass=1" \
+        "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=true compile_only=false" \
+        "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=8 execute_ns=50" \
+        "VERYL_TIERED_STATS test=$GATE_TEST compiled_dispatches=100 fallback_dispatches=200" \
+        "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=59" \
+        >"$directory/veryl-cc-tiered.log"
     printf '%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1" \
+        "v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
         "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$celox_compile execute_ns=$celox_execute jit_execute_ns=$celox_jit_execute" \
         "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$celox_reported" \
         >"$directory/celox.log"
     printf '%s\n%s\n%s\n%s\n%s\n' \
-        "v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1" \
+        "v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=tiered opt_level=O2 four_state=false compile_only=false" \
         "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$tiered_startup execute_ns=$tiered_execute jit_execute_ns=NA" \
         "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 promotion_elapsed_ns=12 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
@@ -84,6 +91,8 @@ write_gate_results() {
     append_result_row "$directory/results.tsv" celox-tiered "$GATE_TEST" 0 \
         90 "$directory/celox-tiered.log" pass 90 \
         "$tiered_reported" "$tiered_startup" "$tiered_execute" NA >/dev/null
+    append_result_row "$directory/results.tsv" veryl-cc-tiered "$GATE_TEST" 0 \
+        100 "$directory/veryl-cc-tiered.log" pass 100 59 8 50 NA >/dev/null
 }
 
 unit="$TMP/unit"
@@ -98,6 +107,44 @@ assert_eq "$GATE_CELOX_JIT_EXECUTE_NS" 20 "Celox gate JIT execute interval"
 assert_eq "$GATE_TIERED_STARTUP_NS" 5 "tiered gate startup interval"
 assert_eq "$GATE_TIERED_EXECUTE_NS" 18 "tiered gate execute interval"
 assert_eq "$GATE_TIERED_TOTAL_NS" 24 "tiered gate end-to-end interval"
+assert_eq "$GATE_VERYL_TIERED_STARTUP_NS" 8 "Veryl tiered startup interval"
+assert_eq "$GATE_VERYL_TIERED_EXECUTE_NS" 50 "Veryl tiered execute interval"
+assert_eq "$GATE_VERYL_TIERED_TOTAL_NS" 59 "Veryl tiered end-to-end interval"
+
+# Tiered execution may finish before C compilation, or start after it is
+# ready. Both are valid end-to-end measurements with the same timing fields.
+for dispatches in '0 17800008' '100 0'; do
+    read -r compiled fallback <<<"$dispatches"
+    valid="$TMP/veryl-tiered-$compiled-$fallback"
+    write_gate_results "$valid" 200 100
+    sed -i "s/compiled_dispatches=100 fallback_dispatches=200/compiled_dispatches=$compiled fallback_dispatches=$fallback/" \
+        "$valid/veryl-cc-tiered.log"
+    validate_gate_results "$valid/results.tsv" "$valid" \
+        || fail "Veryl tiered dispatches $dispatches were rejected by the gate"
+    assert_eq "$GATE_VERYL_TIERED_STARTUP_NS" 8 "Veryl tiered startup with dispatches $dispatches"
+    assert_eq "$GATE_VERYL_TIERED_EXECUTE_NS" 50 "Veryl tiered execution with dispatches $dispatches"
+    assert_eq "$GATE_VERYL_TIERED_TOTAL_NS" 59 "Veryl tiered end-to-end with dispatches $dispatches"
+    node "$ROOT/scripts/convert-heliodor-bench.mjs" "$valid/results.tsv" "$valid/converted.json" --require-tiered >/dev/null \
+        || fail "Veryl tiered dispatches $dispatches could not be converted for the dashboard"
+done
+
+for failure in missing sync no-dispatches missing-stats malformed-stats duplicate-stats wrong-test wrong-time; do
+    invalid="$TMP/veryl-tiered-$failure"
+    write_gate_results "$invalid" 200 100
+    case "$failure" in
+        missing) sed -i '/^veryl-cc-tiered/d' "$invalid/results.tsv" ;;
+        sync) sed -i 's/aot_c_async=true/aot_c_async=false/' "$invalid/veryl-cc-tiered.log" ;;
+        no-dispatches) sed -i 's/compiled_dispatches=100 fallback_dispatches=200/compiled_dispatches=0 fallback_dispatches=0/' "$invalid/veryl-cc-tiered.log" ;;
+        missing-stats) sed -i '/^VERYL_TIERED_STATS/d' "$invalid/veryl-cc-tiered.log" ;;
+        malformed-stats) sed -i 's/fallback_dispatches=200/fallback_dispatches=-1/' "$invalid/veryl-cc-tiered.log" ;;
+        duplicate-stats) sed -n '/^VERYL_TIERED_STATS/p' "$unit/veryl-cc-tiered.log" >>"$invalid/veryl-cc-tiered.log" ;;
+        wrong-test) sed -i '/^VERYL_TIERED_STATS/s/test_soc_linux_boot/other_test/' "$invalid/veryl-cc-tiered.log" ;;
+        wrong-time) sed -i 's/compile_ns=8/compile_ns=9/' "$invalid/veryl-cc-tiered.log" ;;
+    esac
+    if validate_gate_results "$invalid/results.tsv" "$invalid" 2>/dev/null; then
+        fail "Veryl tiered $failure was accepted by the gate"
+    fi
+done
 
 trailing_empty="$TMP/trailing-empty"
 write_gate_results "$trailing_empty" 200 100
@@ -239,16 +286,23 @@ fi
 
 bad_veryl_cycle="$TMP/bad-veryl-cycle"
 write_gate_results "$bad_veryl_cycle" 200 100
-sed -i 's/cy=00d83790/cy=00d83800/' "$bad_veryl_cycle/veryl.log"
+sed -i 's/cy=0087cda0/cy=0087cda1/' "$bad_veryl_cycle/veryl.log"
 if validate_gate_results "$bad_veryl_cycle/results.tsv" "$bad_veryl_cycle" 2>/dev/null; then
     fail "gate accepted the wrong Veryl architectural completion cycle"
 fi
 
 bad_celox_cycle="$TMP/bad-celox-cycle"
 write_gate_results "$bad_celox_cycle" 200 100
-sed -i 's/cy=d83790/cy=d83800/' "$bad_celox_cycle/celox.log"
+sed -i 's/cy=87cda0/cy=87cda1/' "$bad_celox_cycle/celox.log"
 if validate_gate_results "$bad_celox_cycle/results.tsv" "$bad_celox_cycle" 2>/dev/null; then
     fail "gate accepted the wrong Celox architectural completion cycle"
+fi
+
+bad_tiered_cycle="$TMP/bad-tiered-cycle"
+write_gate_results "$bad_tiered_cycle" 200 100
+sed -i 's/cy=87cda0/cy=87cda1/' "$bad_tiered_cycle/celox-tiered.log"
+if validate_gate_results "$bad_tiered_cycle/results.tsv" "$bad_tiered_cycle" 2>/dev/null; then
+    fail "gate accepted the wrong tiered Celox architectural completion cycle"
 fi
 
 duplicate_celox_cycle="$TMP/duplicate-celox-cycle"
@@ -361,6 +415,15 @@ assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutraliza
         $'src/dummy.veryl\ntb/test.veryl' \
         "source enumeration without ripgrep"
     PATH="$saved_path"
+    printf '#[test(test_soc_66_smp_linux_boot_2hart)]\n' >"$HELIODOR_DIR/tb/linux66.veryl"
+    if test_source_files test_soc_66_smp_linux_boot_2hart >/dev/null 2>&1; then
+        fail "accepted versioned SMP without shared harness"
+    fi
+    touch "$HELIODOR_DIR/tb/test_soc_smp_linux_boot.veryl"
+    assert_eq "$(test_source_files test_soc_66_smp_linux_boot_2hart)" \
+        $'src/dummy.veryl\ntb/test_soc_smp_linux_boot.veryl\ntb/linux66.veryl' \
+        "versioned SMP includes its shared harness"
+
     mkdir -p "$HELIODOR_DIR/tb/duplicate"
     printf '%s\n' '#[test(test_soc_linux_boot)]' \
         >"$HELIODOR_DIR/tb/duplicate/test.veryl"
@@ -407,9 +470,10 @@ mkdir -p "$GATE_WORKTREE_ROOT"
 git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/veryl-cc-sync" HEAD
 git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/celox" HEAD
 git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/celox-tiered" HEAD
+git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/veryl-cc-tiered" HEAD
 gate_cleanup_worktrees
 [[ ! -e "$TMP/git-worktrees/veryl-cc-sync" && ! -e "$TMP/git-worktrees/celox" \
-    && ! -e "$TMP/git-worktrees/celox-tiered" ]] \
+    && ! -e "$TMP/git-worktrees/celox-tiered" && ! -e "$TMP/git-worktrees/veryl-cc-tiered" ]] \
     || fail "gate cleanup left detached worktrees behind"
 
 # Full run_gate fixture. Replace every external boundary while retaining the
@@ -480,7 +544,7 @@ monotonic_ns() {
 
 gate_create_worktrees() {
     mkdir -p "$GATE_WORKTREE_ROOT/veryl-cc-sync" "$GATE_WORKTREE_ROOT/celox" \
-        "$GATE_WORKTREE_ROOT/celox-tiered"
+        "$GATE_WORKTREE_ROOT/celox-tiered" "$GATE_WORKTREE_ROOT/veryl-cc-tiered"
 }
 
 gate_cleanup_worktrees() {
@@ -509,7 +573,7 @@ run_one() {
 
     assert_eq "$test" "$GATE_TEST" "fixed gate test"
     assert_eq "$HELIODOR_TESTS" "$GATE_TEST" "fixed test list"
-    assert_eq "$HELIODOR_RUNNERS" "veryl-cc-sync celox celox-tiered" "fixed runner list"
+    assert_eq "$HELIODOR_RUNNERS" "veryl-cc-sync celox celox-tiered veryl-cc-tiered" "fixed runner list"
     assert_eq "$HELIODOR_REPO" "https://github.com/dalance/heliodor.git" \
         "fixed Heliodor repository"
     assert_eq "$HELIODOR_REF" "$GATE_HELIODOR_REF" "pinned Heliodor commit"
@@ -523,16 +587,21 @@ run_one() {
     [[ "$HELIODOR_DIR" == "$HELIODOR_RESULTS_DIR/worktrees/$runner" ]] \
         || fail "$runner did not use its isolated Heliodor worktree: $HELIODOR_DIR"
     case "$runner" in
-        veryl-cc-sync)
+        veryl-cc-sync|veryl-cc-tiered)
+            local async=false
+            [[ "$runner" != veryl-cc-tiered ]] || async=true
             elapsed=200
             reported=71
             compile_elapsed=30
             execute_elapsed=40
             printf '%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=00d83790 x3=00000000000000aa pass=1' \
-                "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false compile_only=false" \
+                'v4 SoC linux boot smoke: cy=0087cda0 x3=00000000000000aa pass=1' \
+                "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=$async compile_only=false" \
                 "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
                 "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$reported" >"$log"
+            if [[ "$runner" == veryl-cc-tiered ]]; then
+                printf '%s\n' "VERYL_TIERED_STATS test=$GATE_TEST compiled_dispatches=100 fallback_dispatches=200" >>"$log"
+            fi
             ;;
         celox)
             elapsed="$MOCK_CELOX_ELAPSED"
@@ -546,7 +615,7 @@ run_one() {
                 elapsed=NA
             fi
             printf '%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1' \
+                'v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
                 "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=$jit_execute_elapsed" \
                 "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=$reported" >"$log"
@@ -568,7 +637,7 @@ run_one() {
                 elapsed=NA
             fi
             printf '%s\n%s\n%s\n%s\n%s\n' \
-                'v4 SoC linux boot smoke: cy=d83790 x3=aa pass=1' \
+                'v4 SoC linux boot smoke: cy=87cda0 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=tiered opt_level=O2 four_state=false compile_only=false" \
                 "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=NA" \
                 "CELOX_TIERED_STATS test=$GATE_TEST tier=compiled promotion=promoted interpreted_evaluations=100 compiled_evaluations=200 promoted_after_interpreted_evaluations=100 promotion_elapsed_ns=12 safe_point_polls=101 split_apply_deferrals=0 threshold_deferrals=0" \
@@ -616,14 +685,14 @@ run_gate_fixture() {
             fail "$name unexpectedly failed"
         }
     fi
-    assert_eq "$MOCK_RUNNERS" "veryl-cc-sync celox celox-tiered" "$name runner order"
+    assert_eq "$MOCK_RUNNERS" "veryl-cc-sync celox celox-tiered veryl-cc-tiered" "$name runner order"
 }
 
 run_gate_fixture success 1
 assert_eq "$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv | wc -l)" 1 \
     "one isolated result file"
 success_results="$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv)"
-assert_eq "$(wc -l <"$success_results")" 4 "exact benchmark result rows"
+assert_eq "$(wc -l <"$success_results")" 5 "exact benchmark result rows"
 
 MOCK_CELOX_EXECUTE=41
 run_gate_fixture slower-integration 1

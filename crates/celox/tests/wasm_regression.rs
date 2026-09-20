@@ -1225,6 +1225,7 @@ fn wasm_reg_vcd_output() {
         dump_vcd(&wasm, &mut vcd_writer, i * 10);
     }
 
+    vcd_writer.flush().unwrap();
     // Verify VCD file was written
     let content = std::fs::read_to_string(&vcd_path).unwrap();
     assert!(

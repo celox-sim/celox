@@ -1,29 +1,29 @@
 ---
 source: crates/celox/tests/error_readability.rs
+assertion_line: 113
 expression: err
 ---
 combinational_loop (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#combinational_loop)
 
-  × combinational loop detected on "x"
+  × combinational loop detected
    ╭─[:6:20]
  5 │             var z: logic;
  6 │             assign x = y;
    ·                    ┬
-   ·                    ╰── Error location
+   ·                    ╰── involved in combinational feedback
  7 │             assign y = z;
    ╰────
    ╭─[:8:20]
  7 │             assign y = z;
  8 │             assign z = x;
    ·                    ┬
-   ·                    ╰── involved in loop
+   ·                    ╰── also involved in combinational feedback
  9 │             assign o = x;
    ╰────
    ╭─[:7:20]
  6 │             assign x = y;
  7 │             assign y = z;
    ·                    ┬
-   ·                    ╰── involved in loop
+   ·                    ╰── also involved in combinational feedback
  8 │             assign z = x;
    ╰────
-  help:

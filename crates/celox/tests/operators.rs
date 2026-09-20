@@ -857,7 +857,7 @@ assign y = a ~^ b;
 
     // XNOR in always_ff.
     fn test_ff_bitxnor(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -981,7 +981,6 @@ assign y = ~^a;
 
     // Reduction NAND in always_ff.
     fn test_ff_reduction_nand(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -1066,7 +1065,6 @@ o_comb = 32'hffff_ffff + 1;
 
     // Reduction NOR in always_ff.
     fn test_ff_reduction_nor(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 clk: input  clock,

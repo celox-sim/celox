@@ -50,6 +50,33 @@ impl fmt::Display for SirCfgError {
 
 impl std::error::Error for SirCfgError {}
 
+/// Dominance queries for SIR rewrites which do not inspect loops or build SSA.
+/// Keeping this separate from `SirCfg` avoids building and dropping unused
+/// per-block analysis tables after each local CFG rewrite.
+#[derive(Debug, Clone)]
+pub struct SirDominance {
+    index: HashMap<BlockId, usize>,
+    dominators: DominatorTree,
+}
+
+impl SirDominance {
+    pub fn analyze<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+        let IndexedSirGraph {
+            index, successors, ..
+        } = index_sir_graph(eu)?;
+        let dominators = DominatorTree::compute(&successors, 0).map_err(map_analysis_error)?;
+        Ok(Self { index, dominators })
+    }
+
+    pub fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+        let (Some(&dominator), Some(&block)) = (self.index.get(&dominator), self.index.get(&block))
+        else {
+            return false;
+        };
+        self.dominators.dominates(dominator, block)
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Some analyses are intentionally ahead of their first consumer.
 pub struct SirCfg {
@@ -407,6 +434,87 @@ mod tests {
             blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
             register_map: HashMap::<_, RegisterType>::default(),
         }
+    }
+
+    #[test]
+    fn dominance_only_queries_match_paths_with_each_vertex_removed() {
+        const BLOCKS: usize = 64;
+        let ids = (0..BLOCKS)
+            .map(|index| BlockId((index * 17 % BLOCKS) * 5 + 7))
+            .collect::<Vec<_>>();
+        for seed in 0..8 {
+            let successors = (0..BLOCKS)
+                .map(|index| {
+                    if index + 1 == BLOCKS {
+                        Vec::new()
+                    } else {
+                        vec![index + 1, (index * 7 + seed) % BLOCKS]
+                    }
+                })
+                .collect::<Vec<_>>();
+            let unit = eu(
+                ids[0].0,
+                successors
+                    .iter()
+                    .enumerate()
+                    .map(|(index, outgoing)| {
+                        block(
+                            ids[index].0,
+                            if outgoing.is_empty() {
+                                SIRTerminator::Return
+                            } else {
+                                SIRTerminator::Branch {
+                                    cond: crate::RegisterId(0),
+                                    true_block: (ids[outgoing[0]], Vec::new()),
+                                    false_block: (ids[outgoing[1]], Vec::new()),
+                                }
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            let queries = SirDominance::analyze(&unit).unwrap();
+            let full = SirCfg::analyze_forward_structure(&unit).unwrap();
+            for removed in 0..BLOCKS {
+                let mut reached = [false; BLOCKS];
+                let mut pending = if removed == 0 { Vec::new() } else { vec![0] };
+                while let Some(block) = pending.pop() {
+                    if reached[block] {
+                        continue;
+                    }
+                    reached[block] = true;
+                    pending.extend(
+                        successors[block]
+                            .iter()
+                            .copied()
+                            .filter(|&next| next != removed),
+                    );
+                }
+                for target in 0..BLOCKS {
+                    assert_eq!(
+                        queries.dominates(ids[removed], ids[target]),
+                        !reached[target]
+                    );
+                    assert_eq!(
+                        queries.dominates(ids[removed], ids[target]),
+                        full.dominates(ids[removed], ids[target])
+                    );
+                }
+            }
+            assert!(!queries.dominates(ids[0], BlockId(usize::MAX)));
+            assert!(!queries.dominates(BlockId(usize::MAX), ids[0]));
+        }
+        let unreachable = eu(
+            0,
+            vec![
+                block(0, SIRTerminator::Return),
+                block(1, SIRTerminator::Return),
+            ],
+        );
+        assert_eq!(
+            SirDominance::analyze(&unreachable).unwrap_err(),
+            SirCfgError::Unreachable(vec![BlockId(1)])
+        );
     }
 
     #[test]

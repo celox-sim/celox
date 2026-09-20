@@ -46,6 +46,7 @@ impl<B: SimBackend> Ord for SimEvent<B> {
                 id2.cmp(&id1)
             })
             .then_with(|| other.signal.cmp(&self.signal))
+            .then_with(|| other.next_val.cmp(&self.next_val))
     }
 }
 

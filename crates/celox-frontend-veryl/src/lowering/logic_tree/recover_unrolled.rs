@@ -528,6 +528,14 @@ fn parameterize_expression(
         *template = exact;
         return Some(true);
     }
+    if variants
+        .iter()
+        .any(|variant| !same_expression_shape(template, variant))
+        && let Some(piecewise) = parameterize_single_folded_branch(module, variants, candidate)
+    {
+        *template = piecewise;
+        return Some(true);
+    }
     match template {
         Expression::Term(template_factor) => {
             let factors = variants
@@ -638,6 +646,319 @@ fn parameterize_expression(
             Some(depends)
         }
         Expression::ArrayLiteral(_, _) | Expression::StructConstructor(_, _, _) => None,
+    }
+}
+
+fn same_expression_shape(lhs: &Expression, rhs: &Expression) -> bool {
+    match (lhs, rhs) {
+        (Expression::Term(lhs), Expression::Term(rhs)) => {
+            std::mem::discriminant(lhs.as_ref()) == std::mem::discriminant(rhs.as_ref())
+        }
+        (Expression::Unary(lhs_op, lhs, _), Expression::Unary(rhs_op, rhs, _)) => {
+            lhs_op == rhs_op && same_expression_shape(lhs, rhs)
+        }
+        (
+            Expression::Binary(lhs_lhs, lhs_op, lhs_rhs, _),
+            Expression::Binary(rhs_lhs, rhs_op, rhs_rhs, _),
+        ) => {
+            lhs_op == rhs_op
+                && same_expression_shape(lhs_lhs, rhs_lhs)
+                && same_expression_shape(lhs_rhs, rhs_rhs)
+        }
+        (
+            Expression::Ternary(lhs_cond, lhs_then, lhs_else, _),
+            Expression::Ternary(rhs_cond, rhs_then, rhs_else, _),
+        ) => {
+            same_expression_shape(lhs_cond, rhs_cond)
+                && same_expression_shape(lhs_then, rhs_then)
+                && same_expression_shape(lhs_else, rhs_else)
+        }
+        (Expression::Concatenation(lhs, _), Expression::Concatenation(rhs, _)) => {
+            lhs.len() == rhs.len()
+        }
+        (Expression::ArrayLiteral(lhs, _), Expression::ArrayLiteral(rhs, _)) => {
+            lhs.len() == rhs.len()
+        }
+        (
+            Expression::StructConstructor(lhs_name, lhs, _),
+            Expression::StructConstructor(rhs_name, rhs, _),
+        ) => lhs_name == rhs_name && lhs.len() == rhs.len(),
+        _ => false,
+    }
+}
+
+/// Reconstruct a ternary that the analyzer folded independently in every
+/// unrolled iteration. This covers source expressions such as
+/// `if i == 0 ? init : values[i - 1]`, whose exceptional iteration no longer
+/// has the same IR shape as the remaining iterations.
+///
+/// This is only a candidate template. `prove_group` still specializes it for
+/// every iteration and compares it bit-for-bit with the expanded IR before a
+/// loop is recovered.
+fn parameterize_single_folded_branch(
+    module: &Module,
+    variants: &[&Expression],
+    candidate: &UnrolledLoopCandidate,
+) -> Option<Expression> {
+    if variants.len() < 3 || variants.len() != candidate.iterations.len() {
+        return None;
+    }
+
+    for exceptional_index in 0..variants.len() {
+        let retained_shape = variants
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| (index != exceptional_index).then_some(*expression))?;
+        if variants.iter().enumerate().any(|(index, expression)| {
+            index != exceptional_index && !same_expression_shape(retained_shape, expression)
+        }) {
+            continue;
+        }
+        let exceptional = variants[exceptional_index];
+        let mut exceptional_variables = Vec::new();
+        if !collect_expression_variables(exceptional, &mut exceptional_variables)
+            || exceptional_variables
+                .iter()
+                .any(|&variable| iteration_owner(module, candidate, variable).is_some())
+        {
+            continue;
+        }
+
+        let retained_indices = (0..variants.len())
+            .filter(|&index| index != exceptional_index)
+            .collect::<Vec<_>>();
+        let retained_variants = retained_indices
+            .iter()
+            .map(|&index| variants[index])
+            .collect::<Vec<_>>();
+        let mut reduced_candidate = candidate.clone();
+        reduced_candidate.iterations = retained_indices
+            .iter()
+            .map(|&index| candidate.iterations[index].clone())
+            .collect();
+
+        let reduced_loop_var = reduced_candidate.iterations[0].loop_var;
+        let canonical_loop_var = candidate.iterations[0].loop_var;
+        let mut common = retained_variants[0].clone();
+        if parameterize_expression(module, &mut common, &retained_variants, &reduced_candidate)
+            .is_none()
+        {
+            continue;
+        }
+        remap_expression_variable(&mut common, reduced_loop_var, canonical_loop_var);
+
+        let loop_variable = module.variables.get(&canonical_loop_var)?;
+        let loop_width = resolve_total_width(module, loop_variable).ok()?;
+        if loop_width == 0 {
+            return None;
+        }
+        let token = exceptional.comptime().token;
+        let mut loop_comptime = Comptime::from_type(
+            loop_variable.r#type.clone(),
+            exceptional.comptime().clock_domain,
+            token,
+        );
+        loop_comptime.expr_context.width = loop_width;
+        loop_comptime.expr_context.signed = loop_variable.r#type.signed;
+        let loop_value = Expression::Term(Box::new(Factor::Variable(
+            canonical_loop_var,
+            VarIndex::default(),
+            VarSelect::default(),
+            loop_comptime,
+        )));
+        let iteration_value = Expression::Term(Box::new(Factor::create_value(
+            Value::new_biguint(
+                signed_to_bits(
+                    BigInt::from(candidate.iterations[exceptional_index].value),
+                    loop_width,
+                )?,
+                loop_width,
+                loop_variable.r#type.signed,
+            ),
+            token,
+        )));
+        let mut condition_comptime = Comptime::create_value(Value::new(0, 1, false), token);
+        invalidate_dependent_comptime(&mut condition_comptime, &RewriteMode::Dynamic);
+        let condition = Expression::Binary(
+            Box::new(loop_value),
+            Op::Eq,
+            Box::new(iteration_value),
+            Box::new(condition_comptime),
+        );
+        guard_loop_dependent_accesses(&mut common, canonical_loop_var, &condition);
+        let mut result_comptime = exceptional.comptime().clone();
+        invalidate_dependent_comptime(&mut result_comptime, &RewriteMode::Dynamic);
+        return Some(Expression::Ternary(
+            Box::new(condition),
+            Box::new(exceptional.clone()),
+            Box::new(common),
+            Box::new(result_comptime),
+        ));
+    }
+    None
+}
+
+fn guard_loop_dependent_accesses(
+    expression: &mut Expression,
+    loop_var: VarId,
+    exceptional_condition: &Expression,
+) {
+    fn guard_access(
+        expression: &mut Expression,
+        loop_var: VarId,
+        exceptional_condition: &Expression,
+    ) {
+        guard_loop_dependent_accesses(expression, loop_var, exceptional_condition);
+        if !expression_contains_variable(expression, loop_var) {
+            return;
+        }
+        let comptime = expression.comptime().clone();
+        let width = comptime.r#type.total_width().unwrap_or(32).max(1);
+        let zero = Expression::Term(Box::new(Factor::create_value(
+            Value::new(0, width, comptime.r#type.signed),
+            comptime.token,
+        )));
+        let dynamic = std::mem::replace(expression, zero.clone());
+        let mut result_comptime = comptime;
+        invalidate_dependent_comptime(&mut result_comptime, &RewriteMode::Dynamic);
+        *expression = Expression::Ternary(
+            Box::new(exceptional_condition.clone()),
+            Box::new(zero),
+            Box::new(dynamic),
+            Box::new(result_comptime),
+        );
+    }
+
+    match expression {
+        Expression::Term(factor) => match factor.as_mut() {
+            Factor::Variable(_, index, select, _) => {
+                for expression in &mut index.0 {
+                    guard_access(expression, loop_var, exceptional_condition);
+                }
+                for expression in &mut select.0 {
+                    guard_access(expression, loop_var, exceptional_condition);
+                }
+                if let Some((_, expression)) = &mut select.1 {
+                    guard_access(expression, loop_var, exceptional_condition);
+                }
+            }
+            Factor::FunctionCall(call) if call.outputs.is_empty() => {
+                for input in call.inputs.values_mut() {
+                    guard_loop_dependent_accesses(input, loop_var, exceptional_condition);
+                }
+            }
+            _ => {}
+        },
+        Expression::Unary(_, inner, _) => {
+            guard_loop_dependent_accesses(inner, loop_var, exceptional_condition);
+        }
+        Expression::Binary(lhs, _, rhs, _) => {
+            guard_loop_dependent_accesses(lhs, loop_var, exceptional_condition);
+            guard_loop_dependent_accesses(rhs, loop_var, exceptional_condition);
+        }
+        Expression::Ternary(condition, then_expr, else_expr, _) => {
+            guard_loop_dependent_accesses(condition, loop_var, exceptional_condition);
+            guard_loop_dependent_accesses(then_expr, loop_var, exceptional_condition);
+            guard_loop_dependent_accesses(else_expr, loop_var, exceptional_condition);
+        }
+        Expression::Concatenation(items, _) => {
+            for (value, repeat) in items {
+                guard_loop_dependent_accesses(value, loop_var, exceptional_condition);
+                if let Some(repeat) = repeat {
+                    guard_loop_dependent_accesses(repeat, loop_var, exceptional_condition);
+                }
+            }
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(value, repeat) => {
+                        guard_loop_dependent_accesses(value, loop_var, exceptional_condition);
+                        if let Some(repeat) = repeat {
+                            guard_loop_dependent_accesses(repeat, loop_var, exceptional_condition);
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(value) => {
+                        guard_loop_dependent_accesses(value, loop_var, exceptional_condition);
+                    }
+                }
+            }
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, value) in fields {
+                guard_loop_dependent_accesses(value, loop_var, exceptional_condition);
+            }
+        }
+    }
+}
+
+fn expression_contains_variable(expression: &Expression, target: VarId) -> bool {
+    let mut variables = Vec::new();
+    collect_expression_variables(expression, &mut variables) && variables.contains(&target)
+}
+
+fn remap_expression_variable(expression: &mut Expression, from: VarId, to: VarId) {
+    match expression {
+        Expression::Term(factor) => match factor.as_mut() {
+            Factor::Variable(variable, index, select, _) => {
+                if *variable == from {
+                    *variable = to;
+                }
+                for expression in &mut index.0 {
+                    remap_expression_variable(expression, from, to);
+                }
+                for expression in &mut select.0 {
+                    remap_expression_variable(expression, from, to);
+                }
+                if let Some((_, expression)) = &mut select.1 {
+                    remap_expression_variable(expression, from, to);
+                }
+            }
+            Factor::FunctionCall(call) if call.outputs.is_empty() => {
+                for input in call.inputs.values_mut() {
+                    remap_expression_variable(input, from, to);
+                }
+            }
+            _ => {}
+        },
+        Expression::Unary(_, inner, _) => remap_expression_variable(inner, from, to),
+        Expression::Binary(lhs, _, rhs, _) => {
+            remap_expression_variable(lhs, from, to);
+            remap_expression_variable(rhs, from, to);
+        }
+        Expression::Ternary(condition, then_expr, else_expr, _) => {
+            remap_expression_variable(condition, from, to);
+            remap_expression_variable(then_expr, from, to);
+            remap_expression_variable(else_expr, from, to);
+        }
+        Expression::Concatenation(items, _) => {
+            for (value, repeat) in items {
+                remap_expression_variable(value, from, to);
+                if let Some(repeat) = repeat {
+                    remap_expression_variable(repeat, from, to);
+                }
+            }
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(value, repeat) => {
+                        remap_expression_variable(value, from, to);
+                        if let Some(repeat) = repeat {
+                            remap_expression_variable(repeat, from, to);
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(value) => {
+                        remap_expression_variable(value, from, to);
+                    }
+                }
+            }
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, value) in fields {
+                remap_expression_variable(value, from, to);
+            }
+        }
     }
 }
 
@@ -2577,6 +2898,7 @@ fn specialize_slt_node(
 struct ProofBitCanonicalizer {
     bit_cache: HashMap<(NodeId, usize), NodeId>,
     opaque_bits: HashMap<OpaqueProofKey, NodeId>,
+    signed_cache: HashMap<NodeId, bool>,
     /// Dense low-to-high mapping for each Concat. Building this once avoids
     /// rescanning an increasingly long part list independently for every bit.
     concat_layouts: HashMap<NodeId, Vec<(NodeId, usize)>>,
@@ -2677,6 +2999,98 @@ fn proof_outputs_match(
 }
 
 fn canonicalize_proof_bit(
+    node: NodeId,
+    bit: usize,
+    arena: &mut SLTNodeArena<VarId>,
+    canonicalizer: &mut ProofBitCanonicalizer,
+) -> Option<NodeId> {
+    if canonicalizer.bit_cache.contains_key(&(node, bit)) {
+        return canonicalize_proof_bit_ready(node, bit, arena, canonicalizer);
+    }
+    // Demand-driven postorder traversal. The reducer below only visits cached
+    // children, so deeply unrolled expressions consume heap worklist space,
+    // not one native stack frame per expression/bit.
+    let mut pending = vec![(node, bit, false)];
+    while let Some((current, current_bit, ready)) = pending.pop() {
+        if canonicalizer
+            .bit_cache
+            .contains_key(&(current, current_bit))
+        {
+            continue;
+        }
+        if current_bit >= get_width(current, arena) {
+            return None;
+        }
+        if ready {
+            canonicalize_proof_bit_ready(current, current_bit, arena, canonicalizer)?;
+            continue;
+        }
+        let mut children = Vec::new();
+        match arena.get(current) {
+            SLTNode::Binary(lhs, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, rhs)
+                if current_bit < get_width(*lhs, arena) && current_bit < get_width(*rhs, arena) =>
+            {
+                children.extend([(*lhs, current_bit), (*rhs, current_bit)]);
+            }
+            SLTNode::Binary(lhs, op @ (BinaryOp::Shl | BinaryOp::Shr), rhs) => {
+                if let Some(shift) = specialized_constant(*rhs, arena)
+                    .filter(|constant| constant.mask.is_zero())
+                    .and_then(|constant| constant.value.to_usize())
+                {
+                    let source = if *op == BinaryOp::Shl {
+                        current_bit.checked_sub(shift)
+                    } else {
+                        current_bit.checked_add(shift)
+                    };
+                    if let Some(source) = source.filter(|&bit| bit < get_width(*lhs, arena)) {
+                        children.push((*lhs, source));
+                    }
+                }
+            }
+            SLTNode::Unary(UnaryOp::BitNot, inner) if current_bit < get_width(*inner, arena) => {
+                children.push((*inner, current_bit));
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } if get_width(*cond, arena) == 1
+                && current_bit < get_width(*then_expr, arena)
+                && current_bit < get_width(*else_expr, arena) =>
+            {
+                children.extend([
+                    (*cond, 0),
+                    (*then_expr, current_bit),
+                    (*else_expr, current_bit),
+                ]);
+            }
+            SLTNode::Concat(parts) => {
+                children.push(canonicalizer.concat_bit_source(current, parts, current_bit)?);
+            }
+            SLTNode::Slice { expr, access } => {
+                children.push((*expr, access.lsb.checked_add(current_bit)?));
+            }
+            SLTNode::Binary(lhs, _, rhs) => {
+                children.extend((0..get_width(*lhs, arena)).map(|bit| (*lhs, bit)));
+                children.extend((0..get_width(*rhs, arena)).map(|bit| (*rhs, bit)));
+            }
+            SLTNode::Unary(_, inner) => {
+                children.extend((0..get_width(*inner, arena)).map(|bit| (*inner, bit)));
+            }
+            _ => {}
+        }
+        pending.push((current, current_bit, true));
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .map(|(child, bit)| (child, bit, false)),
+        );
+    }
+    canonicalizer.bit_cache.get(&(node, bit)).copied()
+}
+
+fn canonicalize_proof_bit_ready(
     node: NodeId,
     bit: usize,
     arena: &mut SLTNodeArena<VarId>,
@@ -2859,8 +3273,8 @@ fn canonicalize_opaque_binary_operands(
     ) || matches!(
         op,
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
-    ) && proof_node_signed(lhs, arena)
-        && proof_node_signed(rhs, arena);
+    ) && proof_node_signed(lhs, arena, &mut canonicalizer.signed_cache)
+        && proof_node_signed(rhs, arena, &mut canonicalizer.signed_cache);
 
     let canonicalize_operand = |operand: NodeId,
                                 width: usize,
@@ -2886,60 +3300,94 @@ fn canonicalize_opaque_binary_operands(
     ))
 }
 
-fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
-    match arena.get(node) {
-        SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => *signed,
-        SLTNode::Binary(lhs, op, rhs) => match op {
-            BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::EqCase
-            | BinaryOp::NeCase
-            | BinaryOp::EqWildcard
-            | BinaryOp::NeWildcard
-            | BinaryOp::LtU
-            | BinaryOp::LtS
-            | BinaryOp::LeU
-            | BinaryOp::LeS
-            | BinaryOp::GtU
-            | BinaryOp::GtS
-            | BinaryOp::GeU
-            | BinaryOp::GeS
-            | BinaryOp::LogicAnd
-            | BinaryOp::LogicOr
-            | BinaryOp::DivU
-            | BinaryOp::RemU => false,
-            BinaryOp::DivS | BinaryOp::RemS => true,
-            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => proof_node_signed(*lhs, arena),
-            BinaryOp::Add
-            | BinaryOp::Sub
-            | BinaryOp::Mul
-            | BinaryOp::And
-            | BinaryOp::Or
-            | BinaryOp::Xor => proof_node_signed(*lhs, arena) && proof_node_signed(*rhs, arena),
-        },
-        SLTNode::Unary(
-            UnaryOp::LogicNot
-            | UnaryOp::And
-            | UnaryOp::Or
-            | UnaryOp::Xor
-            | UnaryOp::PopCount
-            | UnaryOp::CountLeadingZeros
-            | UnaryOp::CountTrailingZeros,
-            _,
-        ) => false,
-        SLTNode::Unary(
-            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
-            inner,
-        ) => proof_node_signed(*inner, arena),
-        SLTNode::Capture { expr, .. } => proof_node_signed(*expr, arena),
-        SLTNode::Mux {
-            then_expr,
-            else_expr,
-            ..
-        } => proof_node_signed(*then_expr, arena) && proof_node_signed(*else_expr, arena),
-        SLTNode::ForFold { loop_signed, .. } => *loop_signed,
-        SLTNode::ForFoldGroup { .. } | SLTNode::Concat(_) | SLTNode::Slice { .. } => false,
+fn proof_node_signed(
+    root: NodeId,
+    arena: &SLTNodeArena<VarId>,
+    cache: &mut HashMap<NodeId, bool>,
+) -> bool {
+    enum Rule {
+        Known(bool),
+        Copy(NodeId),
+        Both(NodeId, NodeId),
     }
+    let mut pending = vec![(root, false)];
+    while let Some((node, ready)) = pending.pop() {
+        if cache.contains_key(&node) {
+            continue;
+        }
+        let rule = match arena.get(node) {
+            SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
+                Rule::Known(*signed)
+            }
+            SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
+                | BinaryOp::EqWildcard
+                | BinaryOp::NeWildcard
+                | BinaryOp::LtU
+                | BinaryOp::LtS
+                | BinaryOp::LeU
+                | BinaryOp::LeS
+                | BinaryOp::GtU
+                | BinaryOp::GtS
+                | BinaryOp::GeU
+                | BinaryOp::GeS
+                | BinaryOp::LogicAnd
+                | BinaryOp::LogicOr
+                | BinaryOp::DivU
+                | BinaryOp::RemU => Rule::Known(false),
+                BinaryOp::DivS | BinaryOp::RemS => Rule::Known(true),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => Rule::Copy(*lhs),
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => Rule::Both(*lhs, *rhs),
+            },
+            SLTNode::Unary(
+                UnaryOp::LogicNot
+                | UnaryOp::And
+                | UnaryOp::Or
+                | UnaryOp::Xor
+                | UnaryOp::PopCount
+                | UnaryOp::CountLeadingZeros
+                | UnaryOp::CountTrailingZeros,
+                _,
+            ) => Rule::Known(false),
+            SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                inner,
+            ) => Rule::Copy(*inner),
+            SLTNode::Capture { expr, .. } => Rule::Copy(*expr),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => Rule::Both(*then_expr, *else_expr),
+            SLTNode::ForFold { loop_signed, .. } => Rule::Known(*loop_signed),
+            SLTNode::ForFoldGroup { .. } | SLTNode::Concat(_) | SLTNode::Slice { .. } => {
+                Rule::Known(false)
+            }
+        };
+        let value = match rule {
+            Rule::Known(value) => value,
+            Rule::Copy(child) if ready => cache[&child],
+            Rule::Both(lhs, rhs) if ready => cache[&lhs] && cache[&rhs],
+            Rule::Copy(child) => {
+                pending.extend([(node, true), (child, false)]);
+                continue;
+            }
+            Rule::Both(lhs, rhs) => {
+                pending.extend([(node, true), (rhs, false), (lhs, false)]);
+                continue;
+            }
+        };
+        cache.insert(node, value);
+    }
+    cache[&root]
 }
 
 fn alloc_opaque_proof_bit(
@@ -4962,6 +5410,50 @@ mod tests {
             BitAccess::new(8, 15),
             "a fixed array element must not become a whole-array carried state"
         );
+    }
+
+    #[test]
+    fn proof_bit_canonicalizer_handles_deep_arithmetic_on_a_small_stack() {
+        let (module, _) = analyze(MULTI_STATE_LOOP);
+        let bits = variable(&module, "bits");
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let mut arena = SLTNodeArena::new();
+                let input = arena
+                    .alloc(SLTNode::Input {
+                        variable: bits,
+                        signed: false,
+                        index: Vec::new(),
+                        access: BitAccess::new(0, 3),
+                    })
+                    .unwrap();
+                let mut node = input;
+                for _ in 0..10_000 {
+                    node = arena
+                        .alloc(SLTNode::Binary(node, BinaryOp::Add, input))
+                        .unwrap();
+                }
+                let mut canonicalizer = ProofBitCanonicalizer::default();
+                assert!(!proof_node_signed(
+                    node,
+                    &arena,
+                    &mut canonicalizer.signed_cache
+                ));
+                let result = canonicalize_proof_bit(node, 0, &mut arena, &mut canonicalizer);
+                assert!(result.is_some());
+                assert_eq!(
+                    result,
+                    canonicalize_proof_bit(node, 0, &mut arena, &mut canonicalizer)
+                );
+                assert_ne!(
+                    result,
+                    canonicalize_proof_bit(input, 0, &mut arena, &mut canonicalizer)
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

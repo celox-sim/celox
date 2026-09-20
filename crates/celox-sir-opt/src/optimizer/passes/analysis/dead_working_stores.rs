@@ -179,6 +179,37 @@ fn transfer_block(
     (live, unknown)
 }
 
+// Backward dataflow should visit successors before predecessors. Block IDs
+// cease to reflect execution order after control-flow rewrites; reversing
+// their numeric order can propagate one read through a long chain repeatedly.
+// Include disconnected blocks, which this pass has always analyzed as well.
+fn backward_order(successors: &[Vec<usize>]) -> VecDeque<usize> {
+    let mut visited = vec![false; successors.len()];
+    let mut order = VecDeque::with_capacity(successors.len());
+    let mut stack = Vec::new();
+    for root in 0..successors.len() {
+        if visited[root] {
+            continue;
+        }
+        visited[root] = true;
+        stack.push((root, 0));
+        while let Some((block, next)) = stack.last_mut() {
+            if *next == successors[*block].len() {
+                order.push_back(*block);
+                stack.pop();
+                continue;
+            }
+            let successor = successors[*block][*next];
+            *next += 1;
+            if !visited[successor] {
+                visited[successor] = true;
+                stack.push((successor, 0));
+            }
+        }
+    }
+    order
+}
+
 pub(in crate::optimizer) fn eliminate_dead_working_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) {
@@ -224,29 +255,30 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
         .collect::<HashMap<_, _>>();
     let successors = block_ids
         .iter()
-        .map(|block| successor_blocks(&eu.blocks[block]))
+        .map(|block| {
+            successor_blocks(&eu.blocks[block])
+                .into_iter()
+                .filter_map(|target| block_index.get(&target).copied())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     let mut predecessors = vec![Vec::new(); block_ids.len()];
     for (block, targets) in successors.iter().enumerate() {
-        for target in targets {
-            if let Some(&target) = block_index.get(target) {
-                predecessors[target].push(block);
-            }
+        for &target in targets {
+            predecessors[target].push(block);
         }
     }
 
     let mut live_in = vec![LiveBits::with_len(read_keys.len()); block_ids.len()];
     let mut unknown_in = vec![false; block_ids.len()];
     let mut queued = vec![true; block_ids.len()];
-    let mut work = (0..block_ids.len()).rev().collect::<VecDeque<_>>();
+    let mut work = backward_order(&successors);
+    let mut out = LiveBits::with_len(read_keys.len());
     while let Some(block) = work.pop_front() {
         queued[block] = false;
-        let mut out = LiveBits::with_len(read_keys.len());
+        out.words.fill(0);
         let mut out_unknown = false;
-        for successor in &successors[block] {
-            let Some(&successor) = block_index.get(successor) else {
-                continue;
-            };
+        for &successor in &successors[block] {
             out.union_with(&live_in[successor]);
             out_unknown |= unknown_in[successor];
         }
@@ -257,10 +289,13 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
             &read_index,
             &store_transfers,
         );
-        if next == live_in[block] && next_unknown == unknown_in[block] {
+        out = next;
+        if out == live_in[block] && next_unknown == unknown_in[block] {
             continue;
         }
-        live_in[block] = next;
+        // Reuse the replaced bitset for the next transfer instead of allocating
+        // another read-sized buffer on every worklist visit.
+        std::mem::swap(&mut live_in[block], &mut out);
         unknown_in[block] = next_unknown;
         for &predecessor in &predecessors[block] {
             if !queued[predecessor] {
@@ -270,18 +305,18 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
         }
     }
 
+    let mut live = out;
+    let mut keep = Vec::new();
     for (block, block_id) in block_ids.into_iter().enumerate() {
-        let mut live = LiveBits::with_len(read_keys.len());
+        live.words.fill(0);
         let mut unknown = false;
-        for successor in &successors[block] {
-            let Some(&successor) = block_index.get(successor) else {
-                continue;
-            };
+        for &successor in &successors[block] {
             live.union_with(&live_in[successor]);
             unknown |= unknown_in[successor];
         }
         let body = eu.blocks.get_mut(&block_id).expect("indexed block exists");
-        let mut keep = vec![true; body.instructions.len()];
+        keep.clear();
+        keep.resize(body.instructions.len(), true);
         for index in (0..body.instructions.len()).rev() {
             let inst = &body.instructions[index];
             if is_dynamic_working_read(inst) {
@@ -473,5 +508,94 @@ mod tests {
             eu.blocks[&BlockId(0)].instructions,
             vec![first, second, dynamic]
         );
+    }
+
+    #[test]
+    fn shuffled_blocks_preserve_loop_and_dynamic_read_liveness() {
+        const BLOCKS: usize = 128;
+        let working = address(WORKING_REGION, 0);
+        for shuffled in [false, true] {
+            let id = |logical| {
+                BlockId(if shuffled && logical < BLOCKS {
+                    (logical * 73 + 19) % BLOCKS
+                } else {
+                    logical
+                })
+            };
+            for dynamic in [false, true] {
+                let mut eu = unit((0..=BLOCKS).map(|logical| {
+                    let mut instructions = vec![store(working, 0, 8, 0)];
+                    if dynamic && logical == 32 {
+                        instructions.insert(
+                            0,
+                            SIRInstruction::Load(
+                                RegisterId(2),
+                                working,
+                                SIROffset::Dynamic(RegisterId(3)),
+                                8,
+                            ),
+                        );
+                    }
+                    if logical == BLOCKS - 1 {
+                        instructions.push(SIRInstruction::Load(
+                            RegisterId(2),
+                            working,
+                            SIROffset::Static(0),
+                            8,
+                        ));
+                    }
+                    BasicBlock {
+                        id: id(logical),
+                        params: Vec::new(),
+                        instructions,
+                        terminator: if logical >= BLOCKS - 1 {
+                            SIRTerminator::Return
+                        } else if logical == 64 {
+                            SIRTerminator::Branch {
+                                cond: RegisterId(1),
+                                true_block: (id(16), Vec::new()),
+                                false_block: (id(65), Vec::new()),
+                            }
+                        } else {
+                            SIRTerminator::Jump(id(logical + 1), Vec::new())
+                        },
+                    }
+                }));
+                eu.entry_block_id = id(0);
+                eliminate_dead_working_stores(&mut eu);
+                for logical in 0..=BLOCKS {
+                    let kept = eu.blocks[&id(logical)]
+                        .instructions
+                        .iter()
+                        .any(|inst| working_store_key(inst).is_some());
+                    assert_eq!(
+                        kept,
+                        logical == BLOCKS - 1 || (dynamic && logical <= 64),
+                        "shuffled={shuffled} dynamic={dynamic} block={logical}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_shuffled_chain_propagates_reads_in_one_sweep() {
+        const BLOCKS: usize = 4096;
+        let id = |logical| (logical * 2017 + 127) % BLOCKS;
+        let mut successors = vec![Vec::new(); BLOCKS + 1];
+        for logical in 0..BLOCKS - 1 {
+            successors[id(logical)].push(id(logical + 1));
+        }
+        let order = backward_order(&successors);
+        assert_eq!(order.len(), successors.len());
+        let mut live = vec![false; successors.len()];
+        live[id(BLOCKS - 1)] = true;
+        for block in order {
+            for &successor in &successors[block] {
+                live[block] |= live[successor];
+            }
+        }
+        assert!(live[..BLOCKS].iter().all(|&live| live));
+        assert!(!live[BLOCKS]);
     }
 }

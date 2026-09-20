@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use num_bigint::BigUint;
 
@@ -79,7 +79,20 @@ pub trait SimBackend {
 
     // ── memory / layout ─────────────────────────────────────────
     fn memory_as_ptr(&self) -> (*const u8, usize);
+    /// Exposing a retained writable view must permanently disable sparse VCD
+    /// tracking in backend-owned state outside the returned memory range.
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
+    /// Return an opaque owner that keeps the memory allocation alive.
+    ///
+    /// Host integrations that expose the raw memory outside Rust can retain
+    /// this value until their external view is finalized. Backends without a
+    /// separately owned stable allocation may keep the default `None`.
+    /// When returning `Some`, the allocation and address reported by
+    /// [`Self::memory_as_ptr`] and [`Self::memory_as_mut_ptr`] must remain valid
+    /// until every clone of the owner has been dropped.
+    fn memory_owner(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize);
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         None
@@ -97,4 +110,43 @@ pub trait SimBackend {
     fn clear_triggered_bits(&mut self);
     fn mark_triggered_bit(&mut self, id: usize);
     fn get_triggered_bits(&self) -> bit_set::BitSet;
+
+    /// Opt into generated write notifications only while no raw mutable view
+    /// has escaped. The default keeps other backend implementations correct.
+    fn vcd_tracking_enabled(&self) -> bool {
+        false
+    }
+
+    /// Consume waveform activity independently of clock trigger processing.
+    /// Returns false when full scanning is required (including raw host views).
+    fn take_vcd_activity(&mut self, groups: &mut Vec<usize>) -> bool {
+        groups.clear();
+        if !self.vcd_tracking_enabled() {
+            return false;
+        }
+        let Some(trace) = self.layout().trace.as_ref() else {
+            return false;
+        };
+        let (ptr, size) = self.memory_as_ptr();
+        // SAFETY: &mut self excludes execution/host access during consumption;
+        // the backend memory contract exposes this same writable state image.
+        let memory = unsafe { std::slice::from_raw_parts_mut(ptr.cast_mut(), size) };
+        trace.take(memory, groups);
+        true
+    }
+
+    /// Called by host setters, which share the generated-store notification ABI.
+    fn mark_vcd_signal(&mut self, signal: SignalRef) {
+        if let Some(trace) = self.layout().trace.as_ref() {
+            let len = signal.array_layout.map_or_else(
+                || celox_state_layout::get_byte_size(signal.width),
+                |array| array.plane_size,
+            );
+            let (ptr, _) = self.memory_as_ptr();
+            // SAFETY: layout homes and metadata fit in the writable state image.
+            unsafe {
+                trace.mark_range(ptr.cast_mut(), signal.offset, len);
+            }
+        }
+    }
 }

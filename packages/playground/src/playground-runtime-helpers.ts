@@ -22,6 +22,81 @@ export type PlaygroundSignalValue =
 	| symbol
 	| { __fourState: true; value: bigint; mask: bigint };
 
+export type PlaygroundEventHandle = {
+	readonly name: string;
+	readonly id: number;
+};
+
+export type PlaygroundTickRuntime = {
+	readonly defaultEventId: number;
+	readonly knownEventIds: ReadonlySet<number>;
+	readonly flushDirty: () => void;
+	readonly tickOne: (eventId: number) => void;
+};
+
+const MAX_U32 = 0xffff_ffff;
+
+function validateU32(value: number, label: "Event ID" | "Tick count"): void {
+	if (!Number.isInteger(value) || value < 0 || value > MAX_U32) {
+		throw new RangeError(
+			`${label} ${value} must be an integer between 0 and ${MAX_U32}`,
+		);
+	}
+}
+
+function validateKnownEventId(
+	eventId: number,
+	knownEventIds: ReadonlySet<number>,
+): void {
+	validateU32(eventId, "Event ID");
+	if (!knownEventIds.has(eventId)) {
+		const availableIds = [...knownEventIds].sort((a, b) => a - b).join(", ");
+		throw new RangeError(
+			`Unknown event ID ${eventId}. Available IDs: ${availableIds || "(none)"}`,
+		);
+	}
+}
+
+/**
+ * Normalize, validate, and execute a Playground `Simulator.tick()` call.
+ * Validation completes before either injected callback is invoked.
+ */
+export function runPlaygroundTicks(
+	runtime: PlaygroundTickRuntime,
+	eventOrCount?: PlaygroundEventHandle | number,
+	count?: number,
+): void {
+	let eventId: number;
+	let ticks: number;
+	let hasExplicitEvent = false;
+
+	if (typeof eventOrCount === "object" && eventOrCount !== null) {
+		eventId = eventOrCount.id;
+		ticks = count ?? 1;
+		hasExplicitEvent = true;
+	} else if (typeof eventOrCount === "number" && count !== undefined) {
+		eventId = eventOrCount;
+		ticks = count;
+		hasExplicitEvent = true;
+	} else {
+		eventId = runtime.defaultEventId;
+		ticks = typeof eventOrCount === "number" ? eventOrCount : (count ?? 1);
+	}
+
+	validateU32(ticks, "Tick count");
+	if (hasExplicitEvent) {
+		validateKnownEventId(eventId, runtime.knownEventIds);
+	} else if (ticks > 0) {
+		if (runtime.knownEventIds.size === 0) {
+			throw new Error("Simulator has no events to tick");
+		}
+		validateKnownEventId(eventId, runtime.knownEventIds);
+	}
+
+	runtime.flushDirty();
+	for (let i = 0; i < ticks; i++) runtime.tickOne(eventId);
+}
+
 export function initializeFourStateMemory(
 	memory: WebAssembly.Memory,
 	regions: Array<[offset: number, byteSize: number]>,

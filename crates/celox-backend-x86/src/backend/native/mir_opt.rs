@@ -10,7 +10,21 @@ use super::mir::*;
 use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
 use crate::{HashMap, HashSet};
 
+mod bitmap_worklist;
+mod boolean;
+mod branch_merge;
+mod circular_scan;
+mod counted_loop;
+mod dead_code;
+mod exclusive_loop;
+mod gvn_liveness;
+mod known_bits;
+mod loop_guard;
+#[cfg(test)]
+mod memory_forward_tests;
 mod pipeline;
+#[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
+pub(crate) use pipeline::optimize_baseline;
 pub use pipeline::{optimize, optimize_with_diagnostics};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,13 +267,11 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
     folded
 }
 
-/// Fold a proven power-of-two byte index into the x86 memory operand.
-///
-/// This pass does not infer an RTL range or replace a bit-offset expression.
-/// It only rewrites an already selected 64-bit `ShlImm` whose sole use is an
-/// indexed load. x86 effective-address scaling and the original shift both
-/// use modulo-64-bit arithmetic, so the rewrite preserves wrapping exactly.
-fn fold_scaled_indexed_loads(func: &mut MFunction) {
+/// Fold single-use byte displacements and power-of-two indexes into x86
+/// memory operands. The offset must remain an encodable signed displacement;
+/// scaling preserves the original modulo-64-bit address arithmetic. The alias
+/// range still describes the entire original object.
+fn fold_indexed_load_addresses(func: &mut MFunction) {
     let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
@@ -276,16 +288,35 @@ fn fold_scaled_indexed_loads(func: &mut MFunction) {
 
     for block in &mut func.blocks {
         let mut shifts = HashMap::<VReg, (VReg, u8)>::default();
+        let mut displacements = HashMap::<VReg, (VReg, i32)>::default();
         for inst in &mut block.insts {
+            if let MInst::AddImm { dst, src, imm } = inst {
+                displacements.insert(*dst, (*src, *imm));
+                continue;
+            }
             if let MInst::ShlImm { dst, src, imm } = inst {
                 if (1..=3).contains(imm) {
                     shifts.insert(*dst, (*src, *imm));
                 }
                 continue;
             }
-            let MInst::LoadIndexed { index, scale, .. } = inst else {
+            let MInst::LoadIndexed {
+                offset,
+                index,
+                scale,
+                ..
+            } = inst
+            else {
                 continue;
             };
+            if use_counts.get(index).copied() == Some(1)
+                && let Some(&(source, displacement)) = displacements.get(index)
+                && let Some(displacement) = displacement.checked_mul(i32::from(*scale))
+                && let Some(adjusted) = offset.checked_add(displacement)
+            {
+                *index = source;
+                *offset = adjusted;
+            }
             if *scale != 1 || use_counts.get(index).copied() != Some(1) {
                 continue;
             }
@@ -426,13 +457,16 @@ fn fold_proven_comparisons(func: &mut MFunction) {
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
-                defs.insert(dst, inst.clone());
+                defs.insert(dst, inst);
             }
         }
     }
+    // Prove against the original definitions, then apply only the rewrites.
+    // Cloning every instruction here multiplies memory for large SMP designs.
+    let mut replacements = Vec::new();
     let mut upper_bounds = HashMap::default();
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
             let replacement = match inst {
                 MInst::CmpSelect {
                     dst,
@@ -479,9 +513,13 @@ fn fold_proven_comparisons(func: &mut MFunction) {
                 _ => None,
             };
             if let Some(replacement) = replacement {
-                *inst = replacement;
+                replacements.push((block_index, inst_index, replacement));
             }
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
@@ -500,16 +538,19 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
         }
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
-                defs.insert(dst, inst.clone());
+                defs.insert(dst, inst);
             }
             for source in inst.uses() {
                 *use_counts.entry(source).or_default() += 1;
             }
         }
     }
+    // Prove against the original definitions, then apply only the rewrites.
+    // Cloning every instruction here multiplies memory for large SMP designs.
+    let mut replacements = Vec::new();
     let mut upper_bounds = HashMap::default();
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
             let replacement = match inst {
                 MInst::CmpImm {
                     dst,
@@ -576,9 +617,13 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
                 _ => None,
             };
             if let Some(replacement) = replacement {
-                *inst = replacement;
+                replacements.push((block_index, inst_index, replacement));
             }
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
@@ -640,6 +685,7 @@ fn unsigned_upper_bound<L: DefLookup>(
         | MInst::Add32 { .. }
         | MInst::Sub32 { .. }
         | MInst::Mul32 { .. }
+        | MInst::MulImm32 { .. }
         | MInst::And32 { .. }
         | MInst::Or32 { .. }
         | MInst::Xor32 { .. } => Some(u32::MAX as u64),
@@ -1115,6 +1161,20 @@ fn simplify_equal_value_selects(func: &mut MFunction) {
 
 fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
     match inst {
+        MInst::Mul { dst, lhs, rhs } if *rhs == imm_vreg || *lhs == imm_vreg => {
+            sign_extended_i32(value).map(|imm| MInst::MulImm {
+                dst: *dst,
+                src: if *rhs == imm_vreg { *lhs } else { *rhs },
+                imm,
+            })
+        }
+        MInst::Mul32 { dst, lhs, rhs } if *rhs == imm_vreg || *lhs == imm_vreg => {
+            Some(MInst::MulImm32 {
+                dst: *dst,
+                src: if *rhs == imm_vreg { *lhs } else { *rhs },
+                imm: value as i32,
+            })
+        }
         MInst::Cmp {
             dst,
             lhs,
@@ -1205,9 +1265,11 @@ fn fold_imm_use(inst: &MInst, imm_vreg: VReg, value: u64) -> Option<MInst> {
             base,
             offset,
             index,
+            scale,
             size,
             ..
         } if *index == imm_vreg => sign_extended_i32(value)
+            .and_then(|index| index.checked_mul(i32::from(*scale)))
             .and_then(|index| offset.checked_add(index))
             .map(|offset| MInst::Load {
                 dst: *dst,
@@ -1842,6 +1904,12 @@ fn constant_fold(func: &mut MFunction) {
                     MInst::Mul32 { dst, lhs, rhs } => {
                         fold_bin32(&consts, *dst, *lhs, *rhs, u32::wrapping_mul)
                     }
+                    MInst::MulImm { dst, src, imm } => consts
+                        .get(src)
+                        .map(|value| (*dst, value.wrapping_mul(*imm as u64))),
+                    MInst::MulImm32 { dst, src, imm } => consts
+                        .get(src)
+                        .map(|value| (*dst, u64::from((*value as u32).wrapping_mul(*imm as u32)))),
                     MInst::And { dst, lhs, rhs } => {
                         fold_bin(&consts, *dst, *lhs, *rhs, |a, b| a & b)
                     }
@@ -2081,7 +2149,7 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
 }
 
 #[derive(Clone, Copy)]
-enum PossibleOneDefinition {
+enum ValueDefinition {
     Phi { block: usize, phi: usize },
     Instruction { block: usize, instruction: usize },
 }
@@ -2094,7 +2162,7 @@ enum PossibleOneDefinition {
 /// when a backedge fact actually improves.
 fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) -> Vec<u64> {
     let value_count = func.vregs.count() as usize;
-    let mut definitions = vec![None::<PossibleOneDefinition>; value_count];
+    let mut definitions = vec![None::<ValueDefinition>; value_count];
     let mut users = vec![Vec::<VReg>::new(); value_count];
     let mut queue = VecDeque::new();
     let mut queued = vec![false; value_count];
@@ -2102,7 +2170,7 @@ fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) ->
     for (block_index, block) in func.blocks.iter().enumerate() {
         for (phi_index, phi) in block.phis.iter().enumerate() {
             let destination = phi.dst.0 as usize;
-            definitions[destination] = Some(PossibleOneDefinition::Phi {
+            definitions[destination] = Some(ValueDefinition::Phi {
                 block: block_index,
                 phi: phi_index,
             });
@@ -2117,7 +2185,7 @@ fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) ->
                 continue;
             };
             let destination = dst.0 as usize;
-            definitions[destination] = Some(PossibleOneDefinition::Instruction {
+            definitions[destination] = Some(ValueDefinition::Instruction {
                 block: block_index,
                 instruction: instruction_index,
             });
@@ -2137,12 +2205,12 @@ fn global_possible_one_bits(func: &MFunction, constants: &HashMap<VReg, u64>) ->
             continue;
         };
         let computed = match definition {
-            PossibleOneDefinition::Phi { block, phi } => func.blocks[block].phis[phi]
+            ValueDefinition::Phi { block, phi } => func.blocks[block].phis[phi]
                 .sources
                 .iter()
                 .map(|(_, source)| possible_bits(*source, &possible_ones, constants))
                 .fold(0, |possible, source| possible | source),
-            PossibleOneDefinition::Instruction { block, instruction } => compute_possible_one_bits(
+            ValueDefinition::Instruction { block, instruction } => compute_possible_one_bits(
                 &func.blocks[block].insts[instruction],
                 &possible_ones,
                 constants,
@@ -2375,7 +2443,10 @@ fn compute_possible_one_bits(
             (bits(*lhs) | bits(*rhs)) & low32
         }
         MInst::OrImm { src, imm, .. } => bits(*src) | *imm,
-        MInst::Add32 { .. } | MInst::Sub32 { .. } | MInst::Mul32 { .. } => low32,
+        MInst::Add32 { .. }
+        | MInst::Sub32 { .. }
+        | MInst::Mul32 { .. }
+        | MInst::MulImm32 { .. } => low32,
         MInst::ShrImm { src, imm, .. } => bits(*src).checked_shr(u32::from(*imm)).unwrap_or(0),
         MInst::ShlImm { src, imm, .. } => bits(*src).checked_shl(u32::from(*imm)).unwrap_or(0),
         MInst::Cmp { .. } | MInst::CmpImm { .. } => 1,
@@ -2423,6 +2494,8 @@ enum GvnOpcode {
     Add,
     Sub,
     Mul,
+    MulImm,
+    MulImm32,
     UMulHi,
     And,
     Or,
@@ -2533,6 +2606,8 @@ fn allocator_can_recover_extended_gvn_leader(inst: &MInst) -> bool {
     matches!(
         inst,
         MInst::AndImm { .. }
+            | MInst::MulImm { .. }
+            | MInst::MulImm32 { .. }
             | MInst::AndImm32 { .. }
             | MInst::OrImm { .. }
             | MInst::ShrImm { .. }
@@ -2567,6 +2642,12 @@ fn gvn_key(
         MInst::Add { lhs, rhs, .. } => Some(binary(GvnOpcode::Add, *lhs, *rhs)),
         MInst::Sub { lhs, rhs, .. } => Some(binary(GvnOpcode::Sub, *lhs, *rhs)),
         MInst::Mul { lhs, rhs, .. } => Some(binary(GvnOpcode::Mul, *lhs, *rhs)),
+        MInst::MulImm { src, imm, .. } => {
+            Some(GvnKey::BinaryImmI32(GvnOpcode::MulImm, value(*src), *imm))
+        }
+        MInst::MulImm32 { src, imm, .. } => {
+            Some(GvnKey::BinaryImmI32(GvnOpcode::MulImm32, value(*src), *imm))
+        }
         MInst::UMulHi { lhs, rhs, .. } => Some(binary(GvnOpcode::UMulHi, *lhs, *rhs)),
         MInst::And { lhs, rhs, .. } => Some(binary(GvnOpcode::And, *lhs, *rhs)),
         MInst::Or { lhs, rhs, .. } => Some(binary(GvnOpcode::Or, *lhs, *rhs)),
@@ -2759,10 +2840,9 @@ fn gvn_load_version(
 }
 
 fn gvn_affected_memory_variables(
-    inst: &MInst,
+    effect: &memory_effect::MemoryEffects,
     tracked: &GvnTrackedMemory,
 ) -> Option<Vec<GvnMemoryVariable>> {
-    let effect = memory_effect::writes(inst);
     if let Some(memory) = effect.unknown_memory() {
         return Some(match memory {
             memory_effect::UnknownMemory::Direct(base) if tracked.tracks_base(base) => {
@@ -2846,28 +2926,20 @@ fn compute_gvn_load_versions(
 
     let frontiers = gvn_dominance_frontiers(predecessors, idom)?;
     let mut definition_blocks = HashMap::<GvnMemoryVariable, BTreeSet<usize>>::default();
-    let mut write_versions =
-        HashMap::<(usize, usize, GvnMemoryVariable), GvnMemoryVersion>::default();
+    // A write's identity is its ordinal in the original instruction stream.
+    // Keep one starting ordinal per block instead of repeating the full
+    // version for every byte written by every instruction.
+    let mut block_write_ordinals = Vec::with_capacity(func.blocks.len());
     let mut write_ordinal = 0usize;
     for (block, mir_block) in func.blocks.iter().enumerate() {
-        for (instruction, inst) in mir_block.insts.iter().enumerate() {
+        block_write_ordinals.push(write_ordinal);
+        for inst in &mir_block.insts {
             let effect = memory_effect::writes(inst);
-            let ordinal = if effect.has_effect() {
-                let ordinal = write_ordinal;
+            if effect.has_effect() {
                 write_ordinal = write_ordinal.checked_add(1)?;
-                Some(ordinal)
-            } else {
-                None
-            };
-            for variable in gvn_affected_memory_variables(inst, &tracked)? {
+            }
+            for variable in gvn_affected_memory_variables(&effect, &tracked)? {
                 definition_blocks.entry(variable).or_default().insert(block);
-                write_versions.insert(
-                    (block, instruction, variable),
-                    GvnMemoryVersion::Write {
-                        ordinal: ordinal.expect("an affected variable belongs to a memory write"),
-                        variable,
-                    },
-                );
             }
         }
     }
@@ -2926,7 +2998,16 @@ fn compute_gvn_load_versions(
             let version = GvnMemoryVersion::Phi { block, variable };
             changes.push((variable, current.insert(variable, version)));
         }
+        let mut write_ordinal = block_write_ordinals[block];
         for (instruction, inst) in func.blocks[block].insts.iter().enumerate() {
+            let effect = memory_effect::writes(inst);
+            let ordinal = if effect.has_effect() {
+                let ordinal = write_ordinal;
+                write_ordinal = write_ordinal.checked_add(1)?;
+                Some(ordinal)
+            } else {
+                None
+            };
             if let MInst::Load {
                 base, offset, size, ..
             } = inst
@@ -2936,8 +3017,11 @@ fn compute_gvn_load_versions(
                     gvn_load_version(*base, *offset, *size, &current)?,
                 );
             }
-            for variable in gvn_affected_memory_variables(inst, &tracked)? {
-                let version = *write_versions.get(&(block, instruction, variable))?;
+            for variable in gvn_affected_memory_variables(&effect, &tracked)? {
+                let version = GvnMemoryVersion::Write {
+                    ordinal: ordinal.expect("an affected variable belongs to a memory write"),
+                    variable,
+                };
                 changes.push((variable, current.insert(variable, version)));
             }
         }
@@ -2977,7 +3061,7 @@ fn global_gvn(func: &mut MFunction) {
     // Compute dominators using simple iterative algorithm (Cooper, Harvey, Kennedy)
     let idom = compute_dominators(num_blocks, &preds, &succs);
     let load_versions = compute_gvn_load_versions(func, &preds, &idom).unwrap_or_default();
-    let (_, live_out) = compute_gvn_liveness(func, &block_id_to_idx, &succs);
+    let mut live_out = gvn_liveness::live_out(func, &block_id_to_idx, &preds);
     let last_uses = func
         .blocks
         .iter()
@@ -3019,81 +3103,13 @@ fn global_gvn(func: &mut MFunction) {
     // subtrees see exactly the expression scope at their common dominator.
     // Load validity is carried by the structural MemorySSA version in its key,
     // rather than by a path-local store invalidation side table.
-    fn gvn_dfs(
-        node: usize,
-        dom_children: &[Vec<usize>],
-        func: &MFunction,
-        value_numbers: &mut [ValueNumber],
-        value_leaders: &mut [VReg],
-        leader_blocks: &mut [Option<usize>],
-        live_out: &[Vec<VReg>],
-        last_uses: &[HashMap<VReg, usize>],
-        load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
-        value_table: &mut HashMap<GvnKey, ValueNumber>,
-        table_changes: &mut Vec<(GvnKey, Option<ValueNumber>)>,
-        leader_changes: &mut Vec<(ValueNumber, VReg, Option<usize>)>,
-        replacements: &mut Vec<(usize, usize, MInst)>,
-    ) {
-        let checkpoint = table_changes.len();
-        let leader_checkpoint = leader_changes.len();
-        let block = &func.blocks[node];
-
-        process_gvn_block(
-            node,
-            block,
-            value_numbers,
-            value_leaders,
-            leader_blocks,
-            &live_out[node],
-            &last_uses[node],
-            load_versions,
-            value_table,
-            table_changes,
-            leader_changes,
-            replacements,
-        );
-
-        for &child in &dom_children[node] {
-            gvn_dfs(
-                child,
-                dom_children,
-                func,
-                value_numbers,
-                value_leaders,
-                leader_blocks,
-                live_out,
-                last_uses,
-                load_versions,
-                value_table,
-                table_changes,
-                leader_changes,
-                replacements,
-            );
-        }
-
-        while leader_changes.len() > leader_checkpoint {
-            let (number, leader, leader_block) = leader_changes.pop().unwrap();
-            value_leaders[number as usize] = leader;
-            leader_blocks[number as usize] = leader_block;
-        }
-
-        while table_changes.len() > checkpoint {
-            let (key, previous) = table_changes.pop().unwrap();
-            if let Some(previous) = previous {
-                value_table.insert(key, previous);
-            } else {
-                value_table.remove(&key);
-            }
-        }
-    }
-
     fn process_gvn_block(
         node: usize,
         block: &MBlock,
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_out: &[VReg],
+        live_out: &mut gvn_liveness::LiveOut<'_>,
         last_uses: &HashMap<VReg, usize>,
         load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
@@ -3118,7 +3134,7 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
-                    let reuse_does_not_extend_live_range = live_out.binary_search(&leader).is_ok()
+                    let reuse_does_not_extend_live_range = live_out.contains(leader, node)
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
@@ -3152,21 +3168,65 @@ fn global_gvn(func: &mut MFunction) {
         }
     }
 
-    gvn_dfs(
-        0,
-        &dom_children,
-        func,
-        &mut value_numbers,
-        &mut value_leaders,
-        &mut leader_blocks,
-        &live_out,
-        &last_uses,
-        &load_versions,
-        &mut value_table,
-        &mut table_changes,
-        &mut leader_changes,
-        &mut replacements,
-    );
+    enum GvnAction {
+        Enter(usize),
+        Exit {
+            table_checkpoint: usize,
+            leader_checkpoint: usize,
+        },
+    }
+    // Deep dominator chains in large designs must not consume the compiler
+    // thread's call stack. Preserve recursive DFS order and undo checkpoints.
+    let mut actions = vec![GvnAction::Enter(0)];
+    while let Some(action) = actions.pop() {
+        let node = match action {
+            GvnAction::Exit {
+                table_checkpoint,
+                leader_checkpoint,
+            } => {
+                while leader_changes.len() > leader_checkpoint {
+                    let (number, leader, leader_block) = leader_changes.pop().unwrap();
+                    value_leaders[number as usize] = leader;
+                    leader_blocks[number as usize] = leader_block;
+                }
+                while table_changes.len() > table_checkpoint {
+                    let (key, previous) = table_changes.pop().unwrap();
+                    if let Some(previous) = previous {
+                        value_table.insert(key, previous);
+                    } else {
+                        value_table.remove(&key);
+                    }
+                }
+                continue;
+            }
+            GvnAction::Enter(node) => node,
+        };
+        actions.push(GvnAction::Exit {
+            table_checkpoint: table_changes.len(),
+            leader_checkpoint: leader_changes.len(),
+        });
+        process_gvn_block(
+            node,
+            &func.blocks[node],
+            &mut value_numbers,
+            &mut value_leaders,
+            &mut leader_blocks,
+            &mut live_out,
+            &last_uses[node],
+            &load_versions,
+            &mut value_table,
+            &mut table_changes,
+            &mut leader_changes,
+            &mut replacements,
+        );
+        actions.extend(
+            dom_children[node]
+                .iter()
+                .rev()
+                .copied()
+                .map(GvnAction::Enter),
+        );
+    }
     debug_assert!(value_table.is_empty());
     debug_assert!(table_changes.is_empty());
     debug_assert!(leader_changes.is_empty());
@@ -3175,121 +3235,6 @@ fn global_gvn(func: &mut MFunction) {
     for (bi, inst_idx, new_inst) in replacements {
         func.blocks[bi].insts[inst_idx] = new_inst;
     }
-}
-
-/// Compute conventional SSA block-entry and block-exit liveness for GVN's
-/// profitability check. Phi sources are uses on predecessor edges; phi
-/// destinations are definitions at the successor entry.
-fn compute_gvn_liveness(
-    func: &MFunction,
-    block_id_to_idx: &HashMap<BlockId, usize>,
-    succs: &[Vec<usize>],
-) -> (Vec<Vec<VReg>>, Vec<Vec<VReg>>) {
-    let block_count = func.blocks.len();
-    let mut uses = vec![HashSet::default(); block_count];
-    let mut defs = vec![HashSet::default(); block_count];
-
-    for (block_index, block) in func.blocks.iter().enumerate() {
-        defs[block_index].extend(block.phis.iter().map(|phi| phi.dst));
-        for inst in &block.insts {
-            for used in inst.uses() {
-                if !defs[block_index].contains(&used) {
-                    uses[block_index].insert(used);
-                }
-            }
-            if let Some(defined) = inst.def() {
-                defs[block_index].insert(defined);
-            }
-        }
-    }
-
-    let uses = uses
-        .into_iter()
-        .map(|set| {
-            let mut values = set.into_iter().collect::<Vec<_>>();
-            values.sort_unstable();
-            values
-        })
-        .collect::<Vec<_>>();
-
-    fn sorted_union(left: &[VReg], right: &[VReg]) -> Vec<VReg> {
-        let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
-        let (mut left_index, mut right_index) = (0usize, 0usize);
-        while left_index < left.len() && right_index < right.len() {
-            match left[left_index].cmp(&right[right_index]) {
-                std::cmp::Ordering::Less => {
-                    merged.push(left[left_index]);
-                    left_index += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    merged.push(left[left_index]);
-                    left_index += 1;
-                    right_index += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    merged.push(right[right_index]);
-                    right_index += 1;
-                }
-            }
-        }
-        merged.extend_from_slice(&left[left_index..]);
-        merged.extend_from_slice(&right[right_index..]);
-        merged
-    }
-
-    fn merged_successor_live(
-        func: &MFunction,
-        succs: &[Vec<usize>],
-        live_in: &[Vec<VReg>],
-        block_index: usize,
-    ) -> Vec<VReg> {
-        let block_id = func.blocks[block_index].id;
-        let mut live_out = Vec::new();
-        for &successor in &succs[block_index] {
-            let mut edge_uses = func.blocks[successor]
-                .phis
-                .iter()
-                .filter_map(|phi| {
-                    phi.sources
-                        .iter()
-                        .find(|(predecessor, _)| *predecessor == block_id)
-                        .map(|(_, source)| *source)
-                })
-                .collect::<Vec<_>>();
-            edge_uses.sort_unstable();
-            edge_uses.dedup();
-            let successor_live = sorted_union(&live_in[successor], &edge_uses);
-            live_out = sorted_union(&live_out, &successor_live);
-        }
-        live_out
-    }
-
-    let mut live_in = vec![Vec::new(); block_count];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block_index in (0..block_count).rev() {
-            let mut live_out = merged_successor_live(func, succs, &live_in, block_index);
-            live_out.retain(|value| !defs[block_index].contains(value));
-            let next = sorted_union(&uses[block_index], &live_out);
-            if next != live_in[block_index] {
-                live_in[block_index] = next;
-                changed = true;
-            }
-        }
-    }
-
-    let mut live_out = vec![Vec::new(); block_count];
-    for (block_index, values) in live_out.iter_mut().enumerate() {
-        *values = merged_successor_live(func, succs, &live_in, block_index);
-    }
-
-    debug_assert!(
-        func.blocks
-            .iter()
-            .all(|block| block_id_to_idx.contains_key(&block.id))
-    );
-    (live_in, live_out)
 }
 
 /// Compute immediate dominators using the iterative algorithm.
@@ -4133,14 +4078,18 @@ fn fold_contiguous_load_packs(func: &mut MFunction) {
 
 /// Select flag-consuming branch forms before allocation.
 ///
-/// A compare or direct load whose only use is the immediately following
-/// branch has no independently observable SSA result. Keeping that result
+/// A compare or direct load whose only use is a branch has no independently
+/// observable SSA result. Keeping that result
 /// until emission invents a live range and can make the allocator spill around
 /// a value which the machine code never materializes.
 ///
 /// Direct-memory predicates are selected by a separate late pass after
 /// StateSSA forwarding. Register comparisons are selected exactly once at the
 /// register-allocation boundary, before pressure scheduling.
+/// An immediate comparison can move past intervening instructions: carrying
+/// its one SSA input instead of its boolean result does not add register
+/// pressure. Two-register comparisons and memory reads remain adjacent to
+/// avoid extending two input live ranges or moving a read across a write.
 pub(crate) fn fold_register_branch_predicates(func: &mut MFunction) -> usize {
     fold_branch_predicates(func, BranchPredicateClass::Register)
 }
@@ -4156,16 +4105,19 @@ enum BranchPredicateClass {
 }
 
 fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> usize {
-    let mut use_counts = HashMap::<VReg, usize>::default();
+    // Only distinguish unused, single-use, and shared values.
+    let mut use_counts = vec![0u8; func.vregs.count() as usize];
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
-                *use_counts.entry(source).or_default() += 1;
+                let count = &mut use_counts[source.0 as usize];
+                *count = count.saturating_add(1);
             }
         }
         for instruction in &block.insts {
             for source in instruction.uses() {
-                *use_counts.entry(source).or_default() += 1;
+                let count = &mut use_counts[source.0 as usize];
+                *count = count.saturating_add(1);
             }
         }
     }
@@ -4183,17 +4135,32 @@ fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> 
         else {
             continue;
         };
-        if use_counts.get(&cond).copied() != Some(1) {
+        if use_counts[cond.0 as usize] != 1 {
             continue;
         }
 
-        let predicate = match block.insts[block.insts.len() - 2].clone() {
+        let adjacent = block.insts.len() - 2;
+        let definition = if matches!(class, BranchPredicateClass::Register) {
+            let Some(index) = block.insts[..=adjacent]
+                .iter()
+                .rposition(|inst| inst.def() == Some(cond))
+            else {
+                continue;
+            };
+            index
+        } else {
+            adjacent
+        };
+        let predicate = match block.insts[definition].clone() {
             MInst::Cmp {
                 dst,
                 lhs,
                 rhs,
                 kind,
-            } if matches!(class, BranchPredicateClass::Register) && dst == cond => {
+            } if matches!(class, BranchPredicateClass::Register)
+                && definition == adjacent
+                && dst == cond =>
+            {
                 BranchPredicate::Compare { lhs, rhs, kind }
             }
             MInst::CmpImm {
@@ -4214,7 +4181,8 @@ fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> 
             }
             _ => continue,
         };
-        block.insts.truncate(block.insts.len() - 2);
+        block.insts.pop();
+        block.insts.remove(definition);
         block.insts.push(MInst::BranchPred {
             predicate,
             true_bb,
@@ -4516,17 +4484,18 @@ fn fold_late_serial_and_immediates(func: &mut MFunction) {
 /// This is produced by dynamic bit-select XOR assignment such as
 /// `x[s] ^= 1`. For 2-state values it is equivalent to `x ^ (1 << s)`.
 fn fold_bit_toggle_insert(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, inst) in block.insts.iter().enumerate() {
             let MInst::Or { dst, lhs, rhs } = *inst else {
                 continue;
             };
@@ -4534,20 +4503,25 @@ fn fold_bit_toggle_insert(func: &mut MFunction) {
             if let Some((value, mask)) = match_bit_toggle_insert(lhs, rhs, &defs)
                 .or_else(|| match_bit_toggle_insert(rhs, lhs, &defs))
             {
-                *inst = MInst::Xor {
+                let replacement = MInst::Xor {
                     dst,
                     lhs: value,
                     rhs: mask,
                 };
+                replacements.push((block_index, inst_index, replacement));
             }
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
 fn match_bit_toggle_insert(
     clear_part: VReg,
     insert_part: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
 ) -> Option<(VReg, VReg)> {
     let MInst::And {
         lhs: clear_lhs,
@@ -4643,7 +4617,7 @@ fn match_bit_toggle_insert(
     }
 }
 
-fn is_const_one(reg: VReg, defs: &HashMap<VReg, MInst>) -> bool {
+fn is_const_one(reg: VReg, defs: &HashMap<VReg, &MInst>) -> bool {
     matches!(defs.get(&reg), Some(MInst::LoadImm { value: 1, .. }))
 }
 
@@ -4669,28 +4643,34 @@ fn fold_byte_enable_spread_to_pdep(func: &mut MFunction) {
         .filter_map(|instruction| {
             instruction
                 .def()
-                .map(|definition| (definition, instruction.clone()))
+                .map(|definition| (definition, instruction))
         })
         .collect::<HashMap<_, _>>();
 
-    for block in &mut func.blocks {
-        for instruction in &mut block.insts {
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        for (inst_index, instruction) in block.insts.iter().enumerate() {
             let Some(dst) = instruction.def() else {
                 continue;
             };
             let Some((enable, lane_mask)) = match_byte_enable_spread(dst, &defs) else {
                 continue;
             };
-            *instruction = MInst::Pdep {
+            let replacement = MInst::Pdep {
                 dst,
                 src: enable,
                 mask: lane_mask,
             };
+            replacements.push((block_index, inst_index, replacement));
         }
+    }
+    drop(defs);
+    for (block, inst, replacement) in replacements {
+        func.blocks[block].insts[inst] = replacement;
     }
 }
 
-fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, VReg)> {
+fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, VReg)> {
     let (spread7, lane_mask) = and_with_constant(result, 0x0101_0101_0101_0101, defs)?;
     let masked14 = or_with_shifted_self(spread7, 7, defs)?;
     let (spread14, _) = and_with_constant(masked14, 0x0003_0003_0003_0003, defs)?;
@@ -4703,7 +4683,7 @@ fn match_byte_enable_spread(result: VReg, defs: &HashMap<VReg, MInst>) -> Option
 fn and_with_constant(
     result: VReg,
     expected: u64,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
 ) -> Option<(VReg, VReg)> {
     let MInst::And { lhs, rhs, .. } = defs.get(&result)? else {
         return None;
@@ -4720,7 +4700,7 @@ fn and_with_constant(
 fn or_with_shifted_self(
     result: VReg,
     expected_shift: u8,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
 ) -> Option<VReg> {
     let MInst::Or { lhs, rhs, .. } = defs.get(&result)? else {
         return None;
@@ -4734,7 +4714,7 @@ fn or_with_shifted_self(
     }
 }
 
-fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, MInst>) -> Option<VReg> {
+fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, &MInst>) -> Option<VReg> {
     match defs.get(&result)? {
         MInst::ShlImm { src, imm, .. } if *imm == expected_shift => Some(*src),
         MInst::Shl { lhs, rhs, .. }
@@ -4756,18 +4736,17 @@ fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, MInst>)
 /// where source bits are the contiguous low bits `0..N` and destination bits
 /// are strictly increasing. This is exactly `pdep(src, mask)`.
 fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let Some(dst) = inst.def() else { continue };
             if !matches!(inst, MInst::Or { .. } | MInst::OrImm { .. }) {
@@ -4855,18 +4834,19 @@ fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
                 ]
             };
 
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
 fn collect_deposit_chain_chunks(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     chunks: &mut Vec<(u8, u8, u8)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -4889,7 +4869,7 @@ fn collect_deposit_chain_chunks(
 
 fn collect_deposit_term(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     chunks: &mut Vec<(u8, u8, u8)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -4905,12 +4885,12 @@ fn collect_deposit_term(
     true
 }
 
-fn trace_deposit_term(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8, u8)> {
+fn trace_deposit_term(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, u8, u8, u8)> {
     trace_deposit_term_inner(reg, defs)
         .filter(|(_, _, width, dst_lsb)| *width > 0 && (*dst_lsb as u16 + *width as u16) <= 64)
 }
 
-fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8, u8)> {
+fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, u8, u8, u8)> {
     let Some(def) = defs.get(&reg) else {
         return Some((reg, 0, 64, 0));
     };
@@ -4960,7 +4940,7 @@ fn trace_deposit_term_inner(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(V
     }
 }
 
-fn trace_value_window(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u8, u8)> {
+fn trace_value_window(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<(VReg, u8, u8)> {
     let Some(def) = defs.get(&reg) else {
         return Some((reg, 0, 64));
     };
@@ -5006,7 +4986,7 @@ fn trace_value_window(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<(VReg, u
     }
 }
 
-fn load_imm_value(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<u64> {
+fn load_imm_value(reg: VReg, defs: &HashMap<VReg, &MInst>) -> Option<u64> {
     match defs.get(&reg)? {
         MInst::LoadImm { value, .. } => Some(*value),
         MInst::Mov { src, .. } => load_imm_value(*src, defs),
@@ -5022,18 +5002,17 @@ fn load_imm_value(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<u64> {
 /// where destination chunks are contiguous low bits and source chunks are
 /// strictly increasing. This is `pext(src, mask)`.
 fn fold_extract_chain_to_pext(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let Some(dst) = inst.def() else { continue };
             if !matches!(inst, MInst::Or { .. } | MInst::OrImm { .. }) {
@@ -5121,12 +5100,13 @@ fn fold_extract_chain_to_pext(func: &mut MFunction) {
                 ]
             };
 
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
@@ -5139,20 +5119,19 @@ fn fold_extract_chain_to_pext(func: &mut MFunction) {
 /// Replacement: `pext(src, mask) → popcnt → and 1` where
 /// `mask = (1 << a) | (1 << b) | ...`
 fn fold_xor_chain_to_pext(func: &mut MFunction) {
-    // Build def map: VReg → instruction (cloned to avoid borrowing func)
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    // Keep the original definitions borrowed until all rewrites are planned.
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
     // For each block, scan for Xor instructions and try to fold
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             // Look for: v = xor a, b  where result is 1-bit (used with and 1)
             let MInst::Xor { dst, lhs, rhs } = inst else {
@@ -5223,13 +5202,13 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
                     imm: 1,
                 },
             ];
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        // Apply replacements in reverse order (to preserve indices)
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
@@ -5241,18 +5220,17 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
 ///   if mask == all_ones: `popcnt src`
 ///   else: `masked = and src, mask; popcnt masked`
 fn fold_add_chain_to_popcnt(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::default();
+    let mut defs: HashMap<VReg, &MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
-                defs.insert(d, inst.clone());
+                defs.insert(d, inst);
             }
         }
     }
 
-    for block in &mut func.blocks {
-        let mut replacements: Vec<(usize, Vec<MInst>)> = Vec::new();
-
+    let mut replacements = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.insts.iter().enumerate() {
             let MInst::Add { dst, lhs, rhs } = inst else {
                 continue;
@@ -5312,12 +5290,13 @@ fn fold_add_chain_to_popcnt(func: &mut MFunction) {
                 ]
             };
 
-            replacements.push((inst_idx, new_insts));
+            replacements.push((block_index, inst_idx, new_insts));
         }
-
-        for (idx, new_insts) in replacements.into_iter().rev() {
-            block.insts.splice(idx..=idx, new_insts);
-        }
+    }
+    drop(defs);
+    // Reverse instruction order preserves indices within each block.
+    for (block, idx, new_insts) in replacements.into_iter().rev() {
+        func.blocks[block].insts.splice(idx..=idx, new_insts);
     }
 }
 
@@ -5328,7 +5307,7 @@ fn collect_xor_chain_bits(
     _vreg: VReg,
     lhs: VReg,
     rhs: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     bits: &mut Vec<(VReg, u64)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -5397,7 +5376,7 @@ fn collect_xor_chain_bits(
 /// Returns true if the tree contains only 0/1 bit extractions from one source.
 fn collect_add_chain_bits(
     reg: VReg,
-    defs: &HashMap<VReg, MInst>,
+    defs: &HashMap<VReg, &MInst>,
     bits: &mut Vec<(VReg, u64)>,
     source_reg: &mut Option<VReg>,
 ) -> bool {
@@ -6830,6 +6809,101 @@ fn emit_partial_store_overlay(
 /// the direct bytes referenced by one block. Insert recovery additionally
 /// reuses one sparse whole-function possible-bit solve.
 fn promote_partial_store_round_trips(func: &mut MFunction) {
+    promote_partial_store_round_trips_impl(func, false);
+}
+
+fn forward_live_partial_stores(func: &mut MFunction) {
+    promote_partial_store_round_trips_impl(func, true);
+}
+
+fn discover_live_partial_stores(
+    block: &MBlock,
+) -> (Vec<PartialRoundTripPlan>, Vec<Option<PartialStoreEvent>>) {
+    let mut plans = Vec::new();
+    let mut stores = vec![None; block.insts.len()];
+    for (instruction, inst) in block.insts.iter().enumerate() {
+        let MInst::Load {
+            dst,
+            base: BaseReg::SimState,
+            offset,
+            size,
+        } = *inst
+        else {
+            continue;
+        };
+        if size == OpSize::S8 {
+            continue;
+        }
+        let load_slot = MemorySlot {
+            base: BaseReg::SimState,
+            offset,
+            size,
+        };
+        let start = i64::from(offset);
+        let end = start + i64::from(size.bytes());
+        let mut selected = Vec::new();
+        let mut covered = 0u16;
+        for previous in (instruction.saturating_sub(32)..instruction).rev() {
+            let write = &block.insts[previous];
+            let effects = memory_effect::writes(write);
+            if effects.unknown_memory()
+                == Some(memory_effect::UnknownMemory::Direct(BaseReg::SimState))
+            {
+                break;
+            }
+            if !effects.ranges().any(|range| {
+                range.base == BaseReg::SimState
+                    && range.offset < end
+                    && range.end().is_none_or(|limit| start < limit)
+            }) {
+                continue;
+            }
+            let MInst::Store {
+                base,
+                offset,
+                src,
+                size,
+            } = *write
+            else {
+                break;
+            };
+            let slot = MemorySlot { base, offset, size };
+            if size.bytes() >= load_slot.size.bytes() || !contained_slot(slot, load_slot) {
+                break;
+            }
+            let mask = ((1u16 << size.bytes()) - 1) << (offset - load_slot.offset);
+            if mask & covered != 0 {
+                break;
+            }
+            covered |= mask;
+            selected.push(previous);
+            stores[previous] = Some(PartialStoreEvent {
+                slot,
+                source: src,
+                insert: None,
+                prior_events: [None; 8],
+                prior_writes: [None; 8],
+            });
+            if selected.len() == 2 {
+                break;
+            }
+        }
+        if selected.is_empty() {
+            continue;
+        }
+        selected.reverse();
+        plans.push(PartialRoundTripPlan {
+            load_instruction: instruction,
+            insertion_instruction: selected[0],
+            load_slot,
+            destination: dst,
+            stores: selected,
+        });
+    }
+    (plans, stores)
+}
+
+fn promote_partial_store_round_trips_impl(func: &mut MFunction, retain_stores: bool) {
     let constants = func
         .blocks
         .iter()
@@ -6853,14 +6927,22 @@ fn promote_partial_store_round_trips(func: &mut MFunction) {
         .collect::<HashSet<_>>();
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
-        let (plans, store_events) = discover_partial_round_trips(
-            block,
-            spill_descs,
-            &defined_values,
-            &possible_ones,
-            &constants,
-        );
-        let plans = retain_dead_partial_store_plans(block, plans);
+        let (plans, store_events) = if retain_stores {
+            discover_live_partial_stores(block)
+        } else {
+            discover_partial_round_trips(
+                block,
+                spill_descs,
+                &defined_values,
+                &possible_ones,
+                &constants,
+            )
+        };
+        let plans = if retain_stores {
+            plans
+        } else {
+            retain_dead_partial_store_plans(block, plans)
+        };
         if plans.is_empty() {
             continue;
         }
@@ -6900,7 +6982,9 @@ fn promote_partial_store_round_trips(func: &mut MFunction) {
                 &stores,
             );
             replacements.insert(plan.load_instruction, replacement);
-            removals.extend(plan.stores);
+            if !retain_stores {
+                removals.extend(plan.stores);
+            }
             spill_descs[plan.destination.0 as usize] = SpillDesc::transient();
         }
 
@@ -6953,7 +7037,17 @@ fn forward_local_store_loads(func: &mut MFunction) {
                     size,
                 } => {
                     if let Some(src) = available.get(base, offset, size) {
-                        rewritten.push(MInst::Mov { dst, src });
+                        emit_partial_load_forward(
+                            &mut rewritten,
+                            vregs,
+                            spill_descs,
+                            dst,
+                            src,
+                            offset,
+                            size,
+                            offset,
+                            size,
+                        );
                         continue;
                     }
                     if let Some((covering_slot, src)) =
@@ -6980,30 +7074,22 @@ fn forward_local_store_loads(func: &mut MFunction) {
                         size,
                     });
                 }
-                MInst::LoadIndexed { .. }
-                | MInst::LoadPtrIndexed { .. }
-                | MInst::StoreIndexed { .. }
-                | MInst::OrStoreIndexed { .. }
-                | MInst::StorePtrIndexed { .. }
-                | MInst::ReleaseStorePtrIndexed { .. } => {
-                    available.clear();
-                    rewritten.push(inst);
+                other => {
+                    let writes = memory_effect::writes(&other);
+                    if let Some(memory_effect::UnknownMemory::Direct(base)) =
+                        writes.unknown_memory()
+                    {
+                        available.invalidate_base(base);
+                    }
+                    for range in writes.ranges() {
+                        if let Some(end) = range.end() {
+                            available.invalidate_range(range.base, range.offset, end);
+                        } else {
+                            available.invalidate_base(range.base);
+                        }
+                    }
+                    rewritten.push(other);
                 }
-                MInst::MemCopy {
-                    src_offset,
-                    dst_offset,
-                    byte_len,
-                } => {
-                    // The source is read but unchanged. Only values cached for
-                    // the written destination range become stale.
-                    available.invalidate_byte_range(BaseReg::SimState, dst_offset, byte_len);
-                    rewritten.push(MInst::MemCopy {
-                        src_offset,
-                        dst_offset,
-                        byte_len,
-                    });
-                }
-                other => rewritten.push(other),
             }
         }
 
@@ -7020,6 +7106,7 @@ struct AvailableStores {
 }
 
 impl AvailableStores {
+    #[cfg(test)]
     fn clear(&mut self) {
         self.slots.clear();
     }
@@ -7043,6 +7130,7 @@ impl AvailableStores {
         self.invalidate_range(base, start, end);
     }
 
+    #[cfg(test)]
     fn invalidate_byte_range(&mut self, base: BaseReg, offset: i32, byte_len: usize) {
         let Some((start, end)) = byte_range(offset, byte_len) else {
             self.invalidate_base(base);
@@ -7318,11 +7406,58 @@ fn invalidate_stores_observed_by(
 pub(super) fn eliminate_redundant_local_stores(func: &mut MFunction) {
     for block in &mut func.blocks {
         let mut later_stores = LaterDirectStores::default();
+        let mut indexed_stores =
+            Vec::<(BaseReg, i32, VReg, OpSize, Option<MemoryAliasRange>)>::new();
         let mut invalidation_scratch = Vec::new();
         let mut reversed = Vec::with_capacity(block.insts.len());
 
         for inst in block.insts.drain(..).rev() {
             invalidate_stores_observed_by(&mut later_stores, &inst, &mut invalidation_scratch);
+            let reads = memory_effect::reads(&inst);
+            indexed_stores.retain(|&(base, _, _, _, envelope)| {
+                if reads.unknown_memory() == Some(memory_effect::UnknownMemory::Direct(base)) {
+                    return false;
+                }
+                !reads.ranges().any(|read| {
+                    read.base == base
+                        && envelope.is_none_or(|envelope| {
+                            read.end()
+                                .is_none_or(|end| i64::from(envelope.offset()) < end)
+                                && read.offset < envelope.end()
+                        })
+                })
+            });
+            if let MInst::StoreIndexed {
+                base,
+                offset,
+                index,
+                size,
+                alias_range,
+                ..
+            } = &inst
+            {
+                if indexed_stores.iter().any(
+                    |&(later_base, later_offset, later_index, later_size, later_envelope)| {
+                        (
+                            later_base,
+                            later_offset,
+                            later_index,
+                            later_size,
+                            later_envelope,
+                        ) == (*base, *offset, *index, *size, *alias_range)
+                    },
+                ) {
+                    continue;
+                }
+                // SSA index identity and the same semantic envelope prove an
+                // exact overwrite. Reads invalidate through that envelope;
+                // intervening writes cannot observe the discarded value.
+                // Bound compile-time work for unusually long store-only blocks.
+                if indexed_stores.len() == 64 {
+                    indexed_stores.remove(0);
+                }
+                indexed_stores.push((*base, *offset, *index, *size, *alias_range));
+            }
             if let MInst::Store {
                 base, offset, size, ..
             } = &inst
@@ -7431,75 +7566,15 @@ fn copy_propagate(func: &mut MFunction) {
     }
 }
 
-/// Dead code elimination: remove instructions whose defs are never used.
+/// Remove scalar definitions that cannot affect an observable instruction.
 fn dead_code_eliminate(func: &mut MFunction) {
-    dead_code_eliminate_impl(func, true);
+    dead_code::eliminate(func, true);
 }
 
 /// Post-allocation DCE must preserve the phi rows used to construct the
 /// already-verified parallel-copy plan.
 fn dead_code_eliminate_preserving_phis(func: &mut MFunction) {
-    dead_code_eliminate_impl(func, false);
-}
-
-fn dead_code_eliminate_impl(func: &mut MFunction, remove_unused_phis: bool) {
-    // Iterate until no more dead code is removed (cascading DCE).
-    loop {
-        let mut used: HashSet<VReg> = HashSet::default();
-        for block in &func.blocks {
-            for inst in &block.insts {
-                for u in inst.uses() {
-                    used.insert(u);
-                }
-            }
-            for phi in &block.phis {
-                for (_, src) in &phi.sources {
-                    used.insert(*src);
-                }
-            }
-        }
-
-        let mut removed = false;
-        for block in &mut func.blocks {
-            let before = block.insts.len();
-            block.insts.retain(|inst| {
-                if let Some(def) = inst.def() {
-                    if !used.contains(&def) {
-                        return matches!(
-                            inst,
-                            MInst::Store { .. }
-                                | MInst::StorePtr { .. }
-                                | MInst::ReleaseStorePtr { .. }
-                                | MInst::StoreIndexed { .. }
-                                | MInst::OrStoreIndexed { .. }
-                                | MInst::StorePtrIndexed { .. }
-                                | MInst::ReleaseStorePtrIndexed { .. }
-                                | MInst::Branch { .. }
-                                | MInst::Jump { .. }
-                                | MInst::Return
-                                | MInst::ReturnError { .. }
-                        );
-                    }
-                }
-                true
-            });
-            if block.insts.len() < before {
-                removed = true;
-            }
-
-            if remove_unused_phis {
-                let phi_before = block.phis.len();
-                block.phis.retain(|phi| used.contains(&phi.dst));
-                if block.phis.len() < phi_before {
-                    removed = true;
-                }
-            }
-        }
-
-        if !removed {
-            break;
-        }
-    }
+    dead_code::eliminate(func, false);
 }
 
 /// Rewrite all use operands in an instruction according to the alias map.
@@ -7516,6 +7591,82 @@ fn rewrite_uses(inst: &mut MInst, aliases: &HashMap<VReg, VReg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiply_immediates_preserve_full_and_low_word_constant_semantics() {
+        for word32 in [false, true] {
+            for constant_on_left in [false, true] {
+                for value in [
+                    0,
+                    3,
+                    30,
+                    i32::MAX as u64,
+                    0x8000_0000,
+                    0xffff_ffff,
+                    i32::MIN as u64,
+                    u64::MAX,
+                    0x1234_5678_89ab_cdef,
+                ] {
+                    let (lhs, rhs) = if constant_on_left {
+                        (VReg(0), VReg(1))
+                    } else {
+                        (VReg(1), VReg(0))
+                    };
+                    let inst = if word32 {
+                        MInst::Mul32 {
+                            dst: VReg(2),
+                            lhs,
+                            rhs,
+                        }
+                    } else {
+                        MInst::Mul {
+                            dst: VReg(2),
+                            lhs,
+                            rhs,
+                        }
+                    };
+                    let folded = fold_imm_use(&inst, VReg(0), value);
+                    if !word32 && (value as i32 as u64) != value {
+                        assert!(
+                            folded.is_none(),
+                            "unencodable full-word constant {value:#x}"
+                        );
+                        continue;
+                    }
+                    let folded = folded.unwrap();
+                    assert_eq!(
+                        folded.uses().iter().copied().collect::<Vec<_>>(),
+                        vec![VReg(1)]
+                    );
+                    let imm = match folded {
+                        MInst::MulImm {
+                            dst: VReg(2),
+                            src: VReg(1),
+                            imm,
+                        } if !word32 => imm,
+                        MInst::MulImm32 {
+                            dst: VReg(2),
+                            src: VReg(1),
+                            imm,
+                        } if word32 => imm,
+                        other => panic!("incorrect immediate form: {other:?}"),
+                    };
+                    for input in [0u64, 1, 0x8000_0000, 1 << 32, 1 << 63, u64::MAX] {
+                        let expected = input.wrapping_mul(value);
+                        let actual = input.wrapping_mul(imm as u64);
+                        assert_eq!(
+                            if word32 { actual as u32 as u64 } else { actual },
+                            if word32 {
+                                expected as u32 as u64
+                            } else {
+                                expected
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// A candidate window that is empty or wholly outside the i32 domain
     /// must never clamp into a nonempty in-domain window: an S8 store at
@@ -8120,6 +8271,91 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn forwards_live_partial_stores_without_losing_later_observers() {
+        use crate::native::{emit, jit_mem::JitCode, mir_legalize, regalloc};
+        fn compile(mut function: MFunction) -> (JitCode, usize) {
+            mir_legalize::legalize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            (
+                JitCode::new(&emitted.code).unwrap(),
+                emitted.required_state_size.max(128) as usize,
+            )
+        }
+        for provenance in [false, true] {
+            for barrier in [false, true] {
+                let mut original = partial_store_round_trip(true, false);
+                if !provenance {
+                    original.spill_descs[3].state_insert = None;
+                }
+                if barrier {
+                    original.blocks[0].insts.insert(
+                        5,
+                        MInst::MemFill {
+                            dst_offset: 101,
+                            byte_len: 1,
+                            value: 0xa5,
+                        },
+                    );
+                }
+                original.blocks[0].push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(4),
+                    size: OpSize::S64,
+                });
+                original.blocks[0].push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(5),
+                    size: OpSize::S64,
+                });
+                original.blocks[0].push(MInst::Return);
+                let mut optimized = original.clone();
+                forward_live_partial_stores(&mut optimized);
+                optimized.verify();
+                assert_eq!(
+                    optimized.blocks[0]
+                        .insts
+                        .iter()
+                        .filter(|inst| matches!(
+                            inst,
+                            MInst::Store {
+                                offset: 100,
+                                size: OpSize::S8,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    optimized.blocks[0]
+                        .insts
+                        .iter()
+                        .any(|inst| matches!(inst, MInst::Load { dst: VReg(4), .. })),
+                    barrier
+                );
+                let (before, before_size) = compile(original);
+                let (after, after_size) = compile(optimized);
+                for value in [0u64, 1, 0x0123_4567_89ab_cdef, u64::MAX] {
+                    let mut left = vec![0u8; before_size.max(after_size)];
+                    left[100..108].copy_from_slice(&value.to_le_bytes());
+                    let mut right = left.clone();
+                    assert_eq!(unsafe { before.call(&mut left) }, 0);
+                    assert_eq!(unsafe { after.call(&mut right) }, 0);
+                    assert_eq!(&left[..128], &right[..128]);
+                }
+            }
+        }
     }
 
     #[test]
@@ -9035,6 +9271,166 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    fn delayed_immediate_branch(kind: CmpKind, imm: i32) -> MFunction {
+        let mut function = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::CmpImm {
+                    dst: VReg(1),
+                    lhs: VReg(0),
+                    imm,
+                    kind,
+                },
+                // Clobber flags and overwrite the original memory. The
+                // delayed predicate must still compare the loaded SSA value.
+                MInst::AddImm {
+                    dst: VReg(2),
+                    src: VReg(0),
+                    imm: 1,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: VReg(2),
+                    size: OpSize::S64,
+                },
+                MInst::Branch {
+                    cond: VReg(1),
+                    true_bb: BlockId(1),
+                    false_bb: BlockId(2),
+                },
+            ],
+            3,
+        );
+        for (block, code) in [(1, 1), (2, 2)] {
+            let mut body = MBlock::new(BlockId(block));
+            body.push(MInst::ReturnError { code });
+            function.blocks.push(body);
+        }
+        function
+    }
+
+    #[test]
+    fn delayed_branch_predicates_keep_shared_results_and_memory_order() {
+        let mut shared = delayed_immediate_branch(CmpKind::Ne, 0);
+        // More than 255 uses must not wrap the compact use count back to one.
+        for _ in 0..256 {
+            shared.blocks[0].insts.insert(
+                2,
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(1),
+                    size: OpSize::S64,
+                },
+            );
+        }
+        shared.verify_result().unwrap();
+        assert_eq!(fold_register_branch_predicates(&mut shared), 0);
+
+        let mut memory = delayed_immediate_branch(CmpKind::Ne, 0);
+        memory.blocks[0].insts[1] = MInst::Load {
+            dst: VReg(1),
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        };
+        memory.verify_result().unwrap();
+        assert_eq!(fold_memory_branch_predicates(&mut memory), 0);
+        assert_eq!(fold_register_branch_predicates(&mut memory), 0);
+
+        let mut registers = delayed_immediate_branch(CmpKind::Ne, 0);
+        registers.blocks[0].insts[1] = MInst::Cmp {
+            dst: VReg(1),
+            lhs: VReg(0),
+            rhs: VReg(0),
+            kind: CmpKind::Ne,
+        };
+        assert_eq!(fold_register_branch_predicates(&mut registers), 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn delayed_immediate_branches_emit_less_code_and_preserve_signedness() {
+        use crate::native::{emit, jit_mem::JitCode, regalloc};
+
+        let mut assignment = AssignmentMap::default();
+        for (value, register) in [PhysReg::RAX, PhysReg::RCX, PhysReg::RDX]
+            .into_iter()
+            .enumerate()
+        {
+            assignment.set(VReg(value as u32), register);
+        }
+        for kind in [
+            CmpKind::Eq,
+            CmpKind::Ne,
+            CmpKind::LtU,
+            CmpKind::LeU,
+            CmpKind::GtU,
+            CmpKind::GeU,
+            CmpKind::LtS,
+            CmpKind::LeS,
+            CmpKind::GtS,
+            CmpKind::GeS,
+        ] {
+            for imm in [i32::MIN, -1, 0, 1, i32::MAX] {
+                let mut function = delayed_immediate_branch(kind, imm);
+                function.verify_result().unwrap();
+                let before = emit::emit(&function, &assignment, 0).unwrap();
+                assert_eq!(fold_register_branch_predicates(&mut function), 1);
+                function.verify_result().unwrap();
+                let after = emit::emit(&function, &assignment, 0).unwrap();
+                assert!(after.text_size < before.text_size);
+                let allocation = regalloc::run_regalloc(&mut function).unwrap();
+                let allocated = emit::emit(
+                    &function,
+                    &allocation.assignment,
+                    allocation.spill_frame_size,
+                )
+                .unwrap();
+                let before_jit = JitCode::new(&before.code).unwrap();
+                let after_jit = JitCode::new(&allocated.code).unwrap();
+                for input in [0u64, 1, u32::MAX as u64, i64::MAX as u64, 1 << 63, u64::MAX] {
+                    let rhs = imm as i64 as u64;
+                    let matched = match kind {
+                        CmpKind::Eq => input == rhs,
+                        CmpKind::Ne => input != rhs,
+                        CmpKind::LtU => input < rhs,
+                        CmpKind::LeU => input <= rhs,
+                        CmpKind::GtU => input > rhs,
+                        CmpKind::GeU => input >= rhs,
+                        CmpKind::LtS => (input as i64) < (rhs as i64),
+                        CmpKind::LeS => (input as i64) <= (rhs as i64),
+                        CmpKind::GtS => (input as i64) > (rhs as i64),
+                        CmpKind::GeS => (input as i64) >= (rhs as i64),
+                    };
+                    let mut original = vec![
+                        0u8;
+                        before
+                            .required_state_size
+                            .max(allocated.required_state_size)
+                            .max(8) as usize
+                    ];
+                    original[..8].copy_from_slice(&input.to_le_bytes());
+                    let mut optimized = original.clone();
+                    let expected = if matched { 1 } else { 2 };
+                    assert_eq!(unsafe { before_jit.call(&mut original) }, expected);
+                    assert_eq!(unsafe { after_jit.call(&mut optimized) }, expected);
+                    assert_eq!(&original[..8], &optimized[..8]);
+                    assert_eq!(
+                        u64::from_le_bytes(optimized[..8].try_into().unwrap()),
+                        input.wrapping_add(1)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -12143,6 +12539,115 @@ mod tests {
     }
 
     #[test]
+    fn folded_indexed_load_executes_the_original_address_and_keeps_its_alias_range() {
+        use crate::native::{emit, jit_mem::JitCode, regalloc};
+        let alias_range = MemoryAliasRange::new(32, 160);
+        let mut func = make_func(
+            vec![
+                MInst::Load {
+                    dst: VReg(0),
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
+                },
+                MInst::ShlImm {
+                    dst: VReg(1),
+                    src: VReg(0),
+                    imm: 2,
+                },
+                MInst::AddImm {
+                    dst: VReg(2),
+                    src: VReg(1),
+                    imm: 3,
+                },
+                MInst::LoadIndexed {
+                    dst: VReg(3),
+                    base: BaseReg::SimState,
+                    offset: 32,
+                    index: VReg(2),
+                    scale: 1,
+                    size: OpSize::S64,
+                    alias_range,
+                },
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    src: VReg(3),
+                    size: OpSize::S64,
+                },
+                MInst::Return,
+            ],
+            4,
+        );
+        fold_indexed_load_addresses(&mut func);
+        assert!(
+            matches!(func.blocks[0].insts[3], MInst::LoadIndexed { offset: 35, index: VReg(0), scale: 4, alias_range: range, .. } if range == alias_range)
+        );
+        dead_code_eliminate(&mut func);
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted =
+            emit::emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        for index in 0..32u64 {
+            let mut state = [0u8; 192];
+            for (offset, byte) in state.iter_mut().enumerate().skip(32) {
+                *byte = offset as u8 ^ 0x5a;
+            }
+            state[..8].copy_from_slice(&index.to_le_bytes());
+            let address = 32 + (index as usize * 4 + 3);
+            let expected = u64::from_le_bytes(state[address..address + 8].try_into().unwrap());
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_load_displacement_overflow_keeps_the_full_width_addition() {
+        for (offset, displacement, scale) in [(i32::MAX, 1, 1), (i32::MIN, -1, 1), (0, i32::MAX, 8)]
+        {
+            let mut func = make_func(
+                vec![
+                    MInst::Load {
+                        dst: VReg(0),
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        size: OpSize::S64,
+                    },
+                    MInst::AddImm {
+                        dst: VReg(1),
+                        src: VReg(0),
+                        imm: displacement,
+                    },
+                    MInst::LoadIndexed {
+                        dst: VReg(2),
+                        base: BaseReg::SimState,
+                        offset,
+                        index: VReg(1),
+                        scale,
+                        size: OpSize::S64,
+                        alias_range: None,
+                    },
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 8,
+                        src: VReg(2),
+                        size: OpSize::S64,
+                    },
+                    MInst::Return,
+                ],
+                3,
+            );
+            fold_indexed_load_addresses(&mut func);
+            assert!(
+                matches!(func.blocks[0].insts[2], MInst::LoadIndexed { index: VReg(1), offset: original, .. } if original == offset)
+            );
+        }
+    }
+
+    #[test]
     fn forwards_exact_store_to_load_in_block() {
         let mut func = make_func(
             vec![
@@ -12162,10 +12667,9 @@ mod tests {
                     offset: 16,
                     size: OpSize::S8,
                 },
-                MInst::AddImm {
+                MInst::LoadImm {
                     dst: VReg(2),
-                    src: VReg(1),
-                    imm: 1,
+                    value: 0x56,
                 },
                 MInst::Store {
                     base: BaseReg::SimState,
@@ -12182,22 +12686,15 @@ mod tests {
 
         let insts = &func.blocks[0].insts;
         assert!(
-            insts.iter().any(|inst| matches!(
-                inst,
-                MInst::LoadImm {
-                    dst: VReg(1),
-                    value: 85,
-                }
-            )),
+            !insts.iter().any(|inst| matches!(inst, MInst::Load { .. })),
             "{insts:#?}"
         );
         assert!(
             insts.iter().any(|inst| matches!(
                 inst,
-                MInst::AddImm {
+                MInst::LoadImm {
                     dst: VReg(2),
-                    src: VReg(1),
-                    imm: 1,
+                    value: 0x56,
                 }
             )),
             "{insts:#?}"
@@ -12226,7 +12723,8 @@ mod tests {
     }
 
     #[test]
-    fn does_not_forward_across_overlapping_store() {
+    fn preserves_overlapping_store_when_forwarding_later_load() {
+        use crate::native::{emit, jit_mem::JitCode, regalloc};
         let mut func = make_func(
             vec![
                 MInst::LoadImm {
@@ -12268,31 +12766,18 @@ mod tests {
 
         optimize(&mut func);
 
-        let insts = &func.blocks[0].insts;
-        assert!(
-            insts.iter().any(|inst| matches!(
-                inst,
-                MInst::Load {
-                    dst: VReg(2),
-                    base: BaseReg::SimState,
-                    offset: 16,
-                    size: OpSize::S16,
-                }
-            )),
-            "{insts:#?}"
-        );
-        assert!(
-            insts.iter().any(|inst| matches!(
-                inst,
-                MInst::Store {
-                    base: BaseReg::SimState,
-                    offset: 32,
-                    src: VReg(2),
-                    size: OpSize::S16,
-                }
-            )),
-            "{insts:#?}"
-        );
+        let allocation = regalloc::run_regalloc(&mut func).unwrap();
+        let emitted =
+            emit::emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0xa5u8; emitted.required_state_size.max(48) as usize];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        // The later byte replaces the high byte of 0x1122. Reusing that old
+        // whole value would lose the overlapping store.
+        assert_eq!(&state[16..18], &[0x22, 0x33]);
+        assert_eq!(&state[32..34], &[0x22, 0x33]);
+        assert_eq!(state[18], 0xa5);
+        assert_eq!(state[34], 0xa5);
     }
 
     #[test]
@@ -12409,9 +12894,11 @@ mod tests {
                     src: VReg(0),
                     size: OpSize::S8,
                 },
-                MInst::LoadImm {
+                MInst::Load {
                     dst: VReg(1),
-                    value: 0,
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    size: OpSize::S64,
                 },
                 MInst::LoadIndexed {
                     dst: VReg(2),
@@ -12808,13 +13295,33 @@ mod tests {
         optimize(&mut func);
 
         assert!(
-            func.blocks[0]
-                .insts
-                .iter()
-                .any(|inst| matches!(inst, MInst::Or { dst: VReg(9), .. })),
+            func.blocks[0].insts.iter().any(|inst| matches!(
+                inst,
+                MInst::Or { dst: VReg(9), .. } | MInst::Or32 { dst: VReg(9), .. }
+            )),
             "{:#?}",
             func.blocks[0].insts
         );
+    }
+
+    #[test]
+    fn constant_index_folding_preserves_scale_and_rejects_displacement_overflow() {
+        for scale in [1, 2, 4, 8] {
+            let instruction = MInst::LoadIndexed {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 64,
+                index: VReg(0),
+                scale,
+                size: OpSize::S64,
+                alias_range: MemoryAliasRange::new(0, 128),
+            };
+            for index in [-2i32, 0, 3] {
+                assert!(matches!(fold_imm_use(&instruction, VReg(0), index as u64),
+                    Some(MInst::Load { offset, .. }) if offset == 64 + index * i32::from(scale)));
+            }
+            assert!(fold_imm_use(&instruction, VReg(0), i32::MAX as u64).is_none());
+        }
     }
 
     #[test]
@@ -13106,6 +13613,34 @@ mod tests {
                 size: OpSize::S64,
             }
         ));
+    }
+
+    #[test]
+    fn global_gvn_handles_deep_dominators_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                const BLOCKS: u32 = 10_000;
+                let mut func = make_func(Vec::new(), BLOCKS + 1);
+                func.blocks.clear();
+                for index in 0..BLOCKS {
+                    let mut block = MBlock::new(BlockId(index));
+                    if index == 0 {
+                        block.push(MInst::LoadImm { dst: VReg(0), value: 1 });
+                    }
+                    block.push(MInst::AddImm { dst: VReg(index + 1), src: VReg(0), imm: index as i32 });
+                    block.push(if index + 1 < BLOCKS {
+                        MInst::Jump { target: BlockId(index + 1) }
+                    } else { MInst::Return });
+                    func.blocks.push(block);
+                }
+                global_gvn(&mut func);
+                assert_eq!(func.blocks.len(), BLOCKS as usize);
+                for (index, block) in func.blocks.iter().enumerate() {
+                    assert!(block.insts.iter().any(|inst| matches!(inst, MInst::AddImm { dst, .. } if *dst == VReg(index as u32 + 1))));
+                }
+            })
+            .unwrap().join().unwrap();
     }
 
     #[test]
@@ -13851,6 +14386,69 @@ mod tests {
                 src: VReg(0),
             }
         ));
+    }
+
+    #[test]
+    fn gvn_write_ordinals_follow_layout_even_when_dominance_order_differs() {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..4 {
+            vregs.alloc();
+        }
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+        let load = |dst| MInst::Load {
+            dst: VReg(dst),
+            base: BaseReg::SimState,
+            offset: 16,
+            size: OpSize::S64,
+        };
+        let store = |offset, size| MInst::Store {
+            base: BaseReg::SimState,
+            offset,
+            src: VReg(0),
+            size,
+        };
+        let mut entry = MBlock::new(BlockId(0));
+        // An untracked write still consumes an ordinal.
+        entry.insts = vec![store(128, OpSize::S64), MInst::Jump { target: BlockId(2) }];
+        let mut exit = MBlock::new(BlockId(1));
+        exit.insts = vec![load(1), store(16, OpSize::S8), load(2), MInst::Return];
+        let mut middle = MBlock::new(BlockId(2));
+        middle.insts = vec![
+            store(16, OpSize::S64),
+            load(3),
+            MInst::Jump { target: BlockId(1) },
+        ];
+        func.push_block(entry);
+        func.push_block(exit);
+        func.push_block(middle);
+        let versions = compute_gvn_load_versions(
+            &func,
+            &[vec![], vec![2], vec![0]],
+            &[Some(0), Some(2), Some(0)],
+        )
+        .unwrap();
+        for location in [(2, 1), (1, 0)] {
+            let version = &versions[&location];
+            for (index, actual) in version.bytes.iter().enumerate() {
+                assert_eq!(
+                    *actual,
+                    GvnMemoryVersion::Write {
+                        ordinal: 2,
+                        variable: GvnMemoryVariable::Byte(BaseReg::SimState, 16 + index as i64),
+                    }
+                );
+            }
+        }
+        let version = &versions[&(1, 2)];
+        for (index, actual) in version.bytes.iter().enumerate() {
+            assert_eq!(
+                *actual,
+                GvnMemoryVersion::Write {
+                    ordinal: if index == 0 { 1 } else { 2 },
+                    variable: GvnMemoryVariable::Byte(BaseReg::SimState, 16 + index as i64),
+                }
+            );
+        }
     }
 
     #[test]

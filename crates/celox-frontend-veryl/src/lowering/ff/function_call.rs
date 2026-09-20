@@ -1589,6 +1589,33 @@ impl<'a> FfParser<'a> {
         ))
     }
 
+    fn coerce_function_output_to_actual<A>(
+        &self,
+        reg: RegisterId,
+        formal_id: VarId,
+        dsts: &[AssignDestination],
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<RegisterId, ParserError> {
+        let width = dsts
+            .iter()
+            .map(|dst| get_access_width(self.module, dst.id, &dst.index, &dst.select))
+            .sum::<Result<usize, ParserError>>()?;
+        let signed = self.module.variables[&formal_id].r#type.signed;
+        if width < ir_builder.register(&reg).width() {
+            let truncated = match ir_builder.register(&reg) {
+                RegisterType::Logic { .. } => ir_builder.alloc_logic(width),
+                RegisterType::Bit { .. } => ir_builder.alloc_bit(width, signed),
+            };
+            // Copying a narrower value preserves Z; a bitwise mask would
+            // turn it into X even in the retained bits.
+            ir_builder.emit(SIRInstruction::Slice(truncated, reg, 0, width));
+            return Ok(truncated);
+        }
+        // Resize the complete formal value before splitting concatenated
+        // destinations. Logic registers do not carry signedness themselves.
+        Ok(self.cast_reg_width_ext(ir_builder, reg, width, signed))
+    }
+
     fn is_whole_variable_reference(expr: &Expression, var_id: VarId) -> bool {
         matches!(
             expr,
@@ -4380,6 +4407,8 @@ impl<'a> FfParser<'a> {
                 } else {
                     dsts.clone()
                 };
+                let rhs_reg =
+                    self.coerce_function_output_to_actual(rhs_reg, *arg_id, &dsts, ir_builder)?;
                 pending_outputs.push((rhs_reg, dsts));
             }
 
@@ -4579,6 +4608,8 @@ impl<'a> FfParser<'a> {
                 } else {
                     dsts.clone()
                 };
+                let rhs_reg =
+                    self.coerce_function_output_to_actual(rhs_reg, *arg_id, &dsts, ir_builder)?;
                 pending_outputs.push((rhs_reg, dsts));
             }
 

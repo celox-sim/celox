@@ -147,11 +147,11 @@ jobs:
       - uses: actions/setup-python@v7
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install cocotb
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: python -m pip install cocotb==2.0.1
+        run: python -m pip install cocotb==2.1.0
 
       - name: Run tests
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
@@ -222,7 +222,7 @@ jobs:
     name: ARM64 Backend Test
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
         with:
@@ -248,7 +248,7 @@ jobs:
         run: cargo check --locked -p celox -p celox-bench
 
       - name: Test AArch64 facade integration
-        run: cargo test --locked -p celox --lib
+        run: cargo test --locked -p celox --lib --test native_exec
 
       - name: Check x86-64 cross-codegen from AArch64
         run: >-

@@ -621,7 +621,10 @@ fn apply_options<'a, T>(
     builder = builder.four_state(opts.four_state);
     builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.cranelift_options(opts.cranelift_options);
-    // VCD is handled separately after build — not passed to SimulatorBuilder
+    // VCD changes the layout and generated stores, so enable it before building.
+    if let Some(path) = opts.vcd.as_deref() {
+        builder = builder.vcd(path);
+    }
     for (from, to) in &opts.false_loops {
         builder = builder.false_loop(from.clone(), to.clone());
     }
@@ -680,6 +683,7 @@ struct CacheKey {
     sources: Vec<(String, String)>,
     top: String,
     four_state: bool,
+    vcd_tracking: bool,
     sir_optimization: SirOptimizationCacheKey,
     cranelift_opt_level: u8,
     regalloc_algorithm: u8,
@@ -753,6 +757,7 @@ fn build_cache_key(
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,
+        vcd_tracking: opts.vcd.is_some(),
         sir_optimization: SirOptimizationCacheKey::from(&opts.optimize_options),
         cranelift_opt_level: opts.cranelift_options.opt_level as u8,
         regalloc_algorithm: opts.cranelift_options.regalloc_algorithm as u8,
@@ -822,6 +827,22 @@ fn napi_runtime_error(
     }
 }
 
+/// Validate a raw numeric event ID before it reaches an unchecked backend lookup.
+///
+/// Standard Celox metadata assigns IDs by enumerating the backend event table, so
+/// valid IDs are dense in `0..event_count`. Numeric N-API entry points must keep
+/// this check in front of every backend call that indexes by event ID.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_event_id(event_id: u32, event_count: usize) -> Result<()> {
+    if (event_id as usize) < event_count {
+        return Ok(());
+    }
+
+    Err(Error::from_reason(
+        celox::RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")).to_string(),
+    ))
+}
+
 /// The backend driving a [`NativeSimulatorHandle`].
 ///
 /// Either the default compiled backend (as before) or the tiered backend,
@@ -836,6 +857,13 @@ enum HandleBackend {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl HandleBackend {
+    fn event_count(&self) -> usize {
+        match self {
+            Self::Default(backend) => backend.id_to_event_slice().len(),
+            Self::Tiered(backend) => backend.id_to_event_slice().len(),
+        }
+    }
+
     fn eval_comb(&mut self) -> std::result::Result<(), celox::RuntimeErrorCode> {
         match self {
             Self::Default(backend) => backend.eval_comb(),
@@ -859,17 +887,17 @@ impl HandleBackend {
         }
     }
 
-    fn memory_as_ptr(&self) -> (*const u8, usize) {
-        match self {
-            Self::Default(backend) => backend.memory_as_ptr(),
-            Self::Tiered(backend) => backend.memory_as_ptr(),
-        }
-    }
-
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         match self {
             Self::Default(backend) => backend.memory_as_mut_ptr(),
             Self::Tiered(backend) => backend.memory_as_mut_ptr(),
+        }
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        match self {
+            Self::Default(backend) => backend.memory_owner(),
+            Self::Tiered(backend) => backend.memory_owner(),
         }
     }
 
@@ -1141,13 +1169,7 @@ impl NativeSimulatorHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
-        // Forward VCD before building: tiered layout selection must know that
-        // recording was requested so it picks the packed layout the VCD
-        // descriptors require (see `build_and_cache_tiered`).
-        if let Some(path) = opts.vcd.as_deref() {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1177,16 +1199,10 @@ impl NativeSimulatorHandle {
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
-        let mut builder = apply_options(
+        let builder = apply_options(
             celox::Simulator::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
-        // Forward VCD before building: tiered layout selection must know that
-        // recording was requested so it picks the packed layout the VCD
-        // descriptors require (see `build_and_cache_tiered`).
-        if let Some(path) = opts.vcd.as_deref() {
-            builder = builder.vcd(path);
-        }
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1308,6 +1324,7 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        validate_event_id(event_id, b.event_count())?;
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         b.eval_apply_ff_at(event_id as usize)
@@ -1324,6 +1341,9 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        // Validate even when `count` is zero so invalid raw IDs never receive
+        // call-shape-dependent treatment at the N-API boundary.
+        validate_event_id(event_id, b.event_count())?;
         for _ in 0..count {
             b.eval_comb()
                 .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
@@ -1352,14 +1372,18 @@ impl NativeSimulatorHandle {
     pub fn dump(&mut self, timestamp: f64) -> Result<()> {
         let b = self
             .backend
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         if let Some(ref mut writer) = self.vcd_writer {
-            let (ptr, size) = b.memory_as_ptr();
-            let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
-            writer
-                .dump(timestamp as u64, memory)
-                .map_err(|e| Error::from_reason(format!("VCD write error: {}", e)))?;
+            match b {
+                HandleBackend::Default(backend) => {
+                    writer.dump_backend(timestamp as u64, backend, &[])
+                }
+                HandleBackend::Tiered(backend) => {
+                    writer.dump_backend(timestamp as u64, backend.as_mut(), &[])
+                }
+            }
+            .map_err(|e| Error::from_reason(format!("VCD write error: {}", e)))?;
         }
         Ok(())
     }
@@ -1372,16 +1396,24 @@ impl NativeSimulatorHandle {
             .backend
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        let owner = b.memory_owner().ok_or_else(|| {
+            Error::from_reason("Simulator backend does not expose owned shared memory")
+        })?;
         let (ptr, _) = b.memory_as_mut_ptr();
         let stable_size = b.stable_region_size();
-        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
+        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, move |_, _| drop(owner)) })
     }
 
-    /// Invalidate this handle (no-op on the Rust side; drop happens via GC).
+    /// Invalidate this handle and release its simulator resources.
     #[napi]
-    pub fn dispose(&mut self) {
+    pub fn dispose(&mut self) -> Result<()> {
         self.backend = None;
-        self.vcd_writer = None;
+        if let Some(mut writer) = self.vcd_writer.take() {
+            writer
+                .flush()
+                .map_err(|e| Error::from_reason(format!("VCD flush error: {e}")))?;
+        }
+        Ok(())
     }
 }
 
@@ -1421,10 +1453,7 @@ impl NativeSimulationHandle {
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let mut builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1468,10 +1497,7 @@ impl NativeSimulationHandle {
         let opts = parse_options(&options)?;
         let artifact = celox::FrontendArtifact::from_json(&artifact_json)
             .map_err(|error| Error::from_reason(error.to_string()))?;
-        let mut builder = apply_options(celox::Simulation::from_frontend(artifact), &opts);
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
+        let builder = apply_options(celox::Simulation::from_frontend(artifact), &opts);
         let sim = builder
             .build()
             .map_err(|error| Error::from_reason(error.to_string()))?;
@@ -1520,13 +1546,10 @@ impl NativeSimulationHandle {
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
-        let mut builder = apply_options(
+        let builder = apply_options(
             celox::Simulation::from_sources(source_refs, &top).with_metadata(metadata),
             &opts,
         );
-        if let Some(path) = &opts.vcd {
-            builder = builder.vcd(path);
-        }
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -1611,8 +1634,8 @@ impl NativeSimulationHandle {
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        sim.add_clock_by_id(event_id, period as u64, initial_delay as u64);
-        Ok(())
+        sim.try_add_clock_by_id(event_id, period as u64, initial_delay as u64)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Schedule a one-shot event by event ID.
@@ -1699,15 +1722,22 @@ impl NativeSimulationHandle {
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        let owner = sim.memory_owner().ok_or_else(|| {
+            Error::from_reason("Simulation backend does not expose owned shared memory")
+        })?;
         let (ptr, _) = sim.memory_as_mut_ptr();
         let stable_size = sim.stable_region_size();
-        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, |_, _| {}) })
+        Ok(unsafe { Uint8Array::with_external_data(ptr, stable_size, move |_, _| drop(owner)) })
     }
 
     /// Invalidate this handle.
     #[napi]
-    pub fn dispose(&mut self) {
-        self.sim = None;
+    pub fn dispose(&mut self) -> Result<()> {
+        if let Some(mut sim) = self.sim.take() {
+            sim.flush_vcd()
+                .map_err(|e| Error::from_reason(format!("VCD flush error: {e}")))?;
+        }
+        Ok(())
     }
 }
 
@@ -3175,6 +3205,207 @@ mod tests {
             .collect()
     }
 
+    fn napi_sources(source: &str) -> Vec<NapiSourceFile> {
+        vec![NapiSourceFile {
+            content: source.to_string(),
+            path: "top.veryl".to_string(),
+        }]
+    }
+
+    const NO_EVENTS_SOURCE: &str = "module Top () {}";
+    const TWO_EVENTS_SOURCE: &str = r#"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            en: input logic,
+            count: output logic<8>,
+        ) {
+            var count_r: logic<8>;
+
+            always_ff (clk, rst) {
+                if_reset {
+                    count_r = 0;
+                } else if en {
+                    count_r = count_r + 1;
+                }
+            }
+
+            always_comb {
+                count = count_r;
+            }
+        }
+    "#;
+
+    #[test]
+    fn raw_event_methods_reject_eventless_handles_with_the_same_error() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None).unwrap();
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+
+        let errors = [
+            simulator.tick(0).unwrap_err(),
+            simulator.tick_n(0, 0).unwrap_err(),
+            simulation.add_clock(0, 10.0, 0.0).unwrap_err(),
+            simulation.schedule(0, 0.0, 1.0).unwrap_err(),
+        ];
+        let expected = celox::RuntimeErrorCode::NotAnEvent("event_id=0".to_string()).to_string();
+
+        for error in errors {
+            assert_eq!(error.reason, expected);
+        }
+    }
+
+    #[test]
+    fn raw_event_methods_reject_the_first_out_of_bounds_id() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+
+        let errors = [
+            simulator.tick(2).unwrap_err(),
+            simulator.tick_n(2, 0).unwrap_err(),
+            simulation.add_clock(2, 10.0, 0.0).unwrap_err(),
+            simulation.schedule(2, 0.0, 1.0).unwrap_err(),
+        ];
+        let expected = celox::RuntimeErrorCode::NotAnEvent("event_id=2".to_string()).to_string();
+
+        for error in errors {
+            assert_eq!(error.reason, expected);
+        }
+    }
+
+    #[test]
+    fn disposed_errors_take_precedence_over_event_validation() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None).unwrap();
+        simulator.dispose().unwrap();
+        assert_eq!(
+            simulator.tick(0).unwrap_err().reason,
+            "Simulator has been disposed"
+        );
+        assert_eq!(
+            simulator.tick_n(0, 0).unwrap_err().reason,
+            "Simulator has been disposed"
+        );
+
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(NO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        simulation.dispose().unwrap();
+        assert_eq!(
+            simulation.add_clock(0, 10.0, 0.0).unwrap_err().reason,
+            "Simulation has been disposed"
+        );
+        assert_eq!(
+            simulation.schedule(0, 0.0, 1.0).unwrap_err().reason,
+            "Simulation has been disposed"
+        );
+    }
+
+    #[test]
+    fn native_handle_dumps_consume_activity_until_memory_is_exposed() {
+        let source = "module Top (
+            clk: input clock, q: output logic<64>,
+            a: input logic<512>, b: input logic<512>, c: input logic<512>,
+        ) { always_ff (clk) { q += 1; } }";
+        let dir = tempfile::tempdir().unwrap();
+        // Warm the uninstrumented cache first. A traced build must not reuse it.
+        NativeSimulatorHandle::new(napi_sources(source), "Top".into(), None)
+            .unwrap()
+            .dispose()
+            .unwrap();
+        for mode in ["fresh", "cached", "tiered"] {
+            let path = dir.path().join(format!("{mode}.vcd"));
+            let options = Some(NapiOptions {
+                vcd: Some(path.to_str().unwrap().to_owned()),
+                four_state: None,
+                opt_level: None,
+                pass_overrides: None,
+                optimize: None,
+                optimize_options: None,
+                cranelift_opt_level: None,
+                regalloc_algorithm: None,
+                enable_alias_analysis: None,
+                enable_verifier: None,
+                false_loops: None,
+                true_loops: None,
+                clock_type: None,
+                reset_type: None,
+                extra_source: None,
+                parameters: None,
+                dead_store_policy: None,
+            });
+            let mut handle = if mode == "tiered" {
+                NativeSimulatorHandle::new_tiered(napi_sources(source), "Top".into(), options)
+            } else {
+                NativeSimulatorHandle::new(napi_sources(source), "Top".into(), options)
+            }
+            .unwrap();
+            handle.dump(0.0).unwrap();
+            let initial = handle.vcd_writer.as_ref().unwrap().statistics();
+            assert!(initial.comparisons > 0);
+            handle.dump(1.0).unwrap();
+            assert_eq!(
+                handle.vcd_writer.as_ref().unwrap().statistics().comparisons,
+                initial.comparisons,
+                "{mode}: idle dumps must not rescan memory"
+            );
+            handle.tick(0).unwrap();
+            handle.dump(2.0).unwrap();
+            let changed = handle.vcd_writer.as_ref().unwrap().statistics();
+            assert!(changed.changes > initial.changes);
+            assert!(changed.comparisons - initial.comparisons < initial.comparisons);
+            handle.dump(3.0).unwrap();
+            assert_eq!(
+                handle.vcd_writer.as_ref().unwrap().statistics().comparisons,
+                changed.comparisons
+            );
+            // shared_memory() obtains its pointer through this same dispatch.
+            handle.backend.as_mut().unwrap().memory_as_mut_ptr();
+            handle.dump(4.0).unwrap();
+            assert_eq!(
+                handle.vcd_writer.as_ref().unwrap().statistics().comparisons,
+                changed.comparisons + initial.comparisons
+            );
+            handle.dispose().unwrap();
+            assert!(std::fs::read_to_string(path).unwrap().contains("\nb1 "));
+        }
+    }
+
+    #[test]
+    fn standard_event_metadata_is_dense_and_valid_ids_still_work() {
+        let mut simulator =
+            NativeSimulatorHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        let simulator_events: HashMap<String, u32> =
+            serde_json::from_str(&simulator.events_json()).unwrap();
+        let mut simulator_ids = simulator_events.values().copied().collect::<Vec<_>>();
+        simulator_ids.sort_unstable();
+        assert_eq!(simulator_ids, [0, 1]);
+        assert_eq!(
+            simulator.backend.as_ref().unwrap().event_count(),
+            simulator_ids.len()
+        );
+        simulator.tick(0).unwrap();
+        simulator.tick_n(1, 0).unwrap();
+
+        let mut simulation =
+            NativeSimulationHandle::new(napi_sources(TWO_EVENTS_SOURCE), "Top".into(), None)
+                .unwrap();
+        let simulation_events: HashMap<String, u32> =
+            serde_json::from_str(&simulation.events_json()).unwrap();
+        let mut simulation_ids = simulation_events.values().copied().collect::<Vec<_>>();
+        simulation_ids.sort_unstable();
+        assert_eq!(simulation_ids, [0, 1]);
+        simulation.add_clock(0, 10.0, 0.0).unwrap();
+        simulation.schedule(1, 5.0, 1.0).unwrap();
+    }
+
     #[test]
     fn simulator_handle_derives_four_state_metadata_from_layout() {
         let source = "module Top (a: input logic<1>) {}";
@@ -3413,13 +3644,18 @@ mod tests {
     }
 
     #[test]
-    fn non_compilation_options_ignored() {
+    fn vcd_paths_share_compiled_code_but_tracing_modes_do_not() {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let mut o1 = default_opts();
         let mut o2 = default_opts();
-        // VCD path doesn't affect compilation
+        // VCD instrumentation affects compilation, but its destination does not.
         o1.common.vcd = None;
         o2.common.vcd = Some("/tmp/dump.vcd".into());
+        assert_ne!(
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
+        );
+        o1.common.vcd = Some("/tmp/another.vcd".into());
         assert_eq!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),

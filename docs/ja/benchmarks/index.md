@@ -20,12 +20,20 @@ RTL 設計の性能を予測するものではありません。
 | 標準ライブラリ | 組み合わせ回路、順序回路、構造化データパス |
 | TypeScript テストベンチ | N-API 呼び出し、型付き信号アクセス、スケジューラ |
 | Verilator 比較 | 同等の生成シミュレータによる基準値 |
-| Heliodor Linux | 大規模な外部設計での生成コード実行速度 |
+| Heliodor Linux | 設計全体のコンパイル、ホスト側テストベンチを含む実行時間、tiered の起動時間・総時間 |
 
 コンパイルと実行は分けて報告します。コンパイルが速くても生成コードが速いとは
 限らず、マイクロベンチマークだけで設計全体の性能は判断できません。
 
 ## 結果の読み方
+
+通常の Benchmark workflow は Rust・Verilator・TypeScript を一つのジョブで順番に
+実行するため、その run 内では同じ VM・CPU で比較できます。CPU とランナーの情報は
+`bench-host` 成果物に保存します。別 run は異なる CPU に割り当てられる場合があるため、
+履歴の小さな差だけでコミットの効果を判断しないでください。
+[大規模な Heliodor](./heliodor.md#大規模-linux-バージョン別の測定) も時間内に収まる構成は
+同じホストで比較します。ARM の 4 hart は 2 組、8 hart はバックエンド別のジョブに分け、
+同じグループ内で同じ CPU を使います。
 
 - 同じワークロード、バックエンド、リビジョン、ホスト環境を比較する。
 - 共有 CI ランナー上の小さな差は、再現するまでノイズとして扱う。
@@ -35,8 +43,9 @@ RTL 設計の性能を予測するものではありません。
 
 Heliodor では固定入力の追加ワークロードを使います。測定方法は
 [Heliodor Linux ベンチマーク](./heliodor.md)を参照してください。
-ダッシュボードではネイティブバックエンドと Veryl-CC を比較します。Cranelift の
-起動時間は大幅に長く、この比較用グラフを読みにくくするため掲載しません。
+ダッシュボードではネイティブバックエンドと同期版の Veryl-CC を比較し、Celox と
+Veryl-CC の tiered 実行では開始までの時間と完了までの総時間も表示します。
+Cranelift 単独の起動時間は大幅に長く、この比較用グラフを読みにくくするため掲載しません。
 Heliodor のグラフは、異なるランナー間の結果を直接比較しないよう CPU
 アーキテクチャ別に分けています。すべてのグラフの値軸は 0 から始まります。
 
@@ -56,7 +65,13 @@ pnpm bench
 
 # Verilator 比較（Verilator と C++ ツールチェーンが必要）
 bash scripts/run-verilator-bench.sh
+
+# VCD 比較（Python 3 も必要。波形の一致を検証してから計測）
+python3 scripts/compare-vcd-verilator.py
 ```
+
+[VCD の測定条件と結果](../../internals/vcd-performance.md#verilator-comparison)には、
+idle・sparse・dense の各負荷で、記録なし／ありを比較した結果をまとめています。
 
 CodSpeed ワークフローは pull request と `master` でベンチマークを実行します。
 CodSpeed は `merge_group` event をサポートしていないため、merge queue では

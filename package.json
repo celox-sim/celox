@@ -1,6 +1,6 @@
 {
   "private": true,
-  "packageManager": "pnpm@11.22.0",
+  "packageManager": "pnpm@12.4.1",
   "scripts": {
     "build": "pnpm --filter=\"!@celox-sim/celox-napi\" --filter=\"!@celox-sim/playground\" -r build",
     "build:napi": "pnpm --filter @celox-sim/celox-napi build:debug",
@@ -20,16 +20,17 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.5",
-    "@emnapi/core": "2.0.0-alpha.4",
-    "@emnapi/runtime": "2.0.0-alpha.4",
-    "@napi-rs/wasm-runtime": "1.2.3",
+    "@emnapi/core": "2.0.0-alpha.5",
+    "@emnapi/runtime": "2.0.0-alpha.5",
+    "@napi-rs/wasm-runtime": "1.2.4",
     "@tybys/wasm-util": "^0.10.1",
     "chart.js": "^4.4.0",
-    "emnapi": "2.0.0-alpha.4",
+    "emnapi": "2.0.0-alpha.5",
     "lefthook": "^2.1.2",
     "typedoc": "^0.28.0",
     "typedoc-plugin-markdown": "^4.4.0",
     "typedoc-vitepress-theme": "^1.1.0",
+    "typescript": "6.0.3",
     "vitepress": "^1.6.4",
     "vue-chartjs": "^5.3.0"
   }

@@ -1235,22 +1235,24 @@ fn test_for_loop_i32_bitwise_steps_discard_high_step_bits() {
     let code = r#"
         #[test(t)]
         module t {
+            var start: signed logic<32>;
             var or_end: signed logic<128>;
             var xor_end: signed logic<128>;
             var or_last: signed logic<32>;
             var xor_last: signed logic<32>;
             initial {
+                start = 3;
                 or_end = 7;
                 xor_end = 5;
                 or_last = 0;
-                for i in 3..=or_end step |= 4294967302 {
+                for i in start..=or_end step |= 4294967302 {
                     or_last = i;
                     if i == 7 {
                         break;
                     }
                 }
                 xor_last = 0;
-                for i in 3..=xor_end step ^= 4294967302 {
+                for i in start..=xor_end step ^= 4294967302 {
                     xor_last = i;
                     if i == 5 {
                         break;
@@ -1273,12 +1275,14 @@ fn test_for_loop_i32_xor_step_with_only_high_bits_fails() {
     let code = r#"
         #[test(t)]
         module t {
+            var start: logic<32>;
             var end_bound: logic<32>;
             var last: logic<32>;
             initial {
+                start = 3;
                 end_bound = 4;
                 last = 0;
-                for i in 3..end_bound step ^= 4294967296 {
+                for i in start..end_bound step ^= 4294967296 {
                     last = i;
                 }
                 $finish();
@@ -1296,12 +1300,14 @@ fn test_for_loop_i32_or_step_with_only_existing_low_bits_fails() {
     let code = r#"
         #[test(t)]
         module t {
+            var start: logic<32>;
             var end_bound: logic<32>;
             var last: logic<32>;
             initial {
+                start = 3;
                 end_bound = 4;
                 last = 0;
-                for i in 3..end_bound step |= 4294967299 {
+                for i in start..end_bound step |= 4294967299 {
                     last = i;
                 }
                 $finish();
@@ -1476,13 +1482,15 @@ fn test_for_loop_expression_bound_stepped() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var start: logic<32>;
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert();
                 clk.next(10);
+                start = 1;
                 limit = cnt >> 1;
-                for _i in 1..limit step *= 2 {{
+                for _i in start..limit step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd13);
@@ -1538,13 +1546,15 @@ fn test_for_loop_expression_bound_arith_shift_step() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var start: logic<32>;
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert();
                 clk.next(10);
+                start = 1;
                 limit = cnt >> 1;
-                for _i in 1..limit step <<<= 1 {{
+                for _i in start..limit step <<<= 1 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd13);
@@ -1600,10 +1610,12 @@ fn test_for_loop_i32_mul_and_shl_overflow_fail() {
             r#"
             #[test(t)]
             module t {{
+                var start: signed logic<32>;
                 var end_bound: signed logic<64>;
                 initial {{
+                    start = {start};
                     end_bound = 64'sd{end};
-                    for _i in {start}..end_bound step {step} {{}}
+                    for _i in start..end_bound step {step} {{}}
                     $finish();
                 }}
             }}
@@ -1617,7 +1629,7 @@ fn test_for_loop_i32_mul_and_shl_overflow_fail() {
 }
 
 #[test]
-fn test_for_loop_static_bounds_use_signed_i32_progress() {
+fn test_for_loop_static_non_additive_overflow_is_rejected() {
     for (start, end, step) in [
         ("1500000000", "1600000000", "*= 2"),
         ("1073741824", "1500000000", "<<= 1"),
@@ -1635,10 +1647,16 @@ fn test_for_loop_static_bounds_use_signed_i32_progress() {
             }}
         "#
         );
-        let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
-            panic!("expected signed i32 loop failure for step {step}");
+        let error = Simulator::builder(&code, "t").run_test().unwrap_err();
+        let SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+            panic!("expected analyzer error for step {step}, got {error:?}");
         };
-        assert!(message.contains("non-progressing stepped for loop"));
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, AnalyzerError::ForLoopOverflow { .. })),
+            "expected for-loop overflow error for step {step}: {errors:?}"
+        );
     }
 }
 

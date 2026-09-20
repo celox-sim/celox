@@ -408,6 +408,8 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::ShrImm { .. } => "shr_imm",
         MInst::ShlImm { .. } => "shl_imm",
         MInst::SarImm { .. } => "sar_imm",
+        MInst::MulImm { .. } => "mul_imm",
+        MInst::MulImm32 { .. } => "mul_imm.w32",
         MInst::AddImm { .. } => "add_imm",
         MInst::SubImm { .. } => "sub_imm",
         MInst::Cmp { .. } => "cmp",

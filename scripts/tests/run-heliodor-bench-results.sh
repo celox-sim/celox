@@ -29,6 +29,33 @@ write_log() {
     printf '%s\n' "$@" >"$path"
 }
 
+# Quarantining the reproduced upstream defect must not disable future HEADs
+# or the annotated revision used by the expanded suite.
+[[ "$(heliodor_head_skip_reason 94e9c5821c24a8941c3ddc3b76daddc7124a855a)" == *initial_assign* ]] \
+    || fail "known invalid HEAD did not explain its exclusion"
+assert_eq "$(heliodor_head_skip_reason 6285682fa0a514077da9d17fee385c7841160025)" "" \
+    "annotated suite revision remains eligible"
+assert_eq "$(heliodor_head_skip_reason 1111111111111111111111111111111111111111)" "" \
+    "new upstream HEAD remains eligible"
+
+# HEAD compatibility configures a relative checkout path. Verify it remains
+# usable as --project after the runner changes into that checkout.
+bash -s -- "$TMP" "$ROOT" <<'RELATIVE_PROJECT_TEST'
+    set -euo pipefail
+    TMP="$1"
+    ROOT="$2"
+    cd "$TMP"
+    export HELIODOR_DIR="relative/source"
+    source "$ROOT/scripts/run-heliodor-bench.sh"
+    mkdir -p "$HELIODOR_DIR"
+    touch "$HELIODOR_DIR/Veryl.toml"
+    for limit in 0 10; do
+        run_in_heliodor "$limit" "$TMP/relative-project.log" \
+            bash -c 'test -f "$1/Veryl.toml"' bash "$HELIODOR_DIR" \
+            || exit 1
+    done
+RELATIVE_PROJECT_TEST
+
 pass_log="$TMP/pass.log"
 write_log "$pass_log" \
     'diagnostic before result' \
@@ -469,5 +496,79 @@ assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "interpreter execution prefix co
 assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "interpreter target runner"
 HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
 CELOX_EXECUTION_PREFIX=()
+
+previous_cache="$FIXTURE_AOT_CACHE_DIR"
+FIXTURE_RESULT_LINE=$'VERYL_TEST_CONFIG test=integration_veryl_tiered backend=cc aot_c_async=true compile_only=false\nVERYL_TEST_TIMING test=integration_veryl_tiered compile_ns=8 execute_ns=50\nVERYL_TIERED_STATS test=integration_veryl_tiered compiled_dispatches=100 fallback_dispatches=200\nVERYL_TEST_RESULT test=integration_veryl_tiered status=pass elapsed_ns=59'
+run_one veryl-cc-tiered integration_veryl_tiered >/dev/null \
+    || fail "run_one rejected a tiered Veryl pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --aot-c-async "* ]] \
+    || fail "tiered Veryl did not enable background C compilation"
+[[ "$FIXTURE_AOT_CACHE_DIR" != "$previous_cache" && ! -e "$FIXTURE_AOT_CACHE_DIR" ]] \
+    || fail "tiered Veryl did not isolate and remove its AOT cache"
+assert_eq "$(awk -F '\t' '$1 == "veryl-cc-tiered" { print $9, $10, $11, $12 }' "$integration_results/results.tsv")" \
+    "59 8 50 NA" "tiered Veryl total/startup/concurrent intervals"
+
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/aot_c_async=true/aot_c_async=false}"
+if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
+    fail "run_one accepted a synchronous result as tiered Veryl"
+fi
+assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4,6)" $'NA\tinvalid' \
+    "wrong Veryl mode must not expose a speed elapsed value"
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/aot_c_async=false/aot_c_async=true}"
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/compiled_dispatches=100/compiled_dispatches=0}"
+run_one veryl-cc-tiered integration_veryl_tiered >/dev/null \
+    || fail "run_one rejected tiered Veryl that finished on the fallback path"
+assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 6,9-12)" $'pass\t59\t8\t50\tNA' \
+    "fallback-only Veryl preserves semantic success and measured intervals"
+[[ "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4)" =~ ^[1-9][0-9]*$ ]] \
+    || fail "fallback-only Veryl did not expose its measured process elapsed value"
+FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/fallback_dispatches=200/fallback_dispatches=0}"
+if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
+    fail "run_one accepted tiered Veryl without any executed dispatches"
+fi
+assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 4,6)" $'NA\tinvalid' \
+    "zero-dispatch Veryl must not expose a speed elapsed value"
+
+HELIODOR_RUNNERS=veryl-cc-tiered
+if any_veryl_runner_enabled; then
+    fail "tiered Veryl requested an unrelated Veryl CLI install"
+fi
+HELIODOR_COMPILE_ONLY=1
+if validate_compile_only_runners 2>/dev/null; then
+    fail "tiered Veryl accepted compile-only mode"
+fi
+if run_one veryl-cc-tiered integration_veryl_tiered >/dev/null 2>&1; then
+    fail "run_one accepted compile-only tiered Veryl"
+fi
+
+# A selected comparison must wait for each backend on this host and retain
+# failures while still attempting the other selected backend for diagnostics.
+(
+    HELIODOR_COMPILE_ONLY=0
+    HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered"
+    HELIODOR_TESTS="comparison"
+    HELIODOR_RESULTS_DIR="$TMP/comparison"
+    prepare() { :; }
+    build_celox_runner() { :; }
+    build_timed_veryl_runner() { :; }
+    comparison_calls=()
+    comparison_failed=0
+    run_one() {
+        comparison_calls+=("$1:$2")
+        if [[ "$1" == celox-tiered ]]; then
+            return "$comparison_failed"
+        fi
+    }
+    run_all || fail "selected comparison failed"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison" \
+        "comparison runs serially in the requested order"
+    comparison_calls=()
+    comparison_failed=124
+    comparison_status=0
+    run_all || comparison_status=$?
+    assert_eq "$comparison_status" 124 "comparison preserves timeout failure"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison" \
+        "comparison attempts both backends after a failure"
+)
 
 echo "run-heliodor-bench result fixture tests: PASS"

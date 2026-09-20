@@ -51,6 +51,239 @@ fn eval_array_literal_expression_in_store(
     expected_width: Option<usize>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    eval_array_literal_expression_with_item_context(
+        module,
+        store,
+        items,
+        expected_width,
+        None,
+        arena,
+    )
+}
+
+fn eval_function_input_assignment_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    target_type: &Type,
+    target_width: usize,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if target_type.array.is_empty() {
+        return eval_assignment_expression_in_store(module, store, expr, arena, target_width);
+    }
+
+    let element_width = target_type.total_width().ok_or_else(|| {
+        ParserError::illegal_context(
+            "function input argument",
+            format!("unresolved element width for {target_type}"),
+            Some(&expr.token_range()),
+        )
+    })?;
+    let value = if let Expression::ArrayLiteral(items, _) = expr {
+        eval_array_literal_expression_with_item_context(
+            module,
+            store,
+            items,
+            Some(target_width),
+            Some(ArrayLiteralItemContext {
+                array_shape: &target_type.array.as_slice()[1..],
+                element_width,
+            }),
+            arena,
+        )?
+    } else {
+        eval_array_literal_item_in_store(
+            module,
+            store,
+            expr,
+            Some(ArrayLiteralItemContext {
+                array_shape: target_type.array.as_slice(),
+                element_width,
+            }),
+            arena,
+        )?
+    };
+
+    finish_assignment_expression(expr, arena, target_width, value)
+}
+
+pub(crate) fn eval_function_input_assignment_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    expr: &Expression,
+    target_type: &Type,
+    target_width: usize,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut store = ExpressionStore::Effectful(store);
+    eval_function_input_assignment_in_store(
+        module,
+        &mut store,
+        expr,
+        target_type,
+        target_width,
+        arena,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ArrayLiteralItemContext<'a> {
+    array_shape: &'a [Option<usize>],
+    element_width: usize,
+}
+
+fn eval_array_literal_item_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    context: Option<ArrayLiteralItemContext<'_>>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let Some(context) = context else {
+        return eval_expression_in_context(module, store, expr, arena, None);
+    };
+
+    // A nested literal occupies the remaining unpacked dimensions. Keep
+    // carrying the formal shape down so every level gets the same index-order
+    // conversion, and the scalar leaves are sized as formal elements.
+    if let Expression::ArrayLiteral(items, _) = expr
+        && !context.array_shape.is_empty()
+    {
+        let target_width = context
+            .array_shape
+            .iter()
+            .try_fold(context.element_width, |width, dim| {
+                width.checked_mul((*dim)?)
+            })
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "array literal item",
+                    "unresolved or overflowing nested array shape",
+                    Some(&expr.token_range()),
+                )
+            })?;
+        let value = eval_array_literal_expression_with_item_context(
+            module,
+            store,
+            items,
+            Some(target_width),
+            Some(ArrayLiteralItemContext {
+                array_shape: &context.array_shape[1..],
+                element_width: context.element_width,
+            }),
+            arena,
+        )?;
+        return finish_assignment_expression(expr, arena, target_width, value);
+    }
+
+    let source_type = &expr.comptime().r#type;
+
+    // A scalar leaf is assigned to one formal element, not concatenated at
+    // its natural width and widened after the aggregate has been assembled.
+    if source_type.array.is_empty() && context.array_shape.is_empty() {
+        return eval_assignment_expression_in_store(
+            module,
+            store,
+            expr,
+            arena,
+            context.element_width,
+        );
+    }
+
+    if source_type.array.as_slice() != context.array_shape || source_type.array.is_empty() {
+        return eval_expression_in_context(module, store, expr, arena, None);
+    }
+
+    // An array-valued item occupies one aggregate slot in the surrounding
+    // assignment pattern. Evaluate it once, then apply the destination's
+    // scalar conversion independently to every element. Coercing the flattened
+    // value as a whole would put all extension bits at one end of the array.
+    let ((source, sources), bounds) = eval_expression_in_context(module, store, expr, arena, None)?;
+    let source_element_width = source_type.total_width().ok_or_else(|| {
+        ParserError::illegal_context(
+            "array literal item",
+            format!("unresolved element width for {source_type}"),
+            Some(&expr.token_range()),
+        )
+    })?;
+    let element_count = source_type.total_array().ok_or_else(|| {
+        ParserError::illegal_context(
+            "array literal item",
+            format!("unresolved array shape for {source_type}"),
+            Some(&expr.token_range()),
+        )
+    })?;
+    let expected_source_width =
+        source_element_width
+            .checked_mul(element_count)
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "array literal item",
+                    "array item width overflows usize",
+                    Some(&expr.token_range()),
+                )
+            })?;
+    let source_width = get_width(source, arena);
+    if source_width != expected_source_width {
+        return Err(ParserError::illegal_context(
+            "array literal item",
+            format!(
+                "expression width {source_width} does not match its array type width {expected_source_width}"
+            ),
+            Some(&expr.token_range()),
+        ));
+    }
+
+    // Array index zero is stored at the least-significant end. Concat accepts
+    // most-significant parts first, so visit semantic elements in reverse.
+    let mut parts = Vec::with_capacity(element_count);
+    for index in (0..element_count).rev() {
+        let lsb = index * source_element_width;
+        let element = arena.alloc(SLTNode::Slice {
+            expr: source,
+            access: BitAccess::new(lsb, lsb + source_element_width - 1),
+        })?;
+        let element = coerce_node_width(
+            arena,
+            element,
+            Some(context.element_width),
+            expression_signed(expr),
+        )?;
+        parts.push((element, context.element_width));
+    }
+
+    Ok(((arena.alloc(SLTNode::Concat(parts))?, sources), bounds))
+}
+
+fn eval_array_literal_default_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    context: Option<ArrayLiteralItemContext<'_>>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    // A scalar default fills scalar leaves even when the current literal level
+    // still represents additional unpacked dimensions. Convert it once as a
+    // formal element; the caller then replicates that converted element across
+    // all remaining aggregate width.
+    if let Some(context) = context
+        && expr.comptime().r#type.array.is_empty()
+    {
+        eval_assignment_expression_in_store(module, store, expr, arena, context.element_width)
+    } else {
+        eval_array_literal_item_in_store(module, store, expr, context, arena)
+    }
+}
+
+fn eval_array_literal_expression_with_item_context(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    items: &[ArrayLiteralItem],
+    expected_width: Option<usize>,
+    item_context: Option<ArrayLiteralItemContext<'_>>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     let mut parts = Vec::new();
     let mut all_bounds = BoundaryMap::default();
     let mut total_sources = HashSet::default();
@@ -62,7 +295,7 @@ fn eval_array_literal_expression_in_store(
         match item {
             ArrayLiteralItem::Value(sub_expr, repeat) => {
                 let ((part_expr, part_sources), p_bounds) =
-                    eval_expression_in_context(module, store, sub_expr, arena, None)?;
+                    eval_array_literal_item_in_store(module, store, sub_expr, item_context, arena)?;
                 all_bounds = merge_boundaries(all_bounds, p_bounds);
                 total_sources.extend(part_sources);
 
@@ -99,8 +332,13 @@ fn eval_array_literal_expression_in_store(
                     ));
                 }
 
-                let ((part_expr, part_sources), p_bounds) =
-                    eval_expression_in_context(module, store, default_expr, arena, None)?;
+                let ((part_expr, part_sources), p_bounds) = eval_array_literal_default_in_store(
+                    module,
+                    store,
+                    default_expr,
+                    item_context,
+                    arena,
+                )?;
                 all_bounds = merge_boundaries(all_bounds, p_bounds);
                 total_sources.extend(part_sources);
                 let width = get_width(part_expr, arena);
@@ -150,10 +388,13 @@ fn eval_array_literal_expression_in_store(
         }
     }
 
-    Ok((
-        (arena.alloc(SLTNode::Concat(parts))?, total_sources),
-        all_bounds,
-    ))
+    // Unpacked array index zero is stored at the least-significant end, while
+    // source-order evaluation must remain left-to-right.
+    if item_context.is_some() {
+        parts.reverse();
+    }
+    let result = arena.alloc(SLTNode::Concat(parts))?;
+    Ok(((result, total_sources), all_bounds))
 }
 
 pub(super) fn eval_function_body_return(
@@ -2089,8 +2330,15 @@ fn eval_function_call_expression(
             ));
         };
         let arg_width = resolve_total_width(module, arg_var)?;
-        let ((arg_node, sources), bounds) =
-            eval_assignment_expression_in_store(module, store, arg_expr, arena, arg_width)?;
+        let value = eval_function_input_assignment_in_store(
+            module,
+            store,
+            arg_expr,
+            &arg_var.r#type,
+            arg_width,
+            arena,
+        )?;
+        let ((arg_node, sources), bounds) = value;
         let arg_node = if arg_var.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
         } else {

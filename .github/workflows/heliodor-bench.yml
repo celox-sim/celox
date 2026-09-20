@@ -12,13 +12,42 @@ on:
       - "crates/**"
       - "!crates/celox-napi/package.json"
       - "scripts/convert-heliodor-bench.mjs"
+      - "scripts/heliodor-suite.mjs"
+      - "scripts/heliodor-suite.test.mjs"
       - "scripts/ci-changes.mjs"
       - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
       - "scripts/tests/convert-heliodor-bench.sh"
+      - "scripts/tests/run-heliodor-bench-results.sh"
+      - "scripts/tests/run-heliodor-bench-gate.sh"
   schedule:
     - cron: "37 2 * * *"
   workflow_dispatch:
+    inputs:
+      suite_test:
+        description: Run only this Linux suite test (empty runs the full suite)
+        type: string
+        default: ""
+      suite_runner:
+        description: Backends to run, space-separated (empty runs all four; long workloads use separate groups)
+        type: string
+        default: ""
+      suite_arch:
+        description: Run only this suite architecture (empty runs both)
+        type: string
+        default: ""
+      arm64_profile:
+        description: Capture an ARM64 Linux boot profile without publishing history
+        type: boolean
+        default: false
+      arm64_profile_run_id:
+        description: Reuse profiling runners from this run ID (requires arm64_profile)
+        type: string
+        default: ""
+      arm64_compare_run_id:
+        description: Compare with runners from this run on the same ARM64 host (requires arm64_profile)
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -27,13 +56,32 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Pull requests neither write benchmark history nor need to wait behind unrelated
-# benchmark runs. Serialize master publishers with bench.yml, while develop uses
-# a separate group so its dispatch cannot replace a pending master nightly run.
+# benchmark runs. Only master publishers share bench.yml's group. Other
+# branches must not replace a pending publisher or compile-time benchmark.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
+  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || github.ref != 'refs/heads/master' && format('heliodor-validation-{0}', github.ref) || 'bench' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-dispatch:
+    name: Validate dispatch inputs
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Reject conflicting or invalid inputs
+        env:
+          ARM64_PROFILE: ${{ inputs.arm64_profile }}
+          SUITE_TEST: ${{ inputs.suite_test }}
+          SUITE_RUNNER: ${{ inputs.suite_runner }}
+          SUITE_ARCH: ${{ inputs.suite_arch }}
+        run: node scripts/heliodor-suite.mjs validate
+
   # PRs use this gate to avoid spending a dedicated ARM runner on unrelated
   # Rust changes. Detection failures fail open in arm64-linux-boot below.
   arm64-changes:
@@ -71,9 +119,14 @@ jobs:
 
       - name: Test benchmark conversion fixtures
         shell: bash
-        run: bash scripts/tests/convert-heliodor-bench.sh
+        run: |
+          node --test scripts/heliodor-suite.test.mjs
+          bash scripts/tests/convert-heliodor-bench.sh
+          bash scripts/tests/run-heliodor-bench-results.sh
+          bash scripts/tests/run-heliodor-bench-gate.sh
 
   heliodor:
+    if: ${{ !inputs.arm64_profile && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch }}
     # Keep the x86_64 gate on every workflow trigger. Only the ARM64 PR lane is
     # change-gated by arm64-changes below.
     runs-on: ubuntu-latest
@@ -155,7 +208,7 @@ jobs:
 
       - name: Convert dashboard metrics
         run: |
-          node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json
+          node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json --require-tiered
           node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-jit.json --jit-only
 
       - name: Compare generated-JIT benchmark
@@ -203,7 +256,7 @@ jobs:
       needs.arm64-changes.outputs.heliodor_arm64 == 'true')
     permissions:
       contents: read
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 90
     env:
       HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
@@ -238,10 +291,11 @@ jobs:
 
   arm64-linux-boot-full:
     name: Nightly ARM64 Linux boot
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch)
     permissions:
       contents: read
-    runs-on: ubuntu-24.04-arm
+      actions: read
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 120
     env:
       HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
@@ -256,14 +310,131 @@ jobs:
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
 
-      - name: Boot Linux with Veryl-CC and the native backend on ARM64
+      - name: Reuse ARM64 profiling runners
+        if: inputs.arm64_profile && inputs.arm64_profile_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: heliodor-arm64-profiling-runners
+          path: target/release
+          run-id: ${{ inputs.arm64_profile_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare ARM64 profiling
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic
+          sudo sysctl kernel.perf_event_paranoid=-1
+          perf_bin=
+          for candidate in /usr/lib/linux-tools/*/perf; do
+            if [[ -x "$candidate" ]]; then perf_bin="$candidate"; fi
+          done
+          test -n "$perf_bin"
+          echo "PERF_BIN=$perf_bin" >> "$GITHUB_ENV"
+          lscpu | tee heliodor-arm64-host.txt
+          mkdir -p "$HELIODOR_RESULTS_DIR"
+          echo "CELOX_PERF_MAP=1" >> "$GITHUB_ENV"
+
+      - name: Boot Linux with synchronous and tiered backends on ARM64
+        if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
         shell: bash
         env:
-          HELIODOR_RUNNERS: veryl-cc-sync celox
+          HELIODOR_RUNNERS: ${{ inputs.arm64_profile && 'celox' || 'veryl-cc-sync celox celox-tiered veryl-cc-tiered' }}
           HELIODOR_TIMEOUT_SEC: "1200"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
+
+      - name: Download ARM64 comparison runner
+        if: inputs.arm64_profile && inputs.arm64_compare_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: heliodor-arm64-profiling-runners
+          path: target/heliodor-arm64/baseline-runners
+          run-id: ${{ inputs.arm64_compare_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare ARM64 compilation and execution
+        if: inputs.arm64_profile && inputs.arm64_compare_run_id != ''
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          trap cleanup_heliodor_fallback EXIT
+          prepare
+          baseline_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/celox-heliodor"
+          veryl_runner="$GITHUB_WORKSPACE/target/heliodor-arm64/baseline-runners/veryl-heliodor"
+          veryl_cache="$GITHUB_WORKSPACE/target/heliodor-arm64/compare-veryl-cache"
+          chmod +x "$baseline_runner" "$CELOX_RUNNER_BIN"
+          if [[ -f "$veryl_runner" ]]; then chmod +x "$veryl_runner"; fi
+          collect_test_source_files test_soc_linux_boot sources
+          args=()
+          for source in "${sources[@]}"; do args+=(--source-file "$source"); done
+          cd "$HELIODOR_DIR"
+          for comparison_round in 1 2 3; do
+            order=(baseline candidate)
+            if (( comparison_round % 2 == 0 )); then order=(candidate baseline); fi
+            if [[ -x "$veryl_runner" ]]; then
+              case "$comparison_round" in
+                1) order=(baseline candidate veryl) ;;
+                2) order=(veryl candidate baseline) ;;
+                3) order=(baseline veryl candidate) ;;
+              esac
+            fi
+            for label in "${order[@]}"; do
+              runner="$CELOX_RUNNER_BIN"
+              if [[ "$label" == baseline ]]; then runner="$baseline_runner"; fi
+              log="$HELIODOR_RESULTS_DIR/compare-$label-$comparison_round.log"
+              if [[ "$label" == veryl ]]; then
+                env VERYL_AOT_CACHE_DIR="$veryl_cache" \
+                  timeout 1200 "$veryl_runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                  "${args[@]}" > "$log" 2>&1
+              else
+                timeout 1200 "$runner" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+                  --backend native --opt-level o2 "${args[@]}" > "$log" 2>&1
+              fi
+              echo "comparison=$label round=$comparison_round"
+              tail -n 4 "$log"
+            done
+          done
+
+      - name: Capture ARM64 profile
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          trap cleanup_heliodor_fallback EXIT
+          prepare
+          chmod +x "$CELOX_RUNNER_BIN"
+          collect_test_source_files test_soc_linux_boot sources
+          args=()
+          for source in "${sources[@]}"; do args+=(--source-file "$source"); done
+          cd "$HELIODOR_DIR"
+          "$PERF_BIN" record -e cpu-clock:u -F 997 -o "$HELIODOR_RESULTS_DIR/perf.data" -- \
+            timeout 1200 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test test_soc_linux_boot \
+            --backend native --opt-level o2 "${args[@]}" \
+            --dump-ir-dir "$HELIODOR_RESULTS_DIR/profile-ir" --dump-ir-and-run \
+            > "$HELIODOR_RESULTS_DIR/profile-linux.log" 2>&1
+
+      - name: Summarize ARM64 profile
+        if: inputs.arm64_profile
+        shell: bash
+        run: |
+          cp /tmp/perf-*.map "$HELIODOR_RESULTS_DIR/"
+          "$PERF_BIN" report --stdio --no-children --percent-limit 0.2 -i "$HELIODOR_RESULTS_DIR/perf.data" | tee "$HELIODOR_RESULTS_DIR/perf-report.txt"
+          "$PERF_BIN" script -i "$HELIODOR_RESULTS_DIR/perf.data" -F ip,sym,dso > "$HELIODOR_RESULTS_DIR/perf-samples.txt"
+
+      - name: Upload ARM64 profiling runners
+        if: inputs.arm64_profile && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-arm64-profiling-runners
+          retention-days: 7
+          path: |
+            target/release/celox-heliodor
+            target/release/veryl-heliodor
 
       - name: Upload nightly ARM64 Linux boot results
         if: always()
@@ -274,13 +445,126 @@ jobs:
             heliodor-arm64-output.txt
             target/heliodor-arm64/results/results.tsv
             target/heliodor-arm64/results/*.log
+            target/heliodor-arm64/results/perf*
+            target/heliodor-arm64/results/profile-ir/mir.txt
+            target/heliodor-arm64/results/profile-ir/native_optimized.sir
+            heliodor-arm64-host.txt
+
+  linux-suite-matrix:
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !inputs.arm64_profile
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: matrix
+        env:
+          SUITE_TEST: ${{ inputs.suite_test }}
+          SUITE_RUNNER: ${{ inputs.suite_runner }}
+          SUITE_ARCH: ${{ inputs.suite_arch }}
+        run: echo "matrix=$(node scripts/heliodor-suite.mjs matrix)" >> "$GITHUB_OUTPUT"
+
+  linux-suite:
+    name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }}, ${{ matrix.group }})
+    needs: linux-suite-matrix
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.linux-suite-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    env:
+      # Keep expanded workloads separate from the historical fixed gate.
+      HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025
+      HELIODOR_SUITE: "1"
+      HELIODOR_TESTS: ${{ matrix.test }}
+      HELIODOR_RUNNERS: ${{ matrix.runner }}
+      HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}
+      HELIODOR_CELOX_CARGO_PROFILE: release
+      CELOX_OPT_LEVEL: O2
+      # Keep phase/progress evidence when a large workload times out.
+      RUST_LOG: ${{ contains(matrix.test, '8hart') && 'celox::=debug,celox_backend_x86::=debug,celox_backend_arm64::=debug' || 'off' }}
+      CELOX_PHASE_TIMING: ${{ contains(matrix.test, '8hart') && '1' || '0' }}
+      CELOX_TESTBENCH_PROGRESS: ${{ contains(matrix.test, '8hart') && '1000000' || '0' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Record host
+        run: |
+          {
+            echo "runner_name=$RUNNER_NAME"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "backends=$HELIODOR_RUNNERS"
+            echo "backend_group=${{ matrix.group }}"
+            echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+            uname -a
+          } > heliodor-suite-host.txt
+          lscpu >> heliodor-suite-host.txt
+          free -h >> heliodor-suite-host.txt
+          swapon --show >> heliodor-suite-host.txt
+          df -h >> heliodor-suite-host.txt
+      - name: Run complete workload
+        shell: bash
+        run: |
+          # Preserve resource evidence in the Actions log even if the runner
+          # stops before it can upload the workload artifacts.
+          (
+            while sleep 60; do
+              date -u '+HELIODOR_RESOURCE_SAMPLE %Y-%m-%dT%H:%M:%SZ'
+              free -m
+              ps -eo pid,ppid,rss,pcpu,comm --sort=-rss | sed -n '1,9p'
+            done
+          ) &
+          resource_monitor=$!
+          trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
+          set -o pipefail
+          # run_all waits for each backend before starting the next one. Bound
+          # each group so artifacts survive the six-hour job limit.
+          /usr/bin/time -v timeout --kill-after=30s 19800s bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
+      - name: Verify complete selected results
+        run: node scripts/heliodor-suite.mjs validate-results target/heliodor/results/results.tsv "$HELIODOR_TESTS" "$HELIODOR_RUNNERS"
+      - name: Verify tiered promotion
+        if: contains(matrix.runner, 'celox-tiered')
+        shell: bash
+        run: |
+          source scripts/run-heliodor-bench.sh
+          logs=(target/heliodor/results/*_celox-tiered_*.log)
+          test "${#logs[@]}" -eq 1
+          validate_gate_tiered_stats "${logs[0]}" "$HELIODOR_TESTS"
+      - name: Upload workload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-suite-${{ matrix.arch }}-${{ matrix.test }}-${{ matrix.group }}
+          path: |
+            heliodor-suite-host.txt
+            heliodor-suite-output.txt
+            target/heliodor/results/results.tsv
+            target/heliodor/results/*.log
 
   publish-linux-boot:
     name: Publish Linux boot benchmarks
     if: >-
+      !cancelled() &&
+      needs.heliodor.result == 'success' &&
+      needs.arm64-linux-boot-full.result == 'success' &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      !inputs.arm64_profile &&
       github.ref == 'refs/heads/master'
-    needs: [heliodor, arm64-linux-boot-full]
+    needs: [heliodor, arm64-linux-boot-full, linux-suite]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -312,7 +596,25 @@ jobs:
           fi
           node scripts/convert-heliodor-bench.mjs \
             "$native_results" heliodor-published.json \
-            --arm64-results "$arm64_results"
+            --arm64-results "$arm64_results" --require-tiered
+
+      - uses: actions/download-artifact@v8
+        if: needs.linux-suite.result == 'success' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
+        with:
+          pattern: heliodor-suite-*
+          path: artifacts/suite
+
+      - name: Convert expanded Linux suite
+        if: needs.linux-suite.result == 'success' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
+        shell: bash
+        run: |
+          node scripts/heliodor-suite.mjs merge artifacts/suite suite
+          node scripts/convert-heliodor-bench.mjs suite-x86_64.tsv heliodor-suite.json --arm64-results suite-aarch64.tsv --require-tiered --suite
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+            writeFileSync("heliodor-published.json", JSON.stringify([...read("heliodor-published.json"), ...read("heliodor-suite.json")]));
+          '
 
       - name: Store Heliodor benchmark history
         uses: benchmark-action/github-action-benchmark@v1
@@ -332,7 +634,8 @@ jobs:
     name: Heliodor HEAD compatibility
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop')
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' &&
+       !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch)
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -354,6 +657,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Resolve Heliodor HEAD
+        id: upstream
         shell: bash
         run: |
           set -euo pipefail
@@ -367,8 +671,18 @@ jobs:
           echo "Testing Heliodor HEAD at $heliodor_revision"
           echo "### Heliodor HEAD compatibility" >> "$GITHUB_STEP_SUMMARY"
           echo "Upstream revision: \`$heliodor_revision\`" >> "$GITHUB_STEP_SUMMARY"
+          source scripts/run-heliodor-bench.sh
+          skip_reason="$(heliodor_head_skip_reason "$heliodor_revision")"
+          if [[ -n "$skip_reason" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$skip_reason"
+            printf 'SKIPPED: %s\n' "$skip_reason" | tee heliodor-head-output.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run Heliodor HEAD compatibility gate
+        if: steps.upstream.outputs.run == 'true'
         shell: bash
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-head-output.txt
 

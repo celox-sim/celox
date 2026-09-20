@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use veryl_analyzer::conv::utils::get_component;
-use veryl_analyzer::ir::{Comptime, Expression, Signature, VarPath};
+use veryl_analyzer::conv::utils::{TypePosition, eval_const_assign, eval_expr, get_component};
+use veryl_analyzer::ir::{
+    AssignDestination, Comptime, Expression, Signature, VarId, VarIndex, VarPath, VarSelect,
+};
+use veryl_analyzer::symbol::{Affiliation, ClockDomain, SymbolKind};
 use veryl_analyzer::value::Value;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::{ClockType, Component, ComponentBackendKind, Metadata, ResetType};
@@ -139,18 +142,81 @@ fn elaborate_parameterized_top(
         )
     })?;
 
-    let mut signature = Signature::new(symbol.found.id);
-    let mut override_map = fxhash::FxHashMap::default();
-    let token = veryl_parser::token_range::TokenRange::default();
-    for (name, value) in param_overrides {
-        let name_id = resource_table::insert_str(name);
-        let path = VarPath::new(name_id);
-        let value = Value::new(*value, 64, false);
-        let comptime = Comptime::create_value(value.clone(), token);
-        let expr = Expression::create_value(value, token);
-        signature.add_parameter(name_id, comptime.value.clone());
-        override_map.insert(path, (comptime, expr));
-    }
+    let SymbolKind::Module(property) = &symbol.found.kind else {
+        unreachable!();
+    };
+    let values: fxhash::FxHashMap<_, _> = param_overrides
+        .iter()
+        .map(|(name, value)| (resource_table::insert_str(name), *value))
+        .collect();
+
+    // push_override expects expressions that have already been evaluated in
+    // the formal parameter type (as get_overridden_params does for HDL insts).
+    // Resolve the header in declaration order so dependent widths/defaults see
+    // earlier overrides, independently of the order of builder.param() calls.
+    let mut header = Context::default();
+    header.inherit(context);
+    header.push_affiliation(Affiliation::Module);
+    header.push_namespace(symbol.found.inner_namespace());
+    let overrides = (|| {
+        let mut signature = Signature::new(symbol.found.id);
+        let mut override_map = fxhash::FxHashMap::default();
+        for parameter in &property.parameters {
+            let property = parameter.property();
+            let token = property.token.into();
+            let invalid = || {
+                ParserError::illegal_context(
+                    "top-level parameter override",
+                    format!(
+                        "unable to evaluate parameter `{}` of top module `{top}`",
+                        parameter.name
+                    ),
+                    Some(&token),
+                )
+            };
+            let r#type = property
+                .r#type
+                .to_ir_type(&mut header, TypePosition::Variable)
+                .map_err(|_| invalid())?;
+            let path = VarPath::new(parameter.name);
+            let mut expr = if let Some(value) = values.get(&parameter.name) {
+                let width = r#type.total_width().ok_or_else(invalid)?;
+                let mut value = Value::new(*value, 64, false)
+                    .expand(width, false)
+                    .into_owned();
+                value.trunc(width);
+                value.set_signed(r#type.signed);
+                let mut comptime = Comptime::create_value(value.clone(), token);
+                comptime.r#type = r#type.clone();
+                let expr = Expression::create_value(value, token);
+                signature.add_parameter(parameter.name, comptime.value.clone());
+                override_map.insert(path.clone(), (comptime.clone(), expr.clone()));
+                (comptime, expr)
+            } else {
+                eval_expr(
+                    &mut header,
+                    Some(r#type.clone()),
+                    property.value.as_ref().ok_or_else(invalid)?,
+                    false,
+                )
+                .map_err(|_| invalid())?
+            };
+            let dst = AssignDestination {
+                id: VarId::default(),
+                path,
+                index: VarIndex::default(),
+                select: VarSelect::default(),
+                comptime: Comptime::from_type(r#type, ClockDomain::None, token),
+                token,
+            };
+            eval_const_assign(&mut header, (&property.kind).into(), &dst, &mut expr)
+                .map_err(|_| invalid())?;
+        }
+        Ok::<_, ParserError>((signature, override_map))
+    })();
+    header.pop_namespace();
+    context.inherit(&mut header);
+    let (signature, override_map) = overrides?;
 
     context.push_override(override_map);
     let component = get_component(context, &signature, top_token).map_err(|_| {
@@ -203,6 +269,7 @@ fn analyze(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> (
     Result<OptimizedSir, ParserError>,
     Vec<AnalyzerError>,
@@ -293,6 +360,20 @@ fn analyze(
     // still reject every cycle that is not covered by the supplied paths.
     if !ignored_loops.is_empty() || !true_loops.is_empty() {
         errors.retain(|error| !matches!(error, AnalyzerError::CombinationalLoop { .. }));
+    }
+
+    // Celox's FF lowerer can model function copy-out and non-local writes that
+    // Veryl rejects for SystemVerilog always_ff compatibility. Keep the
+    // language diagnostics by default, but let semantic regression tests opt
+    // into lowering the analyzer IR for those constructs.
+    if allow_always_ff_function_effects {
+        errors.retain(|error| {
+            !matches!(
+                error,
+                AnalyzerError::SideEffectFunctionCallInAlwaysFf { .. }
+                    | AnalyzerError::FunctionOutputInAlwaysFf { .. }
+            )
+        });
     }
 
     let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
@@ -449,6 +530,7 @@ pub fn compile_to_sir(
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
+        false,
     )
 }
 
@@ -561,6 +643,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
     let (sir, errors, frontend_diagnostics) = analyze(
@@ -582,6 +665,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
+        allow_always_ff_function_effects,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -638,6 +722,7 @@ fn compile_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -658,6 +743,7 @@ fn compile_to_sir_with_layout_mode(
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
+        allow_always_ff_function_effects,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -829,6 +915,7 @@ pub fn compile_mixed_to_sir(
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
+        false,
     )
 }
 
@@ -859,6 +946,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -879,6 +967,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
+        allow_always_ff_function_effects,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -938,6 +1027,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
+    allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     #[cfg(not(feature = "systemverilog"))]
     {
@@ -959,6 +1049,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
+            allow_always_ff_function_effects,
         )
     }
     #[cfg(feature = "systemverilog")]
@@ -980,6 +1071,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
+            allow_always_ff_function_effects,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
             sv_sources,
@@ -1015,6 +1107,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
+            allow_always_ff_function_effects,
         ),
     }
 }
@@ -1085,6 +1178,9 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
         pub tier_promotion: TierPromotion,
+        /// Allow Celox to lower function side effects that Veryl rejects in
+        /// `always_ff` for SystemVerilog compatibility.
+        pub allow_always_ff_function_effects: bool,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1125,6 +1221,14 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         if let Some(path) = vcd_path {
+            if sim.layout().unpacked_arrays.values().any(|array| {
+                !array.element_width.is_multiple_of(8)
+                    || array.element_stride != array.element_width / 8
+            }) {
+                return Err(SimulatorError::from(crate::CodegenError::message(
+                    "VCD requires packed array storage; compile this native image with VCD enabled",
+                )));
+            }
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::VcdWriter::new(path, &descs)
                 .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
@@ -1257,6 +1361,7 @@ mod host {
                 native_force_support: false,
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
+                allow_always_ff_function_effects: false,
             }
         }
     }
@@ -1367,6 +1472,16 @@ mod host {
         /// Enable 4-state (0, 1, X, Z) simulation mode.
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
+            self
+        }
+
+        /// Allow function output and non-local write effects in `always_ff`.
+        ///
+        /// This opts into Celox-specific lowering for constructs rejected by
+        /// Veryl's SystemVerilog compatibility checks. It is primarily useful
+        /// for testing Celox's FF lowering semantics.
+        pub fn allow_always_ff_function_effects(mut self, enable: bool) -> Self {
+            self.options.allow_always_ff_function_effects = enable;
             self
         }
 
@@ -1818,6 +1933,13 @@ mod host {
             ),
             SimulatorError,
         > {
+            // VCD descriptors currently describe packed whole objects. Apply
+            // the same layout rule to every factory, including native images.
+            let layout_mode = if self.vcd_path.is_some() {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             self.enforce_native_force_optimizer();
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
@@ -1853,6 +1975,7 @@ mod host {
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
+                        self.options.allow_always_ff_function_effects,
                     )?
                 }
             } else {
@@ -1874,6 +1997,7 @@ mod host {
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
+                    self.options.allow_always_ff_function_effects,
                 )?
             };
             if let Some(start) = compile_start {
@@ -1884,6 +2008,9 @@ mod host {
             let layout_start = phase_timing.then(crate::timing::now);
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+            if self.vcd_path.is_some() {
+                laid_out.enable_vcd_tracking();
+            }
             if let Some(start) = layout_start {
                 tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
             }
@@ -2360,6 +2487,11 @@ mod host {
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            let layout_mode = if self.vcd_path.is_some() {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             let injected_manifests = self.injected_components.manifests();
             let program_res = if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
@@ -2392,6 +2524,7 @@ mod host {
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
+                        self.options.allow_always_ff_function_effects,
                     )
                 }
             } else {
@@ -2413,12 +2546,16 @@ mod host {
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
+                    self.options.allow_always_ff_function_effects,
                 )
             };
 
             let sim_res = program_res.and_then(|(program, warnings)| {
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+                if self.vcd_path.is_some() {
+                    laid_out.enable_vcd_tracking();
+                }
 
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -2565,6 +2702,11 @@ mod host {
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            let layout_mode = if self.vcd_path.is_some() {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
                 compile_frontend_to_sir_with_layout_mode(
                     artifact,
@@ -2596,10 +2738,14 @@ mod host {
                     &self.injected_components.manifests(),
                     layout_mode,
                     !self.options.native_force_support,
+                    self.options.allow_always_ff_function_effects,
                 )?
             };
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+            if self.vcd_path.is_some() {
+                laid_out.enable_vcd_tracking();
+            }
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);

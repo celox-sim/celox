@@ -85,7 +85,7 @@ mod host_api {
     };
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};
     pub use celox_macros::veryl_test;
-    pub use celox_runtime::{VcdSignalDesc, VcdWriter};
+    pub use celox_runtime::{VcdSignalDesc, VcdStatistics, VcdWriter};
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {
         pub(crate) backend: &'a mut B,

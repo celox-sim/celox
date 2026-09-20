@@ -79,6 +79,9 @@ celox-sir-opt         = { workspace = true, default-features = false, features =
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 celox-backend-arm64   = { workspace = true }
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 insta      = "1.46"
 libc.workspace = true
@@ -90,6 +93,11 @@ tempfile.workspace = true
 veryl-std = { workspace = true }
 veryl-emitter = { workspace = true }
 veryl-simulator = { workspace = true }
+vcd = "0.7"
+
+[[bench]]
+name = "vcd"
+harness = false
 
 [[bench]]
 name = "simulation"

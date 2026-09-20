@@ -694,6 +694,50 @@ describe("createDut — array ports", () => {
 		expect(dut.data.length).toBe(4);
 	});
 
+	test.each([
+		["element-strided", 3, 1, { arrayElementStride: 1, arrayPlaneSize: 4 }],
+		["sub-byte", 3, 2, {}],
+		["non-byte-aligned wide", 13, 7, {}],
+		["byte-aligned", 8, 4, {}],
+	] as const)(
+		"%s storage rejects invalid indices without changing memory",
+		(_name, width, byteSize, layoutExtras) => {
+			const buffer = makeBuffer(32);
+			const bytes = new Uint8Array(buffer);
+			bytes.fill(0xa5);
+			const before = bytes.slice();
+			const layout: Record<string, SignalLayout> = {
+				data: {
+					offset: 8,
+					width,
+					byteSize,
+					is4state: false,
+					direction: "input",
+					...layoutExtras,
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				data: {
+					direction: "input",
+					type: "logic",
+					width,
+					arrayDims: [4],
+				},
+			};
+			const state: DirtyState = { dirty: false };
+			const dut = createDut<{
+				data: { at(i: number): bigint; set(i: number, value: bigint): void };
+			}>(buffer, layout, ports, mockHandle(), state);
+
+			for (const index of [-1, 4, 1.5]) {
+				expect(() => dut.data.at(index)).toThrow(RangeError);
+				expect(() => dut.data.set(index, 1n)).toThrow(RangeError);
+				expect(Array.from(bytes)).toEqual(Array.from(before));
+			}
+			expect(state.dirty).toBe(false);
+		},
+	);
+
 	test("native element-strided sub-byte elements use separate slots", () => {
 		const buffer = makeBuffer(64);
 		const layout: Record<string, SignalLayout> = {
@@ -946,6 +990,60 @@ describe("createDut — array ports", () => {
 		for (let i = 0; i < 8; i += 2) dut.bits.set(i, 0n);
 		expect(view.getUint8(2)).toBe(0b10101010);
 	});
+
+	test.each([
+		[24, 0x12_3456n, 0xab_cdefn],
+		[40, 0x12_3456789an, 0x55_66778899n],
+		[48, 0x1234_56789abcn, 0xabcd_ef012345n],
+	])(
+		"%i-bit byte-aligned elements use exact-size I/O",
+		(elementWidth, value, nextValue) => {
+			const elementByteSize = elementWidth / 8;
+			const arrayOffset = 4;
+			const buffer = makeBuffer(32);
+			const bytes = new Uint8Array(buffer);
+			bytes.fill(0xa5);
+			const layout: Record<string, SignalLayout> = {
+				data: {
+					offset: arrayOffset,
+					width: elementWidth,
+					byteSize: elementByteSize,
+					is4state: false,
+					direction: "input",
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				data: {
+					direction: "input",
+					type: "logic",
+					width: elementWidth,
+					arrayDims: [2],
+				},
+			};
+			const dut = createDut<{
+				data: { at(i: number): bigint; set(i: number, value: bigint): void };
+			}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+			dut.data.set(1, nextValue);
+			const nextElementBefore = bytes.slice(
+				arrayOffset + elementByteSize,
+				arrayOffset + elementByteSize * 2,
+			);
+			dut.data.set(0, value);
+
+			expect(dut.data.at(0)).toBe(value);
+			expect(dut.data.at(1)).toBe(nextValue);
+			expect(
+				Array.from(
+					bytes.slice(
+						arrayOffset + elementByteSize,
+						arrayOffset + elementByteSize * 2,
+					),
+				),
+			).toEqual(Array.from(nextElementBefore));
+			expect(bytes[arrayOffset + elementByteSize * 2]).toBe(0xa5);
+		},
+	);
 
 	test("elementWidth=3: elements spanning byte boundaries read/write correctly", () => {
 		// logic<3>[6]: 6 × 3 = 18 bits = 3 bytes

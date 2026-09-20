@@ -27,7 +27,7 @@ use crate::{CodegenError, HashMap, HashSet, SimulatorError, SimulatorOptions};
 use super::super::RuntimeEventBuffer;
 use super::super::compile_cancel::{CompileCancel, cancelled, cancelled_error};
 use super::super::traits::SimulatorErrorCode;
-use super::super::{MemoryLayout, get_byte_size};
+use super::super::{MemoryLayout, get_byte_size, memory_image::MemoryImage};
 #[cfg(any(
     feature = "x86_64-codegen",
     all(target_arch = "x86_64", not(feature = "arm64-codegen"))
@@ -40,11 +40,13 @@ const NATIVE_FEATURE_AVX: u8 = 1 << 1;
 const NATIVE_FEATURE_FS_STATE_BASE: u8 = 1 << 2;
 const NATIVE_FEATURE_GS_STATE_BASE: u8 = 1 << 3;
 const NATIVE_FEATURE_POPCNT: u8 = 1 << 4;
+const NATIVE_FEATURE_BMI1: u8 = 1 << 5;
 const KNOWN_NATIVE_FEATURES: u8 = NATIVE_FEATURE_BMI2
     | NATIVE_FEATURE_AVX
     | NATIVE_FEATURE_FS_STATE_BASE
     | NATIVE_FEATURE_GS_STATE_BASE
-    | NATIVE_FEATURE_POPCNT;
+    | NATIVE_FEATURE_POPCNT
+    | NATIVE_FEATURE_BMI1;
 
 fn current_native_feature_bits() -> u8 {
     #[cfg(any(
@@ -65,6 +67,9 @@ fn current_native_feature_bits() -> u8 {
 
 fn format_native_feature_bits(bits: u8) -> String {
     let mut names = Vec::new();
+    if bits & NATIVE_FEATURE_BMI1 != 0 {
+        names.push("BMI1");
+    }
     if bits & NATIVE_FEATURE_BMI2 != 0 {
         names.push("BMI2");
     }
@@ -490,6 +495,20 @@ impl NativeProgramImage {
             .merged_total_size
             .checked_add(self.layout.triggered_bits_total_size)
             .ok_or_else(|| "semantic memory size overflows".to_string())?;
+        if let Some(trace) = &self.layout.trace {
+            let metadata_start = self
+                .layout
+                .triggered_bits_offset
+                .checked_add(self.layout.triggered_bits_total_size)
+                .ok_or_else(|| "trace metadata offset overflows".to_string())?;
+            if !trace.validate(
+                self.layout.total_size,
+                metadata_start,
+                self.layout.scratch_base_offset,
+            ) {
+                return Err("invalid waveform activity layout".into());
+            }
+        }
         if self.native_memory_size < semantic_size {
             return Err("native memory is smaller than the semantic state".into());
         }
@@ -548,8 +567,19 @@ fn prepare_merged_sir(
     first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
+    baseline: bool,
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
     let verify_enabled = cfg!(debug_assertions) || diagnostics.verify_boundaries;
+    let mut phase_start = diagnostics.pass_timing.then(crate::timing::now);
+    let mut report_phase = |phase: &str| {
+        if let Some(start) = phase_start {
+            tracing::debug!(
+                "[native-sir-timing] label={label} phase={phase} elapsed={:?}",
+                start.elapsed()
+            );
+            phase_start = Some(crate::timing::now());
+        }
+    };
     if verify_enabled {
         for (unit_index, unit) in units.iter().enumerate() {
             if let Err(error) = unit.verify_result() {
@@ -580,8 +610,15 @@ fn prepare_merged_sir(
     };
 
     verify(&sir_eu, "before x86 merged-SIR optimization")?;
+    report_phase("merge");
     if cancelled(cancel) {
         return Err(cancelled_error());
+    }
+    // The baseline tier keeps the finalized source-unit order and every
+    // state store; the optional cross-unit transforms belong to the
+    // optimizing tier. ISel/legalize/regalloc/emit still run below.
+    if baseline {
+        return Ok(sir_eu);
     }
     if let Some(first_ff_unit) = first_ff_unit {
         let removed = crate::optimizer::sir::eliminate_unobserved_comb_state_stores(
@@ -600,6 +637,7 @@ fn prepare_merged_sir(
             verify(&sir_eu, "after comb/FF state-publication DSE")?;
         }
     }
+    report_phase("comb_state_dse");
     if label == "eval_comb_apply_ff"
         && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
             |source| {
@@ -613,6 +651,7 @@ fn prepare_merged_sir(
         crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
+    report_phase("comb_state_ssa");
     crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
         &mut sir_eu,
         &boundaries,
@@ -628,6 +667,7 @@ fn prepare_merged_sir(
         crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after x86 working StateSSA DCE")?;
     }
+    report_phase("working_state_ssa");
     if cancelled(cancel) {
         return Err(cancelled_error());
     }
@@ -650,6 +690,7 @@ fn prepare_merged_sir(
         }
     })?;
     verify(&sir_eu, "after x86 merged-chain cleanup")?;
+    report_phase("merged_chain");
     Ok(sir_eu)
 }
 
@@ -773,6 +814,7 @@ fn compile_unit_refs(
         first_ff_unit,
         diagnostics,
         cancel,
+        x86_options.baseline,
     )?;
     if cancelled(cancel) {
         return Err(cancelled_error());
@@ -782,8 +824,8 @@ fn compile_unit_refs(
         feature = "x86_64-codegen",
         all(target_arch = "x86_64", not(feature = "arm64-codegen"))
     ))]
-    let emit_result = emit::emit_prepared_eu(
-        &sir_eu,
+    let emit_result = emit::emit_owned_prepared_eu(
+        sir_eu,
         layout,
         four_state,
         label,
@@ -1642,77 +1684,168 @@ fn compile_program(
     capture_trace: bool,
     cancel: Option<&CompileCancel>,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
-    const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
-
     let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
-    let next_task = AtomicUsize::new(0);
-    let (comb_jit, compiled_ff_codes) = std::thread::scope(|scope| {
-        let four_state = options.four_state;
-        let x86_options = &options.x86_options;
-        let comb_handle = scope.spawn(move || {
-            if cancelled(cancel) {
-                return Err(cancelled_error());
+    let comb_blocks = sir
+        .sir
+        .eval_comb
+        .iter()
+        .map(|unit| unit.blocks.len())
+        .sum::<usize>();
+    let max_task_blocks = compile_tasks
+        .iter()
+        .map(|task| {
+            task.units
+                .iter()
+                .map(|unit| unit.blocks.len())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let max_instructions = std::iter::once(sir.sir.eval_comb.iter().collect::<Vec<_>>())
+        .chain(compile_tasks.iter().map(|task| task.units.clone()))
+        .map(|units| {
+            units
+                .iter()
+                .flat_map(|unit| unit.blocks.values())
+                .map(|block| block.instructions.len())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let release_pages = || {
+        // Measure usable capacity after returning unused large-compiler pages.
+        // Small single-worker builds must not trim unrelated process heaps.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if comb_blocks.max(max_task_blocks) >= 65_536 {
+            unsafe {
+                libc::malloc_trim(0);
             }
-            compile_units(
-                &sir.sir.eval_comb,
+        }
+    };
+    release_pages();
+    let workers = super::compile_resources::workers(
+        comb_blocks.max(max_task_blocks),
+        max_instructions,
+        compile_tasks.len() + 1,
+    );
+    let serial = workers == 1;
+    // Start expensive functions early so the final fused function does not
+    // sit behind short FF entries. Stable task identities preserve image order.
+    let mut task_order = (0..compile_tasks.len()).collect::<Vec<_>>();
+    task_order.sort_by_key(|&id| {
+        std::cmp::Reverse(
+            compile_tasks[id]
+                .units
+                .iter()
+                .map(|unit| unit.blocks.len())
+                .sum::<usize>(),
+        )
+    });
+    if options.x86_options.diagnostics.phase_timing {
+        tracing::debug!(
+            "[native-timing] compile_program serial={serial} workers={workers} comb_blocks={comb_blocks} max_task_blocks={max_task_blocks} max_instructions={max_instructions} ff_tasks={}",
+            compile_tasks.len()
+        );
+    }
+    let next_task = AtomicUsize::new(0);
+    let (comb_jit, compiled_ff_codes) = if serial {
+        let comb_jit = compile_units(
+            &sir.sir.eval_comb,
+            layout,
+            options.four_state,
+            "eval_comb",
+            &options.x86_options,
+            capture_trace,
+            &options.optimize_options.diagnostics,
+            cancel,
+        )?;
+        let mut compiled = HashMap::default();
+        for (task_id, task) in compile_tasks.iter().enumerate() {
+            release_pages();
+            let code = compile_unit_refs(
+                &task.units,
                 layout,
-                four_state,
-                "eval_comb",
-                x86_options,
+                options.four_state,
+                task.label,
+                task.first_ff_unit,
+                &options.x86_options,
                 capture_trace,
                 &options.optimize_options.diagnostics,
                 cancel,
-            )
-        });
-        let task_worker_count = compile_tasks
-            .len()
-            .min(MAX_PARALLEL_NATIVE_FUNCTIONS.saturating_sub(1));
-        let task_handles = (0..task_worker_count)
-            .map(|_| {
-                let next_task = &next_task;
-                let compile_tasks = &compile_tasks;
-                scope.spawn(move || {
-                    let mut compiled = Vec::new();
-                    loop {
-                        if cancelled(cancel) {
-                            return Err(cancelled_error());
-                        }
-                        let task_id = next_task.fetch_add(1, Ordering::Relaxed);
-                        let Some(task) = compile_tasks.get(task_id) else {
-                            break;
-                        };
-                        let code = compile_unit_refs(
-                            &task.units,
-                            layout,
-                            four_state,
-                            task.label,
-                            task.first_ff_unit,
-                            x86_options,
-                            capture_trace,
-                            &options.optimize_options.diagnostics,
-                            cancel,
-                        )?;
-                        compiled.push((task_id, code));
-                    }
-                    Ok::<_, SimulatorError>(compiled)
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let comb_jit = comb_handle
-            .join()
-            .map_err(|_| codegen_message("native eval_comb compile thread panicked"))??;
-        let mut compiled_ff_codes = HashMap::default();
-        for handle in task_handles {
-            let compiled = handle
-                .join()
-                .map_err(|_| codegen_message("native FF compile thread panicked"))??;
-            compiled_ff_codes.extend(compiled);
+            )?;
+            compiled.insert(task_id, code);
         }
-        Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
-    })?;
+        (comb_jit, compiled)
+    } else {
+        std::thread::scope(|scope| {
+            let four_state = options.four_state;
+            let x86_options = &options.x86_options;
+            let comb_handle = scope.spawn(move || {
+                if cancelled(cancel) {
+                    return Err(cancelled_error());
+                }
+                compile_units(
+                    &sir.sir.eval_comb,
+                    layout,
+                    four_state,
+                    "eval_comb",
+                    x86_options,
+                    capture_trace,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                )
+            });
+            let task_worker_count = compile_tasks.len().min(workers.saturating_sub(1));
+            let task_handles = (0..task_worker_count)
+                .map(|_| {
+                    let next_task = &next_task;
+                    let compile_tasks = &compile_tasks;
+                    let task_order = &task_order;
+                    scope.spawn(move || {
+                        let mut compiled = Vec::new();
+                        loop {
+                            if cancelled(cancel) {
+                                return Err(cancelled_error());
+                            }
+                            let index = next_task.fetch_add(1, Ordering::Relaxed);
+                            let Some(&task_id) = task_order.get(index) else {
+                                break;
+                            };
+                            let task = &compile_tasks[task_id];
+                            let code = compile_unit_refs(
+                                &task.units,
+                                layout,
+                                four_state,
+                                task.label,
+                                task.first_ff_unit,
+                                x86_options,
+                                capture_trace,
+                                &options.optimize_options.diagnostics,
+                                cancel,
+                            )?;
+                            compiled.push((task_id, code));
+                        }
+                        Ok::<_, SimulatorError>(compiled)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let comb_jit = comb_handle
+                .join()
+                .map_err(|_| codegen_message("native eval_comb compile thread panicked"))??;
+            let mut compiled_ff_codes = HashMap::default();
+            for handle in task_handles {
+                let compiled = handle
+                    .join()
+                    .map_err(|_| codegen_message("native FF compile thread panicked"))??;
+                compiled_ff_codes.extend(compiled);
+            }
+            Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
+        })?
+    };
+    release_pages();
     // A foreign-interface image can request per-unit entries so force/release
     // can reapply overrides between procedural store boundaries. Ordinary
     // images do not compile or retain this duplicate combinational code.
@@ -1982,7 +2115,7 @@ fn compile_program(
 
 pub struct NativeBackend {
     compiled: Arc<SharedNativeCode>,
-    memory: Vec<u64>,
+    memory: MemoryImage,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     execution_timing: Option<NativeExecutionTiming>,
@@ -2170,7 +2303,7 @@ impl NativeBackend {
     /// Each instance gets its own simulation state memory.
     pub fn from_shared(shared: Arc<SharedNativeCode>) -> Self {
         let mem_size_words = shared.native_memory_size.div_ceil(8);
-        let mut memory = vec![0u64; mem_size_words + 1]; // +1 for safety
+        let mut memory = MemoryImage::zeroed(mem_size_words + 1); // +1 for safety
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
@@ -2207,7 +2340,7 @@ impl NativeBackend {
     /// is the one referenced by the state header so its pointer stays valid.
     pub(crate) fn adopt_shared_with_state(
         shared: Arc<SharedNativeCode>,
-        memory: Vec<u64>,
+        memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
         comb_capture_enabled: Vec<u8>,
     ) -> Self {
@@ -2302,6 +2435,25 @@ impl NativeBackend {
         self.execution_timing = Some(NativeExecutionTiming::default());
     }
 
+    /// Total capacity of the live image in `u64` words.
+    pub(crate) fn memory_word_capacity(&self) -> usize {
+        self.memory.capacity_words()
+    }
+
+    /// Swap the compiled code image for a newly compiled one in place,
+    /// keeping the live state, event buffers, capture flags, and timing.
+    /// The caller must supply code from the same laid-out program and only
+    /// replace it outside a split evaluate/apply pair: backend scratch may
+    /// differ, but semantic state and trigger IDs must remain identical.
+    /// The image capacity must cover the new `native_memory_size` requirement.
+    pub(crate) fn replace_shared_code(&mut self, shared: Arc<SharedNativeCode>) {
+        let mem_size_words = shared.native_memory_size.div_ceil(8) + 1;
+        if self.memory.len_words() < mem_size_words {
+            self.memory.resize_zeroed_within_capacity(mem_size_words);
+        }
+        self.compiled = shared;
+    }
+
     /// Stop timing and return the accumulated generated-code interval.
     pub fn finish_execution_timing(&mut self) -> Option<NativeExecutionTiming> {
         self.execution_timing.take()
@@ -2345,13 +2497,13 @@ impl NativeBackend {
 
     fn mem_bytes(&self) -> &[u8] {
         let ptr = self.mem_ptr();
-        let len = self.memory.len() * 8;
+        let len = self.memory.len_words() * 8;
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
     fn mem_bytes_mut(&mut self) -> &mut [u8] {
         let ptr = self.mem_mut_ptr();
-        let len = self.memory.len() * 8;
+        let len = self.memory.len_words() * 8;
         unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 
@@ -2421,10 +2573,10 @@ impl NativeBackend {
 
     fn call_func_timed(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
         let Some(_) = self.execution_timing else {
-            return Self::call_func(&mut self.memory, func);
+            return Self::call_func(self.memory.as_mut_slice(), func);
         };
         let start = Instant::now();
-        let result = Self::call_func(&mut self.memory, func);
+        let result = Self::call_func(self.memory.as_mut_slice(), func);
         let elapsed = start.elapsed();
         let timing = self
             .execution_timing
@@ -2464,10 +2616,10 @@ impl NativeBackend {
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
         if self.execution_timing.is_none() || count == 0 {
-            return Self::call_func_many(&mut self.memory, func, count);
+            return Self::call_func_many(self.memory.as_mut_slice(), func, count);
         }
         let start = Instant::now();
-        let result = Self::call_func_many(&mut self.memory, func, count);
+        let result = Self::call_func_many(self.memory.as_mut_slice(), func, count);
         let elapsed = start.elapsed();
         let timing = self
             .execution_timing
@@ -2560,6 +2712,7 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
@@ -2602,6 +2755,7 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let clear_mask = self.compiled.options.four_state && signal.is_4state;
         self.write_signal_plane(signal, false, &val);
         if clear_mask {
@@ -2610,6 +2764,7 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
+        celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let write_mask = self.compiled.options.four_state && signal.is_4state;
         self.write_signal_plane(signal, false, &val);
         if write_mask {
@@ -2659,11 +2814,22 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn memory_as_ptr(&self) -> (*const u8, usize) {
-        (self.mem_ptr(), self.memory.len() * 8)
+        (self.mem_ptr(), self.memory.len_words() * 8)
     }
 
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
-        (self.mem_mut_ptr(), self.memory.len() * 8)
+        (
+            self.memory.expose_mut_ptr().cast(),
+            self.memory.len_words() * 8,
+        )
+    }
+
+    fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(self.memory.owner())
+    }
+
+    fn vcd_tracking_enabled(&self) -> bool {
+        self.memory.vcd_tracking_enabled()
     }
 
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize) {

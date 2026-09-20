@@ -17,7 +17,7 @@ pub use reflection::{
 };
 pub use simulation::{EventInfo, SimulationExecutor, SimulationState};
 pub use testbench::bind_testbench_program;
-pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdWriter};
+pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdStatistics, VcdWriter};
 
 pub type AbsoluteAddr = celox_design::StateAddr;
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;

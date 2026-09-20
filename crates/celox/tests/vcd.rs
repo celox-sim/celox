@@ -34,6 +34,7 @@ mod tests {
 
         sim.dump(0);
         sim.dump(10);
+        sim.flush_vcd().unwrap();
 
         assert!(Path::new(vcd_path).exists());
         let content = fs::read_to_string(vcd_path).unwrap();
@@ -110,6 +111,8 @@ mod tests {
         drive(&mut tiered);
         dump_at(&mut tiered, 10);
 
+        reference.flush_vcd().unwrap();
+        tiered.flush_vcd().unwrap();
         assert_eq!(without_date(reference_path), without_date(tiered_path));
 
         fs::remove_file(reference_path).unwrap();
@@ -191,5 +194,435 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+}
+
+mod activity {
+    use celox::{SimBackend, Simulator, SimulatorBuilder, VcdWriter};
+    use num_bigint::BigUint;
+
+    const SOURCE: &str = r#"
+        module Top (
+            clk: input clock, rst: input reset,
+            enable: input logic, index: input logic<3>, data: input logic<65>,
+            q: output logic<65>, alias_out: output logic<65>, comb: output logic<65>,
+            read: output logic<9>,
+        ) {
+            var mem: logic<9>[8];
+            assign alias_out = data;
+            assign comb = data ^ (data << 1);
+            assign read = mem[index];
+            always_ff (clk, rst) {
+                if_reset {
+                    q = 0;
+                    mem = '0;
+                } else if enable {
+                    q = data;
+                    mem[index] = data[0+:9];
+                }
+            }
+        }
+    "#;
+
+    fn commands(bytes: &[u8]) -> Vec<vcd::Command> {
+        let mut parser = vcd::Parser::new(bytes);
+        parser.parse_header().unwrap();
+        parser.map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn invalid_external_values_preserve_backend_activity_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let sim = SimulatorBuilder::new(
+            "module Top (a: input logic<8>, q: output logic<8>) { assign q = a + 1; }",
+            "Top",
+        )
+        .vcd(dir.path().join("unused.vcd"))
+        .build_cranelift()
+        .unwrap();
+        let input = sim.signal("a");
+        let descs = sim.build_vcd_descs(false);
+        let mut backend = sim.into_backend();
+        let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+        let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+        let external_descs = [celox_runtime::VcdExternalSignalDesc {
+            scope: "component".into(),
+            name: "state".into(),
+            width: 8,
+        }];
+        writer.add_external_signals(&external_descs).unwrap();
+        reference.add_external_signals(&external_descs).unwrap();
+
+        for time in 0..3u64 {
+            backend.set(input, time as u8);
+            backend.eval_comb().unwrap();
+            let external = [(BigUint::from(time), BigUint::default())];
+            if time != 0 {
+                // Both missing and excess values are recoverable input errors.
+                // Retry without another memory write to expose lost activity.
+                let invalid = vec![external[0].clone(); if time == 1 { 0 } else { 2 }];
+                let before = writer.statistics();
+                let error = writer
+                    .dump_backend(time, &mut backend, &invalid)
+                    .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(writer.statistics().comparisons, before.comparisons);
+            }
+            writer.dump_backend(time, &mut backend, &external).unwrap();
+            let (ptr, size) = backend.memory_as_ptr();
+            // SAFETY: backend owns this memory and is not mutated during the dump.
+            let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
+            reference
+                .dump_with_external(time, memory, &external)
+                .unwrap();
+        }
+
+        assert_eq!(
+            commands(&writer.into_inner().unwrap()),
+            commands(&reference.into_inner().unwrap())
+        );
+    }
+
+    #[test]
+    fn timestamp_errors_preserve_backend_activity_for_retry() {
+        #[derive(Default)]
+        struct FailWrites {
+            bytes: Vec<u8>,
+            failures: std::cell::Cell<usize>,
+        }
+        impl std::io::Write for FailWrites {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(remaining) = self.failures.get().checked_sub(1) {
+                    self.failures.set(remaining);
+                    return Err(std::io::ErrorKind::Other.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for failures in [1, 3] {
+            for new_activity in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                // Separate physical groups keep both the original write and a
+                // write between retries on the sparse comparison path.
+                let sim = SimulatorBuilder::new(
+                    "module Top (
+                        a: input logic<512>, b: input logic<512>,
+                        c: input logic<512>, d: input logic<512>,
+                        e: input logic<512>, f: input logic<512>,
+                    ) {}",
+                    "Top",
+                )
+                .vcd(dir.path().join("unused.vcd"))
+                .build_cranelift()
+                .unwrap();
+                let a = sim.signal("a");
+                let b = sim.signal("b");
+                let descs = sim.build_vcd_descs(false);
+                let mut backend = sim.into_backend();
+                let mut writer = VcdWriter::from_writer(FailWrites::default(), &descs);
+                let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+                writer.dump_backend(0, &mut backend, &[]).unwrap();
+                let (ptr, size) = backend.memory_as_ptr();
+                // SAFETY: backend owns this memory and is not mutated during the dump.
+                reference
+                    .dump(0, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
+                writer.flush().unwrap();
+                reference.flush().unwrap();
+
+                // Fill the 256 KiB output buffer exactly with timestamps. The
+                // next timestamp must flush it before accepting any new bytes,
+                // so a sink error occurs after consuming activity but before
+                // comparing or updating any cached signal values.
+                writer.dump_with_activity(10, &[], &[], Some(&[])).unwrap();
+                reference
+                    .dump_with_activity(10, &[], &[], Some(&[]))
+                    .unwrap();
+                for _ in 0..(256 * 1024 - 4) / 3 {
+                    writer.dump_with_activity(0, &[], &[], Some(&[])).unwrap();
+                    reference
+                        .dump_with_activity(0, &[], &[], Some(&[]))
+                        .unwrap();
+                }
+
+                backend.set_wide(a, BigUint::from(11u8));
+                writer.get_ref().failures.set(failures);
+                let before = writer.statistics().comparisons;
+                for attempt in 0..failures {
+                    let error = writer.dump_backend(20, &mut backend, &[]).unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                    assert_eq!(writer.statistics().comparisons, before);
+                    if new_activity {
+                        // Include repeated notifications as well as a different
+                        // group, without another write to the original group.
+                        backend.set_wide(b, BigUint::from(22 + attempt));
+                    }
+                }
+                writer.dump_backend(20, &mut backend, &[]).unwrap();
+                let (ptr, size) = backend.memory_as_ptr();
+                // SAFETY: backend owns this memory and is not mutated during the dump.
+                reference
+                    .dump(20, unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
+                assert_eq!(
+                    writer.statistics().comparisons - before,
+                    1 + u64::from(new_activity),
+                    "retry must visit each pending group exactly once"
+                );
+                let after = writer.statistics().comparisons;
+                writer.dump_backend(20, &mut backend, &[]).unwrap();
+                assert_eq!(writer.statistics().comparisons, after);
+                assert_eq!(
+                    commands(&writer.into_inner().unwrap().bytes),
+                    commands(&reference.into_inner().unwrap()),
+                    "failures={failures}, new_activity={new_activity}"
+                );
+            }
+        }
+    }
+
+    fn compare<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path, four_state: bool) {
+        assert!(sim.layout().trace.is_some());
+        let descs = sim.build_vcd_descs(four_state);
+        let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let data = sim.signal("data");
+        let index = sim.signal("index");
+        let enable = sim.signal("enable");
+        let dump = |sim: &mut Simulator<B>, reference: &mut VcdWriter<Vec<u8>>, time| {
+            sim.dump(time);
+            let (ptr, size) = sim.memory_as_ptr();
+            reference
+                .dump(time, unsafe { std::slice::from_raw_parts(ptr, size) })
+                .unwrap();
+        };
+        // Initial dump works even without any registered activity.
+        dump(&mut sim, &mut reference, 0);
+        sim.set(rst, 0u8);
+        sim.tick(clk).unwrap();
+        dump(&mut sim, &mut reference, 1);
+        sim.set(rst, 1u8);
+        for step in 2..34u64 {
+            let value = (BigUint::from(1u8) << (step as usize % 65)) | BigUint::from(step);
+            let mask = if four_state && step % 3 == 0 {
+                BigUint::from(0x155u16)
+            } else {
+                BigUint::default()
+            };
+            sim.modify(|io| {
+                io.set(index, (step % 8) as u8);
+                io.set(enable, u8::from(step % 4 != 0));
+                io.set_four_state(data, value.clone(), mask.clone());
+            })
+            .unwrap();
+            // Notifications must survive several clock/comb evaluations before dump.
+            sim.tick(clk).unwrap();
+            sim.tick(clk).unwrap();
+            dump(&mut sim, &mut reference, step);
+            let before = sim.vcd_statistics().unwrap().comparisons;
+            dump(&mut sim, &mut reference, step);
+            assert_eq!(
+                sim.vcd_statistics().unwrap().comparisons,
+                before,
+                "a second dump without writes must not rescan memory"
+            );
+        }
+        // Changes that return to the previous dump value are suppressed.
+        let old = sim.get(data);
+        sim.set_wide(data, &old ^ BigUint::from(1u8));
+        sim.set_wide(data, old);
+        dump(&mut sim, &mut reference, 35);
+        // A retained mutable pointer bypasses setters on more than one dump.
+        let (raw, _) = sim.memory_as_mut_ptr();
+        for time in 36..39 {
+            unsafe {
+                *raw.add(data.offset) ^= 1;
+            }
+            sim.modify(|_| {}).unwrap();
+            dump(&mut sim, &mut reference, time);
+        }
+        sim.flush_vcd().unwrap();
+        let actual = std::fs::read(path).unwrap();
+        let expected = reference.into_inner().unwrap();
+        assert!(!commands(&actual).is_empty());
+        assert_eq!(commands(&actual), commands(&expected));
+    }
+
+    #[test]
+    fn restoring_raw_memory_cannot_reenable_sparse_tracking() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path) {
+            let a = sim.signal("a");
+            let descs = sim.build_vcd_descs(false);
+            let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+            sim.dump(0);
+            let (ptr, size) = sim.memory_as_ptr();
+            // SAFETY: the backend is idle and owns the complete state image.
+            let snapshot = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+            reference.dump(0, &snapshot).unwrap();
+            let (raw, writable_size) = sim.memory_as_mut_ptr();
+            assert_eq!(size, writable_size);
+            // Restore every exposed byte, including activity metadata. Retain
+            // the same pointer for later unnotified writes, as a host may do.
+            unsafe {
+                std::ptr::copy_nonoverlapping(snapshot.as_ptr(), raw, writable_size);
+            }
+            for time in 1..4 {
+                unsafe {
+                    *raw.add(a.offset) = time as u8;
+                }
+                sim.dump(time);
+                reference
+                    .dump(time, unsafe { std::slice::from_raw_parts(raw, size) })
+                    .unwrap();
+            }
+            sim.flush_vcd().unwrap();
+            assert_eq!(
+                commands(&std::fs::read(path).unwrap()),
+                commands(&reference.into_inner().unwrap())
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raw-restore.vcd");
+        let builder = || {
+            SimulatorBuilder::new(
+                "module Top (a: input logic<512>, b: input logic<512>, c: input logic<512>) {}",
+                "Top",
+            )
+            .vcd(&path)
+        };
+        check(builder().build().unwrap(), &path);
+        check(builder().build_cranelift().unwrap(), &path);
+        check(builder().build_interpreter().unwrap(), &path);
+        check(builder().build_wasm().unwrap(), &path);
+        check(builder().build_tiered().unwrap(), &path);
+    }
+
+    #[test]
+    fn generated_notifications_match_full_scan_across_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        for optimized in [false, true] {
+            for four_state in [false, true] {
+                let path = dir.path().join("wave.vcd");
+                let builder = || {
+                    SimulatorBuilder::new(SOURCE, "Top")
+                        .optimize(optimized)
+                        .four_state(four_state)
+                        .vcd(&path)
+                };
+                compare(builder().build().unwrap(), &path, four_state);
+                compare(builder().build_cranelift().unwrap(), &path, four_state);
+                compare(builder().build_interpreter().unwrap(), &path, four_state);
+                compare(builder().build_wasm().unwrap(), &path, four_state);
+                compare(builder().build_tiered().unwrap(), &path, four_state);
+            }
+        }
+    }
+
+    #[test]
+    fn clock_trigger_consumption_does_not_consume_waveform_activity() {
+        let code = r#"
+            module Top (clk: input clock, rst: input reset, div: output logic, q: output logic<8>) {
+                let gclk: '_ clock = clk;
+                always_ff (clk, rst) { if_reset { div = 0; } else { div = ~div; } }
+                always_ff (gclk, rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade.vcd");
+        let mut sim = celox::Simulation::builder(code, "Top")
+            .vcd(&path)
+            .build()
+            .unwrap();
+        sim.add_clock("clk", 10, 10);
+        let rst = sim.signal("rst");
+        sim.modify(|io| io.set(rst, 0u8)).unwrap();
+        // The reference writer reads the same committed state after the scheduler.
+        let descs = ["clk", "rst", "div", "q"].map(|name| {
+            let signal = sim.signal(name);
+            celox::VcdSignalDesc {
+                scope: "reference".into(),
+                name: name.into(),
+                offset: signal.offset,
+                width: signal.width,
+                is_4state: false,
+            }
+        });
+        let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+        for step in 0..20 {
+            if step == 2 {
+                let rst = sim.signal("rst");
+                sim.modify(|io| io.set(rst, 1u8)).unwrap();
+            }
+            let time = sim.step().unwrap().unwrap();
+            sim.dump(time);
+            let (ptr, size) = sim.memory_as_ptr();
+            reference
+                .dump(time, unsafe { std::slice::from_raw_parts(ptr, size) })
+                .unwrap();
+        }
+        sim.flush_vcd().unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let actual = commands(&bytes);
+        let reference_bytes = reference.into_inner().unwrap();
+        let expected = commands(&reference_bytes);
+        // Match by declaration names, since the full design includes scopes and aliases.
+        fn values(bytes: &[u8], names: &[&str]) -> Vec<(u64, String, String)> {
+            let mut parser = vcd::Parser::new(bytes);
+            let header = parser.parse_header().unwrap();
+            fn vars(
+                items: &[vcd::ScopeItem],
+                out: &mut Vec<(vcd::IdCode, String)>,
+                names: &[&str],
+            ) {
+                for item in items {
+                    match item {
+                        vcd::ScopeItem::Var(var) if names.contains(&var.reference.as_str()) => {
+                            out.push((var.code, var.reference.clone()))
+                        }
+                        vcd::ScopeItem::Scope(scope) => vars(&scope.items, out, names),
+                        _ => {}
+                    }
+                }
+            }
+            let mut ids = vec![];
+            vars(&header.items, &mut ids, names);
+            let mut time = 0;
+            let mut out = vec![];
+            for command in parser.map(Result::unwrap) {
+                let pair = match command {
+                    vcd::Command::Timestamp(t) => {
+                        time = t;
+                        None
+                    }
+                    vcd::Command::ChangeScalar(id, value) => Some((id, value.to_string())),
+                    vcd::Command::ChangeVector(id, value) => Some((id, value.to_string())),
+                    _ => None,
+                };
+                if let Some((id, value)) = pair {
+                    for (_, name) in ids.iter().filter(|(code, _)| *code == id) {
+                        out.push((time, name.clone(), value.clone()));
+                    }
+                }
+            }
+            out.sort();
+            out
+        }
+        assert!(actual.len() > 20 && expected.len() > 20);
+        assert_eq!(
+            values(&bytes, &["clk", "rst", "div", "q"]),
+            values(&reference_bytes, &["clk", "rst", "div", "q"])
+        );
+        assert!(
+            values(&bytes, &["q"])
+                .iter()
+                .any(|(_, _, value)| value != "0")
+        );
     }
 }

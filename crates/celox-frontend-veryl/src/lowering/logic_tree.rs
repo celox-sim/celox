@@ -44,8 +44,8 @@ use veryl_parser::resource_table;
 use veryl_parser::token_range::TokenRange;
 
 pub(crate) use effect::{
-    CombEffectCollector, collect_and_advance_expression, collect_expression_effects,
-    expression_contains_runtime_effect, subtract_written_sensitivity,
+    CombEffectCollector, collect_and_advance_expression, expression_contains_runtime_effect,
+    subtract_written_sensitivity,
 };
 use effect::{collect_comb_effects_statements, statements_contain_runtime_effect};
 pub use expr::coerce_node_width;
@@ -2557,6 +2557,7 @@ fn assign_node_to_dsts(
     rhs_expr: NodeId,
     rhs_sources: HashSet<VarAtomBase<VarId>>,
     source_is_2state: bool,
+    source_signed: bool,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let destination_width = checked_destination_width(
@@ -2573,8 +2574,7 @@ fn assign_node_to_dsts(
             dsts.first().map(|destination| &destination.token),
         ));
     }
-    let rhs_signed = expr::is_signed(module, rhs_expr, arena);
-    let rhs_expr = coerce_node_width(arena, rhs_expr, Some(destination_width), rhs_signed)?;
+    let rhs_expr = coerce_node_width(arena, rhs_expr, Some(destination_width), source_signed)?;
 
     if dsts.len() == 1 {
         let dst = &dsts[0];
@@ -2704,8 +2704,14 @@ fn eval_statement_form_function_call(
             )
         })?;
         let arg_width = resolve_total_width(module, formal)?;
-        let ((arg_node, arg_sources), arg_bounds) =
-            eval_assignment_expression_effectful(module, &mut store, arg_expr, arena, arg_width)?;
+        let ((arg_node, arg_sources), arg_bounds) = expr::eval_function_input_assignment_effectful(
+            module,
+            &mut store,
+            arg_expr,
+            &formal.r#type,
+            arg_width,
+            arena,
+        )?;
         let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
         } else {
@@ -2800,6 +2806,9 @@ pub(super) fn apply_function_output(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let (output_expr, output_sources, output_is_2state) =
         function_output_value(module, arg_id, call, final_local_store, arena)?;
+    // Copy-out reads the formal variable. Its declared signedness can differ
+    // from the expression stored by the last assignment in the callee.
+    let output_signed = module.variables[&arg_id].r#type.signed;
     assign_node_to_dsts(
         module,
         store,
@@ -2808,6 +2817,7 @@ pub(super) fn apply_function_output(
         output_expr,
         output_sources,
         output_is_2state,
+        output_signed,
         arena,
     )
 }
@@ -4089,8 +4099,9 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_written_accesses_preserves_indeterminate_expression_branches() {
+    fn test_collect_written_accesses_reflects_constant_indeterminate_ternary_folding() {
         let code = r#"
+            #[allow(unassign_variable)]
             module Top (
                 d: input logic,
                 q: output logic,
@@ -4132,11 +4143,13 @@ mod tests {
         let mut written = HashMap::default();
         collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
 
+        for name in ["ternary_then", "z_ternary_then"] {
+            let id = var_id_of(&module, &[name]);
+            assert!(!written.contains_key(&id), "{name}");
+        }
         for name in [
-            "ternary_then",
             "ternary_else",
             "short_circuit_rhs",
-            "z_ternary_then",
             "z_ternary_else",
             "z_short_circuit_rhs",
         ] {

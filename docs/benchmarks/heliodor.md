@@ -1,23 +1,39 @@
 # Heliodor Linux Benchmark
 
 Heliodor is Celox's large external Veryl workload. It boots a pinned Linux image
-and compares Celox's native and tiered JIT backends with synchronous `veryl-cc`
-execution using the same design revision and input workload. The tiered runner
-starts on the interpreter while native code is generated in the background, then
-promotes the live simulation at a scheduler safe point. Cranelift Linux boot
-measurements are not collected or published because their runtime is outside the
-useful scale of this comparison.
+and compares Celox's native and tiered JIT backends with synchronous and tiered
+Veryl-CC using the same design revision and input workload on each architecture.
+Celox tiered starts on the interpreter while native code is generated in the
+background. On x86-64 it first adopts a baseline native image, then replaces it
+with the optimizing image at a safe point, preserving live state and event buffers.
+Code-generation tracing uses the optimizing pipeline directly.
+Veryl-CC tiered starts on Cranelift and switches to C code as its
+background compilation completes, matching `veryl test --backend cc`'s default
+`aot_c_async=true` setting. The synchronous Veryl-CC runner explicitly sets
+`aot_c_async=false` and waits for C compilation before simulation. Standalone
+Cranelift Linux boot measurements are not collected or published because their
+runtime is outside the useful scale of this comparison.
 
 ## What the benchmark answers
 
-The benchmark separates two questions:
+The benchmark separates three questions:
 
-1. How long does Celox take to compile the design?
-2. How quickly does the generated simulator execute the complete workload?
+1. How long do the synchronous backends take to compile the design?
+2. How long does the complete workload take to execute, including the testbench?
 3. How long does tiered execution take from startup through Linux completion
    while compilation overlaps simulation?
 
-Only the second measurement is used for generated-code throughput comparisons.
+Execution time includes the testbench for both simulators.
+Tiered results have separate charts for startup until simulation begins, execution
+with background compilation, and total time through Linux completion. The tiered
+execution interval includes time on the initial backend and must not be read as
+compiled-code throughput. Veryl-CC may finish on Cranelift before C compilation
+completes; these runs remain valid tiered measurements. Startup and total time
+begin before design analysis; source-file loading and building the benchmark
+executables with Cargo are excluded.
+The TSV retains `compile_elapsed_ns` for tiered startup, not the total background
+compiler time. Each synchronous and tiered Veryl-CC run uses its own empty AOT-C
+cache. Historical synchronous Veryl-CC measurements keep their original series.
 A partial boot, projected completion time, or compile-only result is not a
 successful execution result.
 
@@ -29,9 +45,11 @@ A run is accepted only when it:
 - reaches the configured Linux completion marker;
 - records compilation and execution separately;
 - compares runners built from the intended Celox and Veryl revisions;
-- preserves the logs needed to diagnose a timeout or semantic mismatch.
-- proves that the tiered run promoted and executed at least one generated-code
-  evaluation before Linux completed.
+- preserves the logs needed to diagnose a timeout or semantic mismatch;
+- proves that Celox tiered promoted and executed at least one generated-code
+  evaluation before Linux completed;
+- confirms that Veryl-CC tiered enabled asynchronous C compilation and executed
+  at least one compiled or fallback dispatch.
 
 This fixed completion marker prevents faster failures or incomplete boots from
 being reported as performance improvements.
@@ -42,11 +60,15 @@ being reported as performance improvements.
 bash scripts/run-heliodor-bench.sh run
 ```
 
-To run only the tiered JIT benchmark:
+To compare both tiered backends:
 
 ```bash
-HELIODOR_RUNNERS=celox-tiered bash scripts/run-heliodor-bench.sh run
+HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.sh run
 ```
+
+The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
+`veryl-cc-tiered` on x86-64. The nightly AArch64 job measures the same four
+backends. Publishing requires both tiered results for each architecture.
 
 The first run needs network access to obtain the pinned Heliodor checkout. The
 script prints the selected revisions, build configuration, completion status,
@@ -54,3 +76,98 @@ and timings. Use the same machine and configuration for before/after comparisons
 
 Published results appear in the **Heliodor Linux** section of the
 [benchmark dashboard](./index.md).
+
+## Expanded Linux suite
+
+Nightly and non-profiling manual runs also measure the following workloads on
+x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`), using all four backends:
+
+| Guest Linux kernel | Hart counts |
+| --- | --- |
+| 5.15 | 1, 2, 4, 8 |
+| 6.6 | 1, 2, 4 |
+| 7.1 | 1 |
+| 7.1 with vector enabled | 1 |
+
+These 9 workloads use Heliodor revision
+`6285682fa0a514077da9d17fee385c7841160025`. Kernel versions refer to the
+simulated guest, not the benchmark host OS. Backends execute sequentially on the
+same VM within each group below (26 jobs for the complete suite):
+
+| Workload | Comparison groups per architecture |
+| --- | --- |
+| 1/2 harts, or x86-64 4 harts | All four backends in one job |
+| AArch64 4 harts | Two jobs: Celox native + Veryl-CC sync; Celox tiered + Veryl-CC tiered |
+| 8 harts, either architecture | Four jobs, one per backend |
+
+Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
+AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
+execution modes preserves useful same-CPU comparisons with time for builds.
+Different groups may use different CPUs. CPU and host identity are retained in
+each artifact, and publication requires every group's complete successful results.
+Each runner has a one-hour timeout for 1/2 harts,
+three hours for 4 harts, and five and a half hours for 8 harts;
+timeouts and incomplete runs fail the job and are not published as timings.
+The nightly publisher requires the complete suite on both architectures.
+The suite applies testbench adjustment `8hart-100m-v1`: the 8-hart Veryl test
+gets the same 100-million-cycle budget as its upstream Verilator wrapper,
+replacing the stale 30-million-cycle limit. The shutdown assertion is unchanged.
+`HELIODOR_SUITE=1` applies this adjustment only to the pinned suite revision;
+the selected adjustment is recorded in the job log. Switching the same checkout
+back to `HELIODOR_SUITE=0` restores the stock testbench. Additional local edits
+to a patched wrapper are preserved and reported as an error.
+
+Linux 7.1 SMP (2/4 harts) is excluded pending an upstream RTL fix. Both
+configurations stop retiring instructions on one hart; the two-hart case also
+reproduces on Verilator, with a stalled data-cache read and another hart waiting
+for a lock. These failures are not counted as successful benchmark results.
+
+The separate HEAD compatibility job skips only upstream revision
+`94e9c5821c24a8941c3ddc3b76daddc7124a855a`: its testbench lacks the
+`initial_assign` annotations for ROM/DRAM preloads added by `6285682`.
+CI records this as a known-source exclusion, not a successful simulation.
+Every other upstream HEAD remains eligible for the compatibility test.
+
+The dashboard labels each kernel and hart count separately. Expanded results
+use separate history from the older fixed gate because the design revision is
+different. Each chart retains the same compilation, execution, and tiered timing
+definitions described above. These large jobs do not run on pull requests.
+
+For example, to run the Linux 6.6 four-hart workload locally:
+
+```bash
+HELIODOR_REF=6285682fa0a514077da9d17fee385c7841160025 \
+HELIODOR_TESTS=test_soc_66_smp_linux_boot_4hart \
+HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered" \
+HELIODOR_CELOX_CARGO_PROFILE=release HELIODOR_TIMEOUT_SEC=10800 \
+bash scripts/run-heliodor-bench.sh run
+```
+
+For a focused manual rerun, set `suite_test`, `suite_runner`, and/or `suite_arch`
+in the workflow dispatch inputs. Empty inputs select the complete suite. Filtered
+runs skip the historical gate and never publish dashboard history. For example:
+
+```bash
+gh workflow run heliodor-bench.yml --ref <branch> \
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner=celox -f suite_arch=aarch64
+```
+
+Nightly and manual runs use the same grouping above. To compare a subset, give
+`suite_runner` a space-separated list; this narrows the groups without combining
+them. Backends execute in the supplied order within each group. CPU, runner,
+group, run/attempt, and boot identifiers are saved with the
+results. Every Veryl-CC run still gets a fresh AOT-C cache.
+
+```bash
+gh workflow run heliodor-bench.yml --ref <branch> \
+  -f suite_test=test_soc_66_smp_linux_boot_4hart \
+  -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=aarch64
+```
+
+Each group has a shared 5.5-hour budget, including building the runners,
+to preserve logs before the [hosted job's six-hour limit](https://docs.github.com/en/actions/reference/limits).
+A timeout or missing backend fails the comparison, and partial results are never
+published as completed boots. The per-backend limits above also apply within
+this shared budget. Separate workflow runs, including different commits, can use different
+CPUs; their history is not a same-host comparison.

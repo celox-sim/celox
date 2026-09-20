@@ -20,12 +20,13 @@ pub(super) struct Allocation {
 pub(super) fn allocate(
     func: &mut MFunction,
     cfg: &NormalizedCfg,
-    next_use: &NextUseAnalysis,
-    planning_recipes: &PlanningRecipes,
+    next_use: NextUseAnalysis,
+    planning_recipes: PlanningRecipes,
     constraints: &super::constraints::ConstraintModel,
     trace: Option<&mut super::RegallocTrace>,
     timing: bool,
     verify: bool,
+    baseline_spill_budget: Option<usize>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<Allocation, super::RegallocError> {
     // Observed between allocation stages so a cancelled compile unwinds at
@@ -42,8 +43,8 @@ pub(super) fn allocate(
     let mut plan = super::spill_plan::plan_with_integrated_schedule(
         func,
         cfg,
-        next_use,
-        planning_recipes,
+        &next_use,
+        &planning_recipes,
         register_count,
         constraints,
     )
@@ -57,6 +58,9 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
+    // Scheduling has consumed these analyses. Do not retain their potentially
+    // huge CFG/value tables while constructing stack-home liveness and unions.
+    drop((next_use, planning_recipes));
     if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }
@@ -71,6 +75,19 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
+    }
+    if !verify {
+        plan.retain_reconstruction_states(func, cfg)
+            .map_err(|error| {
+                super::RegallocError::new(
+                    "spill-plan state release",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            })?;
     }
     if let Some(start) = phase {
         tracing::debug!(
@@ -220,14 +237,14 @@ pub(super) fn allocate(
     checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
-    let reconstruction = super::reconstruct::reconstruct(
+    let reconstruction = super::reconstruct::reconstruct_with_spill_budget(
         func,
         cfg,
         &plan,
-        next_use,
         &reload_recipes,
         timing,
         verify,
+        baseline_spill_budget,
     )
     .map_err(|error| {
         super::RegallocError::new(

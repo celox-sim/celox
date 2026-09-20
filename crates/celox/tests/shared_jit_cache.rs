@@ -307,6 +307,7 @@ fn precompiled_runtime_restores_initial_state_and_settles_outputs() {
     let source = format!(
         r#"
             module Top (out: output logic<8>) {{
+                #[allow(initial_assign)]
                 var mem: logic<8>[2];
                 initial {{
                     $readmemh("{}", mem);

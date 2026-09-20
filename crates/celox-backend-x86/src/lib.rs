@@ -46,6 +46,8 @@ pub struct NativeDiagnostics {
 
 #[derive(Debug, Clone)]
 pub struct X86BackendOptions {
+    /// Prefer low compilation latency for the first native execution tier.
+    pub baseline: bool,
     pub slp: bool,
     pub native_tick_loop: bool,
     pub diagnostics: NativeDiagnostics,
@@ -56,6 +58,7 @@ impl Default for X86BackendOptions {
         Self {
             slp: true,
             native_tick_loop: true,
+            baseline: false,
             diagnostics: NativeDiagnostics::default(),
         }
     }

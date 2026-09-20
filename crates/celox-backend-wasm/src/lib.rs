@@ -437,6 +437,26 @@ fn compile_instruction(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    let target = match inst {
+        SIRInstruction::Store(addr, _, width, _, _, _)
+        | SIRInstruction::Commit(_, addr, _, width, _)
+            if *width != 0 =>
+        {
+            Some(addr)
+        }
+        _ => None,
+    };
+    if let Some(offsets) = target.and_then(|addr| layout.trace_notification_offsets(addr)) {
+        for offset in offsets {
+            instrs.push(Instruction::I32Const(offset as i32));
+            instrs.push(Instruction::I32Const(1));
+            instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
+    }
     match inst {
         SIRInstruction::Imm(dst, val) => {
             compile_imm(dst, val, unit, four_state, &*locals, instrs);
@@ -1723,7 +1743,17 @@ fn compile_binary_wide(
             instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
         }
 
-        compile_binary_mask_wide(&d, &l, op, &r, d_width, operand_width, locals, instrs);
+        compile_binary_mask_wide(
+            &d,
+            &l,
+            op,
+            &r,
+            d_width,
+            operand_width,
+            l_width,
+            locals,
+            instrs,
+        );
         normalize_reg_with_mask(&d, d_width, instrs);
         return;
     }
@@ -1817,7 +1847,7 @@ fn compile_binary_wide(
             emit_wide_shift(op, &l, &r, &d, d_chunks, locals, instrs);
         }
         BinaryOp::Sar => {
-            emit_wide_sar(&l, &r, &d, d_chunks, d_width, locals, instrs);
+            emit_wide_sar(&l, &r, &d, d_chunks, l_width, locals, instrs);
         }
         // 5. Eq/Ne
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
@@ -2280,6 +2310,7 @@ fn compile_binary_wide(
             &r,
             d_width,
             l_width.max(r_width),
+            l_width,
             locals,
             instrs,
         );
@@ -2537,6 +2568,7 @@ fn compile_binary_mask_wide(
     rhs: &RegLocal,
     d_width: usize,
     operand_width: usize,
+    lhs_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -2776,7 +2808,7 @@ fn compile_binary_mask_wide(
                         rhs,
                         &shifted_mask,
                         dst.num_chunks,
-                        d_width,
+                        lhs_width,
                         locals,
                         instrs,
                     );
@@ -3103,7 +3135,7 @@ fn emit_wide_sar(
     r: &RegLocal,
     d: &RegLocal,
     d_chunks: usize,
-    d_width: usize,
+    l_width: usize,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -3130,8 +3162,8 @@ fn emit_wide_sar(
     instrs.push(Instruction::I64Sub);
     instrs.push(Instruction::LocalSet(inv_bit));
 
-    let msb_chunk = ((d_width - 1) / 64) as u32;
-    let msb_bit = ((d_width - 1) % 64) as i64;
+    let msb_chunk = ((l_width - 1) / 64) as u32;
+    let msb_bit = ((l_width - 1) % 64) as i64;
     instrs.push(Instruction::I64Const(0));
     instrs.push(Instruction::LocalSet(sign_fill));
     instrs.push(Instruction::LocalGet(l.value_idx + msb_chunk));
@@ -4569,7 +4601,10 @@ fn compile_store_at_offset(
     let store_bytes = get_byte_size(op_width);
     let num_chunks = num_i64_chunks(op_width);
 
-    if num_chunks == 1 && op_width <= 64 && (bit_shift != 0 || !op_width.is_multiple_of(8)) {
+    if num_chunks == 1
+        && bit_shift + op_width <= 64
+        && (bit_shift != 0 || !op_width.is_multiple_of(8))
+    {
         emit_partial_store_small(src, byte_offset, bit_shift, op_width, locals, instrs);
     } else if bit_shift == 0 {
         // Byte-aligned store. Break remaining bytes into power-of-2
@@ -5903,6 +5938,7 @@ mod bit_count_tests {
         let working_base_offset = (total_size + 7) & !7;
 
         MemoryLayout {
+            trace: None,
             four_state,
             mode: MemoryLayoutMode::Packed,
             unpacked_arrays: HashMap::default(),
@@ -6043,6 +6079,90 @@ mod bit_count_tests {
 
     fn read_bits(memory: &[u8], bit_offset: usize, width: usize) -> BigUint {
         read_bits_at(memory, OUTPUT_OFFSET, bit_offset, width)
+    }
+
+    #[test]
+    fn shifted_scalar_stores_preserve_spill_bits_and_neighbors() {
+        // A single source chunk can cover nine destination bytes. In particular,
+        // OptimizeBlocks coalesces four 15-bit array elements into a 60-bit store
+        // at bit 15; a u64 read-modify-write loses its final three bits.
+        for four_state in [false, true] {
+            for (offset, width) in [(0, 64), (1, 63), (1, 64), (7, 58), (7, 64), (15, 60)] {
+                for packed_elements in [false, true] {
+                    let initial = 0xa55a_3cc3_f00f_6996_9669_0ff0_c33c_5aa5u128;
+                    let initial_mask = 0x0ff0_9669_5aa5_c33c_3cc3_a55a_6996_f00fu128;
+                    let field_mask = (1u128 << width) - 1;
+                    let value = 0xd9e7_b3f5_a6c8_912fu128 & field_mask;
+                    let mask = 0xa55a_9669_3cc3_f00fu128 & field_mask;
+                    let destination =
+                        RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address());
+                    let store_offset = if packed_elements {
+                        SIROffset::PackedElements {
+                            bit_offset: offset,
+                            element_width: 15,
+                        }
+                    } else {
+                        SIROffset::Static(offset)
+                    };
+                    let block = BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                RegisterId(0),
+                                SIRValue::new_four_state(initial, initial_mask),
+                            ),
+                            SIRInstruction::Store(
+                                destination,
+                                SIROffset::Static(0),
+                                128,
+                                RegisterId(0),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                            SIRInstruction::Imm(
+                                RegisterId(1),
+                                SIRValue::new_four_state(value, mask),
+                            ),
+                            SIRInstruction::Store(
+                                destination,
+                                store_offset,
+                                width,
+                                RegisterId(1),
+                                Vec::new(),
+                                Vec::new(),
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    };
+                    let unit = ExecutionUnit {
+                        entry_block_id: BlockId(0),
+                        blocks: [(BlockId(0), block)].into_iter().collect(),
+                        register_map: [
+                            (RegisterId(0), RegisterType::Logic { width: 128 }),
+                            (RegisterId(1), RegisterType::Logic { width }),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    };
+                    let memory = run_wasm(&unit, &layout(128, four_state), four_state);
+                    let replace =
+                        |old: u128, new: u128| (old & !(field_mask << offset)) | (new << offset);
+                    assert_eq!(
+                        read_bits(&memory, 0, 128),
+                        BigUint::from(replace(initial, value)),
+                        "offset={offset}, width={width}, four_state={four_state}, packed_elements={packed_elements}"
+                    );
+                    if four_state {
+                        assert_eq!(
+                            read_bits_at(&memory, OUTPUT_OFFSET + 16, 0, 128),
+                            BigUint::from(replace(initial_mask, mask)),
+                            "mask at offset={offset}, width={width}, packed_elements={packed_elements}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn assert_results(cases: &[CountCase], memory: &[u8]) {
@@ -6186,6 +6306,83 @@ mod bit_count_tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn wide_sar_uses_the_lhs_width_for_sign_fill() {
+        let lhs = RegisterId(0);
+        let rhs = RegisterId(1);
+        let dst = RegisterId(2);
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            lhs,
+            RegisterType::Bit {
+                width: 65,
+                signed: true,
+            },
+        );
+        register_map.insert(
+            rhs,
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            dst,
+            RegisterType::Bit {
+                width: 128,
+                signed: true,
+            },
+        );
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(
+                    lhs,
+                    SIRValue::new_four_state(
+                        BigUint::from(1u8) << 64usize,
+                        BigUint::from(1u8) << 64usize,
+                    ),
+                ),
+                SIRInstruction::Imm(rhs, SIRValue::new(1u8)),
+                SIRInstruction::Binary(dst, lhs, BinaryOp::Sar, rhs),
+                SIRInstruction::Store(
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address()),
+                    SIROffset::Static(0),
+                    128,
+                    dst,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: std::iter::once((BlockId(0), block)).collect(),
+            register_map,
+        };
+        let two_state_layout = layout(128, false);
+        let expected = (BigUint::from(1u8) << 127usize) | (BigUint::from(1u8) << 63usize);
+
+        let cranelift = read_bits(&run_cranelift(&unit, &two_state_layout, false), 0, 128);
+        let wasm = read_bits(&run_wasm(&unit, &two_state_layout, false), 0, 128);
+        assert_eq!(cranelift, expected);
+        assert_eq!(wasm, expected);
+
+        let four_state_layout = layout(128, true);
+        for memory in [
+            run_cranelift(&unit, &four_state_layout, true),
+            run_wasm(&unit, &four_state_layout, true),
+        ] {
+            assert_eq!(read_bits(&memory, 0, 128), expected);
+            assert_eq!(
+                read_bits_at(&memory, OUTPUT_OFFSET + get_byte_size(128), 0, 128),
+                expected,
+            );
         }
     }
 }

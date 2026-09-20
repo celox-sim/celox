@@ -661,7 +661,9 @@ mod host {
         ) {
             let value_byte_size = signal.width.div_ceil(8);
             let write_mask = self.backend.layout().four_state && signal.is_4state;
-            let (ptr, mem_len) = self.backend.memory_as_mut_ptr();
+            // Initial writes precede the first full dump; no mutable view escapes.
+            let (ptr, mem_len) = self.backend.memory_as_ptr();
+            let ptr = ptr.cast_mut();
             let mem = unsafe { std::slice::from_raw_parts_mut(ptr, mem_len) };
 
             for run in runs {
@@ -869,12 +871,22 @@ mod host {
             }
             let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
-                let (ptr, size) = self.backend.memory_as_ptr();
-                let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
                 writer
-                    .dump_with_external(timestamp, memory, &component_traces)
+                    .dump_backend(timestamp, &mut self.backend, &component_traces)
                     .unwrap();
             }
+        }
+
+        /// Make buffered waveform output visible and report write errors.
+        pub fn flush_vcd(&mut self) -> std::io::Result<()> {
+            if let Some(writer) = self.vcd_writer.as_mut() {
+                writer.flush()?;
+            }
+            Ok(())
+        }
+
+        pub fn vcd_statistics(&self) -> Option<celox_runtime::VcdStatistics> {
+            self.vcd_writer.as_ref().map(crate::VcdWriter::statistics)
         }
 
         /// Sets a signal value and marks combinational logic as dirty.
@@ -1228,6 +1240,11 @@ mod host {
             self.backend.memory_as_mut_ptr()
         }
 
+        /// Returns an opaque owner that keeps the backend memory allocation alive.
+        pub fn memory_owner(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+            self.backend.memory_owner()
+        }
+
         /// Returns the stable region size in bytes.
         pub fn stable_region_size(&self) -> usize {
             self.backend.stable_region_size()
@@ -1366,19 +1383,40 @@ mod host {
         }
 
         /// Triggers a clock/event by its numeric ID.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is not a
+        /// known event ID, or a runtime error if evaluating the event fails.
         pub fn tick_by_id(&mut self, event_id: usize) -> Result<(), RuntimeErrorCode> {
-            let event = self.backend.id_to_event_slice()[event_id];
+            let event = self
+                .backend
+                .id_to_event_slice()
+                .get(event_id)
+                .copied()
+                .ok_or_else(|| RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))?;
             self.tick(event)
         }
 
         /// Triggers a clock/event N times by its numeric ID.
         /// Avoids repeated cross-boundary calls when used from FFI.
+        /// The event ID is validated even when `count` is zero.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is not a
+        /// known event ID, or a runtime error if evaluating an event fails.
         pub fn tick_by_id_n(
             &mut self,
             event_id: usize,
             count: u32,
         ) -> Result<(), RuntimeErrorCode> {
-            let event = self.backend.id_to_event_slice()[event_id];
+            let event = self
+                .backend
+                .id_to_event_slice()
+                .get(event_id)
+                .copied()
+                .ok_or_else(|| RuntimeErrorCode::NotAnEvent(format!("event_id={event_id}")))?;
             for _ in 0..count {
                 self.tick(event)?;
             }

@@ -211,6 +211,7 @@ fn compile_resolves_standalone_readmem_relative_to_the_source() {
 module Top (
     y: output logic<8>,
 ) {
+    #[allow(initial_assign)]
     var mem: logic<8> [2];
     initial {
         $readmemh("mem.hex", mem);

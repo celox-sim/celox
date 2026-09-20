@@ -1,11 +1,11 @@
 import { type Dirent, readdirSync, statSync } from "node:fs";
-import { extname, join } from "node:path";
+import { extname, join, relative } from "node:path";
 import { runGenTs } from "./generator.js";
 import type { GenTsJsonOutput, TestbenchComponentManifests } from "./types.js";
 
 export class GenTsCache {
 	private _data: GenTsJsonOutput | undefined;
-	private _mtimeKey = "";
+	private _sourceKey = "";
 
 	constructor(
 		private readonly _projectRoot: string,
@@ -19,36 +19,39 @@ export class GenTsCache {
 
 	/** Get cached data, refreshing if any .veryl file has changed. */
 	get(): GenTsJsonOutput {
-		const key = this.computeMtimeKey();
-		if (this._data && this._mtimeKey === key) {
+		const key = this.computeSourceKey();
+		if (this._data && this._sourceKey === key) {
 			return this._data;
 		}
 		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
-		this._mtimeKey = key;
+		this._sourceKey = key;
 		return this._data;
 	}
 
 	/** Force invalidation — next `get()` will re-run the generator. */
 	invalidate(): void {
-		this._mtimeKey = "";
+		this._sourceKey = "";
 		this._data = undefined;
 	}
 
 	/**
-	 * Build a key from the max mtime of all .veryl files in the project.
-	 * This is intentionally cheap — only stats, no file reads.
+	 * Build a key from every .veryl file's path, mtime, and size.
+	 * This stays cheap — only stats, no file reads — while detecting changes to
+	 * older files whose mtime does not exceed the newest file in the project.
 	 */
-	private computeMtimeKey(): string {
-		let maxMtime = 0;
-		let count = 0;
-		this.walkVerylFiles(this._projectRoot, (mtimeMs) => {
-			if (mtimeMs > maxMtime) maxMtime = mtimeMs;
-			count++;
+	private computeSourceKey(): string {
+		const files: Array<[path: string, mtimeMs: number, size: number]> = [];
+		this.walkVerylFiles(this._projectRoot, (path, mtimeMs, size) => {
+			files.push([relative(this._projectRoot, path), mtimeMs, size]);
 		});
-		return `${count}:${maxMtime}`;
+		files.sort(([a], [b]) => a.localeCompare(b));
+		return JSON.stringify(files);
 	}
 
-	private walkVerylFiles(dir: string, cb: (mtimeMs: number) => void): void {
+	private walkVerylFiles(
+		dir: string,
+		cb: (path: string, mtimeMs: number, size: number) => void,
+	): void {
 		let entries: Dirent<string>[] | undefined;
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -70,7 +73,8 @@ export class GenTsCache {
 				this.walkVerylFiles(full, cb);
 			} else if (extname(entry.name) === ".veryl") {
 				try {
-					cb(statSync(full).mtimeMs);
+					const stat = statSync(full);
+					cb(full, stat.mtimeMs, stat.size);
 				} catch {
 					// file may have been deleted
 				}

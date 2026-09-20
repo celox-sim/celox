@@ -71,7 +71,9 @@ fn declared_strided_array_layouts(
         }
         let element_width = metadata.width / element_count;
         let element_bytes = get_byte_size(element_width);
-        let element_stride = element_bytes;
+        // Native scalar accesses and x86 scaled addressing use power-of-two
+        // widths. Padding also keeps a partial last byte inside its element.
+        let element_stride = element_bytes.next_power_of_two();
         layouts.insert(
             address,
             UnpackedArrayLayout {
@@ -93,7 +95,7 @@ fn supports_strided_access(
     layout: UnpackedArrayLayout,
     offset: &SIROffset,
     width: usize,
-    whole_object_transfer: bool,
+    bulk_transfer: bool,
 ) -> bool {
     match offset {
         SIROffset::Element {
@@ -108,23 +110,27 @@ fn supports_strided_access(
         }
         SIROffset::Static(start) => {
             let physically_contiguous = layout.element_stride * 8 == layout.element_width;
-            let whole = *start == 0 && width == layout.element_width * layout.element_count;
+            let bounded_transfer = start
+                .checked_add(width)
+                .is_some_and(|end| end <= layout.element_width * layout.element_count);
             let single_element = start
                 .checked_add(width.saturating_sub(1))
                 .is_some_and(|end| *start / layout.element_width == end / layout.element_width);
-            physically_contiguous || single_element || (whole_object_transfer && whole)
+            physically_contiguous || single_element || (bulk_transfer && bounded_transfer)
         }
         SIROffset::PackedElements {
             bit_offset,
             element_width,
         } => {
-            let whole = *bit_offset == 0 && width == layout.element_width * layout.element_count;
+            let bounded_transfer = bit_offset
+                .checked_add(width)
+                .is_some_and(|end| end <= layout.element_width * layout.element_count);
             *element_width == layout.element_width
                 && ((layout.element_stride * 8 == layout.element_width
                     && bit_offset
                         .checked_add(width)
                         .is_some_and(|end| end <= layout.element_width * layout.element_count))
-                    || (whole_object_transfer && whole))
+                    || (bulk_transfer && bounded_transfer))
         }
         SIROffset::Dynamic(_) => false,
     }
@@ -150,12 +156,12 @@ pub(crate) fn collect_strided_array_layouts(
         let mut check = |addr: &crate::ir::RegionedAbsoluteAddr,
                          offset: &SIROffset,
                          width: usize,
-                         whole_object_transfer: bool| {
+                         bulk_transfer: bool| {
             let abs = addr.absolute_addr();
             let Some(layout) = candidates.get(&abs).copied() else {
                 return;
             };
-            if !supports_strided_access(layout, offset, width, whole_object_transfer) {
+            if !supports_strided_access(layout, offset, width, bulk_transfer) {
                 candidates.remove(&abs);
             }
         };
@@ -188,6 +194,9 @@ pub(crate) fn collect_strided_array_layouts(
         .chain(program.sir.eval_only_ffs.values().flatten())
         .chain(program.sir.apply_ffs.values().flatten())
     {
+        // Zero resets may be coalesced or split at native word boundaries.
+        // Strided access expansion handles each logical range, and the native
+        // zero-fill planner can combine a complete reset into a physical fill.
         let mut zero_roots = eu
             .blocks
             .values()
@@ -197,8 +206,8 @@ pub(crate) fn collect_strided_array_layouts(
                     if matches!(
                         address.region,
                         STABLE_REGION | crate::ir::SPARSE_WORKING_REGION
-                    ) && offset.constant_bit_offset() == Some(0)
-                        && *width > 64 =>
+                    ) && offset.constant_bit_offset().is_some()
+                        && *width != 0 =>
                 {
                     Some(*source)
                 }
@@ -259,7 +268,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn padded_array_accepts_only_semantic_whole_object_transfers() {
+    fn padded_array_accepts_only_semantic_bulk_transfers() {
         let layout = UnpackedArrayLayout {
             element_width: 51,
             element_count: 4096,
@@ -280,10 +289,22 @@ mod tests {
             whole_width,
             true,
         ));
-        assert!(!supports_strided_access(
+        assert!(supports_strided_access(
             layout,
             &SIROffset::Static(51),
             whole_width - 51,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            layout,
+            &SIROffset::Static(51),
+            whole_width,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            layout,
+            &SIROffset::Static(usize::MAX),
+            whole_width,
             true,
         ));
     }
@@ -330,13 +351,22 @@ mod tests {
             32,
             true,
         ));
-        assert!(!supports_strided_access(
+        assert!(supports_strided_access(
             padded,
             &SIROffset::PackedElements {
                 bit_offset: 1,
                 element_width: 1,
             },
             31,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 1,
+                element_width: 1,
+            },
+            32,
             true,
         ));
     }
