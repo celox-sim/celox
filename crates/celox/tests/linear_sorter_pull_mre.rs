@@ -8,46 +8,53 @@ mod test_utils;
 const DEPTH: usize = 100;
 const SOURCE: &str = include_str!("fixtures/linear_sorter_pull_mre.veryl");
 
-fn push_values<B: celox::SimBackend>(sim: &mut celox::Simulator<B>, clk: B::Event, values: &[u16]) {
-    let push = sim.signal("push");
-    let pop = sim.signal("pop");
-    let d_in = sim.signal("d_in");
+// Expand against each backend, including the Veryl reference adapter.
+macro_rules! push_values {
+    ($sim:expr, $clk:expr, $values:expr) => {{
+        let sim = $sim;
+        let clk = $clk;
+        let values = $values;
+        let push = sim.signal("push");
+        let pop = sim.signal("pop");
+        let d_in = sim.signal("d_in");
 
-    sim.modify(|io| {
-        io.set(pop, 0u8);
-        io.set(push, 1u8);
-    })
-    .unwrap();
-    for &value in values {
-        sim.modify(|io| io.set(d_in, value)).unwrap();
+        sim.modify(|io| {
+            io.set(pop, 0u8);
+            io.set(push, 1u8);
+        })
+        .unwrap();
+        for &value in values {
+            sim.modify(|io| io.set(d_in, value)).unwrap();
+            sim.tick(clk).unwrap();
+        }
+        sim.modify(|io| io.set(push, 0u8)).unwrap();
         sim.tick(clk).unwrap();
-    }
-    sim.modify(|io| io.set(push, 0u8)).unwrap();
-    sim.tick(clk).unwrap();
+    }};
 }
 
-fn pull_until_empty<B: celox::SimBackend>(
-    sim: &mut celox::Simulator<B>,
-    clk: B::Event,
-    max_cycles: usize,
-) -> Vec<u16> {
-    let pop = sim.signal("pop");
-    let empty = sim.signal("empty");
-    let d_out = sim.signal("d_out");
-    let mut out = Vec::new();
+macro_rules! pull_until_empty {
+    ($sim:expr, $clk:expr, $max_cycles:expr) => {{
+        let sim = $sim;
+        let clk = $clk;
+        let max_cycles = $max_cycles;
+        let pop = sim.signal("pop");
+        let empty = sim.signal("empty");
+        let d_out = sim.signal("d_out");
+        let mut out = Vec::new();
 
-    for _ in 0..max_cycles {
-        if sim.get_as::<u8>(empty) != 0 {
-            break;
+        for _ in 0..max_cycles {
+            if sim.get_as::<u8>(empty) != 0 {
+                break;
+            }
+            out.push(sim.get_as::<u16>(d_out));
+            sim.modify(|io| io.set(pop, 1u8)).unwrap();
+            sim.tick(clk).unwrap();
+            sim.modify(|io| io.set(pop, 0u8)).unwrap();
+            sim.tick(clk).unwrap();
         }
-        out.push(sim.get_as::<u16>(d_out));
-        sim.modify(|io| io.set(pop, 1u8)).unwrap();
-        sim.tick(clk).unwrap();
-        sim.modify(|io| io.set(pop, 0u8)).unwrap();
-        sim.tick(clk).unwrap();
-    }
 
-    out
+        out
+    }};
 }
 
 all_backends! {
@@ -142,7 +149,6 @@ module WordArrayIndex64 (
 }
 
 fn linear_sorter_pull_late_minima_drain_once_in_sorted_order(sim) {
-    @omit_veryl;
     @ignore_on(wasm, sv);
     @build Simulator::builder(SOURCE, "LinearSorterPullMreU16")
         .param("DEPTH", DEPTH as u64)
@@ -173,8 +179,8 @@ fn linear_sorter_pull_late_minima_drain_once_in_sorted_order(sim) {
     let mut expected = input.clone();
     expected.sort();
 
-    push_values(&mut sim, clk, &input);
-    let got = pull_until_empty(&mut sim, clk, DEPTH + 8);
+    push_values!(&mut sim, clk, &input);
+    let got = pull_until_empty!(&mut sim, clk, DEPTH + 8);
 
     assert_eq!(got, expected);
 }

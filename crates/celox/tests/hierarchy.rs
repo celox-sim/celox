@@ -1013,7 +1013,6 @@ inst u_sub: Sub ( i: 8'h0F, o: o );
     }
 
     fn test_hierarchical_concat_feedback_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
@@ -1052,7 +1051,6 @@ assign out = v[0];
     }
 
     fn test_hierarchical_concat_feedback_runtime_multi_observe(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
@@ -1091,7 +1089,6 @@ assign out1 = v[1];
     }
 
     fn test_hierarchical_concat_feedback_with_constant_middle_bit(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
@@ -1132,7 +1129,6 @@ assign mid = v[1];
     }
 
     fn test_hierarchical_dynamic_index_feedback_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
@@ -1207,7 +1203,6 @@ assign out_dyn = d;
     }
 
     fn test_hierarchical_dual_dynamic_readers_feedback_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (

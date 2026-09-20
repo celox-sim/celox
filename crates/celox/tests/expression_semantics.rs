@@ -138,7 +138,6 @@ module Top (
     }
 
     fn parent_context_and_self_determined_boundaries_match_between_comb_and_ff(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
@@ -182,7 +181,8 @@ module Top (
         for (suffix, expected) in [("div", 124u8), ("sar", 124u8), ("lt", 1u8)] {
             for prefix in ["c", "f"] {
                 let name = format!("{prefix}_{suffix}");
-                assert_eq!(sim.get(sim.signal(&name)), expected.into(), "{name}");
+                let signal = sim.signal(&name);
+                assert_eq!(sim.get(signal), expected.into(), "{name}");
             }
         }
     }
@@ -276,7 +276,6 @@ module Top (
     }
 
     fn wildcard_predicates_remain_one_bit_in_ternaries_and_concats(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -305,12 +304,12 @@ module Top (
         .unwrap();
         sim.tick(clk).unwrap();
         for name in ["c", "f"] {
-            assert_eq!(sim.get(sim.signal(name)), 3u8.into(), "{name}");
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), 3u8.into(), "{name}");
         }
     }
 
     fn function_actuals_are_converted_at_the_formal_boundary(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -333,7 +332,8 @@ module Top (
         sim.modify(|io| io.set(actual, 0xe1u8)).unwrap();
         sim.tick(clk).unwrap();
         for name in ["c", "f"] {
-            assert_eq!(sim.get(sim.signal(name)), 0x21u16.into(), "{name}");
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), 0x21u16.into(), "{name}");
         }
     }
 
@@ -619,7 +619,6 @@ module Top (
     }
 
     fn numeric_cast_preserves_four_state_sign_extension(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
@@ -646,8 +645,9 @@ module Top (
         .unwrap();
         sim.tick(clk).unwrap();
         for name in ["c_num", "f_num"] {
+            let signal = sim.signal(name);
             assert_eq!(
-                sim.get_four_state(sim.signal(name)),
+                sim.get_four_state(signal),
                 (BigUint::from(0xf1u8), BigUint::from(0xf0u8)),
                 "{name} with X sign bit"
             );
@@ -661,8 +661,9 @@ module Top (
         .unwrap();
         sim.tick(clk).unwrap();
         for name in ["c_num", "f_num"] {
+            let signal = sim.signal(name);
             assert_eq!(
-                sim.get_four_state(sim.signal(name)),
+                sim.get_four_state(signal),
                 (BigUint::from(0x01u8), BigUint::from(0xf0u8)),
                 "{name} with Z sign bit"
             );
