@@ -13,7 +13,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, bench, describe } from "vitest";
+import { afterAll, type BenchRunOptions, describe, test } from "vitest";
 import {
 	clearJitCache,
 	createSimulatorBridge,
@@ -22,6 +22,13 @@ import {
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
 import type { ModuleDefinition } from "./types.js";
+
+// Keep each measurement in its own test while preserving its sampling options.
+function benchmark(name: string, fn: () => void, options?: BenchRunOptions) {
+	test(name, { timeout: 0 }, async ({ bench }) => {
+		await bench(name, fn).run(options);
+	});
+}
 
 const addon = loadNativeAddon();
 
@@ -83,7 +90,7 @@ interface TopPorts {
 }
 
 describe("simulation", () => {
-	bench(
+	benchmark(
 		"simulation_build_top_n1000",
 		() => {
 			clearJitCache(addon);
@@ -105,11 +112,11 @@ describe("simulation", () => {
 		sim.dispose();
 	});
 
-	bench("simulation_tick_top_n1000_x1", () => {
+	benchmark("simulation_tick_top_n1000_x1", () => {
 		sim.tick();
 	});
 
-	bench(
+	benchmark(
 		"simulation_tick_top_n1000_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -120,14 +127,14 @@ describe("simulation", () => {
 	);
 
 	// Testbench pattern: write input + tick + read back
-	bench("testbench_tick_top_n1000_x1", () => {
+	benchmark("testbench_tick_top_n1000_x1", () => {
 		sim.dut.rst = 1n;
 		sim.tick();
 		//read to measure full testbench cycle
 		sim.dut.rst;
 	});
 
-	bench(
+	benchmark(
 		"testbench_tick_top_n1000_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -164,14 +171,14 @@ describe("simulation", () => {
 		simArr.dispose();
 	});
 
-	bench("testbench_array_tick_top_n1000_x1", () => {
+	benchmark("testbench_array_tick_top_n1000_x1", () => {
 		simArr.dut.rst = 1n;
 		simArr.tick();
 		//read array element to measure .at() overhead
 		simArr.dut.cnt.at(0);
 	});
 
-	bench(
+	benchmark(
 		"testbench_array_tick_top_n1000_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -203,7 +210,7 @@ describe("overhead", () => {
 		simTick.dispose();
 	});
 
-	bench(
+	benchmark(
 		"simulator_tick_x10000",
 		() => {
 			for (let i = 0; i < 10_000; i++) {
@@ -221,7 +228,7 @@ describe("overhead", () => {
 		simStep.dispose();
 	});
 
-	bench(
+	benchmark(
 		"simulation_step_x20000",
 		() => {
 			// 20000 steps = 10000 cycles (rising + falling)
@@ -238,7 +245,7 @@ describe("overhead", () => {
  * above but uses the Simulation API instead of Simulator.
  */
 describe("simulation-time-based", () => {
-	bench(
+	benchmark(
 		"simulation_time_build_top_n1000",
 		() => {
 			clearJitCache(addon);
@@ -255,11 +262,11 @@ describe("simulation-time-based", () => {
 		sim.dispose();
 	});
 
-	bench("simulation_time_step_x1", () => {
+	benchmark("simulation_time_step_x1", () => {
 		sim.step();
 	});
 
-	bench(
+	benchmark(
 		"simulation_time_step_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -269,7 +276,7 @@ describe("simulation-time-based", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"simulation_time_runUntil_1000000",
 		() => {
 			const base = sim.time();
@@ -327,7 +334,7 @@ describe("testbench-helpers", () => {
 		simWait.dispose();
 	});
 
-	bench(
+	benchmark(
 		"waitForCycles_x1000",
 		() => {
 			simWait.waitForCycles("clk", 1000);
@@ -335,7 +342,7 @@ describe("testbench-helpers", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"manual_step_loop_x2000",
 		() => {
 			for (let i = 0; i < 2000; i++) {
@@ -357,7 +364,7 @@ describe("testbench-helpers", () => {
 		simRun.dispose();
 	});
 
-	bench(
+	benchmark(
 		"runUntil_fast_path_100000",
 		() => {
 			const base = simRun.time();
@@ -366,7 +373,7 @@ describe("testbench-helpers", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"runUntil_guarded_100000",
 		() => {
 			const base = simRun.time();
@@ -382,7 +389,7 @@ describe("testbench-helpers", () => {
  * Compares build time and tick performance with and without optimization.
  */
 describe("optimize-flag", () => {
-	bench(
+	benchmark(
 		"build_without_optimize",
 		() => {
 			clearJitCache(addon);
@@ -392,7 +399,7 @@ describe("optimize-flag", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"build_with_optimize",
 		() => {
 			clearJitCache(addon);
@@ -423,7 +430,7 @@ describe("optimize-flag", () => {
 		simOpt.dispose();
 	});
 
-	bench(
+	benchmark(
 		"tick_x10000_without_optimize",
 		() => {
 			for (let i = 0; i < 10_000; i++) {
@@ -433,7 +440,7 @@ describe("optimize-flag", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"tick_x10000_with_optimize",
 		() => {
 			for (let i = 0; i < 10_000; i++) {
@@ -481,7 +488,7 @@ interface LinearSecPorts {
 }
 
 describe("stdlib-linear-sec", () => {
-	bench(
+	benchmark(
 		"simulation_build_linear_sec_p6",
 		() => {
 			clearJitCache(addon);
@@ -498,13 +505,13 @@ describe("stdlib-linear-sec", () => {
 	});
 
 	let linearSecInput = 0n;
-	bench("simulation_eval_linear_sec_p6_x1", () => {
+	benchmark("simulation_eval_linear_sec_p6_x1", () => {
 		sim.dut.i_word = linearSecInput++;
 		//read to measure eval
 		sim.dut.o_word;
 	});
 
-	bench(
+	benchmark(
 		"simulation_eval_linear_sec_p6_x1000000",
 		() => {
 			let input = 0n;
@@ -517,7 +524,7 @@ describe("stdlib-linear-sec", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"testbench_eval_linear_sec_p6_x1000000",
 		() => {
 			let input = 0n;
@@ -550,7 +557,7 @@ interface CountonesPorts {
 }
 
 describe("stdlib-countones", () => {
-	bench(
+	benchmark(
 		"simulation_build_countones_w64",
 		() => {
 			clearJitCache(addon);
@@ -567,13 +574,13 @@ describe("stdlib-countones", () => {
 	});
 
 	let countonesInput = 0n;
-	bench("simulation_eval_countones_w64_x1", () => {
+	benchmark("simulation_eval_countones_w64_x1", () => {
 		sim.dut.i_data = countonesInput++;
 		//read to measure eval
 		sim.dut.o_ones;
 	});
 
-	bench(
+	benchmark(
 		"simulation_eval_countones_w64_x1000000",
 		() => {
 			let input = 0n;
@@ -620,7 +627,7 @@ interface StdCounterPorts {
 }
 
 describe("stdlib-counter", () => {
-	bench(
+	benchmark(
 		"simulation_build_std_counter_w32",
 		() => {
 			clearJitCache(addon);
@@ -642,11 +649,11 @@ describe("stdlib-counter", () => {
 		sim.dispose();
 	});
 
-	bench("simulation_tick_std_counter_w32_x1", () => {
+	benchmark("simulation_tick_std_counter_w32_x1", () => {
 		sim.tick();
 	});
 
-	bench(
+	benchmark(
 		"simulation_tick_std_counter_w32_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -656,7 +663,7 @@ describe("stdlib-counter", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"testbench_tick_std_counter_w32_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -704,7 +711,7 @@ interface GrayCounterPorts {
 }
 
 describe("stdlib-gray-counter", () => {
-	bench(
+	benchmark(
 		"simulation_build_gray_counter_w32",
 		() => {
 			clearJitCache(addon);
@@ -729,11 +736,11 @@ describe("stdlib-gray-counter", () => {
 		sim.dispose();
 	});
 
-	bench("simulation_tick_gray_counter_w32_x1", () => {
+	benchmark("simulation_tick_gray_counter_w32_x1", () => {
 		sim.tick();
 	});
 
-	bench(
+	benchmark(
 		"simulation_tick_gray_counter_w32_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
@@ -743,7 +750,7 @@ describe("stdlib-gray-counter", () => {
 		{ iterations: 3, time: 0 },
 	);
 
-	bench(
+	benchmark(
 		"testbench_tick_gray_counter_w32_x1000000",
 		() => {
 			for (let i = 0; i < 1_000_000; i++) {
