@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nix-packages = {
+      url = "github:tignear/nix-packages";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -10,7 +14,12 @@
   };
 
   outputs =
-    { nixpkgs, rust-overlay, ... }:
+    {
+      nixpkgs,
+      nix-packages,
+      rust-overlay,
+      ...
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -35,7 +44,7 @@
             );
             targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [ "wasm32-unknown-unknown" ]);
           };
-          mbx = import ./nix/mbx.nix { inherit pkgs; };
+          mbx = nix-packages.packages.${system}.mbx;
           # mbx recognizes a symlink named cargo and preserves Cargo's CLI,
           # including --version. Real Cargo must remain later on PATH.
           cargoShim = pkgs.runCommand "celox-cargo-shim" { } ''
