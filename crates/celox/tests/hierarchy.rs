@@ -276,9 +276,9 @@ assign seen_o = seen;
 
     fn test_instance_input_function_output_preserves_runtime_display(sim) {
         // veryl-simulator does not write the connection's function output
-        // actual back; wasm does not currently expose runtime event draining.
+        // actual back.
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (
 i: input logic,
@@ -371,9 +371,9 @@ assign tmp_o = tmp;
 
     fn test_instance_output_dynamic_index_preserves_runtime_display(sim) {
         // veryl-simulator does not write the dynamic connection index call's
-        // output actual back; wasm does not currently expose runtime events.
+        // output actual back.
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic, o: output logic) {
 assign o = i;
@@ -421,7 +421,7 @@ assign tmp_o = tmp;
 
     fn test_instance_output_index_runtime_effect_tracks_plain_sibling_source(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic, o: output logic) {
 assign o = i;
@@ -533,7 +533,7 @@ assign tmp_o = tmp;
 
     fn test_instance_output_concat_runtime_effect_observes_prior_slice(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic<2>, o: output logic<2>) {
 assign o = i;
@@ -575,7 +575,7 @@ assign tmp_o = tmp;
 
     fn test_instance_output_index_runtime_effect_triggers_on_child_change(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (i: input logic, o: output logic) {
 assign o = i;
@@ -619,7 +619,7 @@ assign mem_o = mem;
 
     fn test_instance_output_index_effect_triggers_when_two_state_parent_is_unchanged(sim) {
         @omit_veryl;
-        @ignore_on(wasm, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (mode: input logic<2>, o: output logic) {
 always_comb {
@@ -909,7 +909,6 @@ assign out = mem;
 
 fn test_dynamic_prefix_colon_output_port_allows_zero_lsb(sim) {
     @omit_veryl;
-    @ignore_on(sv);
         @setup { let code = r#"
 module Child (a: input logic<8>, y: output logic<8>) {
 assign y = a;
@@ -1014,7 +1013,6 @@ inst u_sub: Sub ( i: 8'h0F, o: o );
     }
 
     fn test_hierarchical_concat_feedback_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
@@ -1053,7 +1051,6 @@ assign out = v[0];
     }
 
     fn test_hierarchical_concat_feedback_runtime_multi_observe(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
@@ -1092,7 +1089,6 @@ assign out1 = v[1];
     }
 
     fn test_hierarchical_concat_feedback_with_constant_middle_bit(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module Child (
@@ -1133,7 +1129,6 @@ assign mid = v[1];
     }
 
     fn test_hierarchical_dynamic_index_feedback_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
@@ -1208,7 +1203,6 @@ assign out_dyn = d;
     }
 
     fn test_hierarchical_dual_dynamic_readers_feedback_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm, interp, sv);
         @setup { let code = r#"
 module ChildFb (
