@@ -83,7 +83,7 @@ module Top (
     }
 
     fn test_direct_comb_size_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>[4],
@@ -162,7 +162,7 @@ module Top (
     }
 
     fn test_comb_function_body_bits_size_system_functions(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>[4],
@@ -235,7 +235,7 @@ module Top (
     }
 
     fn test_direct_comb_signed_unsigned_system_functions_affect_comparison(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -358,7 +358,7 @@ module Top (
     }
 
     fn test_direct_ff_bits_array_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -379,7 +379,7 @@ module Top (
     }
 
     fn test_direct_ff_size_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -419,8 +419,8 @@ module Top (
         assert_eq!(sim.get_as::<u32>(q), 8);
     }
 
-    #[ignore = "$size on packed multidimensional types is folded to total width by Veryl analyzer before Celox FF lowering"]
     fn test_direct_ff_size_packed_multidimensional_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -440,8 +440,8 @@ module Top (
         assert_eq!(sim.get_as::<u32>(q), 10);
     }
 
-    #[ignore = "$size on packed multidimensional type arguments is folded to total width by Veryl analyzer before Celox FF lowering"]
     fn test_direct_ff_size_packed_multidimensional_type_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
