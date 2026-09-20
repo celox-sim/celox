@@ -143,19 +143,22 @@ importers:
         version: 2.1.12
       typedoc:
         specifier: ^0.28.0
-        version: 0.28.20(typescript@7.0.2)
+        version: 0.28.20(typescript@6.0.3)
       typedoc-plugin-markdown:
         specifier: ^4.4.0
-        version: 4.13.0(typedoc@0.28.20(typescript@7.0.2))
+        version: 4.13.0(typedoc@0.28.20(typescript@6.0.3))
       typedoc-vitepress-theme:
         specifier: ^1.1.0
-        version: 1.1.3(typedoc-plugin-markdown@4.13.0(typedoc@0.28.20(typescript@7.0.2)))
+        version: 1.1.3(typedoc-plugin-markdown@4.13.0(typedoc@0.28.20(typescript@6.0.3)))
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
       vitepress:
         specifier: ^1.6.4
-        version: 1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.5)(lightningcss@1.33.0)(postcss@8.5.26)(search-insights@2.17.3)(typescript@7.0.2)
+        version: 1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.5)(lightningcss@1.33.0)(postcss@8.5.26)(search-insights@2.17.3)(typescript@6.0.3)
       vue-chartjs:
         specifier: ^5.3.0
-        version: 5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@7.0.2))
+        version: 5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3))
 
   crates/celox-napi:
     devDependencies:
@@ -3548,10 +3551,10 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@vitejs/plugin-vue@5.2.4(vite@5.4.21(@types/node@25.9.5)(lightningcss@1.33.0))(vue@3.5.29(typescript@7.0.2))':
+  '@vitejs/plugin-vue@5.2.4(vite@5.4.21(@types/node@25.9.5)(lightningcss@1.33.0))(vue@3.5.29(typescript@6.0.3))':
     dependencies:
       vite: 5.4.21(@types/node@25.9.5)(lightningcss@1.33.0)
-      vue: 3.5.29(typescript@7.0.2)
+      vue: 3.5.29(typescript@6.0.3)
 
   '@vitest/expect@5.0.0':
     dependencies:
@@ -3662,28 +3665,28 @@ snapshots:
       '@vue/shared': 3.5.29
       csstype: 3.2.3
 
-  '@vue/server-renderer@3.5.29(vue@3.5.29(typescript@7.0.2))':
+  '@vue/server-renderer@3.5.29(vue@3.5.29(typescript@6.0.3))':
     dependencies:
       '@vue/compiler-ssr': 3.5.29
       '@vue/shared': 3.5.29
-      vue: 3.5.29(typescript@7.0.2)
+      vue: 3.5.29(typescript@6.0.3)
 
   '@vue/shared@3.5.29': {}
 
-  '@vueuse/core@12.8.2(typescript@7.0.2)':
+  '@vueuse/core@12.8.2(typescript@6.0.3)':
     dependencies:
       '@types/web-bluetooth': 0.0.21
       '@vueuse/metadata': 12.8.2
-      '@vueuse/shared': 12.8.2(typescript@7.0.2)
-      vue: 3.5.29(typescript@7.0.2)
+      '@vueuse/shared': 12.8.2(typescript@6.0.3)
+      vue: 3.5.29(typescript@6.0.3)
     transitivePeerDependencies:
       - typescript
 
-  '@vueuse/integrations@12.8.2(focus-trap@7.8.0)(typescript@7.0.2)':
+  '@vueuse/integrations@12.8.2(focus-trap@7.8.0)(typescript@6.0.3)':
     dependencies:
-      '@vueuse/core': 12.8.2(typescript@7.0.2)
-      '@vueuse/shared': 12.8.2(typescript@7.0.2)
-      vue: 3.5.29(typescript@7.0.2)
+      '@vueuse/core': 12.8.2(typescript@6.0.3)
+      '@vueuse/shared': 12.8.2(typescript@6.0.3)
+      vue: 3.5.29(typescript@6.0.3)
     optionalDependencies:
       focus-trap: 7.8.0
     transitivePeerDependencies:
@@ -3691,9 +3694,9 @@ snapshots:
 
   '@vueuse/metadata@12.8.2': {}
 
-  '@vueuse/shared@12.8.2(typescript@7.0.2)':
+  '@vueuse/shared@12.8.2(typescript@6.0.3)':
     dependencies:
-      vue: 3.5.29(typescript@7.0.2)
+      vue: 3.5.29(typescript@6.0.3)
     transitivePeerDependencies:
       - typescript
 
@@ -4261,21 +4264,21 @@ snapshots:
 
   typanion@3.14.0: {}
 
-  typedoc-plugin-markdown@4.13.0(typedoc@0.28.20(typescript@7.0.2)):
+  typedoc-plugin-markdown@4.13.0(typedoc@0.28.20(typescript@6.0.3)):
     dependencies:
-      typedoc: 0.28.20(typescript@7.0.2)
+      typedoc: 0.28.20(typescript@6.0.3)
 
-  typedoc-vitepress-theme@1.1.3(typedoc-plugin-markdown@4.13.0(typedoc@0.28.20(typescript@7.0.2))):
+  typedoc-vitepress-theme@1.1.3(typedoc-plugin-markdown@4.13.0(typedoc@0.28.20(typescript@6.0.3))):
     dependencies:
-      typedoc-plugin-markdown: 4.13.0(typedoc@0.28.20(typescript@7.0.2))
+      typedoc-plugin-markdown: 4.13.0(typedoc@0.28.20(typescript@6.0.3))
 
-  typedoc@0.28.20(typescript@7.0.2):
+  typedoc@0.28.20(typescript@6.0.3):
     dependencies:
       '@gerrit0/mini-shiki': 3.23.0
       lunr: 2.3.9
       markdown-it: 14.3.0
       minimatch: 10.2.5
-      typescript: 7.0.2
+      typescript: 6.0.3
       yaml: 2.9.0
 
   typescript@6.0.3: {}
@@ -4372,7 +4375,7 @@ snapshots:
       fsevents: 2.3.3
       yaml: 2.9.0
 
-  vitepress@1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.5)(lightningcss@1.33.0)(postcss@8.5.26)(search-insights@2.17.3)(typescript@7.0.2):
+  vitepress@1.6.4(@algolia/client-search@5.49.1)(@types/node@25.9.5)(lightningcss@1.33.0)(postcss@8.5.26)(search-insights@2.17.3)(typescript@6.0.3):
     dependencies:
       '@docsearch/css': 3.8.2
       '@docsearch/js': 3.8.2(@algolia/client-search@5.49.1)(search-insights@2.17.3)
@@ -4381,17 +4384,17 @@ snapshots:
       '@shikijs/transformers': 2.5.0
       '@shikijs/types': 2.5.0
       '@types/markdown-it': 14.1.2
-      '@vitejs/plugin-vue': 5.2.4(vite@5.4.21(@types/node@25.9.5)(lightningcss@1.33.0))(vue@3.5.29(typescript@7.0.2))
+      '@vitejs/plugin-vue': 5.2.4(vite@5.4.21(@types/node@25.9.5)(lightningcss@1.33.0))(vue@3.5.29(typescript@6.0.3))
       '@vue/devtools-api': 7.7.9
       '@vue/shared': 3.5.29
-      '@vueuse/core': 12.8.2(typescript@7.0.2)
-      '@vueuse/integrations': 12.8.2(focus-trap@7.8.0)(typescript@7.0.2)
+      '@vueuse/core': 12.8.2(typescript@6.0.3)
+      '@vueuse/integrations': 12.8.2(focus-trap@7.8.0)(typescript@6.0.3)
       focus-trap: 7.8.0
       mark.js: 8.11.1
       minisearch: 7.2.0
       shiki: 2.5.0
       vite: 5.4.21(@types/node@25.9.5)(lightningcss@1.33.0)
-      vue: 3.5.29(typescript@7.0.2)
+      vue: 3.5.29(typescript@6.0.3)
     optionalDependencies:
       postcss: 8.5.26
     transitivePeerDependencies:
@@ -4442,20 +4445,20 @@ snapshots:
     transitivePeerDependencies:
       - msw
 
-  vue-chartjs@5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@7.0.2)):
+  vue-chartjs@5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3)):
     dependencies:
       chart.js: 4.5.1
-      vue: 3.5.29(typescript@7.0.2)
+      vue: 3.5.29(typescript@6.0.3)
 
-  vue@3.5.29(typescript@7.0.2):
+  vue@3.5.29(typescript@6.0.3):
     dependencies:
       '@vue/compiler-dom': 3.5.29
       '@vue/compiler-sfc': 3.5.29
       '@vue/runtime-dom': 3.5.29
-      '@vue/server-renderer': 3.5.29(vue@3.5.29(typescript@7.0.2))
+      '@vue/server-renderer': 3.5.29(vue@3.5.29(typescript@6.0.3))
       '@vue/shared': 3.5.29
     optionalDependencies:
-      typescript: 7.0.2
+      typescript: 6.0.3
 
   why-is-node-running@2.3.0:
     dependencies:
