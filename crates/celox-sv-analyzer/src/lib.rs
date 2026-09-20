@@ -1786,6 +1786,26 @@ mod tests {
     }
 
     #[test]
+    fn masked_parameters_are_substituted_for_if_coverage() {
+        for value in ["1'bx", "1'bz"] {
+            let source = format!(
+                "module Top(input logic outer, a, b, output logic y);
+                 localparam logic P = {value};
+                 always_comb if (outer) begin if (P === {value}) y = a; end else y = b;
+                 endmodule"
+            );
+            analyze_source(&source, Path::new("masked_if_coverage.sv")).unwrap();
+            let mismatch = source.replace(&format!("P === {value}"), "P === 1'b0");
+            assert!(
+                analyze_source(&mismatch, Path::new("masked_if_uncovered.sv"))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("latch inference")
+            );
+        }
+    }
+
+    #[test]
     fn substitutes_masked_parameter_case_labels() {
         for (value, label) in [("1'bx", "P"), ("1'bz", "P"), ("1'bx", "(P | 1'b0)")] {
             let source = format!(

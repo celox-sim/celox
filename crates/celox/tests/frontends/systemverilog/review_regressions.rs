@@ -8855,3 +8855,59 @@ fn generate_local_literals_shadow_module_constants_in_comb() {
         }
     }
 }
+
+#[test]
+fn masked_generate_locals_shadow_numeric_outer_constants() {
+    use num_bigint::BigUint;
+    for literal in ["1'bx", "1'bz"] {
+        let source = format!(
+            "module Top(output logic y);
+             parameter logic P = 0;
+             if (1) begin : g
+                 localparam logic P = {literal};
+                 always_comb y = P;
+             end endmodule"
+        );
+        let mut sim =
+            Simulator::from_sv_sources(vec![(&source, Path::new("masked_generate.sv"))], "Top")
+                .four_state(true)
+                .build_cranelift()
+                .unwrap();
+        let y = sim.signal("y");
+        let (value, mask) = sim.get_four_state(y);
+        assert_eq!(mask, BigUint::from(1u8));
+        assert_eq!(value, BigUint::from(u8::from(literal == "1'bx")));
+    }
+}
+
+#[test]
+fn function_predicates_prove_complementary_else_if() {
+    let source = r#"
+        module Top(input bit s, input logic a, b, output logic y);
+            function automatic bit inv(input bit v); return !v; endfunction
+            always_comb if (s) y = a; else if (inv(s)) y = b;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_complement.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let s = sim.signal("s");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    for input in 0..8u8 {
+        sim.modify(|io| {
+            io.set(s, input & 1);
+            io.set(a, (input >> 1) & 1);
+            io.set(b, (input >> 2) & 1);
+        })
+        .unwrap();
+        let expected = if input & 1 != 0 {
+            (input >> 1) & 1
+        } else {
+            (input >> 2) & 1
+        };
+        assert_eq!(sim.get(y), expected.into());
+    }
+}

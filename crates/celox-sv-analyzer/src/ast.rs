@@ -7644,6 +7644,7 @@ fn comb_processes_from_module_common_item(
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
             let mut local_packed_dimensions = packed_dimensions.clone();
             local_packed_dimensions.const_env = const_env.clone();
+            local_packed_dimensions.parameter_values = parameter_literals.clone();
             if let Some(process) = comb_process_from_always_construct(
                 always,
                 condition,
@@ -8253,10 +8254,37 @@ fn add_localparams_from_generate_item_with_literals(
     }
     let mut parameter_types = parameter_types_from_const_env(const_env);
     for parameter in parameters {
-        let Some(value) = parameter.resolved_value(const_env, &parameter_types) else {
-            continue;
-        };
         let resolved_type = parameter.resolved_type(&parameter_types);
+        let resolved = parameter.resolved_value(const_env, &parameter_types);
+        if resolved.is_none() {
+            // An unknown local still shadows an inherited numeric binding.
+            const_env.remove(parameter.name());
+            for marker in [
+                parameter_marker(parameter.name()),
+                local_parameter_marker(parameter.name()),
+                enum_marker(parameter.name()),
+                parameter_width_marker(parameter.name()),
+                parameter_signed_marker(parameter.name()),
+            ] {
+                const_env.remove(&marker);
+            }
+            if let Some(literals) = parameter_literals.as_deref_mut() {
+                let value = parameter_value_env(std::slice::from_ref(&parameter), const_env)
+                    .remove(parameter.name());
+                literals.remove(parameter.name());
+                if let Some(value) = value {
+                    let value = substitute_expr_idents(value, literals);
+                    literals.insert(parameter.name().to_string(), value);
+                }
+            }
+            parameter_types.remove(parameter.name());
+            if let Some(r#type) = resolved_type {
+                parameter_types.insert(parameter.name().to_string(), r#type);
+                insert_parameter_type_markers(const_env, parameter.name(), r#type);
+            }
+            continue;
+        }
+        let value = resolved.expect("numeric parameter");
         if let Some(r#type) = resolved_type {
             parameter_types.insert(parameter.name().to_string(), r#type);
             insert_parameter_type_markers(const_env, parameter.name(), r#type);
@@ -9848,6 +9876,11 @@ fn eval_const_integral_expr_preserving_mask(
                     })
                     .collect::<Option<Vec<_>>>()?,
             )?;
+            if count > MAX_CONSTANT_CONCAT_BITS
+                || part.width.checked_mul(count)? > MAX_CONSTANT_CONCAT_BITS
+            {
+                return None;
+            }
             concat_integral_literals(std::iter::repeat_n(part, count))
         }
         _ => {
@@ -9857,6 +9890,8 @@ fn eval_const_integral_expr_preserving_mask(
     }
 }
 
+const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
+
 fn concat_integral_literals(
     parts: impl IntoIterator<Item = typecheck::IntegralLiteral>,
 ) -> Option<typecheck::IntegralLiteral> {
@@ -9865,6 +9900,9 @@ fn concat_integral_literals(
     let mut mask = num_bigint::BigUint::default();
     for part in parts {
         width = width.checked_add(part.width)?;
+        if width > MAX_CONSTANT_CONCAT_BITS {
+            return None;
+        }
         value = (value << part.width) | part.value;
         mask = (mask << part.width) | part.mask;
     }
@@ -13003,7 +13041,14 @@ fn definitely_assigned_comb_targets(
                         )
                     })
                     .map(|condition| {
-                        simplify_constant_mux_conditions(condition, &packed_dimensions.const_env)
+                        simplify_constant_mux_conditions(
+                            substitute_expr_constants_with_parameter_literals(
+                                condition,
+                                &packed_dimensions.const_env,
+                                &packed_dimensions.parameter_values,
+                            ),
+                            &packed_dimensions.const_env,
+                        )
                     })
                     .map(procedural_truth_condition)
                     .and_then(expr_to_const)
@@ -13172,8 +13217,21 @@ fn conditional_chain_has_complementary_final_predicate(
     let Some((_, _, final_predicate, _)) = conditional.nodes.4.last() else {
         return false;
     };
+    let expand = |condition| {
+        simplify_constant_mux_conditions(
+            expand_expr_calls(
+                condition,
+                &packed_dimensions.functions,
+                &packed_dimensions.expression_signedness,
+                0,
+                true,
+            ),
+            &packed_dimensions.const_env,
+        )
+    };
     let Some(final_condition) =
         expr_from_cond_predicate(&final_predicate.nodes.1, syntax_tree, packed_dimensions)
+            .map(expand)
     else {
         return false;
     };
@@ -13185,7 +13243,11 @@ fn conditional_chain_has_complementary_final_predicate(
         )
         .filter_map(|predicate| expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions))
         .any(|condition| {
-            two_state_conditions_are_complements(&condition, &final_condition, packed_dimensions)
+            two_state_conditions_are_complements(
+                &expand(condition),
+                &final_condition,
+                packed_dimensions,
+            )
         })
 }
 
@@ -13248,6 +13310,25 @@ fn normalized_two_state_boolean<'a>(
     expr: &'a Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Option<(&'a Expr, bool)> {
+    match expr {
+        Expr::Resize {
+            expr: operand,
+            width,
+            ..
+        } if expr_static_width(operand, packed_dimensions)
+            .is_some_and(|source| source <= *width)
+            && expr_is_two_state(operand, packed_dimensions) =>
+        {
+            return normalized_two_state_boolean(operand, packed_dimensions);
+        }
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: operand,
+        } if expr_is_two_state(operand, packed_dimensions) => {
+            return normalized_two_state_boolean(operand, packed_dimensions);
+        }
+        _ => {}
+    }
     if let Expr::Unary { op, expr } = expr
         && (*op == UnaryOp::LogicNot
             || (*op == UnaryOp::BitNot
@@ -15830,5 +15911,42 @@ fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Bi
         ">" => Some(BinaryOp::Gt),
         ">=" => Some(BinaryOp::Ge),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod constant_concat_limits_tests {
+    use super::*;
+
+    #[test]
+    fn bounds_repeated_constant_concatenation() {
+        for (count, accepted) in [(65_536, true), (65_537, false), (1_000_000_000, false)] {
+            let expr = Expr::RepeatConcat {
+                count: ConstExpr::Literal(count.to_string()),
+                parts: vec![Expr::Literal("1'bx".to_string())],
+            };
+            let result = eval_const_integral_expr_preserving_mask(
+                &expr,
+                &HashMap::default(),
+                &HashMap::default(),
+            );
+            assert_eq!(result.is_some(), accepted);
+            if let Some(result) = result {
+                assert_eq!(result.width, count);
+                assert!(result.mask.bit((count - 1) as u64));
+            }
+        }
+        let expr = Expr::RepeatConcat {
+            count: ConstExpr::Literal("40000".to_string()),
+            parts: vec![Expr::Literal("2'bxz".to_string())],
+        };
+        assert!(
+            eval_const_integral_expr_preserving_mask(
+                &expr,
+                &HashMap::default(),
+                &HashMap::default(),
+            )
+            .is_none()
+        );
     }
 }
