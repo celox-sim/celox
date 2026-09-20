@@ -8166,12 +8166,14 @@ fn comb_processes_from_generate_block(
         }
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
+            let mut block_parameter_literals = parameter_literals.clone();
             for item in &block.nodes.3 {
-                if add_localparams_from_generate_item(
+                if add_localparams_from_generate_item_with_literals(
                     item,
                     syntax_tree,
                     &mut block_env,
                     &packed_dimensions.type_aliases,
+                    Some(&mut block_parameter_literals),
                 ) {
                     continue;
                 }
@@ -8183,7 +8185,7 @@ fn comb_processes_from_generate_block(
                     packed_dimensions,
                     functions,
                     expression_signedness,
-                    parameter_literals,
+                    &block_parameter_literals,
                     processes,
                     remaining_expansion,
                 )?;
@@ -11938,7 +11940,7 @@ fn conditional_assignments_from_conditional_statement(
     ));
     prior_false.push(procedural_false_condition(if_condition));
 
-    for (_, _, predicate, branch) in &stmt.nodes.4 {
+    for (index, (_, _, predicate, branch)) in stmt.nodes.4.iter().enumerate() {
         let branch_condition =
             expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
                 .ok_or_else(|| {
@@ -11964,6 +11966,23 @@ fn conditional_assignments_from_conditional_statement(
             syntax_tree,
             packed_dimensions,
         ));
+        if index + 1 == stmt.nodes.4.len()
+            && stmt.nodes.5.is_none()
+            && exhaustive_fallback
+            && parent_condition.is_none()
+            && conditional_chain_has_complementary_final_predicate(
+                stmt,
+                syntax_tree,
+                packed_dimensions,
+            )
+        {
+            mark_exhaustive_fallback(
+                &mut assignments[branch_start..],
+                &definitely_assigned_branches,
+                chain_start,
+                packed_dimensions,
+            );
+        }
         prior_false.push(procedural_false_condition(branch_condition));
     }
 
@@ -13004,6 +13023,11 @@ fn definitely_assigned_comb_targets(
                     break;
                 }
             }
+            terminal |= conditional_chain_has_complementary_final_predicate(
+                conditional,
+                syntax_tree,
+                packed_dimensions,
+            );
             if !terminal {
                 let Some((_, else_branch)) = &conditional.nodes.5 else {
                     return Vec::new();
@@ -13136,6 +13160,33 @@ fn guarded_comb_targets(
         return None;
     }
     Some((condition, targets))
+}
+
+/// An else-if predicate is evaluated only when every earlier predicate was
+/// false, so a two-state complement of an earlier predicate closes the chain.
+fn conditional_chain_has_complementary_final_predicate(
+    conditional: &sv_parser::ConditionalStatement,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> bool {
+    let Some((_, _, final_predicate, _)) = conditional.nodes.4.last() else {
+        return false;
+    };
+    let Some(final_condition) =
+        expr_from_cond_predicate(&final_predicate.nodes.1, syntax_tree, packed_dimensions)
+    else {
+        return false;
+    };
+    std::iter::once(&conditional.nodes.2.nodes.1)
+        .chain(
+            conditional.nodes.4[..conditional.nodes.4.len() - 1]
+                .iter()
+                .map(|(_, _, predicate, _)| &predicate.nodes.1),
+        )
+        .filter_map(|predicate| expr_from_cond_predicate(predicate, syntax_tree, packed_dimensions))
+        .any(|condition| {
+            two_state_conditions_are_complements(&condition, &final_condition, packed_dimensions)
+        })
 }
 
 fn two_state_conditions_are_complements(

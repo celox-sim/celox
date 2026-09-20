@@ -8752,3 +8752,106 @@ fn enum_dependent_aliases_preserve_parameter_widths() {
         assert_eq!(sim.get(y), expected.into());
     }
 }
+
+#[test]
+fn complementary_else_if_chains_are_exhaustive() {
+    for body in [
+        "if (s) y = a; else if (!s) y = b;",
+        "if (s == 1'b1) y = a; else if (s != 1'b1) y = b;",
+        "if (s) y = a; else if (~s) y = b;",
+        "if (outer) begin if (s) y = a; else if (!s) y = b; end else y = b;",
+    ] {
+        let source = format!(
+            "module Top(input bit s, input logic outer, a, b, output logic y);
+             always_comb begin {body} end endmodule"
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("complementary_else_if.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap();
+        let s = sim.signal("s");
+        let outer = sim.signal("outer");
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let y = sim.signal("y");
+        for input in 0..16u8 {
+            let sv = input & 1;
+            let av = (input >> 1) & 1;
+            let bv = (input >> 2) & 1;
+            let ov = (input >> 3) & 1;
+            sim.modify(|io| {
+                io.set(s, sv);
+                io.set(a, av);
+                io.set(b, bv);
+                io.set(outer, ov);
+            })
+            .unwrap();
+            let expected = if sv != 0 && (!body.contains("outer") || ov != 0) {
+                av
+            } else {
+                bv
+            };
+            assert_eq!(sim.get(y), expected.into(), "{body}, {input}");
+        }
+    }
+    for (kind, body) in [
+        ("logic", "if (s) y = a; else if (!s) y = b;"),
+        ("bit", "if (s) y = a; else if (s) y = b;"),
+        ("bit", "if (s) y = a; else if (!s) begin end"),
+        (
+            "bit",
+            "if (outer) begin if (s) y = a; else if (!s) begin end end else y = b;",
+        ),
+    ] {
+        let source = format!(
+            "module Top(input {kind} s, input logic outer, a, b, output logic y);
+             always_comb begin {body} end endmodule"
+        );
+        assert!(
+            four_state_cranelift_build_error(&source).contains("latch inference"),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn generate_local_literals_shadow_module_constants_in_comb() {
+    for declaration in [
+        "parameter logic [3:0] P = 0;",
+        "typedef enum logic [3:0] { P = 0 } E;",
+    ] {
+        let source = format!(
+            "module Top(output logic [7:0] local_y, nested_y, sibling_y, module_y);
+             {declaration}
+             if (1) begin : g
+                 localparam logic signed [3:0] P = 4'hf;
+                 always_comb local_y = P;
+                 if (1) begin : nested
+                     always_comb nested_y = P;
+                 end
+             end
+             if (1) begin : sibling
+                 always_comb sibling_y = P;
+             end
+             always_comb module_y = P;
+             endmodule"
+        );
+        let mut sim = Simulator::from_sv_sources(
+            vec![(&source, Path::new("generate_local_literals.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap();
+        for (name, expected) in [
+            ("local_y", 255u8),
+            ("nested_y", 255),
+            ("sibling_y", 0),
+            ("module_y", 0),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), expected.into(), "{declaration}, {name}");
+        }
+    }
+}
