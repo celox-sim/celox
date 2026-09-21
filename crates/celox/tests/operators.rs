@@ -353,6 +353,8 @@ assign o = r;
     }
 
     fn test_pow_operator_runtime_exponent_comb_and_ff(sim) {
+        // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+        @omit_veryl;
         @ignore_on(sv);
         @setup { let code = r#"
 module Top (

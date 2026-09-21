@@ -225,6 +225,8 @@ module Top (
 all_backends! {
 
 fn test_large_scc_dynamic_loop_convergence(sim) {
+    // Requires Celox false-loop authorization; Veryl rejects the combinational cycle.
+    @omit_veryl;
     @ignore_on(sv);
     @setup {
     let chain_size = 20;

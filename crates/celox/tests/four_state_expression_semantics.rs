@@ -438,6 +438,8 @@ module Top (
     }
 
     fn ff_procedural_control_uses_known_nonzero_truth(sim) {
+        // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (

@@ -101,10 +101,10 @@ assign o11 = a[1][1];
 
     }
 
-    #[ignore = "blocked by upstream Veryl IR: UnsupportedByIr at conv/utils.rs:231"]
-    fn test_array_literal_single_element_fills_param_sized_array(sim) {
-        @setup { // '{val} with a single element (no `default:` keyword) should fill all positions
-// when applied to a param-sized array, matching SV assignment-pattern semantics.
+    fn test_array_literal_default_fills_param_sized_array(sim) {
+        // The SV frontend does not yet lower array assignment patterns in always_ff.
+        @ignore_on(sv);
+        @setup { // A default entry fills every position of a param-sized array.
 let code = r#"
 module Top #(param N: u32 = 3) (
 i_clk: input clock,
@@ -119,7 +119,7 @@ assign o1 = arr[1];
 assign o2 = arr[2];
 always_ff (i_clk, i_rst) {
 if_reset {
-arr = '{0};
+arr = '{default: 0};
 } else {
 arr[0] = 8'hAB;
 }
@@ -134,6 +134,15 @@ arr[0] = 8'hAB;
     let o2 = sim.signal("o2");
 
     // Reset: all elements should be 0
+    sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o0), 0u8.into());
+    assert_eq!(sim.get(o1), 0u8.into());
+    assert_eq!(sim.get(o2), 0u8.into());
+
+    sim.modify(|io| io.set(i_rst, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o0), 0xABu8.into());
     sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(o0), 0u8.into());
@@ -177,9 +186,10 @@ arr[0] = 8'hAB;
 
     }
 
-    #[ignore = "blocked by upstream Veryl IR: UnsupportedByIr at conv/utils.rs:231"]
-    fn test_array_literal_single_element_fills_2d_array(sim) {
-        @setup { // '{0} on a 2D param-sized array should also fill all elements.
+    fn test_array_literal_default_fills_2d_array(sim) {
+        // The SV frontend does not yet lower array assignment patterns in always_ff.
+        @ignore_on(sv);
+        @setup { // Each dimension needs its own default entry.
 let code = r#"
 module Top #(param N: u32 = 2, param M: u32 = 3) (
 i_clk: input clock,
@@ -190,9 +200,9 @@ var arr: logic<8> [N, M];
 assign o = arr[1][2];
 always_ff (i_clk, i_rst) {
 if_reset {
-arr = '{0};
+arr = '{default: '{default: 0}};
 } else {
-arr[0][0] = 8'hAB;
+arr[1][2] = 8'hAB;
 }
 }
 }
@@ -202,6 +212,13 @@ arr[0][0] = 8'hAB;
     let i_rst = sim.signal("i_rst");
     let o = sim.signal("o");
 
+    sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o), 0u8.into());
+
+    sim.modify(|io| io.set(i_rst, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(o), 0xABu8.into());
     sim.modify(|io| io.set(i_rst, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(o), 0u8.into());
