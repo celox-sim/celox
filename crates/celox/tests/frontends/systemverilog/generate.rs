@@ -1,6 +1,100 @@
 use super::*;
 
 sv_backends! {
+    fn ignores_type_aliases_in_inactive_generate_branches(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    typedef logic T;
+                    if (0) begin : inactive_typedef typedef logic [7:0] T; end
+                    if (0) begin : inactive_parameter parameter type T = logic [7:0]; end
+                    if (0) begin : inactive_localparam localparam type T = logic [7:0]; end
+                    T tmp;
+                    assign tmp = a;
+                    assign y = tmp;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("inactive_generate_aliases.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u8, 1, 2, 255] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (value & 1).into());
+        }
+    }
+
+    fn distinguishes_escaped_generate_scope_components(sim) {
+        @setup {
+            let sv = r#"
+                module Child(input logic a, output logic y); assign y = a; endmodule
+                module Top(input logic [3:0] a, output logic [3:0] y);
+                    if (1) begin : \a.b
+                        logic tmp;
+                        function automatic logic f(input logic x); return x; endfunction
+                        Child child(.a(f(a[0])), .y(tmp));
+                        assign y[0] = tmp;
+                    end
+                    if (1) begin : \a
+                        if (1) begin : b
+                            logic tmp;
+                            function automatic logic f(input logic x); return ~x; endfunction
+                            Child child(.a(f(a[1])), .y(tmp));
+                            assign y[1] = tmp;
+                        end
+                    end
+                    if (1) begin : \g[0]
+                        logic tmp;
+                        Child child(.a(a[2]), .y(tmp));
+                        assign y[2] = tmp;
+                    end
+                    for (genvar i=0; i<1; i++) begin : \g
+                        logic tmp;
+                        Child child(.a(a[3]), .y(tmp));
+                        assign y[3] = tmp;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("escaped_generate_components.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in 0u8..16 {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (value ^ 2).into());
+        }
+    }
+
+    fn prefers_function_local_types_over_generate_signals(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic [3:0] a, output logic [31:0] y);
+                    if (1) begin : g
+                        logic [7:0] x;
+                        assign x = 0;
+                        function automatic int formal_bits(input logic [3:0] x);
+                            return {~$bits(x)'(0)};
+                        endfunction
+                        function automatic int formal_size(input logic [1:0][2:0] x);
+                            return {~$size(x)'(0)};
+                        endfunction
+                        function automatic int local_bits();
+                            logic [2:0] x;
+                            return {~$bits(x)'(0)};
+                        endfunction
+                        function automatic int local_size();
+                            logic [4:0][1:0] x;
+                            return {~$size(x)'(0)};
+                        endfunction
+                        assign y = formal_bits(a) + 10*formal_size(a)
+                                 + 100*local_bits() + 1000*local_size();
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_function_local_types.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 31745u32.into());
+    }
+
     fn evaluates_module_constant_functions_in_generate_schemes(sim) {
         @setup {
             let sv = r#"

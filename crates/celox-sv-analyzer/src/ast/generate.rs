@@ -10,6 +10,16 @@ use super::*;
 // qualified, and never reach the public analyzer IR.
 const OUTER_BINDING: &str = "\0generate_outer:";
 
+// Whitespace terminates an escaped identifier (IEEE 1800-2023 5.6.1).
+// Preserve that terminator before appending hierarchy delimiters or loop indices.
+fn scope_component(name: &str) -> String {
+    if name.starts_with('\\') {
+        format!("{name} ")
+    } else {
+        name.to_string()
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Item<'a> {
     pub node: &'a sv_parser::ModuleOrGenerateItem,
@@ -35,7 +45,7 @@ impl Item<'_> {
         if self.scope.is_empty() {
             name.to_string()
         } else {
-            format!("{}.{name}", self.scope)
+            format!("{}.{}", self.scope, scope_component(name))
         }
     }
 
@@ -860,6 +870,7 @@ impl<'a> Elaborator<'a, '_> {
         let mut name = explicit
             .and_then(|name| identifier_text(RefNode::GenerateBlockIdentifier(name), self.tree))
             .unwrap_or_else(|| format!("genblk{ordinal}"));
+        name = scope_component(&name);
         if let Some((_, index)) = index {
             name.push_str(&format!("[{index}]"));
         }
@@ -932,9 +943,10 @@ impl<'a> Elaborator<'a, '_> {
                                     )));
                                 }
                                 scope.shadowed.insert(name.clone());
-                                scope
-                                    .names
-                                    .insert(name.clone(), format!("{}.{name}", scope.path));
+                                scope.names.insert(
+                                    name.clone(),
+                                    format!("{}.{}", scope.path, scope_component(&name)),
+                                );
                             }
                         }
                         signals_from_module_or_generate_item(
@@ -964,7 +976,7 @@ impl<'a> Elaborator<'a, '_> {
                 scope.shadowed.insert(signal.name.clone());
                 scope.names.insert(
                     signal.name.clone(),
-                    format!("{}.{}", scope.path, signal.name),
+                    format!("{}.{}", scope.path, scope_component(&signal.name)),
                 );
             }
         }
@@ -985,26 +997,12 @@ fn module_constant_functions(
     aliases: &HashMap<String, Type>,
     literals: &HashMap<String, Expr>,
 ) -> HashMap<String, Function> {
-    let mut direct = Vec::new();
-    for item in module_non_port_items(node) {
-        match item {
-            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => direct.push(item),
-            sv_parser::NonPortModuleItem::GenerateRegion(region) => {
-                for item in &region.nodes.1 {
-                    if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-                        direct.push(item);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
     let dimensions = PackedDimensions::new(HashMap::default(), env, aliases);
     let types = parameter_types_from_const_env(env);
     let mut functions = HashMap::default();
     let mut calls = HashMap::default();
-    for item in direct {
-        let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item else {
+    for item in module_scope_items(node) {
+        let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
             continue;
         };
         if !matches!(
