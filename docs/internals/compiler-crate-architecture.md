@@ -60,6 +60,17 @@ may depend on the other. The public `celox` compiler driver selects an adapter
 and consumes core contracts directly, so there is no multi-language frontend
 facade or language-specific compatibility re-export.
 
+The SystemVerilog analyzer uses a shared generate elaborator for signal,
+instance, combinational-process, and clocked-process collection. It selects
+constant `if`/`case` branches, unrolls bounded `for` constructs, and qualifies
+local signals and instances by their generated scope (for example,
+`lanes[2].child`). The same environment carries genvars and localparams into
+all four collectors, including parameter-specialized child modules. Case
+comparisons use a common width and signedness across the selector and all
+labels, preserving X/Z according to IEEE 1800-2023 section 12.5. Inactive
+branches are not lowered. Generate-local typedefs and function declarations
+inside loop-generate remain unsupported.
+
 Each adapter projects parser-native identities into the source-independent
 `SourceVarId` namespace before constructing core symbolic structures. Veryl IDs
 therefore remain in the Veryl adapter and its source sidecars; they do not enter

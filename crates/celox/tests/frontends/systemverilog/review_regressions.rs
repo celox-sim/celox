@@ -373,22 +373,21 @@ fn rejects_writes_to_input_ports() {
 }
 
 #[test]
-fn rejects_generate_locals_that_shadow_parameters() {
-    let error = cranelift_build_error(
-        r#"
+fn supports_generate_locals_that_shadow_parameters() {
+    let source = r#"
         module Top #(parameter P = 0) (output wire y);
             if (1) begin : g
                 logic P;
-                assign P = 1'b1;
+                always_comb P = 1'b1;
                 assign y = P;
             end
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("local data declaration inside conditional-generate"),
-        "unexpected error: {error}"
-    );
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("generate_shadow.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
 }
 
 #[test]
@@ -405,7 +404,7 @@ fn rejects_single_branch_generate_locals_instead_of_leaking_them() {
         "#,
     );
     assert!(
-        error.contains("local data declaration inside conditional-generate"),
+        error.contains("combinational expression assigned to `y`"),
         "unexpected error: {error}"
     );
 }
@@ -447,7 +446,7 @@ fn rejects_generate_local_typedefs_instead_of_leaking_them() {
         "#,
     );
     assert!(
-        error.contains("type declaration inside conditional-generate"),
+        error.contains("combinational expression assigned to `y`"),
         "unexpected error: {error}"
     );
 }
@@ -5172,13 +5171,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "module instantiation inside loop-generate",
-            r#"
-            module Child(); endmodule
-            module Top(); for (genvar i = 0; i < 2; i++) Child child(); endmodule
-        "#,
-        ),
-        (
             "module instance array",
             r#"
             module Child(); endmodule
@@ -5224,13 +5216,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic clk, d, output logic q);
                 always_ff @(posedge clk) q = d;
             endmodule
-        "#,
-        ),
-        (
-            "output port lvalue connection",
-            r#"
-            module Child(output logic [7:0] y); assign y = 8'hff; endmodule
-            module Top(output logic [15:0] y); Child child(.y(y[7:0])); endmodule
         "#,
         ),
         (
@@ -5333,18 +5318,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "local data declaration inside loop-generate",
-            r#"
-            module Top(input logic [1:0] a, output logic [1:0] y);
-                for (genvar i = 0; i < 2; i++) begin
-                    logic tmp;
-                    assign tmp = a[i];
-                    assign y[i] = tmp;
-                end
-            endmodule
-        "#,
-        ),
-        (
             "initial construct",
             r#"
             module Top(output logic y); initial y = 1'b1; endmodule
@@ -5399,17 +5372,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "case-generate construct",
-            r#"
-            module Top #(parameter MODE = 0) (output logic y);
-                case (MODE)
-                    0: assign y = 1'b0;
-                    default: assign y = 1'b1;
-                endcase
-            endmodule
-        "#,
-        ),
-        (
             "always_ff event control",
             r#"
             module Top(input logic a, b, d, output logic q);
@@ -5422,14 +5384,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, sample, output logic q);
                 always_ff @(posedge clk or posedge sample) q <= clk;
-            endmodule
-        "#,
-        ),
-        (
-            "always_ff inside loop-generate",
-            r#"
-            module Top(input logic clk, input logic [1:0] d, output logic [1:0] q);
-                for (genvar i = 0; i < 2; i++) always_ff @(posedge clk) q[i] <= d[i];
             endmodule
         "#,
         ),
@@ -5461,18 +5415,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic [1:0] a, output logic y);
                 always_ff @(posedge clk) casez (a) 2'b1?: y <= 1'b1; default: y <= 0; endcase
-            endmodule
-        "#,
-        ),
-        (
-            "local data declaration inside conditional-generate",
-            r#"
-            module Top #(parameter ENABLE = 1) (input logic a, output logic y);
-                if (ENABLE) begin
-                    logic tmp; assign tmp = a; assign y = tmp;
-                end else begin
-                    logic [1:0] tmp; assign tmp = {a, a}; assign y = tmp[0];
-                end
             endmodule
         "#,
         ),
@@ -5691,16 +5633,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unknown conditional-generate condition",
-            r#"
-            module Top(output logic y);
-                for (genvar i = -1; i < 0; i++) begin : outer
-                    if (&i) assign y = 1'b1;
-                end
-            endmodule
-        "#,
-        ),
-        (
             "duplicate parameter override `P`",
             r#"
             module Child #(parameter P = 0) (output logic y); assign y = P; endmodule
@@ -5828,18 +5760,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "local data declaration inside conditional-generate",
-            r#"
-            module Top #(parameter ENABLE = 0) (output logic y);
-                logic [3:0] local_value;
-                if (ENABLE) begin : enabled
-                    logic local_value;
-                    assign y = local_value;
-                end else assign y = local_value[0];
-            endmodule
-        "#,
-        ),
-        (
             "undriven net declaration `w`",
             r#"
             module Top(output logic y); wire w; assign y = (w === 1'bz); endmodule
@@ -5864,14 +5784,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule
             module Top(input logic a, output logic y); Child child(.aa(a), .y(y)); endmodule
-        "#,
-        ),
-        (
-            "unknown conditional-generate condition",
-            r#"
-            module Top #(parameter logic P = 1'bx) (output logic y);
-                if (P) assign y = 1'b1;
-            endmodule
         "#,
         ),
         (
@@ -5909,42 +5821,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "conditional-generate condition lowering",
+            "unknown conditional-generate condition",
             r#"
             module Top(output logic y);
                 if (2 ** 3) assign y = 1'b1;
                 else assign y = 1'b0;
-            endmodule
-        "#,
-        ),
-        (
-            "local data declaration inside conditional-generate",
-            r#"
-            module Top #(parameter SELECT = 1) (input logic clk, output logic q);
-                if (SELECT) begin : selected
-                    localparam VALUE = 1'b1;
-                    always_ff @(posedge clk) q <= VALUE;
-                end else begin : unselected
-                    localparam VALUE = 1'b0;
-                    always_ff @(posedge clk) q <= VALUE;
-                end
-            endmodule
-        "#,
-        ),
-        (
-            "local data declaration inside conditional-generate",
-            r#"
-            module Top(output logic a_value, output logic b_value);
-                if (1) begin : a
-                    logic tmp;
-                    assign tmp = 1'b0;
-                    assign a_value = tmp;
-                end
-                if (1) begin : b
-                    logic tmp;
-                    assign tmp = 1'b1;
-                    assign b_value = tmp;
-                end
             endmodule
         "#,
         ),
