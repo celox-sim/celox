@@ -212,6 +212,7 @@ impl Item<'_> {
 #[derive(Clone, Default)]
 struct Scope {
     path: String,
+    in_loop: bool,
     env: HashMap<String, i128>,
     literals: HashMap<String, Expr>,
     names: HashMap<String, String>,
@@ -222,6 +223,7 @@ struct Elaborator<'a, 'b> {
     tree: &'a SyntaxTree,
     aliases: &'b HashMap<String, Type>,
     remaining: usize,
+    functions: HashMap<String, Function>,
     items: Vec<Item<'a>>,
 }
 
@@ -235,11 +237,15 @@ pub(super) fn items<'a>(
         tree,
         aliases,
         remaining: MAX_GENERATE_LOOP_EXPANSION,
+        functions: HashMap::default(),
         items: Vec::new(),
     };
     let parameters =
         parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
     let mut literals = parameter_value_env(&parameters, env);
+    if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
+        elaborator.functions = module_constant_functions(node.clone(), tree, env, aliases, &literals);
+    }
     // Numeric values and their type markers are already carried by `env`.
     literals.retain(|name, _| !env.contains_key(name));
     let scope = Scope {
@@ -272,10 +278,64 @@ impl<'a> Elaborator<'a, '_> {
             &scope.env,
             self.aliases,
         )?;
-        expr_to_const(substitute_expr_idents(
+        let mut expr = expr_to_const(substitute_expr_idents(
             const_expr_to_expr(expr),
             &scope.literals,
-        ))
+        ))?;
+        self.expand_constant_calls(&mut expr, scope)?;
+        Some(expr)
+    }
+
+    fn expand_constant_calls(&self, expr: &mut ConstExpr, scope: &Scope) -> Option<()> {
+        match expr {
+            ConstExpr::Function { name, args } => {
+                for arg in args {
+                    self.expand_constant_calls(arg, scope)?;
+                }
+                if self.functions.contains_key(name) {
+                    if scope.shadowed.contains(name) {
+                        return None;
+                    }
+                    let signedness = parameter_types_from_const_env(&scope.env)
+                        .into_iter()
+                        .map(|(name, ty)| (name, ty.signed))
+                        .collect();
+                    let expanded = expand_expr_calls(
+                        const_expr_to_expr(expr.clone()),
+                        &self.functions,
+                        &signedness,
+                        0,
+                        true,
+                    );
+                    let expanded = simplify_constant_mux_conditions(expanded, &scope.env);
+                    // Fold only the call: surrounding case arithmetic still needs
+                    // the common comparison width, while function results are self-determined.
+                    *expr = expr_to_const(fold_const_integral_expr_preserving_mask(
+                        expanded, &scope.env,
+                    ))?;
+                }
+            }
+            ConstExpr::Unary { expr, .. } => self.expand_constant_calls(expr, scope)?,
+            ConstExpr::Select { expr, bit } => {
+                self.expand_constant_calls(expr, scope)?;
+                self.expand_constant_calls(bit, scope)?;
+            }
+            ConstExpr::Binary { left, right, .. } => {
+                self.expand_constant_calls(left, scope)?;
+                self.expand_constant_calls(right, scope)?;
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.expand_constant_calls(condition, scope)?;
+                self.expand_constant_calls(then_expr, scope)?;
+                self.expand_constant_calls(else_expr, scope)?;
+            }
+            ConstExpr::Ident(_) | ConstExpr::Literal(_) => {}
+        }
+        Some(())
     }
 
     fn value(
@@ -525,7 +585,7 @@ impl<'a> Elaborator<'a, '_> {
                 _ => {}
             }
         }
-        if scope.path.contains('[')
+        if scope.in_loop
             && RefNode::ModuleOrGenerateItem(item)
                 .into_iter()
                 .any(|node| matches!(node, RefNode::FunctionDeclaration(_)))
@@ -804,6 +864,7 @@ impl<'a> Elaborator<'a, '_> {
             name.push_str(&format!("[{index}]"));
         }
         let mut scope = parent.clone();
+        scope.in_loop |= index.is_some();
         scope.path = if parent.path.is_empty() {
             name
         } else {
@@ -915,6 +976,123 @@ impl<'a> Elaborator<'a, '_> {
     }
 }
 
+// Bootstrap only module-scope functions; collecting the full function map would
+// itself elaborate generate blocks and recurse into the conditions being decided.
+fn module_constant_functions(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    literals: &HashMap<String, Expr>,
+) -> HashMap<String, Function> {
+    let mut direct = Vec::new();
+    for item in module_non_port_items(node) {
+        match item {
+            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => direct.push(item),
+            sv_parser::NonPortModuleItem::GenerateRegion(region) => {
+                for item in &region.nodes.1 {
+                    if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
+                        direct.push(item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let dimensions = PackedDimensions::new(HashMap::default(), env, aliases);
+    let types = parameter_types_from_const_env(env);
+    let mut functions = HashMap::default();
+    let mut calls = HashMap::default();
+    for item in direct {
+        let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item else {
+            continue;
+        };
+        if !matches!(
+            item.nodes.1,
+            sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(_)
+        ) {
+            continue;
+        }
+        for node in RefNode::ModuleCommonItem(&item.nodes.1) {
+            let RefNode::FunctionDeclaration(declaration) = node else {
+                continue;
+            };
+            let Some(mut function) =
+                function_from_declaration(declaration, tree, env, aliases, &dimensions)
+            else {
+                continue;
+            };
+            let mut bindings = HashMap::default();
+            for node in RefNode::FunctionDeclaration(declaration) {
+                if !matches!(
+                    node,
+                    RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+                ) {
+                    continue;
+                }
+                let Some(name) = identifier_text(node, tree) else {
+                    continue;
+                };
+                if function
+                    .params
+                    .iter()
+                    .any(|parameter| parameter.name == name)
+                {
+                    continue;
+                }
+                let value = literals
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| {
+                        env.get(&name).map(|value| {
+                            Expr::Literal(types.get(&name).map_or_else(
+                                || value.to_string(),
+                                |ty| format_typed_parameter_literal(*value, ty.width, ty.signed),
+                            ))
+                        })
+                    })
+                    .unwrap_or_else(|| Expr::Ident(format!("\0constant_function:{name}")));
+                bindings.insert(name, value);
+            }
+            // Close over definition-site constants. Unresolved module signals must
+            // not become constants just because a generate local shadows them.
+            function.body = substitute_expr_idents(function.body, &bindings);
+            calls.insert(
+                function.name.clone(),
+                RefNode::FunctionDeclaration(declaration)
+                    .into_iter()
+                    .filter_map(|node| {
+                        let RefNode::TfCall(call) = node else {
+                            return None;
+                        };
+                        identifier_text(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            functions.insert(function.name.clone(), function);
+        }
+    }
+    // The existing inliner bounds call depth, but branching recursion would
+    // still expand exponentially. Keep recursive call graphs unsupported here.
+    fn acyclic(
+        name: &str,
+        calls: &HashMap<String, Vec<String>>,
+        active: &mut HashSet<String>,
+    ) -> bool {
+        let Some(children) = calls.get(name) else {
+            return true;
+        };
+        if !active.insert(name.to_string()) {
+            return false;
+        }
+        let valid = children.iter().all(|child| acyclic(child, calls, active));
+        active.remove(name);
+        valid
+    }
+    functions.retain(|name, _| acyclic(name, &calls, &mut HashSet::default()));
+    functions
+}
+
 // Inspect dimension expressions only, excluding runtime declaration initializers.
 fn dimension_dependencies(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
     node.into_iter()
@@ -945,6 +1123,104 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn does_not_use_a_module_function_hidden_by_a_generate_function() {
+        let source = r#"
+            module Top(output logic y);
+                function automatic bit enabled(); return 1; endfunction
+                if (1) begin : g
+                    function automatic bit enabled(); return 0; endfunction
+                    if (enabled()) assign y=1;
+                    else assign y=0;
+                end
+            endmodule
+        "#;
+        let error = analyze(source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown conditional-generate condition"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_recursive_constant_function_expansion() {
+        let source = r#"
+            module Top(output logic y);
+                function automatic int recurse(); return recurse() + recurse(); endfunction
+                if (recurse()) assign y=1;
+                else assign y=0;
+            endmodule
+        "#;
+        let error = analyze(source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown conditional-generate condition"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn preserves_constant_function_masks_and_case_context() {
+        let source = r#"
+            module Top(output logic y);
+                function automatic logic unknown(); return 1'bx; endfunction
+                function automatic logic [3:0] narrow(); return 4'hf; endfunction
+                if (unknown()) begin initial $fatal; end
+                else begin
+                    case (narrow() + 4'd1)
+                        8'd16: assign y=1;
+                        default: initial $fatal;
+                    endcase
+                end
+            endmodule
+        "#;
+        analyze(source).unwrap();
+    }
+
+    #[test]
+    fn rejects_runtime_function_reads_even_when_generate_locals_shadow_them() {
+        let source = r#"
+            module Top(input logic a, output logic y);
+                function automatic logic read_input(); return a; endfunction
+                if (1) begin : g
+                    localparam a=1;
+                    if (read_input()) assign y=1;
+                    else assign y=0;
+                end
+            endmodule
+        "#;
+        let error = analyze(source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown conditional-generate condition"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn retains_loop_ancestry_through_nested_conditional_blocks() {
+        let source = r#"
+            module Top();
+                for (genvar i=0; i<1; i++) begin : g
+                    if (1) begin : nested
+                        function automatic bit f(); return 1; endfunction
+                    end
+                end
+            endmodule
+        "#;
+        let error = analyze(source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("function declaration inside loop-generate"),
+            "{error}"
+        );
     }
 
     #[test]

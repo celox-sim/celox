@@ -1,6 +1,52 @@
 use super::*;
 
 sv_backends! {
+    fn evaluates_module_constant_functions_in_generate_schemes(sim) {
+        @setup {
+            let sv = r#"
+                module Top #(parameter LIMIT=3)(output logic [3:0] y);
+                    if (enabled()) begin : active
+                        localparam LIMIT=0;
+                        for (genvar i=start(); below_limit(i); i++) begin : lane
+                            assign y[i] = 1;
+                        end
+                    end else begin initial $fatal; end
+                    case (choice())
+                        2: assign y[3] = 1;
+                        default: initial $fatal;
+                    endcase
+                    function automatic bit enabled(); return yes(); endfunction
+                    function automatic bit yes(); return 1'b1; endfunction
+                    function automatic int start(); return 0; endfunction
+                    function automatic bit below_limit(input int x); return x < LIMIT; endfunction
+                    function automatic logic [1:0] choice(); return 2; endfunction
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_constant_functions.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 15u8.into());
+    }
+
+    fn permits_functions_in_escaped_conditional_generate_labels(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic a, output logic y);
+                    if (1) begin : \decode[fast]
+                        function automatic logic invert(input logic x); return ~x; endfunction
+                        assign y = invert(a);
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("escaped_generate_label.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in 0u8..2 {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (value ^ 1).into());
+        }
+    }
+
     fn resolves_each_generate_signal_declarator_independently(sim) {
         @setup {
             let sv = r#"

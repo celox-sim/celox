@@ -14315,6 +14315,16 @@ fn const_expr_from_ref_node_with_env(
                 .or(Some(base))
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+                if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
+                {
+                    let dimensions =
+                        PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+                    return expr_to_const(expr_from_function_subroutine_call(
+                        &call.nodes.0,
+                        syntax_tree,
+                        &dimensions,
+                    )?);
+                }
                 if let Some(ty) =
                     size_system_function_expr_type(primary, syntax_tree, const_env, type_aliases)
                 {
