@@ -19,7 +19,7 @@ wasm-encoder = "0.259"
 [dev-dependencies]
 celox-backend-cranelift = { workspace = true }
 num-bigint = { workspace = true }
-wasmtime = "48"
+wasmtime = "49"
 
 [lints]
 workspace = true
