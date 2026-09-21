@@ -141,9 +141,6 @@ fn acyclic_shared_clock_array_samples_the_previous_input_pair(sim) {
 
 all_backends! {
 fn ff_read_array_uses_previous_index(sim) {
-    // Veryl 0.21.0 misses reads used only in indices/selects during FF
-    // classification. Re-enable its reference run when read tracking is fixed.
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -187,9 +184,8 @@ fn ff_read_array_uses_previous_index(sim) {
 }
 
 fn ff_read_bit_select_uses_previous_index(sim) {
-    // Veryl 0.21.0 misses bit-select index reads during FF classification.
     // The SV frontend rejects this dynamic bit-select in always_ff lowering.
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
         let source = r#"
             module Top (
@@ -228,9 +224,8 @@ fn ff_read_bit_select_uses_previous_index(sim) {
 }
 
 fn ff_read_part_select_uses_previous_index(sim) {
-    // Veryl 0.21.0 misses part-select index reads during FF classification.
     // The SV frontend does not support indexed part-selects yet.
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup {
         let source = r#"
             module Top (

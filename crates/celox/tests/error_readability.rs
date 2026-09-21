@@ -41,10 +41,8 @@ fn test_multiple_driver_error_readability() {
 #[test]
 fn test_multiple_errors_readability() {
     // Both `assign x = ~x & a` and `assign y = ~y & a` create self-loops.
-    // Previously the Veryl analyzer reported both as unassign_variable warnings.
-    // Now warnings pass through and the SIR scheduler detects the loops, but it
-    // uses a fail-fast strategy (returns on the first unauthorized SCC), so only
-    // one loop is reported. See scheduler.rs CombinationalLoop handling.
+    // The Veryl analyzer reports both loop paths alongside the unassigned
+    // variable warnings.
     let code = r#"
         module Top (
             a: input logic,

@@ -106,6 +106,89 @@ module Top {
 }
 
 #[test]
+fn readmemh_write_to_the_bound_is_an_error() {
+    expect_mutable_bound_error(
+        r#"
+#[test(t)]
+module t {
+    #[allow(initial_assign)]
+    var limit: logic<8>[2];
+
+    initial {
+        for _i in 0..limit[0] {
+            $readmemh("unused.hex", limit);
+        }
+        $finish();
+    }
+}
+"#,
+        "t",
+    );
+}
+
+#[test]
+fn hierarchical_readmemh_write_to_the_bound_is_an_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bounds.hex");
+    std::fs::write(&path, "1\n2\n").unwrap();
+    let path = path.to_string_lossy().replace('\\', "\\\\");
+    for bound in ["dut.mem[0]", "size"] {
+        let code = format!(
+            r#"
+module Memory (size: output logic<8>) {{
+    #[allow(unassign_variable)]
+    var mem: logic<8>[2];
+    assign size = mem[0];
+}}
+#[test(t)]
+module t {{
+    var size: logic<8>;
+    inst dut: Memory (size);
+    initial {{
+        for _i in 0..{bound} {{
+            $readmemh("{path}", dut.mem);
+        }}
+        $finish();
+    }}
+}}
+"#
+        );
+        expect_mutable_bound_error(&code, "t");
+    }
+}
+
+#[test]
+fn hierarchical_readmemh_write_to_disjoint_memory_does_not_warn() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.hex");
+    std::fs::write(&path, "1\n2\n").unwrap();
+    let path = path.to_string_lossy().replace('\\', "\\\\");
+    let code = format!(
+        r#"
+module Memory {{
+    #[allow(unassign_variable)]
+    var mem: logic<8>[2];
+    #[allow(unassign_variable)]
+    var bounds: logic<8>[2];
+}}
+#[test(t)]
+module t {{
+    inst dut: Memory;
+    initial {{
+        for _i in 0..dut.bounds[0] {{ $readmemh("{path}", dut.mem); }}
+        $finish();
+    }}
+}}
+"#
+    );
+    let simulator = Simulator::builder(&code, "t").build().unwrap();
+    assert!(!simulator.warnings().iter().any(|warning| matches!(
+        warning,
+        CompilationWarning::Frontend(FrontendDiagnostic::UnknownForBoundEffect { .. })
+    )));
+}
+
+#[test]
 fn effects_in_the_bound_itself_are_errors() {
     expect_mutable_bound_error(
         r#"

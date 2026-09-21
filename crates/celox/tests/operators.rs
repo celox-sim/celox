@@ -465,7 +465,7 @@ module Top (
     }
 
     fn test_signed_comparison_after_as_cast(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (a: input logic<8>, b: input logic<8>, y: output logic) {
 assign y = (a as i8) <: (b as i8);
@@ -487,9 +487,7 @@ assign y = (a as i8) <: (b as i8);
     }
 
     fn test_cast_signed_to_unsigned_affects_comparison(sim) {
-        // Veryl 0.20.2's runtime keeps the source signedness for this cast;
-        // the analyzer and emitted SystemVerilog make the result unsigned.
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (a: input i8, b: input i8, y: output logic) {
 assign y = (a as u8) <: (b as u8);
@@ -1114,7 +1112,7 @@ assign y = r;
     }
 
     fn test_mixed_signed_unsigned_comparison(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @setup { // Mixed signed/unsigned should be treated as unsigned (Clause 11.8.1)
 let code = r#"
 module Top (

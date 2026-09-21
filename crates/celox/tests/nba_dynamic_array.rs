@@ -25,6 +25,7 @@ module Top (
             rs1_rdy[i]  = 1'b0;
             rs2_rdy[i]  = 1'b0;
             rob_idx[i]  = 5'd0;
+            cand[i]     = 9'd0;
         }
         occupied[1] = 1'b1;
         rs1_rdy[0]  = 1'b1;
@@ -51,6 +52,10 @@ module Top (
             expected |= BigUint::from(candidate) << (i * 9);
         }
         assert_eq!(sim.get(o), expected);
+        sim.modify(|io| io.set(bound, 1u8)).unwrap();
+        assert_eq!(sim.get(o), BigUint::from(30u16 << 3));
+        sim.modify(|io| io.set(bound, 0u8)).unwrap();
+        assert_eq!(sim.get(o), BigUint::from(0u8));
     }
 
     fn test_child_dynamic_ff_read_reaches_parent_after_same_edge_enable(sim) {

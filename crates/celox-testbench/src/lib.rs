@@ -219,6 +219,11 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     },
     Break,
     Finish,
+    /// Apply preloaded memory data at this point in the testbench program.
+    WriteMemory {
+        signal: Signal,
+        writes: Vec<celox_design::InitialStateWriteRun>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

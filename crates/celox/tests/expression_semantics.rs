@@ -187,9 +187,8 @@ module Top (
         }
     }
 
-    #[ignore = "Veryl 0.20.2 folds signed numeric casts before Celox receives AIR"]
     fn constant_and_runtime_casts_use_the_same_resize_rule(sim) {
-        @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -245,12 +244,14 @@ module Top (
         ] {
             for prefix in ["c_const", "c_runtime", "f_const", "f_runtime"] {
                 let name = format!("{prefix}_{suffix}");
-                assert_eq!(sim.get(sim.signal(&name)), expected.into(), "{name}");
+                let signal = sim.signal(&name);
+                assert_eq!(sim.get(signal), expected.into(), "{name}");
             }
         }
         for prefix in ["c_const", "c_runtime", "f_const", "f_runtime"] {
             let name = format!("{prefix}_lt");
-            assert_eq!(sim.get(sim.signal(&name)), 1u8.into(), "{name}");
+            let signal = sim.signal(&name);
+            assert_eq!(sim.get(signal), 1u8.into(), "{name}");
         }
     }
 
@@ -426,10 +427,7 @@ module Top (
     }
 
     fn signed_type_cast_keeps_comparison_operands_signed(sim) {
-        // Veryl simulator 0.20.2 loses the signed result of the same-width
-        // `as i8` while lowering this comparison. `~a` itself is not the
-        // failure: comparing it with a signed variable works there.
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -487,9 +485,6 @@ module Top (
     }
 
     fn system_function_results_obey_ternary_width_contexts(sim) {
-        // Veryl 0.20.3 leaves these calls unresolved in its simulator IR, so
-        // the reference simulation cannot be constructed.
-        @omit_veryl;
         @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (

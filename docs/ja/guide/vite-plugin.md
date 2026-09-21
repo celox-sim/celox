@@ -59,6 +59,35 @@ Verylのassertionはソース位置付きでVitestのレポートに現れます
 手書きのTypeScriptテストから `Simulator` または `Simulation` で操作でき、同じimport機構を
 その他のViteベースのツールからも利用できます。
 
+### インスタンス内のメモリへの読み込み
+
+インスタンス内の配列を `$readmemh` の読み込み先にできます。
+多段の階層や、パラメーター付きのメモリにも対応しています。
+
+```veryl
+module Memory {
+    #[allow(unassign_variable)]
+    var mem: logic<8>[256];
+}
+
+#[test(memory_test)]
+module memory_test {
+    inst dut: Memory;
+    initial {
+        $readmemh("program.hex", dut.mem);
+        $assert(dut.mem[0] == 8'h2a);
+        $finish();
+    }
+}
+```
+
+Hex ファイルはシミュレーターのコンパイル時に読み込みます。ルートのテストベンチでは
+各文の実行位置でメモリを書き換えるため、条件分岐、繰り返しの読み込み、クロック進行の
+順序が保たれます。読み込み先はアンパック配列全体です。アドレス指定と X/Z 値は
+ローカルメモリの初期化と同じ規則で解析し、4-state シミュレーションでは X/Z のマスクも
+保持します。相対パスは Veryl ソースファイルの位置から解決し、見つからない場合は
+作業ディレクトリを参照します。
+
 ### カスタムプロジェクトルート
 
 `Veryl.toml` が Vite ルートまたはその親ディレクトリにない場合、パスを明示的に指定します：
