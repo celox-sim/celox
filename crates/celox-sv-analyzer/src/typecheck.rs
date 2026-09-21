@@ -175,6 +175,79 @@ pub fn context_size_const_integral_literal(
     Some(resize_integral_literal(literal, width, signed, extension))
 }
 
+/// Evaluate an integral expression in the common context of a case-generate.
+/// Unlike a cast, an unsigned comparison context prevents sign extension and
+/// propagates its width into arithmetic operands before they are evaluated.
+pub(crate) fn eval_generate_case_operand(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+    width: usize,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    fn evaluate(expr: &ConstExpr, width: usize, signed: bool) -> Option<IntegralLiteral> {
+        if let Some(fill) = unbased_fill_from_const_expr(expr) {
+            let mut literal = integral_fill_literal(fill, width)?;
+            literal.signed = signed;
+            return Some(literal);
+        }
+        let literal = match expr {
+            ConstExpr::Unary { op, expr }
+                if matches!(op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot) =>
+            {
+                eval_integral_unary(*op, evaluate(expr, width, signed)?)
+            }
+            ConstExpr::Binary { left, op, right }
+                if matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                ) =>
+            {
+                eval_four_state_binary_literal(
+                    &evaluate(left, width, signed)?,
+                    *op,
+                    &evaluate(right, width, signed)?,
+                    signed,
+                )?
+            }
+            ConstExpr::Binary { left, op, right }
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) =>
+            {
+                eval_integral_shift(
+                    evaluate(left, width, signed)?,
+                    *op,
+                    integral_literal_from_const_expr(right)?,
+                )
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let then_literal = evaluate(then_expr, width, signed)?;
+                let else_literal = evaluate(else_expr, width, signed)?;
+                match integral_literal_truth(&integral_literal_from_const_expr(condition)?) {
+                    Some(true) => then_literal,
+                    Some(false) => else_literal,
+                    None => merge_unknown_integral_literals(then_literal, else_literal),
+                }
+            }
+            _ => integral_literal_from_const_expr(expr)?,
+        };
+        let extension = signed_extension(&literal, signed && literal.signed);
+        Some(resize_integral_literal(literal, width, signed, extension))
+    }
+    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    evaluate(&expr, width, signed)
+}
+
 pub fn format_integral_literal_binary(literal: &IntegralLiteral) -> String {
     let bits = (0..literal.width)
         .rev()
@@ -615,6 +688,15 @@ fn eval_integral_shift(
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
+        ConstExpr::Function { name, args } => {
+            let value = eval_const_function(name, args, &HashMap::default())?;
+            let (width, signing) = match name.as_str() {
+                "$clog2" => (32, "s"),
+                "$onehot" | "$onehot0" => (1, ""),
+                _ => return None,
+            };
+            parse_integral_literal(&format!("{width}'{signing}d{value}"))
+        }
         ConstExpr::Select { expr, bit } => {
             let literal = integral_literal_from_const_expr(expr)?;
             let bit = integral_literal_from_const_expr(bit)?;

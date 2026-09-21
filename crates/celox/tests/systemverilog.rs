@@ -45,6 +45,8 @@ macro_rules! sv_backends {
 
 #[path = "frontends/systemverilog/always_comb.rs"]
 mod always_comb;
+#[path = "frontends/systemverilog/generate.rs"]
+mod generate;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
 #[path = "frontends/systemverilog/literals.rs"]
