@@ -1,6 +1,86 @@
 use super::*;
 
 sv_backends! {
+    fn counts_only_known_ones_in_generate_system_functions(sim) {
+        @setup {
+            let sv = r#"
+                module Top(output logic [6:0] y);
+                    if ($onehot(2'bx0)) begin initial $fatal; end else assign y[0]=1;
+                    if ($onehot(2'bx1)) assign y[1]=1; else begin initial $fatal; end
+                    if ($onehot(3'bz11)) begin initial $fatal; end else assign y[2]=1;
+                    if ($onehot0(2'bz0)) assign y[3]=1; else begin initial $fatal; end
+                    if ($onehot0(2'bz1)) assign y[4]=1; else begin initial $fatal; end
+                    if ($onehot0(3'bx11)) begin initial $fatal; end else assign y[5]=1;
+                    if ($onehot('1)) assign y[6]=1; else begin initial $fatal; end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_onehot_unknowns.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 127u8.into());
+    }
+
+    fn uses_self_determined_unbased_shift_counts_in_generate_cases(sim) {
+        @setup {
+            let sv = r#"
+                module Top(output logic [3:0] y);
+                    case (8'h1 << '1) 8'h2: assign y[0]=1; default: initial $fatal; endcase
+                    case (8'h4 >> '1) 8'h2: assign y[1]=1; default: initial $fatal; endcase
+                    case (8'sh80 >>> '1) 8'shc0: assign y[2]=1; default: initial $fatal; endcase
+                    case (8'h1 << 'x) 8'bxxxxxxxx: assign y[3]=1; default: initial $fatal; endcase
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_unbased_shift_counts.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 15u8.into());
+    }
+
+    fn freezes_typedef_ranges_before_generate_parameter_shadowing(sim) {
+        @setup {
+            let sv = r#"
+                module Child #(parameter P=8)(input logic [7:0] a, output logic [7:0] y);
+                    typedef logic [P-1:0] T;
+                    if (1) begin : g
+                        localparam P=4;
+                        T x;
+                        assign x=a;
+                        assign y=x;
+                    end
+                endmodule
+                module Top(input logic [7:0] a, output logic [15:0] y);
+                    Child #(.P(8)) full(.a(a), .y(y[7:0]));
+                    Child #(.P(6)) narrow(.a(a), .y(y[15:8]));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_typedef_definition_scope.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u8, 16, 63, 128, 255] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), ((value as u16) | (((value & 63) as u16) << 8)).into());
+        }
+    }
+
+    fn preserves_unsigned_rhs_in_compound_genvar_updates(sim) {
+        @setup {
+            let sv = r#"
+                module Top(output logic [1:0] y);
+                    function automatic logic [31:0] step(); return 2; endfunction
+                    for (genvar i=-1; i!=1; i%=step()) begin : remainder
+                        assign y[0]=1;
+                    end
+                    for (genvar i=-1; i!=0; i/=step()) begin : quotient
+                        if (i==2147483647) assign y[1]=1;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_unsigned_compound_updates.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 3u8.into());
+    }
+
     fn coerces_genvar_values_to_signed_32_bits(sim) {
         @setup {
             let sv = r#"

@@ -586,10 +586,8 @@ impl<'a> Elaborator<'a, '_> {
                             value,
                             &generate.nodes.1.nodes.1.4,
                             self.tree,
-                            |expr| {
-                                let expr = self.expression(expr, &iteration)?;
-                                eval_ast_const_expr(&expr, &iteration.env)
-                            },
+                            &iteration.env,
+                            |expr| self.expression(expr, &iteration),
                         )
                         .ok_or_else(|| {
                             AnalyzerError::Unsupported("genvar update operator".to_string())

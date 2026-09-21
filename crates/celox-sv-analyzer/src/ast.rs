@@ -3552,6 +3552,35 @@ fn type_aliases_from_module_node_with_env(
             _ => {}
         }
     }
+    // Alias dimensions belong to their definition scope, not the scope that
+    // later declares a signal of that type. Rebuilt for each specialization.
+    for ty in aliases.values_mut() {
+        for range in &mut ty.packed_ranges {
+            if let Some(value) = eval_ast_const_expr(&range.left, const_env) {
+                range.left = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+            }
+            if let Some(value) = eval_ast_const_expr(&range.right, const_env) {
+                range.right = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+            }
+        }
+        for range in &mut ty.unpacked_ranges {
+            if let Some(value) = eval_ast_const_expr(&range.left, const_env) {
+                range.left = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+            }
+            if let Some(value) = eval_ast_const_expr(&range.right, const_env) {
+                range.right = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+            }
+            if let Some(value) = range
+                .size
+                .as_ref()
+                .and_then(|size| eval_ast_const_expr(size, const_env))
+            {
+                range.size = Some(ConstExpr::Literal(format_typed_parameter_literal(
+                    value, 128, true,
+                )));
+            }
+        }
+    }
     Ok(aliases)
 }
 
@@ -7129,7 +7158,8 @@ fn next_genvar_value(
     value: i128,
     iteration: &sv_parser::GenvarIteration,
     syntax_tree: &SyntaxTree,
-    evaluate: impl FnOnce(&sv_parser::ConstantExpression) -> Option<i128>,
+    const_env: &HashMap<String, i128>,
+    evaluate: impl FnOnce(&sv_parser::ConstantExpression) -> Option<ConstExpr>,
 ) -> Option<i128> {
     match iteration {
         sv_parser::GenvarIteration::Prefix(iteration) => {
@@ -7151,21 +7181,31 @@ fn next_genvar_value(
         sv_parser::GenvarIteration::Assignment(iteration) => {
             let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)?;
             let rhs = evaluate(&iteration.nodes.2.nodes.0)?;
-            match op {
-                "=" => Some(rhs),
-                "+=" => value.checked_add(rhs),
-                "-=" => value.checked_sub(rhs),
-                "*=" => value.checked_mul(rhs),
-                "/=" => (rhs != 0).then(|| value / rhs),
-                "%=" => (rhs != 0).then(|| value % rhs),
-                "<<=" => u32::try_from(rhs)
-                    .ok()
-                    .and_then(|rhs| value.checked_shl(rhs)),
-                ">>=" => u32::try_from(rhs)
-                    .ok()
-                    .and_then(|rhs| value.checked_shr(rhs)),
-                _ => None,
+            if op == "=" {
+                return eval_ast_const_expr(&rhs, const_env);
             }
+            let op = match op {
+                "+=" => BinaryOp::Add,
+                "-=" => BinaryOp::Sub,
+                "*=" => BinaryOp::Mul,
+                "/=" => BinaryOp::Div,
+                "%=" => BinaryOp::Mod,
+                "<<=" => BinaryOp::Shl,
+                ">>=" => BinaryOp::Shr,
+                _ => return None,
+            };
+            // A compound assignment performs the typed binary operation before
+            // assignment conversion. Do not erase the RHS width or signedness.
+            eval_ast_const_expr(
+                &ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Literal(format_typed_parameter_literal(
+                        value, 32, true,
+                    ))),
+                    op,
+                    right: Box::new(rhs),
+                },
+                const_env,
+            )
         }
     }
 }

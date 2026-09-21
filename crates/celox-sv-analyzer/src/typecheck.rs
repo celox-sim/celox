@@ -223,7 +223,7 @@ pub(crate) fn eval_generate_case_operand(
                 eval_integral_shift(
                     evaluate(left, width, signed)?,
                     *op,
-                    integral_literal_from_const_expr(right)?,
+                    self_determined_integral_literal(right)?,
                 )
             }
             ConstExpr::Mux {
@@ -685,6 +685,14 @@ fn eval_integral_shift(
     left
 }
 
+fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral> {
+    if let Some(fill) = unbased_fill_from_const_expr(expr) {
+        integral_fill_literal(fill, 1)
+    } else {
+        integral_literal_from_const_expr(expr)
+    }
+}
+
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
@@ -721,14 +729,11 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
         ConstExpr::Binary { left, op, right }
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) =>
         {
-            let operand = |expr: &ConstExpr| {
-                if let Some(fill) = unbased_fill_from_const_expr(expr) {
-                    integral_fill_literal(fill, 1)
-                } else {
-                    integral_literal_from_const_expr(expr)
-                }
-            };
-            Some(eval_integral_shift(operand(left)?, *op, operand(right)?))
+            Some(eval_integral_shift(
+                self_determined_integral_literal(left)?,
+                *op,
+                self_determined_integral_literal(right)?,
+            ))
         }
         ConstExpr::Unary { op, expr } => {
             let operand = if matches!(op, UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor)
@@ -983,7 +988,7 @@ fn eval_const_function(
     match name {
         "$clog2" => clog2(eval_const_expr(arg, constants)?),
         "$onehot" | "$onehot0" => {
-            let value = const_expr_bit_pattern(arg, constants)?;
+            let value = const_expr_known_one_bits(arg, constants)?;
             let ones = value.iter_u64_digits().map(u64::count_ones).sum::<u32>();
             Some(match name {
                 "$onehot" => (ones == 1) as i128,
@@ -995,9 +1000,14 @@ fn eval_const_function(
     }
 }
 
-fn const_expr_bit_pattern(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<BigUint> {
-    if let Some(literal) = integral_literal_from_const_expr(expr) {
-        return (literal.mask == BigUint::default()).then_some(literal.value);
+fn const_expr_known_one_bits(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+) -> Option<BigUint> {
+    if let Some(literal) = self_determined_integral_literal(expr) {
+        // IEEE 1800-2023 20.9 counts only bits equal to 1; X/Z do not
+        // contribute, and onehot/onehot0 always return a two-state bit.
+        return Some(&literal.value ^ (&literal.value & &literal.mask));
     }
     let value = eval_const_expr(expr, constants)?;
     (value >= 0).then(|| BigUint::from(value as u128))
