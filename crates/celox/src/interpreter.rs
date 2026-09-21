@@ -1075,9 +1075,20 @@ fn alu_binary(
                 }
             }
         }
-        BinaryOp::Eq
-        | BinaryOp::Ne
-        | BinaryOp::LtU
+        BinaryOp::Eq | BinaryOp::Ne => {
+            let common = lhs_width.max(rhs_width);
+            let unknown = (&lhs.mask | &rhs.mask) & width_mask(common);
+            let known = width_mask(common) ^ &unknown;
+            let mismatch = (&lhs.payload ^ &rhs.payload) & known;
+            if !mismatch.is_zero() {
+                SIRValue::new(u8::from(*op == BinaryOp::Ne))
+            } else if !unknown.is_zero() {
+                all_x(dst_width)
+            } else {
+                SIRValue::new(u8::from(*op == BinaryOp::Eq))
+            }
+        }
+        BinaryOp::LtU
         | BinaryOp::LtS
         | BinaryOp::LeU
         | BinaryOp::LeS
@@ -1087,9 +1098,7 @@ fn alu_binary(
         | BinaryOp::GeS => {
             // SEMANTICS-CHECK: comparisons yield X when either operand holds
             // an unknown bit; otherwise the comparison runs on the operands'
-            // declared values (signed ops interpret two's complement). `Eq`
-            // and `Ne` sign-extend a signed left-hand operand and zero-extend
-            // the right-hand one, mirroring the compiled promotion rules.
+            // declared values (signed ops interpret two's complement).
             if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
                 all_x(dst_width)
             } else {

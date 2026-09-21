@@ -1274,10 +1274,7 @@ fn test_four_state_mod_with_x(sim) {
 // P0: Comparison operators with X (NE, GT, GE, LE + signed variants)
 // ==========================================================================
 // Known unequal bits decide equality even when other bits are X or Z.
-// Celox currently propagates X unconditionally for EQ/NE; retain the correct
-// expectation as a regression instead of attributing it to the Veryl simulator.
 fn test_four_state_equality_known_mismatch_with_unknown_bits(sim) {
-    @ignore_on(native, cranelift, wasm, interp, sv);
     @build SimulatorBuilder::new(r#"
         module Top (
             a: input logic<8>, b: input logic<8>,

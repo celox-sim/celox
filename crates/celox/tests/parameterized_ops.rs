@@ -648,10 +648,13 @@ fn comb_arith_4s(
 }
 
 // ===================================================================
-// 4-state: Comparison — comb  (any X → result X)
+// 4-state: Comparison — comb (known mismatch dominates X/Z for equality)
 // ===================================================================
 
-#[test_case("==", "logic<8>", "logic", 42, 0x00, 0, 0x01, 1, 1 ; "4s eq X input")]
+#[test_case("==", "logic<8>", "logic", 42, 0x00, 0, 0x01, 0, 0 ; "4s eq known mismatch with Z")]
+#[test_case("!=", "logic<8>", "logic", 42, 0x00, 1, 0x01, 1, 0 ; "4s ne known mismatch with X")]
+#[test_case("==", "logic<8>", "logic", 42, 0x00, 43, 0x01, 1, 1 ; "4s eq indeterminate with X")]
+#[test_case("!=", "logic<8>", "logic", 42, 0x00, 43, 0x01, 1, 1 ; "4s ne indeterminate with X")]
 #[test_case("<:", "logic<8>", "logic", 10, 0x00, 0, 0x01, 1, 1 ; "4s lt X input")]
 #[test_case("==", "logic<8>", "logic", 42, 0x00, 42, 0x00, 1, 0 ; "4s eq defined")]
 fn comb_compare_4s(
