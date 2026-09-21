@@ -548,6 +548,9 @@ impl<'a> Elaborator<'a, '_> {
                         "loop-generate initializer",
                     )?;
                     loop {
+                        // Assignment to a genvar truncates and sign-extends to its
+                        // signed 32-bit type, including after every loop update.
+                        value = i128::from(value as i32);
                         let mut iteration = scope.clone();
                         iteration.env.insert(name.clone(), value);
                         insert_parameter_type_markers(
@@ -1142,6 +1145,30 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn coerces_genvar_assignments_before_naming_or_updating_iterations() {
+        for (scheme, names) in [
+            ("genvar i=32'hffffffff; i!=0; i/=2", vec!["g[-1].tmp"]),
+            (
+                "genvar i=2147483647; i!=-2147483647; i++",
+                vec!["g[-2147483648].tmp", "g[2147483647].tmp"],
+            ),
+            ("genvar i=1; i!=0; i=64'h100000000", vec!["g[1].tmp"]),
+            ("genvar i=1073741824; i!=0; i*=4", vec!["g[1073741824].tmp"]),
+        ] {
+            let source = analyze(&format!(
+                "module Top(); for ({scheme}) begin : g logic tmp; end endmodule"
+            ))
+            .unwrap();
+            let actual: Vec<_> = source.modules()[0]
+                .signals()
+                .iter()
+                .map(|signal| signal.name())
+                .collect();
+            assert_eq!(actual, names, "{scheme}");
+        }
     }
 
     #[test]

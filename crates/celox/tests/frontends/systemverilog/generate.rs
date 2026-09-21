@@ -1,6 +1,64 @@
 use super::*;
 
 sv_backends! {
+    fn coerces_genvar_values_to_signed_32_bits(sim) {
+        @setup {
+            let sv = r#"
+                module Top(output logic [2:0] y);
+                    for (genvar i=32'hffffffff; i!=0; i/=2) begin : negative
+                        if (i == -1) assign y[0]=1;
+                        else begin initial $fatal; end
+                    end
+                    for (genvar i=2147483647; i!=-2147483647; i++) begin : wrapping
+                        if (i == 2147483647) assign y[1]=1;
+                        else if (i == -2147483648) assign y[2]=1;
+                        else begin initial $fatal; end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_genvar_coercion.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 7u8.into());
+    }
+
+    fn restricts_generate_size_queries_to_visible_functions(sim) {
+        @setup {
+            let sv = r#"
+                module Top(output logic [3:0] y);
+                    function automatic bit f(); return 1; endfunction
+                    if (0) begin : inactive
+                        function automatic logic [7:0] f(); return 0; endfunction
+                    end
+                    for (genvar i=0; i<0; i++) begin : empty
+                        function automatic logic [31:0] f(); return 0; endfunction
+                    end
+                    case ($bits(f()))
+                        1: assign y[0]=1;
+                        default: initial $fatal;
+                    endcase
+                    if (1) begin : active
+                        if ($bits(f()) == 12) assign y[1]=1;
+                        else begin initial $fatal; end
+                        if ($size(f()) == 3) assign y[2]=1;
+                        else begin initial $fatal; end
+                        if ($bits(h()) == 4) assign y[3]=1;
+                        else begin initial $fatal; end
+                        function automatic logic [2:0][3:0] f(); return 0; endfunction
+                        function automatic logic [3:0] h(); return 0; endfunction
+                    end
+                    if (1) begin : sibling
+                        function automatic logic [15:0] f(); return 0; endfunction
+                    end
+                    function automatic bit h(); return 1; endfunction
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_visible_function_metadata.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 15u8.into());
+    }
+
     fn predeclares_generate_signals_and_functions(sim) {
         @setup {
             let sv = r#"

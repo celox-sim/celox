@@ -1324,33 +1324,65 @@ fn containing_function_return_types(
         if target_start < module_start || target_end > module_end {
             continue;
         }
-        let module_span = (module_start, module_end);
+        // Only declarations in the target's lexical ancestors are visible.
+        // A syntax-wide scan would let inactive or sibling generate functions
+        // replace a module function before generate elaboration has even run.
+        let generate_scopes: Vec<_> = module
+            .clone()
+            .into_iter()
+            .filter_map(|node| {
+                let RefNode::GenerateBlock(block) = node else {
+                    return None;
+                };
+                ref_node_source_span(RefNode::GenerateBlock(block))
+            })
+            .collect();
+        let contains = |(start, end): (usize, usize), (inner_start, inner_end): (usize, usize)| {
+            start <= inner_start && inner_end <= end
+        };
+        let target_span = (target_start, target_end);
+        let scope_span = generate_scopes
+            .iter()
+            .copied()
+            .filter(|span| contains(*span, target_span))
+            .min_by_key(|(start, end)| end - start)
+            .unwrap_or((module_start, module_end));
         if let Some(active) = ACTIVE_FUNCTION_RETURN_METADATA
-            .with(|metadata| metadata.borrow().get(&module_span).cloned())
+            .with(|metadata| metadata.borrow().get(&scope_span).cloned())
         {
             return active;
         }
         ACTIVE_FUNCTION_RETURN_METADATA.with(|metadata| {
-            metadata
-                .borrow_mut()
-                .insert(module_span, HashMap::default());
+            metadata.borrow_mut().insert(scope_span, HashMap::default());
         });
-        let _guard = ActiveFunctionReturnMetadataGuard { module_span };
-        let declarations = module
+        let _guard = ActiveFunctionReturnMetadataGuard { scope_span };
+        let mut declarations = module
             .into_iter()
             .filter_map(|child| {
                 let RefNode::FunctionDeclaration(declaration) = child else {
                     return None;
                 };
-                Some(declaration)
+                let declaration_span =
+                    ref_node_source_span(RefNode::FunctionDeclaration(declaration))?;
+                let ancestors: Vec<_> = generate_scopes
+                    .iter()
+                    .filter(|span| contains(**span, declaration_span))
+                    .collect();
+                if ancestors.iter().any(|span| !contains(**span, target_span)) {
+                    return None;
+                }
+                Some((ancestors.len(), declaration))
             })
             .collect::<Vec<_>>();
+        // Populate outer declarations first so inner declarations shadow them
+        // regardless of their relative order in the source text.
+        declarations.sort_by_key(|(depth, _)| *depth);
         let mut result = HashMap::default();
         // A return range may depend on a function declared later in the
         // module. Revisit declarations after publishing each partial pass;
         // recursive discovery reads that partial map instead of recursing.
         for _ in 0..=declarations.len() {
-            for declaration in &declarations {
+            for (_, declaration) in &declarations {
                 if let Some((name, metadata)) = function_declaration_return_metadata(
                     declaration,
                     syntax_tree,
@@ -1361,7 +1393,7 @@ fn containing_function_return_types(
                 }
             }
             ACTIVE_FUNCTION_RETURN_METADATA.with(|active| {
-                active.borrow_mut().insert(module_span, result.clone());
+                active.borrow_mut().insert(scope_span, result.clone());
             });
         }
         return result;
@@ -1404,13 +1436,13 @@ impl Drop for ActivePackedDimensionsGuard {
 }
 
 struct ActiveFunctionReturnMetadataGuard {
-    module_span: (usize, usize),
+    scope_span: (usize, usize),
 }
 
 impl Drop for ActiveFunctionReturnMetadataGuard {
     fn drop(&mut self) {
         ACTIVE_FUNCTION_RETURN_METADATA.with(|metadata| {
-            metadata.borrow_mut().remove(&self.module_span);
+            metadata.borrow_mut().remove(&self.scope_span);
         });
     }
 }
