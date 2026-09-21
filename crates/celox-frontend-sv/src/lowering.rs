@@ -1879,9 +1879,6 @@ fn output_lvalue_access(
             };
             let id = *name_to_id.get(name)?;
             let variable = variables.get(&id)?;
-            if variable.array_dims.is_empty() {
-                return None;
-            }
             let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
             let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;

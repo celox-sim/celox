@@ -447,7 +447,7 @@ fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
         (
             "LinearSec.sv",
             include_str!("../../../testdata/verilator/LinearSec.sv"),
-            "local data declaration inside loop-generate",
+            "combinational assignment target `codeword_corrected`",
         ),
     ] {
         let error = Simulator::from_sv_sources(vec![(sv, Path::new(name))], "Top")

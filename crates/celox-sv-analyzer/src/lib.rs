@@ -3884,25 +3884,25 @@ mod tests {
 
     #[test]
     fn rejects_unlowered_constructs_in_veryl_emitted_sources() {
+        let error = analyze_source(
+            include_str!("../testdata/verilator/Fifo.sv"),
+            Path::new("Fifo.sv"),
+        )
+        .expect_err("unlowered constructs must not be silently ignored");
+        assert!(matches!(error, AnalyzerError::Unsupported(_)));
+    }
+
+    #[test]
+    fn analyzes_generate_constructs_in_veryl_emitted_sources() {
         for (name, source) in [
             ("Top.sv", include_str!("../testdata/verilator/Top.sv")),
-            ("Fifo.sv", include_str!("../testdata/verilator/Fifo.sv")),
+            (
+                "LinearSec.sv",
+                include_str!("../testdata/verilator/LinearSec.sv"),
+            ),
         ] {
-            let error = analyze_source(source, Path::new(name))
-                .expect_err("unlowered constructs must not be silently ignored");
-            assert!(matches!(error, AnalyzerError::Unsupported(_)));
+            analyze_source(source, Path::new(name)).unwrap();
         }
-
-        let error = analyze_source(
-            include_str!("../testdata/verilator/LinearSec.sv"),
-            Path::new("LinearSec.sv"),
-        )
-        .expect_err("loop-local declarations must not be silently ignored");
-        assert!(matches!(
-            error,
-            AnalyzerError::Unsupported(detail)
-                if detail == "local data declaration inside loop-generate"
-        ));
     }
 
     #[test]
