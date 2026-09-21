@@ -108,9 +108,10 @@ fn test_for_loop_unroll_break_in_always_ff(sim) {
     assert_eq!(sim.get(o3), 0u8.into());
 }
 
-// The std::delay module pattern: `'{0}` reset combined with a `for` loop.
-#[ignore = "blocked by upstream Veryl IR: UnsupportedByIr at conv/utils.rs:231"]
-fn test_for_loop_unroll_with_brace_zero_reset(sim) {
+// Default array reset combined with a shift-register `for` loop.
+fn test_for_loop_unroll_with_default_zero_reset(sim) {
+    // The SV frontend does not yet lower array assignment patterns in always_ff.
+    @ignore_on(sv);
     @setup { let code = r#"
         module Delay #(param DELAY: u32 = 3, param WIDTH: u32 = 8) (
             i_clk: input clock,
@@ -122,7 +123,7 @@ fn test_for_loop_unroll_with_brace_zero_reset(sim) {
             assign o_d = delay[DELAY - 1];
             always_ff (i_clk, i_rst) {
                 if_reset {
-                    delay = '{0};
+                    delay = '{default: 0};
                 } else {
                     delay[0] = i_d;
                     for i in 1..DELAY {
@@ -133,6 +134,26 @@ fn test_for_loop_unroll_with_brace_zero_reset(sim) {
         }
     "#; }
     @build Simulator::builder(code, "Delay");
+    let clk = sim.event("i_clk");
+    let rst = sim.signal("i_rst");
+    let d = sim.signal("i_d");
+    let q = sim.signal("o_d");
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(d, 0xABu8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    for _ in 0..2 {
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 0u8.into());
+    }
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0xABu8.into());
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
 }
 
 }

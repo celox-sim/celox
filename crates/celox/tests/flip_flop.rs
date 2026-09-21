@@ -180,6 +180,8 @@ fn test_ff_runtime_display_and_assert_continue(sim) {
 }
 
 fn test_ff_assert_message_output_argument_is_eager(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1381,6 +1383,8 @@ fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
 }
 
 fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1414,6 +1418,8 @@ fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
 }
 
 fn test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1492,6 +1498,8 @@ fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
 }
 
 fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1519,6 +1527,8 @@ fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
 }
 
 fn test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1553,6 +1563,8 @@ fn test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment(sim)
 }
 
 fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1580,6 +1592,8 @@ fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
 }
 
 fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
@@ -1605,6 +1619,8 @@ fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
 }
 
 fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
@@ -1635,6 +1651,8 @@ fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) 
 }
 
 fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
@@ -1665,8 +1683,9 @@ fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
 }
 
 fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(sim) {
-    // Veryl 0.20.3 copies the output to the wrong dynamically selected bit.
-    @ignore_on(veryl, sv);
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1702,6 +1721,8 @@ fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(
 }
 
 fn test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1791,6 +1812,8 @@ fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
 }
 
 fn test_ff_dynamic_nonlocal_store_follows_pending_whole_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -1882,8 +1905,9 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
 }
 
 fn test_ff_nonlocal_source_ternary_preserves_unknown_merge(sim) {
-    // Veryl 0.20.3 selects one arm instead of merging an X/Z condition.
-    @ignore_on(veryl, sv);
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2035,8 +2059,9 @@ fn test_ff_retained_dynamic_copyout_does_not_repeat_nonlocal_body_write(sim) {
 }
 
 fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
-    // Veryl 0.20.3 resolves the output actual with the pre-call index.
-    @ignore_on(veryl, sv);
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2236,8 +2261,9 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
 }
 
 fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
-    // Veryl 0.20.3 exposes the same-edge write to a later FF read.
-    @ignore_on(veryl, sv);
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2509,8 +2535,9 @@ fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
 }
 
 fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
-    // Veryl 0.20.3 evaluates the $bits/$size operand and applies its effects.
-    @ignore_on(veryl, sv);
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2554,6 +2581,8 @@ fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
 }
 
 fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -3576,6 +3605,8 @@ fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
 }
 
 fn test_ff_pure_input_is_snapshotted_before_later_effectful_input(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, effect: output logic<8>, q: output logic<8>) {
@@ -3741,6 +3772,8 @@ fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
 }
 
 fn test_ff_effectful_array_item_output_is_not_a_read_alias(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -4691,7 +4724,7 @@ fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
 }
 
 fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -4717,10 +4750,19 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
         io.set(count, 4u8);
     })
     .unwrap();
-    assert_eq!(
-        sim.tick(clk).unwrap_err().to_string(),
-        "Non-progressing for loop in always_ff (loop variable `i`): i"
-    );
+    let error = sim.tick(clk).unwrap_err();
+    // Only the Veryl reference adapter lacks Celox's detailed loop diagnostic.
+    let expected = if (&sim as &dyn std::any::Any)
+        .is::<test_utils::veryl_sim::VerylSimAdapter>()
+    {
+        celox::RuntimeErrorCode::DetectedTrueLoop
+    } else {
+        celox::RuntimeErrorCode::Runtime {
+            message: "Non-progressing for loop in always_ff (loop variable `i`)".into(),
+            signals: vec!["i".into()],
+        }
+    };
+    assert_eq!(error, expected);
 }
 
 fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
@@ -4746,7 +4788,7 @@ fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
 }
 
 fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -4766,10 +4808,19 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
     let count = sim.signal("count");
 
     sim.modify(|io| io.set(count, 0u8)).unwrap();
-    assert_eq!(
-        sim.tick(clk).unwrap_err().to_string(),
-        "Non-progressing for loop in always_ff (loop variable `i`): i"
-    );
+    let error = sim.tick(clk).unwrap_err();
+    // Only the Veryl reference adapter lacks Celox's detailed loop diagnostic.
+    let expected = if (&sim as &dyn std::any::Any)
+        .is::<test_utils::veryl_sim::VerylSimAdapter>()
+    {
+        celox::RuntimeErrorCode::DetectedTrueLoop
+    } else {
+        celox::RuntimeErrorCode::Runtime {
+            message: "Non-progressing for loop in always_ff (loop variable `i`)".into(),
+            signals: vec!["i".into()],
+        }
+    };
+    assert_eq!(error, expected);
 }
 
 fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
@@ -5489,6 +5540,8 @@ fn test_ff_function_call_expression(sim) {
 }
 
 fn test_ff_function_call_statement_with_output_argument(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
@@ -5517,6 +5570,8 @@ fn test_ff_function_call_statement_with_output_argument(sim) {
 }
 
 fn test_ff_function_call_statement_with_output_argument_and_return_value(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>, out_q1: output logic<8>, out_q2: output logic<8>) {
@@ -5547,6 +5602,8 @@ fn test_ff_function_call_statement_with_output_argument_and_return_value(sim) {
 }
 
 fn test_ff_function_call_expression_with_output_argument_and_return_value(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>, out_q1: output logic<8>, out_q2: output logic<8>) {
@@ -5689,6 +5746,8 @@ fn test_ff_function_call_indexed_argument_access(sim) {
 }
 
 fn test_ff_function_call_nested_output_statement_in_function_body(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<8>) {
@@ -6069,6 +6128,8 @@ fn test_ff_function_call_array_literal_view_dominates_conditional_access(sim) {
 }
 
 fn test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6124,6 +6185,8 @@ fn test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm(sim) {
 }
 
 fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6201,6 +6264,8 @@ fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim)
 }
 
 fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6242,6 +6307,8 @@ fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
 }
 
 fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6281,6 +6348,8 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) 
 }
 
 fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6363,6 +6432,8 @@ fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
 }
 
 fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6409,6 +6480,8 @@ fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
 }
 
 fn test_ff_function_call_effectful_array_items_are_eager_before_conditional_access(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6468,6 +6541,8 @@ fn test_ff_function_call_effectful_array_items_are_eager_before_conditional_acce
 }
 
 fn test_ff_function_call_carries_branch_local_static_array_item_cache(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6515,6 +6590,8 @@ fn test_ff_function_call_carries_branch_local_static_array_item_cache(sim) {
 }
 
 fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6565,6 +6642,8 @@ fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
 }
 
 fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6617,6 +6696,8 @@ fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
 }
 
 fn test_ff_function_call_merges_nested_array_state_at_cache_completion(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6673,6 +6754,8 @@ fn test_ff_function_call_merges_nested_array_state_at_cache_completion(sim) {
 }
 
 fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6727,6 +6810,8 @@ fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(si
 }
 
 fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6784,6 +6869,8 @@ fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
 }
 
 fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6841,6 +6928,8 @@ fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
 }
 
 fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -6950,6 +7039,8 @@ fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
 }
 
 fn test_ff_function_call_merges_outer_array_view_across_nested_short_circuit(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -7045,7 +7136,9 @@ fn test_ff_function_call_forwards_array_literal_view_to_nested_call(sim) {
 }
 
 fn test_ff_function_call_keeps_array_view_active_for_output_index(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7131,6 +7224,8 @@ fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(s
 }
 
 fn test_ff_function_call_bits_and_size_evaluate_effectful_array_argument(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -7177,6 +7272,8 @@ fn test_ff_function_call_bits_and_size_evaluate_effectful_array_argument(sim) {
 }
 
 fn test_ff_function_call_nested_bits_evaluates_effectful_array_argument(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @setup { let code = r#"
         module Top (
@@ -7216,7 +7313,9 @@ fn test_ff_function_call_nested_bits_evaluates_effectful_array_argument(sim) {
 }
 
 fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7253,7 +7352,9 @@ fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
 }
 
 fn test_ff_function_call_snapshots_pure_array_items_before_later_effect(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (clk: input clock, q: output logic<8>, changing: output logic<8>) {
             function update (

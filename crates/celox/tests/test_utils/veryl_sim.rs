@@ -74,15 +74,11 @@ impl VerylIOContext<'_> {
 fn t_to_value<T: Copy>(val: T) -> Value {
     let size = std::mem::size_of::<T>();
     let width = size * 8;
-    let mut payload = 0u64;
+    let mut bytes = vec![0u8; size];
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            &val as *const T as *const u8,
-            &mut payload as *mut u64 as *mut u8,
-            size.min(8),
-        );
+        std::ptr::copy_nonoverlapping(&val as *const T as *const u8, bytes.as_mut_ptr(), size);
     }
-    Value::new(payload, width, false)
+    Value::new_biguint(BigUint::from_bytes_le(&bytes), width, false)
 }
 
 fn value_to_biguint(v: Value) -> BigUint {
@@ -329,6 +325,14 @@ impl VerylSimAdapter {
 // Builder
 // ---------------------------------------------------------------------------
 
+fn check_analyzer_errors(phase: &str, errors: Vec<veryl_analyzer::AnalyzerError>) {
+    let errors: Vec<_> = errors
+        .into_iter()
+        .filter(veryl_analyzer::AnalyzerError::is_error)
+        .collect();
+    assert!(errors.is_empty(), "Veryl {phase} errors: {errors:?}");
+}
+
 pub fn build_veryl_adapter(
     sources: &[(&str, &Path)],
     top: &str,
@@ -345,18 +349,25 @@ pub fn build_veryl_adapter(
     let mut parsers = Vec::new();
     for (code, path) in sources {
         let parsed = Parser::parse(code, path).unwrap();
-        analyzer.analyze_pass1("prj", &parsed.veryl);
+        check_analyzer_errors(
+            "analyze_pass1",
+            analyzer.analyze_pass1("prj", &parsed.veryl),
+        );
         parsers.push(parsed);
     }
 
-    Analyzer::analyze_post_pass1();
+    check_analyzer_errors("analyze_post_pass1", Analyzer::analyze_post_pass1());
 
     let mut context = Context::default();
     let mut ir = air::Ir::default();
     for parsed in &parsers {
-        analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
+        check_analyzer_errors(
+            "analyze_pass2",
+            analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir)),
+        );
     }
-    Analyzer::analyze_post_pass2(&ir);
+    check_analyzer_errors("analyze_pass2 context", context.drain_errors());
+    check_analyzer_errors("analyze_post_pass2", Analyzer::analyze_post_pass2(&ir));
 
     let top_id = veryl_parser::resource_table::insert_str(top);
     let config = Config {
