@@ -283,6 +283,26 @@ impl<'a> Elaborator<'a, '_> {
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
+    fn condition(
+        &self,
+        expr: &sv_parser::ConstantExpression,
+        scope: &Scope,
+        detail: &str,
+    ) -> Result<bool, AnalyzerError> {
+        let types = parameter_types_from_const_env(&scope.env)
+            .into_iter()
+            .map(|(name, ty)| (name, (ty.width, ty.signed)))
+            .collect();
+        self.expression(expr, scope)
+            .and_then(|expr| {
+                typecheck::eval_const_integral_literal_with_types(&expr.into(), &scope.env, &types)
+            })
+            // Unknown truth takes the false branch; a known one bit still makes
+            // a vector true even when other bits are X/Z (IEEE 1800-2023 12.4).
+            .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
+            .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
+    }
+
     fn generate_item(
         &mut self,
         item: &'a sv_parser::GenerateItem,
@@ -309,12 +329,12 @@ impl<'a> Elaborator<'a, '_> {
                     *ordinal += 1;
                     match &**generate {
                         sv_parser::ConditionalGenerateConstruct::If(generate) => {
-                            let value = self.value(
+                            let value = self.condition(
                                 &generate.nodes.1.nodes.1,
                                 scope,
                                 "unknown conditional-generate condition",
                             )?;
-                            let selected = if value != 0 {
+                            let selected = if value {
                                 Some(&generate.nodes.2)
                             } else {
                                 generate.nodes.3.as_ref().map(|(_, b)| b)
@@ -465,12 +485,11 @@ impl<'a> Elaborator<'a, '_> {
                         iteration.names.remove(&name);
                         iteration.shadowed.insert(name.clone());
                         iteration.literals.remove(&name);
-                        if self.value(
+                        if !self.condition(
                             &generate.nodes.1.nodes.1.2.nodes.0,
                             &iteration,
                             "loop-generate condition",
-                        )? == 0
-                        {
+                        )? {
                             break;
                         }
                         self.remaining = self.remaining.checked_sub(1).ok_or_else(|| {
@@ -520,12 +539,102 @@ impl<'a> Elaborator<'a, '_> {
         Ok(())
     }
 
-    fn localparams(
+    fn constants_and_signal_types(
         &self,
         children: &[&sv_parser::GenerateItem],
         scope: &mut Scope,
         declared: &mut HashSet<String>,
     ) -> Result<(), AnalyzerError> {
+        let mut signal_declarations = Vec::new();
+        for item in children {
+            let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
+                continue;
+            };
+            let is_signal = match &**item {
+                sv_parser::ModuleOrGenerateItem::Module(module) => identifier_text(
+                    RefNode::ModuleIdentifier(&module.nodes.1.nodes.0), self.tree,
+                ).is_some_and(|name| self.aliases.contains_key(&name)),
+                sv_parser::ModuleOrGenerateItem::ModuleItem(common) => {
+                    if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = &common.nodes.1
+                        && let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) = &**declaration
+                    {
+                        matches!(&**declaration,
+                            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(_)
+                            | sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(_))
+                    } else { false }
+                }
+                _ => false,
+            };
+            if !is_signal {
+                continue;
+            }
+            let node = RefNode::ModuleOrGenerateItem(item);
+            let names: Vec<_> = node
+                .clone()
+                .into_iter()
+                .filter_map(|node| match node {
+                    RefNode::VariableDeclAssignment(
+                        sv_parser::VariableDeclAssignment::Variable(assignment),
+                    ) => {
+                        identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), self.tree)
+                    }
+                    RefNode::NetDeclAssignment(assignment) => {
+                        identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), self.tree)
+                    }
+                    RefNode::HierarchicalInstance(instance) => identifier_text(
+                        RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
+                        self.tree,
+                    ),
+                    _ => None,
+                })
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+            for name in &names {
+                if !declared.insert(name.clone()) {
+                    return Err(AnalyzerError::Unsupported(format!(
+                        "duplicate generate-local declaration `{name}`"
+                    )));
+                }
+                // An inner declaration hides inherited values and type metadata
+                // before any local size query or dimension is evaluated.
+                for key in [
+                    name.clone(),
+                    parameter_marker(name),
+                    local_parameter_marker(name),
+                    enum_marker(name),
+                    parameter_width_marker(name),
+                    parameter_signed_marker(name),
+                    variable_bits_marker(name),
+                    variable_size_marker(name),
+                    variable_signed_marker(name),
+                ] {
+                    scope.env.remove(&key);
+                }
+                scope.literals.remove(name);
+            }
+            let dependencies: HashSet<_> = node
+                .into_iter()
+                .filter(|node| {
+                    matches!(
+                        node,
+                        RefNode::PackedDimension(_)
+                            | RefNode::UnpackedDimension(_)
+                            | RefNode::VariableDimension(_)
+                    )
+                })
+                .flat_map(|node| node.into_iter())
+                .filter(|node| {
+                    matches!(
+                        node,
+                        RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+                    )
+                })
+                .filter_map(|node| identifier_text(node, self.tree))
+                .collect();
+            signal_declarations.push((names, &**item, dependencies));
+        }
         let mut pending = Vec::new();
         for item in children {
             let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
@@ -589,6 +698,9 @@ impl<'a> Elaborator<'a, '_> {
                     enum_marker(&name),
                     parameter_width_marker(&name),
                     parameter_signed_marker(&name),
+                    variable_bits_marker(&name),
+                    variable_size_marker(&name),
+                    variable_signed_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
@@ -598,8 +710,39 @@ impl<'a> Elaborator<'a, '_> {
                 pending.push((name, node.clone(), dependencies));
             }
         }
-        while !pending.is_empty() {
-            let unresolved: HashSet<_> = pending.iter().map(|(name, _, _)| name.clone()).collect();
+        // Signal dimensions and localparams can depend on each other. Resolve
+        // both in one dependency order, publishing signal types without values.
+        while !pending.is_empty() || !signal_declarations.is_empty() {
+            let unresolved: HashSet<_> = pending
+                .iter()
+                .map(|(name, _, _)| name.clone())
+                .chain(
+                    signal_declarations
+                        .iter()
+                        .flat_map(|(names, _, _)| names.iter().cloned()),
+                )
+                .collect();
+            if let Some(index) = signal_declarations
+                .iter()
+                .position(|(_, _, dependencies)| dependencies.is_disjoint(&unresolved))
+            {
+                let (_, item, _) = signal_declarations.remove(index);
+                let mut signals = Vec::new();
+                signals_from_module_or_generate_item(
+                    item,
+                    self.tree,
+                    self.aliases,
+                    &scope.env,
+                    &mut signals,
+                )?;
+                extend_const_env_with_variable_types(
+                    &mut scope.env,
+                    signals
+                        .iter()
+                        .map(|signal| (signal.name(), signal.r#type())),
+                );
+                continue;
+            }
             let Some(index) = pending
                 .iter()
                 .position(|(_, _, dependencies)| dependencies.is_disjoint(&unresolved))
@@ -680,7 +823,7 @@ impl<'a> Elaborator<'a, '_> {
         if let Some((genvar, _)) = index {
             declared.insert(genvar.to_string());
         }
-        self.localparams(&children, &mut scope, &mut declared)?;
+        self.constants_and_signal_types(&children, &mut scope, &mut declared)?;
         for item in &children {
             let mut signals = Vec::new();
             if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
@@ -749,12 +892,6 @@ impl<'a> Elaborator<'a, '_> {
                 }
             }
             for signal in signals {
-                if !declared.insert(signal.name.clone()) {
-                    return Err(AnalyzerError::Unsupported(format!(
-                        "duplicate generate-local declaration `{}`",
-                        signal.name
-                    )));
-                }
                 for key in [
                     signal.name.clone(),
                     parameter_marker(&signal.name),
@@ -789,6 +926,33 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn rejects_nonconstant_truth_and_unknown_genvar_values() {
+        for body in [
+            "if (a) assign y=1; else assign y=0;",
+            "for (genvar i=0; a; i++) assign y=0;",
+            "for (genvar i=1'bx; i<1; i++) assign y=0;",
+        ] {
+            let source = format!("module Top(input logic a, output logic y); {body} endmodule");
+            assert!(
+                analyze(&source).is_err(),
+                "accepted nonconstant or invalid generate: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_cyclic_generate_signal_size_dependencies() {
+        let source = "module Top(); if (1) begin : g localparam W=$bits(data); logic [W-1:0] data; end endmodule";
+        let error = analyze(source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cyclic generate-local parameter dependency"),
+            "{error}"
+        );
     }
 
     #[test]

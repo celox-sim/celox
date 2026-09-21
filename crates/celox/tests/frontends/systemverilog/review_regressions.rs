@@ -5787,14 +5787,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unknown conditional-generate condition",
-            r#"
-            module Top #(parameter logic P = 1'bx) (output logic y);
-                if (P) assign y = 1'b1;
-            endmodule
-        "#,
-        ),
-        (
             "always_ff event expression",
             r#"
             module Top(input logic clk, enable, d, output logic q);

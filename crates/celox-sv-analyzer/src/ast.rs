@@ -943,6 +943,17 @@ fn size_system_function_expr_type(
             if name != "$bits" && name != "$size" {
                 return None;
             }
+            // Scoped type markers take precedence over a same-named declaration
+            // found by the enclosing-module scan used for complex expressions.
+            if let Some(ConstExpr::Ident(identifier)) = const_expr_from_expr(argument, syntax_tree)
+                && let Some(width) =
+                    variable_size_function_width(const_env, &identifier, name == "$size")
+            {
+                return Some(ExprType {
+                    width,
+                    signed: variable_type_is_signed(const_env, &identifier),
+                });
+            }
             // A size-function argument only needs a statically known type;
             // it need not itself be a constant expression. Lower the typed
             // expression first so selects and other runtime-valued forms can
@@ -5056,10 +5067,26 @@ fn instances_from_module_instantiation(
     let mut parameter_overrides =
         parameter_overrides_from_value_assignment(instantiation.nodes.1.as_ref(), syntax_tree)?;
     for override_ in &mut parameter_overrides {
-        override_.value = override_
-            .value
-            .take()
-            .map(|value| substitute_const_expr_constants_preserving_enum_types(value, const_env));
+        if let Some(value) = override_.value.take() {
+            let value = substitute_typed_parameter_literals(
+                value,
+                const_env,
+                &parameter_types_from_const_env(const_env),
+            );
+            let value = expr_to_const(substitute_expr_idents(
+                const_expr_to_expr(value),
+                &packed_dimensions.parameter_values,
+            ))
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported(format!(
+                    "constant module parameter override `{}`",
+                    override_.name
+                ))
+            })?;
+            override_.value = Some(substitute_const_expr_constants_preserving_enum_types(
+                value, const_env,
+            ));
+        }
     }
     let condition =
         condition.map(|condition| substitute_const_expr_constants(condition, const_env));
@@ -14237,6 +14264,11 @@ fn const_expr_from_ref_node_with_env(
                 .or(Some(base))
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+                if let Some(ty) =
+                    size_system_function_expr_type(primary, syntax_tree, const_env, type_aliases)
+                {
+                    return Some(ConstExpr::Literal(ty.width.to_string()));
+                }
                 let lowered = const_expr_from_function_subroutine_call(&call.nodes.0, syntax_tree);
                 if let Some(ConstExpr::Function { name, args }) = &lowered
                     && name == "$bits"

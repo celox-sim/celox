@@ -1,6 +1,85 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_generate_localparam_types_in_child_overrides(sim) {
+        @setup {
+            let sv = r#"
+                module Child #(parameter P=0)(output logic [7:0] y);
+                    localparam WIDTH = $bits(P);
+                    localparam NEGATIVE = (P < 0);
+                    assign y = WIDTH | (NEGATIVE << 6);
+                endmodule
+                module Top(output logic [31:0] y);
+                    for (genvar i=0; i<2; i++) begin : g
+                        localparam logic [3+i:0] P = '1;
+                        localparam logic signed [3+i:0] Q = '1;
+                        Child #(.P(P)) u(.y(y[16*i+7:16*i]));
+                        Child #(.P(Q)) s(.y(y[16*i+15:16*i+8]));
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_override_types.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x45054404u32.into());
+    }
+
+    fn treats_unknown_generate_truth_as_false(sim) {
+        @setup {
+            let sv = r#"
+                module Top #(parameter logic P = 1'bx)(output logic [4:0] y);
+                    if (1'bx) begin initial $fatal; end
+                    if (P) begin initial $fatal; end
+                    else assign y[0] = 1;
+                    if (1'bz) begin initial $fatal; end
+                    else assign y[1] = 1;
+                    if (2'b1x) assign y[2] = 1;
+                    else begin initial $fatal; end
+                    if (1) begin : g
+                        localparam logic [1:0] X = 2'b0x;
+                        if (X) begin initial $fatal; end
+                        else assign y[3] = 1;
+                        for (genvar i=0; X; i++) begin initial $fatal; end
+                        for (genvar i=0; (i==0) ? 2'b1z : X; i++) begin
+                            assign y[4] = 1;
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_unknown_truth.sv"))], "Top").four_state(true);
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 31u8.into());
+    }
+
+    fn resolves_generate_signal_size_parameter_dependencies(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [1:0] data;
+                    assign data = 0;
+                    for (genvar i=0; i<2; i++) begin : g
+                        localparam W = $bits(data);
+                        localparam S = $size(data);
+                        logic [W-1:0] copy;
+                        logic [N-1:0] data;
+                        localparam N = 8;
+                        assign data = a[8*i+7:8*i];
+                        assign copy = data;
+                        if (W == 8 && S == 8) assign y[8*i+7:8*i] = copy;
+                        else begin initial $fatal; end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_signal_size.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u16, 0x1234, 0xfedc] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+        }
+    }
+
     fn resolves_generate_function_names_lexically(sim) {
         @setup {
             let sv = r#"

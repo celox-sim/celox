@@ -591,7 +591,7 @@ fn integral_literal_from_truth(truth: Option<bool>) -> IntegralLiteral {
     }
 }
 
-fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> {
+pub(crate) fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> {
     let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
     let known = width_mask ^ &literal.mask;
     if (&literal.value & known) != BigUint::default() {
