@@ -583,8 +583,10 @@ impl<'a> Elaborator<'a, '_> {
                             value,
                             &generate.nodes.1.nodes.1.4,
                             self.tree,
-                            &iteration.env,
-                            self.aliases,
+                            |expr| {
+                                let expr = self.expression(expr, &iteration)?;
+                                eval_ast_const_expr(&expr, &iteration.env)
+                            },
                         )
                         .ok_or_else(|| {
                             AnalyzerError::Unsupported("genvar update operator".to_string())
@@ -722,16 +724,35 @@ impl<'a> Elaborator<'a, '_> {
             else {
                 continue;
             };
-            let sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) =
-                &**declaration
-            else {
-                continue;
-            };
-            let node = RefNode::LocalParameterDeclaration(&declaration.0);
-            let sv_parser::LocalParameterDeclaration::Param(parameter) = &declaration.0 else {
-                return Err(AnalyzerError::Unsupported(
-                    "generate-local type parameter".to_string(),
-                ));
+            // IEEE 1800-2023 6.20.1: parameter declarations in a
+            // generate block are localparams as well.
+            let (node, data_type) = match &**declaration {
+                sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(
+                    declaration,
+                ) => {
+                    let sv_parser::LocalParameterDeclaration::Param(parameter) = &declaration.0
+                    else {
+                        return Err(AnalyzerError::Unsupported(
+                            "generate-local type parameter".to_string(),
+                        ));
+                    };
+                    (
+                        RefNode::LocalParameterDeclaration(&declaration.0),
+                        &parameter.nodes.1,
+                    )
+                }
+                sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
+                    let sv_parser::ParameterDeclaration::Param(parameter) = &declaration.0 else {
+                        return Err(AnalyzerError::Unsupported(
+                            "generate-local type parameter".to_string(),
+                        ));
+                    };
+                    (
+                        RefNode::ParameterDeclaration(&declaration.0),
+                        &parameter.nodes.1,
+                    )
+                }
+                _ => continue,
             };
             for child in node.clone() {
                 let RefNode::ParamAssignment(assignment) = child else {
@@ -746,7 +767,7 @@ impl<'a> Elaborator<'a, '_> {
                 // Include both initializer and declared range dependencies. Bind all
                 // names before evaluation so a forward local hides an outer parameter.
                 let dependencies: HashSet<_> =
-                    RefNode::DataTypeOrImplicit(&parameter.nodes.1)
+                    RefNode::DataTypeOrImplicit(data_type)
                         .into_iter()
                         .chain(assignment.nodes.2.iter().flat_map(|(_, value)| {
                             RefNode::ConstantParamExpression(value).into_iter()
@@ -1121,6 +1142,31 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn predeclares_generate_functions_before_nested_conditions() {
+        let error = analyze(
+            r#"
+            module Top(output logic y);
+                function automatic bit f(); return 1; endfunction
+                if (1) begin : g
+                    if (f()) assign y=1;
+                    else assign y=0;
+                    function automatic bit f(); return 0; endfunction
+                end
+            endmodule
+        "#,
+        )
+        .unwrap_err();
+        // IEEE 1800-2023 13.4.3 excludes generate-local constant functions.
+        // Never silently select the same-named module function instead.
+        assert!(
+            error
+                .to_string()
+                .contains("unknown conditional-generate condition"),
+            "{error}"
+        );
     }
 
     #[test]

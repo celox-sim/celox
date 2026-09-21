@@ -1,6 +1,71 @@
 use super::*;
 
 sv_backends! {
+    fn predeclares_generate_signals_and_functions(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic a, output logic [2:0] y);
+                    logic tmp;
+                    assign tmp = 0;
+                    function automatic logic f(input logic x); return x; endfunction
+                    if (1) begin : g
+                        assign y[0] = tmp;
+                        if (1) begin : nested assign y[1] = tmp; end
+                        assign y[2] = f(a);
+                        logic tmp;
+                        assign tmp = a;
+                        function automatic logic f(input logic x); return ~x; endfunction
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_forward_names.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in 0u8..2 {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (if value == 0 {4u8} else {3u8}).into());
+        }
+    }
+
+    fn binds_generate_parameter_declarations_as_localparams(sim) {
+        @setup {
+            let sv = r#"
+                module Child #(parameter P=0)(output logic [7:0] y); assign y=P; endmodule
+                module Top #(parameter P=0)(output logic [7:0] y);
+                    if (1) begin : g
+                        Child #(.P(P)) child(.y(y));
+                        parameter logic [7:0] P = Q + 1;
+                        parameter Q = 2;
+                        if (P != 3) begin initial $fatal; end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_parameter_declarations.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 3u8.into());
+    }
+
+    fn expands_constant_functions_in_genvar_updates(sim) {
+        @setup {
+            let sv = r#"
+                module Top(output logic [3:0] y);
+                    for (genvar i=0; i<2; i=bump(i)) begin : plain
+                        assign y[i]=1;
+                    end
+                    for (genvar j=2; j<4; j+=step()) begin : compound
+                        assign y[j]=1;
+                    end
+                    function automatic int bump(input int x); return x+step(); endfunction
+                    function automatic int step(); return 1; endfunction
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_function_updates.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 15u8.into());
+    }
+
     fn ignores_type_aliases_in_inactive_generate_branches(sim) {
         @setup {
             let sv = r#"

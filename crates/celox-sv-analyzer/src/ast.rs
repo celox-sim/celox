@@ -7097,8 +7097,7 @@ fn next_genvar_value(
     value: i128,
     iteration: &sv_parser::GenvarIteration,
     syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
+    evaluate: impl FnOnce(&sv_parser::ConstantExpression) -> Option<i128>,
 ) -> Option<i128> {
     match iteration {
         sv_parser::GenvarIteration::Prefix(iteration) => {
@@ -7119,13 +7118,7 @@ fn next_genvar_value(
         }
         sv_parser::GenvarIteration::Assignment(iteration) => {
             let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)?;
-            let rhs = const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(&iteration.nodes.2.nodes.0),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )?;
-            let rhs = eval_ast_const_expr(&rhs, const_env)?;
+            let rhs = evaluate(&iteration.nodes.2.nodes.0)?;
             match op {
                 "=" => Some(rhs),
                 "+=" => value.checked_add(rhs),
