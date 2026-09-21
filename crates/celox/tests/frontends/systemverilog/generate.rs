@@ -1,6 +1,70 @@
 use super::*;
 
 sv_backends! {
+    fn resolves_generate_function_names_lexically(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic clk, input logic a, output logic [5:0] y);
+                    function automatic logic f(input logic x); return x; endfunction
+                    function automatic logic outer(input logic x); return f(x); endfunction
+                    if (1) begin : first
+                        function automatic logic f(input logic x); return ~x; endfunction
+                        function automatic logic wrapper(input logic x); return f(x); endfunction
+                        assign y[0] = wrapper(a);
+                        always_comb y[1] = f(a);
+                        always_ff @(posedge clk) y[2] <= f(a);
+                        if (1) begin : nested
+                            assign y[3] = wrapper(a);
+                        end
+                        assign y[4] = outer(a);
+                    end
+                    if (1) begin : second
+                        function automatic logic f(input logic x); return x; endfunction
+                        assign y[5] = f(a);
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_function_scopes.sv"))], "Top");
+        let a = sim.signal("a");
+        let clk = sim.event("clk");
+        for value in 0u8..2 {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (if value == 0 { 15u8 } else { 48u8 }).into());
+        }
+    }
+
+    fn resolves_forward_generate_localparam_dependencies(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic clk, output logic [7:0] y, output logic [3:0] q);
+                    localparam B = 99;
+                    if (1) begin : constants
+                        localparam logic [WIDTH-1:0] A = B + 1;
+                        localparam B = C + 1, C = 1;
+                        localparam WIDTH = 4;
+                        logic [A:0] tmp;
+                        assign tmp = A;
+                        assign y[3:0] = tmp;
+                        always_ff @(posedge clk) q <= A;
+                    end
+                    for (genvar i = 0; i < 2; i++) begin : lanes
+                        localparam A = B;
+                        localparam B = C;
+                        localparam C = i + 1;
+                        assign y[5+2*i:4+2*i] = A;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_forward_parameters.sv"))], "Top");
+        sim.modify(|_| {}).unwrap();
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x93u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 3u8.into());
+    }
+
     fn elaborates_generate_lanes_with_local_state_and_instances(sim) {
         @setup {
             let sv = r#"
@@ -255,5 +319,33 @@ fn generate_function_call_preserves_definition_site_bindings() {
         sim.tick(clk).unwrap();
         let expected = if value & 1 != 0 { 15u8 } else { 6u8 };
         assert_eq!(sim.get(sim.signal("y")), expected.into());
+    }
+}
+
+#[test]
+fn rejects_unqualified_generate_function_calls_outside_their_scope() {
+    for call in [
+        "assign y = f(a);",
+        "if (1) begin : sibling assign y = f(a); end",
+    ] {
+        let source = format!(
+            r#"
+            module Top(input logic a, output logic y);
+                if (1) begin : g
+                    function automatic logic f(input logic x); return x; endfunction
+                end
+                {call}
+            endmodule
+        "#
+        );
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(&source, Path::new("generate_function_visibility.sv"))],
+                "Top"
+            )
+            .build_cranelift()
+            .is_err(),
+            "accepted out-of-scope call: {call}"
+        );
     }
 }

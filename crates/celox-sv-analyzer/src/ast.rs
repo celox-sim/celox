@@ -5277,6 +5277,7 @@ fn functions_from_module_node(
             }
             function.body = substitute_expr_idents(function.body, &literals);
             item.qualify_function(&mut function);
+            function.name = item.name(&function.name);
             let name = function.name.clone();
             let mut parameter_names = HashSet::default();
             if let Some(parameter) = function
@@ -7002,95 +7003,32 @@ fn next_genvar_value(
     }
 }
 
-fn add_localparams_from_generate_item_with_literals(
-    item: &sv_parser::GenerateItem,
-    syntax_tree: &SyntaxTree,
+fn bind_generate_parameter(
+    parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-    mut parameter_literals: Option<&mut HashMap<String, Expr>>,
-) -> bool {
-    let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
-        return false;
-    };
-    let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item else {
-        return false;
-    };
-    let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = &item.nodes.1
-    else {
-        return false;
-    };
-    let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) =
-        &**declaration
-    else {
-        return false;
-    };
-    let sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) =
-        &**declaration
-    else {
-        return false;
-    };
-    let mut parameters = Vec::new();
-    if parameters_from_ref_node(
-        RefNode::LocalParameterDeclaration(&localparam.0),
-        syntax_tree,
-        &mut parameters,
-        true,
-        const_env,
-        type_aliases,
-        &HashMap::default(),
-    )
-    .is_err()
-    {
-        return true;
-    }
-    let mut parameter_types = parameter_types_from_const_env(const_env);
-    for parameter in parameters {
-        let resolved_type = parameter.resolved_type(&parameter_types);
-        let resolved = parameter.resolved_value(const_env, &parameter_types);
-        if resolved.is_none() {
-            // An unknown local still shadows an inherited numeric binding.
-            const_env.remove(parameter.name());
-            for marker in [
-                parameter_marker(parameter.name()),
-                local_parameter_marker(parameter.name()),
-                enum_marker(parameter.name()),
-                parameter_width_marker(parameter.name()),
-                parameter_signed_marker(parameter.name()),
-            ] {
-                const_env.remove(&marker);
-            }
-            if let Some(literals) = parameter_literals.as_deref_mut() {
-                let value = parameter_value_env(std::slice::from_ref(&parameter), const_env)
-                    .remove(parameter.name());
-                literals.remove(parameter.name());
-                if let Some(value) = value {
-                    let value = substitute_expr_idents(value, literals);
-                    literals.insert(parameter.name().to_string(), value);
-                }
-            }
-            parameter_types.remove(parameter.name());
-            if let Some(r#type) = resolved_type {
-                parameter_types.insert(parameter.name().to_string(), r#type);
-                insert_parameter_type_markers(const_env, parameter.name(), r#type);
-            }
-            continue;
-        }
-        let value = resolved.expect("numeric parameter");
-        if let Some(r#type) = resolved_type {
-            parameter_types.insert(parameter.name().to_string(), r#type);
-            insert_parameter_type_markers(const_env, parameter.name(), r#type);
-        }
-        if let Some(parameter_literals) = parameter_literals.as_deref_mut() {
-            let literal = if let Some(r#type) = resolved_type {
-                format_typed_parameter_literal(value, r#type.width, r#type.signed)
-            } else {
-                value.to_string()
-            };
-            parameter_literals.insert(parameter.name().to_string(), Expr::Literal(literal));
-        }
+    parameter_literals: &mut HashMap<String, Expr>,
+) {
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let resolved_type = parameter.resolved_type(&parameter_types);
+    let resolved = parameter.resolved_value(const_env, &parameter_types);
+    let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
+        Some(Expr::Literal(if let Some(ty) = resolved_type {
+            format_typed_parameter_literal(value, ty.width, ty.signed)
+        } else {
+            value.to_string()
+        }))
+    } else {
+        parameter_value_env(std::slice::from_ref(&parameter), const_env)
+            .remove(parameter.name())
+            .map(|value| substitute_expr_idents(value, parameter_literals))
+    };
+    if let Some(ty) = resolved_type {
+        insert_parameter_type_markers(const_env, parameter.name(), ty);
     }
-    true
+    if let Some(literal) = literal {
+        parameter_literals.insert(parameter.name().to_string(), literal);
+    }
 }
 
 fn eval_ast_const_expr(expr: &ConstExpr, const_env: &HashMap<String, i128>) -> Option<i128> {

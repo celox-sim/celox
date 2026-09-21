@@ -101,6 +101,18 @@ impl Item<'_> {
         for function in functions.values_mut() {
             bindings.qualify_function(function);
         }
+        // Keep definition-site calls to hidden module functions available to the
+        // inliner, then expose only the functions visible in this lexical scope.
+        for name in &self.shadowed {
+            if let Some(function) = functions.remove(name) {
+                functions.insert(format!("{OUTER_BINDING}{name}"), function);
+            }
+        }
+        for (name, qualified) in &self.names {
+            if let Some(function) = functions.get(qualified).cloned() {
+                functions.insert(name.clone(), function);
+            }
+        }
         functions
     }
 
@@ -133,7 +145,10 @@ impl Item<'_> {
                 self.expr(then_expr);
                 self.expr(else_expr);
             }
-            Expr::Call { args, .. } => args.iter_mut().for_each(|e| self.expr(e)),
+            Expr::Call { name, args } => {
+                *name = self.name(name);
+                args.iter_mut().for_each(|e| self.expr(e));
+            }
         }
     }
 
@@ -145,7 +160,10 @@ impl Item<'_> {
                 self.constant(expr);
                 self.constant(bit);
             }
-            ConstExpr::Function { args, .. } => args.iter_mut().for_each(|e| self.constant(e)),
+            ConstExpr::Function { name, args } => {
+                *name = self.name(name);
+                args.iter_mut().for_each(|e| self.constant(e));
+            }
             ConstExpr::Unary { expr, .. } => self.constant(expr),
             ConstExpr::Binary { left, right, .. } => {
                 self.constant(left);
@@ -460,7 +478,12 @@ impl<'a> Elaborator<'a, '_> {
                                 "loop-generate unroll limit exceeded".to_string(),
                             )
                         })?;
-                        self.block(&generate.nodes.2, &iteration, *ordinal, Some(value))?;
+                        self.block(
+                            &generate.nodes.2,
+                            &iteration,
+                            *ordinal,
+                            Some((&name, value)),
+                        )?;
                         value = next_genvar_value(
                             value,
                             &generate.nodes.1.nodes.1.4,
@@ -497,12 +520,122 @@ impl<'a> Elaborator<'a, '_> {
         Ok(())
     }
 
+    fn localparams(
+        &self,
+        children: &[&sv_parser::GenerateItem],
+        scope: &mut Scope,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), AnalyzerError> {
+        let mut pending = Vec::new();
+        for item in children {
+            let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
+                continue;
+            };
+            let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item else {
+                continue;
+            };
+            let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
+                &item.nodes.1
+            else {
+                continue;
+            };
+            let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
+                declaration,
+            ) = &**declaration
+            else {
+                continue;
+            };
+            let sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) =
+                &**declaration
+            else {
+                continue;
+            };
+            let node = RefNode::LocalParameterDeclaration(&declaration.0);
+            let sv_parser::LocalParameterDeclaration::Param(parameter) = &declaration.0 else {
+                return Err(AnalyzerError::Unsupported(
+                    "generate-local type parameter".to_string(),
+                ));
+            };
+            for child in node.clone() {
+                let RefNode::ParamAssignment(assignment) = child else {
+                    continue;
+                };
+                let name = parameter_name(RefNode::ParamAssignment(assignment), self.tree)?;
+                if !declared.insert(name.clone()) {
+                    return Err(AnalyzerError::Unsupported(format!(
+                        "duplicate generate-local declaration `{name}`"
+                    )));
+                }
+                // Include both initializer and declared range dependencies. Bind all
+                // names before evaluation so a forward local hides an outer parameter.
+                let dependencies: HashSet<_> =
+                    RefNode::DataTypeOrImplicit(&parameter.nodes.1)
+                        .into_iter()
+                        .chain(assignment.nodes.2.iter().flat_map(|(_, value)| {
+                            RefNode::ConstantParamExpression(value).into_iter()
+                        }))
+                        .filter(|node| {
+                            matches!(
+                                node,
+                                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+                            )
+                        })
+                        .filter_map(|node| identifier_text(node, self.tree))
+                        .collect();
+                for key in [
+                    name.clone(),
+                    parameter_marker(&name),
+                    local_parameter_marker(&name),
+                    enum_marker(&name),
+                    parameter_width_marker(&name),
+                    parameter_signed_marker(&name),
+                ] {
+                    scope.env.remove(&key);
+                }
+                scope.literals.remove(&name);
+                scope.names.remove(&name);
+                scope.shadowed.insert(name.clone());
+                pending.push((name, node.clone(), dependencies));
+            }
+        }
+        while !pending.is_empty() {
+            let unresolved: HashSet<_> = pending.iter().map(|(name, _, _)| name.clone()).collect();
+            let Some(index) = pending
+                .iter()
+                .position(|(_, _, dependencies)| dependencies.is_disjoint(&unresolved))
+            else {
+                return Err(AnalyzerError::Unsupported(
+                    "cyclic generate-local parameter dependency".to_string(),
+                ));
+            };
+            let (name, node, _) = pending.remove(index);
+            let mut parameters = Vec::new();
+            parameters_from_ref_node(
+                node,
+                self.tree,
+                &mut parameters,
+                true,
+                &scope.env,
+                self.aliases,
+                &HashMap::default(),
+            )?;
+            let parameter = parameters
+                .into_iter()
+                .find(|parameter| parameter.name() == name)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
+                })?;
+            bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
+        }
+        Ok(())
+    }
+
     fn block(
         &mut self,
         block: &'a sv_parser::GenerateBlock,
         parent: &Scope,
         ordinal: usize,
-        index: Option<i128>,
+        index: Option<(&str, i128)>,
     ) -> Result<(), AnalyzerError> {
         // A directly nested conditional generate does not introduce a scope
         // (IEEE 1800-2023 27.5). A loop body still always introduces a scope.
@@ -529,7 +662,7 @@ impl<'a> Elaborator<'a, '_> {
         let mut name = explicit
             .and_then(|name| identifier_text(RefNode::GenerateBlockIdentifier(name), self.tree))
             .unwrap_or_else(|| format!("genblk{ordinal}"));
-        if let Some(index) = index {
+        if let Some((_, index)) = index {
             name.push_str(&format!("[{index}]"));
         }
         let mut scope = parent.clone();
@@ -544,28 +677,11 @@ impl<'a> Elaborator<'a, '_> {
         };
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
+        if let Some((genvar, _)) = index {
+            declared.insert(genvar.to_string());
+        }
+        self.localparams(&children, &mut scope, &mut declared)?;
         for item in &children {
-            if add_localparams_from_generate_item_with_literals(
-                item,
-                self.tree,
-                &mut scope.env,
-                self.aliases,
-                Some(&mut scope.literals),
-            ) {
-                for node in RefNode::GenerateItem(item) {
-                    if let RefNode::ParamAssignment(parameter) = node {
-                        let name = parameter_name(RefNode::ParamAssignment(parameter), self.tree)?;
-                        if !declared.insert(name.clone()) {
-                            return Err(AnalyzerError::Unsupported(format!(
-                                "duplicate generate-local declaration `{name}`"
-                            )));
-                        }
-                        scope.names.remove(&name);
-                        scope.shadowed.insert(name);
-                    }
-                }
-                continue;
-            }
             let mut signals = Vec::new();
             if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
                 // Do not recurse into nested scopes while gathering direct declarations.
@@ -592,6 +708,34 @@ impl<'a> Elaborator<'a, '_> {
                             return Err(AnalyzerError::Unsupported(
                                 "type declaration inside generate scope".to_string(),
                             ));
+                        }
+                        for node in RefNode::ModuleOrGenerateItem(item) {
+                            if let RefNode::FunctionDeclaration(function) = node {
+                                let identifier = match &function.nodes.2 {
+                                    sv_parser::FunctionBodyDeclaration::WithPort(body) => {
+                                        &body.nodes.2
+                                    }
+                                    sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
+                                        &body.nodes.2
+                                    }
+                                };
+                                let name = identifier_text(
+                                    RefNode::FunctionIdentifier(identifier),
+                                    self.tree,
+                                )
+                                .ok_or_else(|| {
+                                    AnalyzerError::Unsupported("function name".to_string())
+                                })?;
+                                if !declared.insert(name.clone()) {
+                                    return Err(AnalyzerError::Unsupported(format!(
+                                        "duplicate generate-local declaration `{name}`"
+                                    )));
+                                }
+                                scope.shadowed.insert(name.clone());
+                                scope
+                                    .names
+                                    .insert(name.clone(), format!("{}.{name}", scope.path));
+                            }
                         }
                         signals_from_module_or_generate_item(
                             item,
@@ -645,6 +789,39 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn reserves_genvar_in_its_own_block_but_allows_nested_shadowing() {
+        for declaration in ["logic i;", "wire i;", "localparam i = 2;"] {
+            let source = format!(
+                "module Top(); for (genvar i=0; i<1; i++) begin : g {declaration} end endmodule"
+            );
+            let error = analyze(&source).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("duplicate generate-local declaration `i`"),
+                "{error}"
+            );
+        }
+        analyze("module Top(output logic y); for (genvar i=0; i<1; i++) begin : g if (1) begin : inner localparam i=1; assign y=i; end end endmodule").unwrap();
+    }
+
+    #[test]
+    fn rejects_cyclic_generate_localparams_even_when_outer_names_exist() {
+        for declarations in ["localparam A=B; localparam B=A;", "localparam A=A;"] {
+            let source = format!(
+                "module Top(); localparam A=1; if (1) begin : g {declarations} end endmodule"
+            );
+            let error = analyze(&source).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cyclic generate-local parameter dependency"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
