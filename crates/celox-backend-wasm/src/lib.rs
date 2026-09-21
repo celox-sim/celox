@@ -2496,7 +2496,7 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalSet(dst_mask));
             instrs.push(Instruction::End);
         }
-        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
             let compare_mask = locals.alloc(1);
             let lhs_unknown = locals.alloc(1);
             let mismatch = locals.alloc(1);
@@ -2508,8 +2508,13 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalSet(compare_mask));
 
             instrs.push(Instruction::LocalGet(lhs_mask));
-            instrs.push(Instruction::LocalGet(compare_mask));
-            instrs.push(Instruction::I64And);
+            if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+                instrs.push(Instruction::LocalGet(rhs_mask));
+                instrs.push(Instruction::I64Or);
+            } else {
+                instrs.push(Instruction::LocalGet(compare_mask));
+                instrs.push(Instruction::I64And);
+            }
             instrs.push(Instruction::LocalSet(lhs_unknown));
 
             instrs.push(Instruction::LocalGet(lhs.value_idx));
@@ -2832,7 +2837,7 @@ fn compile_binary_mask_wide(
             }
             instrs.push(Instruction::End);
         }
-        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
             let any_unknown = locals.alloc(1);
             let any_mismatch = locals.alloc(1);
             let operand_chunks = lhs.num_chunks.max(rhs.num_chunks);
@@ -2851,8 +2856,13 @@ fn compile_binary_mask_wide(
                 instrs.push(Instruction::LocalSet(compare_mask));
 
                 emit_wide_get_chunk(instrs, &lhs_mask, c);
-                instrs.push(Instruction::LocalGet(compare_mask));
-                instrs.push(Instruction::I64And);
+                if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+                    emit_wide_get_chunk(instrs, &rhs_mask, c);
+                    instrs.push(Instruction::I64Or);
+                } else {
+                    instrs.push(Instruction::LocalGet(compare_mask));
+                    instrs.push(Instruction::I64And);
+                }
                 instrs.push(Instruction::LocalGet(any_unknown));
                 instrs.push(Instruction::I64Or);
                 instrs.push(Instruction::LocalSet(any_unknown));

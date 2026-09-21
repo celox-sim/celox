@@ -12748,6 +12748,72 @@ fn lower_static_wide_load_chunks(
     chunks
 }
 
+// Known unequal bits dominate X/Z in logical equality. Compute each chunk's
+// mismatch before reducing chunks, so an unknown in another chunk cannot hide it.
+fn equality_chunk_state(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    lv: VReg,
+    rv: VReg,
+    lm: VReg,
+    rm: VReg,
+) -> (VReg, VReg) {
+    let unknown = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Or {
+        dst: unknown,
+        lhs: lm,
+        rhs: rm,
+    });
+    let known = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::BitNot {
+        dst: known,
+        src: unknown,
+    });
+    let diff = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Xor {
+        dst: diff,
+        lhs: lv,
+        rhs: rv,
+    });
+    let mismatch = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::And {
+        dst: mismatch,
+        lhs: diff,
+        rhs: known,
+    });
+    (unknown, mismatch)
+}
+
+fn equality_result_mask(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    unknown: VReg,
+    mismatch: VReg,
+    d_width: usize,
+) -> VReg {
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    let has_mismatch = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp {
+        dst: has_mismatch,
+        lhs: mismatch,
+        rhs: zero,
+        kind: CmpKind::Ne,
+    });
+    let conservative = conservative_mask(ctx, block, unknown, zero, d_width);
+    let result = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Select {
+        dst: result,
+        cond: has_mismatch,
+        true_val: zero,
+        false_val: conservative,
+    });
+    result
+}
+
 /// Compute result mask for a binary operation.
 ///
 /// Mask formulas (from IEEE 1800 / Cranelift backend):
@@ -12761,7 +12827,8 @@ fn lower_static_wide_load_chunks(
 /// - XOR: res_m = lm | rm
 /// - Shift: if shift amount has X → all-X; else shift mask normally
 /// - Arithmetic (Add/Sub/Mul/Div/Rem): conservative — any X → all-X
-/// - Comparison: any X → result X (1-bit mask)
+/// - Equality: known mismatch → definite result; otherwise any X → result X
+/// - Ordered comparison: any X → result X (1-bit mask)
 /// - LogicAnd: dominant-false (v|m==0) → mask=0; else if any X → mask=all-X
 /// - LogicOr: dominant-true (v&~m!=0) → mask=0; else if any X → mask=all-X
 fn lower_binary_mask(
@@ -12775,6 +12842,10 @@ fn lower_binary_mask(
     d_width: usize,
 ) -> VReg {
     match op {
+        BinaryOp::Eq | BinaryOp::Ne => {
+            let (unknown, mismatch) = equality_chunk_state(ctx, block, lv, rv, lm, rm);
+            equality_result_mask(ctx, block, unknown, mismatch, d_width)
+        }
         BinaryOp::And => {
             // res_m = (lm & rm) | (lm & rv) | (rm & lv)
             let t1 = ctx.alloc_vreg(SpillDesc::transient());
@@ -13114,7 +13185,7 @@ fn lower_binary_mask(
         }
         _ => {
             // Conservative: any X in either operand → all-X result
-            // Covers: Add, Sub, Mul, Div, Rem, comparisons (Eq/Ne/Lt/Le/Gt/Ge)
+            // Covers: Add, Sub, Mul, Div, Rem, ordered comparisons (Lt/Le/Gt/Ge)
             conservative_mask(ctx, block, lm, rm, d_width)
         }
     }
@@ -13621,6 +13692,40 @@ fn lower_wide_binary_mask(
     let rm_chunks = get_wide_mask_chunks(ctx, block, &rhs, n_chunks);
 
     match op {
+        BinaryOp::Eq | BinaryOp::Ne => {
+            let lv_chunks = ctx.get_wide_chunks(&lhs, block);
+            let rv_chunks = ctx.get_wide_chunks(&rhs, block);
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            let mut unknown = zero;
+            let mut mismatch = zero;
+            for i in 0..n_chunks {
+                let lv = ctx.wide_chunk_or_zero(&lv_chunks, i, block);
+                let rv = ctx.wide_chunk_or_zero(&rv_chunks, i, block);
+                let (chunk_unknown, chunk_mismatch) =
+                    equality_chunk_state(ctx, block, lv, rv, lm_chunks[i], rm_chunks[i]);
+                let next_unknown = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: next_unknown,
+                    lhs: unknown,
+                    rhs: chunk_unknown,
+                });
+                let next_mismatch = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: next_mismatch,
+                    lhs: mismatch,
+                    rhs: chunk_mismatch,
+                });
+                unknown = next_unknown;
+                mismatch = next_mismatch;
+            }
+            let mask = equality_result_mask(ctx, block, unknown, mismatch, d_width);
+            ctx.set_mask(dst, mask);
+            ctx.wide_masks.insert(dst, vec![(mask, d_width)]);
+        }
         BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
             // Per-chunk mask computation
             let lv_chunks = ctx.get_wide_chunks(&lhs, block);

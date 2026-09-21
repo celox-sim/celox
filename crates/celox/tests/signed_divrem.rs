@@ -159,8 +159,6 @@ module Top (
     }
 
     fn signed_divrem_i128(sim) {
-        // Veryl 0.20.3 produces an incorrect negative signed remainder.
-        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     a: input signed logic<128>,

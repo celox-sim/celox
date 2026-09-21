@@ -510,7 +510,6 @@ fn test_four_state_shift_by_x_amount(sim) {
 // Comparison with X → result is X
 // ==========================================================================
 fn test_four_state_comparison_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -532,16 +531,16 @@ fn test_four_state_comparison_with_x(sim) {
     let id_y_eq = sim.signal("y_eq");
     let id_y_lt = sim.signal("y_lt");
 
-    // a = 10 (defined), b = X (mask=0x01, only LSB X)
+    // The known bits agree: a = 0, b = 0000000X. Equality is indeterminate.
     sim.modify(|io| {
-        io.set_four_state(id_a, BigUint::from(10u32), BigUint::from(0u32));
-        io.set_four_state(id_b, BigUint::from(0u32), BigUint::from(1u32));
+        io.set_four_state(id_a, BigUint::from(0u32), BigUint::from(0u32));
+        io.set_four_state(id_b, BigUint::from(1u32), BigUint::from(1u32));
     })
     .unwrap();
 
     let (_, m_eq) = sim.get_four_state(id_y_eq);
     let (_, m_lt) = sim.get_four_state(id_y_lt);
-    // Any X in comparison inputs should yield X result
+    // Equality is X when unknown bits can change the result.
     assert_eq!(
         m_eq,
         BigUint::from(1u32),
@@ -1274,8 +1273,32 @@ fn test_four_state_mod_with_x(sim) {
 // ==========================================================================
 // P0: Comparison operators with X (NE, GT, GE, LE + signed variants)
 // ==========================================================================
+// Known unequal bits decide equality even when other bits are X or Z.
+fn test_four_state_equality_known_mismatch_with_unknown_bits(sim) {
+    @build SimulatorBuilder::new(r#"
+        module Top (
+            a: input logic<8>, b: input logic<8>,
+            eq: output logic, ne: output logic,
+        ) {
+            assign eq = a == b;
+            assign ne = a != b;
+        }
+    "#, "Top").four_state(true);
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let eq = sim.signal("eq");
+    let ne = sim.signal("ne");
+    for unknown_payload in [0u8, 1u8] {
+        sim.modify(|io| {
+            io.set_four_state(a, unknown_payload.into(), 1u8.into());
+            io.set(b, 20u8);
+        }).unwrap();
+        assert_eq!(sim.get_four_state(eq), (0u8.into(), 0u8.into()));
+        assert_eq!(sim.get_four_state(ne), (1u8.into(), 0u8.into()));
+    }
+}
+
 fn test_four_state_ne_with_x(sim) {
-    @ignore_on(veryl);
     @setup {
     let code = r#"
         module Top (
@@ -1304,9 +1327,9 @@ fn test_four_state_ne_with_x(sim) {
     assert_eq!(v, BigUint::from(1u32), "10 != 20 should be true");
     assert_eq!(m, BigUint::from(0u32));
 
-    // One has X → result X
+    // The known bits agree: 0001010X != 00010100 is indeterminate.
     sim.modify(|io| {
-        io.set_four_state(id_a, BigUint::from(0u32), BigUint::from(1u32));
+        io.set_four_state(id_a, BigUint::from(21u32), BigUint::from(1u32));
     })
     .unwrap();
     let (_, m) = sim.get_four_state(id_y);

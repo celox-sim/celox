@@ -528,6 +528,19 @@ impl SIRTranslator {
                             .select(shift_amt_has_x, all_ones, shifted_m);
                         apply_d_width_mask_arith(state, m, common_ty, d_width)
                     }
+                    BinaryOp::Eq | BinaryOp::Ne => {
+                        let unknown = state.builder.ins().bor(l_m, r_m);
+                        let known = state.builder.ins().bnot(unknown);
+                        let diff = state.builder.ins().bxor(l, r);
+                        let mismatch = state.builder.ins().band(diff, known);
+                        let no_mismatch = state.builder.ins().icmp_imm_u(IntCC::Equal, mismatch, 0);
+                        let has_unknown =
+                            state.builder.ins().icmp_imm_u(IntCC::NotEqual, unknown, 0);
+                        let uncertain = state.builder.ins().band(no_mismatch, has_unknown);
+                        let zero = state.builder.ins().iconst(common_ty, 0);
+                        let one = state.builder.ins().iconst(common_ty, 1);
+                        state.builder.ins().select(uncertain, one, zero)
+                    }
                     BinaryOp::EqCase | BinaryOp::NeCase => {
                         let value_diff = state.builder.ins().bxor(l, r);
                         let mask_diff = state.builder.ins().bxor(l_m, r_m);
@@ -1083,6 +1096,35 @@ impl SIRTranslator {
                             res_chunks = new_res;
 
                             vec![mask_val; final_num_chunks]
+                        }
+                        BinaryOp::Eq | BinaryOp::Ne => {
+                            let mut unknown = state.builder.ins().iconst(types::I64, 0);
+                            let mut mismatch = state.builder.ins().iconst(types::I64, 0);
+                            for i in 0..num_chunks {
+                                let lv = get_chunk_as_i64(state.builder, &l_chunks, i);
+                                let rv = get_chunk_as_i64(state.builder, &r_chunks, i);
+                                let lm = get_chunk_as_i64(state.builder, &l_masks, i);
+                                let rm = get_chunk_as_i64(state.builder, &r_masks, i);
+                                let lm = cast_type(state.builder, lm, types::I64);
+                                let rm = cast_type(state.builder, rm, types::I64);
+                                let chunk_unknown = state.builder.ins().bor(lm, rm);
+                                let known = state.builder.ins().bnot(chunk_unknown);
+                                let diff = state.builder.ins().bxor(lv, rv);
+                                let chunk_mismatch = state.builder.ins().band(diff, known);
+                                unknown = state.builder.ins().bor(unknown, chunk_unknown);
+                                mismatch = state.builder.ins().bor(mismatch, chunk_mismatch);
+                            }
+                            let no_mismatch =
+                                state.builder.ins().icmp_imm_u(IntCC::Equal, mismatch, 0);
+                            let has_unknown =
+                                state.builder.ins().icmp_imm_u(IntCC::NotEqual, unknown, 0);
+                            let uncertain = state.builder.ins().band(no_mismatch, has_unknown);
+                            let zero = state.builder.ins().iconst(types::I64, 0);
+                            let one = state.builder.ins().iconst(types::I64, 1);
+                            let mask = state.builder.ins().select(uncertain, one, zero);
+                            let mut masks = vec![zero; final_num_chunks];
+                            masks[0] = mask;
+                            masks
                         }
                         BinaryOp::EqCase | BinaryOp::NeCase => {
                             let mut accumulated_diff = state.builder.ins().iconst(types::I64, 0);

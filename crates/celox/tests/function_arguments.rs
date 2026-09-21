@@ -398,6 +398,8 @@ fn test_ff_expression_output_copyout_extends_before_splitting_concat(sim) {
 }
 
 fn test_ff_statement_output_copyout_freezes_all_inputs(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @build Simulator::builder(r#"
         module Top (
@@ -475,6 +477,8 @@ fn test_ff_output_copyout_to_dynamic_slice_preserves_other_bits(sim) {
 }
 
 fn test_ff_nested_output_copyout_is_visible_before_outer_copyout(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
+    @omit_veryl;
     @ignore_on(sv);
     @build Simulator::builder(r#"
         module Top (
