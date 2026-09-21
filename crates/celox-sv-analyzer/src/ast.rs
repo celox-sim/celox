@@ -3155,6 +3155,7 @@ fn signals_from_module_node(
             syntax_tree,
             type_aliases,
             &item.env,
+            None,
             &mut signals,
         )?;
         for signal in &mut signals[start..] {
@@ -3179,6 +3180,7 @@ fn signals_from_module_or_generate_item(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
+    selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -3188,6 +3190,7 @@ fn signals_from_module_or_generate_item(
                 syntax_tree,
                 type_aliases,
                 const_env,
+                selected_name,
             )?;
             substitute_signal_local_constants(&mut alias_signals, const_env);
             signals.extend(alias_signals);
@@ -3198,6 +3201,7 @@ fn signals_from_module_or_generate_item(
                 syntax_tree,
                 type_aliases,
                 const_env,
+                selected_name,
                 signals,
             )?;
         }
@@ -3211,6 +3215,7 @@ fn signals_from_module_common_item(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
+    selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = item {
@@ -3222,10 +3227,22 @@ fn signals_from_module_common_item(
         };
         let mut declared = match &**declaration {
             sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
-                signals_from_data_declaration(data, syntax_tree, type_aliases, const_env)?
+                signals_from_data_declaration(
+                    data,
+                    syntax_tree,
+                    type_aliases,
+                    const_env,
+                    selected_name,
+                )?
             }
             sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
-                signals_from_net_declaration(net, syntax_tree, type_aliases, const_env)?
+                signals_from_net_declaration(
+                    net,
+                    syntax_tree,
+                    type_aliases,
+                    const_env,
+                    selected_name,
+                )?
             }
             _ => Vec::new(),
         };
@@ -3257,6 +3274,7 @@ fn signals_from_net_declaration(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
+    selected_name: Option<&str>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let (r#type, assignments, is_net) = match net {
         sv_parser::NetDeclaration::NetType(net) => {
@@ -3313,6 +3331,9 @@ fn signals_from_net_declaration(
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("unsupported signal identifier".to_string())
             })?;
+        if selected_name.is_some_and(|selected| selected != name) {
+            continue;
+        }
         let signal_type = type_with_unpacked_ranges(
             r#type.clone(),
             unpacked_ranges_from_dimensions_with_env(
@@ -3336,6 +3357,7 @@ fn signals_from_type_alias_instantiation(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
+    selected_name: Option<&str>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
     let module_name = identifier_text(
@@ -3354,6 +3376,9 @@ fn signals_from_type_alias_instantiation(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
+        if selected_name.is_some_and(|selected| selected != name) {
+            continue;
+        }
         let signal_type = type_with_unpacked_ranges(
             r#type.clone(),
             unpacked_ranges_from_dimensions_with_env(
@@ -3616,6 +3641,7 @@ fn signals_from_data_declaration(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
+    selected_name: Option<&str>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let sv_parser::DataDeclaration::Variable(variable) = data else {
         return Ok(Vec::new());
@@ -3659,6 +3685,9 @@ fn signals_from_data_declaration(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
+        if selected_name.is_some_and(|selected| selected != name) {
+            continue;
+        }
         let signal_type = type_with_unpacked_ranges(
             r#type.clone(),
             unpacked_ranges_from_variable_dimensions_with_env(
@@ -5881,9 +5910,14 @@ fn function_local_packed_dimensions_from_block_item_iter<'a>(
         let sv_parser::BlockItemDeclaration::Data(item) = item else {
             continue;
         };
-        let signals =
-            signals_from_data_declaration(&item.nodes.1, syntax_tree, type_aliases, const_env)
-                .ok()?;
+        let signals = signals_from_data_declaration(
+            &item.nodes.1,
+            syntax_tree,
+            type_aliases,
+            const_env,
+            None,
+        )
+        .ok()?;
         dimensions.extend(signals.into_iter().map(|signal| {
             (
                 signal.name().to_string(),
@@ -5910,9 +5944,14 @@ fn function_local_types_from_block_item_iter<'a>(
         let sv_parser::BlockItemDeclaration::Data(item) = item else {
             continue;
         };
-        let signals =
-            signals_from_data_declaration(&item.nodes.1, syntax_tree, type_aliases, const_env)
-                .ok()?;
+        let signals = signals_from_data_declaration(
+            &item.nodes.1,
+            syntax_tree,
+            type_aliases,
+            const_env,
+            None,
+        )
+        .ok()?;
         for signal in signals {
             let r#type = signal.r#type();
             if !r#type.unpacked_ranges().is_empty() {
@@ -12082,7 +12121,19 @@ fn expr_from_cond_predicate(
     let [sv_parser::ExpressionOrCondPattern::Expression(expr)] = entries.as_slice() else {
         return None;
     };
-    expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+    let expression = expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
+    // Prove this before call expansion, while scoped return metadata can tell
+    // two-state functions apart from four-state functions of the same name.
+    if let Expr::Binary {
+        left,
+        op: BinaryOp::LogicOr,
+        right,
+    } = &expression
+        && two_state_conditions_are_complements(left, right, packed_dimensions)
+    {
+        return Some(Expr::Literal("1'b1".to_string()));
+    }
+    Some(expression)
 }
 
 fn cond_predicate_has_conjunction_operator(

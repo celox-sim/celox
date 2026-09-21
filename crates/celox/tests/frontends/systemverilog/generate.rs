@@ -1,6 +1,55 @@
 use super::*;
 
 sv_backends! {
+    fn resolves_each_generate_signal_declarator_independently(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic [1:0] x, output logic [1:0] y);
+                    if (1) begin : g
+                        localparam N = $size(a);
+                        localparam W = 2;
+                        logic a[W-1:0], b[N-1:0];
+                        assign a[0] = x[0];
+                        assign a[1] = x[1];
+                        assign b[0] = a[0];
+                        assign b[1] = a[1];
+                        assign y = {b[1], b[0]};
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_declarator_dependencies.sv"))], "Top");
+        let x = sim.signal("x");
+        for value in 0u8..4 {
+            sim.modify(|io| io.set(x, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+        }
+    }
+
+    fn uses_scoped_function_return_metadata_for_comb_completeness(sim) {
+        @setup {
+            let sv = r#"
+                module Top(input logic a, output logic y, z);
+                    function automatic logic f(input logic x); return x; endfunction
+                    if (1) begin : g
+                        function automatic bit f(input logic x); return x; endfunction
+                        always_comb if (f(a) || !f(a)) y = a;
+                        if (1) begin : nested
+                            always_comb if (f(a) || !f(a)) z = ~a;
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("generate_function_metadata.sv"))], "Top").four_state(true);
+        let a = sim.signal("a");
+        for value in 0u8..2 {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+            assert_eq!(sim.get(sim.signal("z")), (value ^ 1).into());
+        }
+    }
+
     fn preserves_generate_localparam_types_in_child_overrides(sim) {
         @setup {
             let sv = r#"
@@ -427,4 +476,33 @@ fn rejects_unqualified_generate_function_calls_outside_their_scope() {
             "accepted out-of-scope call: {call}"
         );
     }
+}
+
+#[test]
+fn keeps_four_state_generate_function_guards_nonexhaustive() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            function automatic bit f(input logic x); return x; endfunction
+            if (1) begin : g
+                function automatic logic f(input logic x); return x; endfunction
+                always_comb if (f(a) || !f(a)) y = a;
+            end
+        endmodule
+    "#;
+    let result = Simulator::from_sv_sources(
+        vec![(source, Path::new("generate_four_state_function_guard.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift();
+    let error = match result {
+        Ok(_) => panic!("accepted an incomplete four-state guard"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("latch inference inside always_comb"),
+        "{error}"
+    );
 }

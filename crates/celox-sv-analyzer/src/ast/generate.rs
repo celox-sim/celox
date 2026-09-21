@@ -58,6 +58,8 @@ impl Item<'_> {
         local.const_env = self.env.clone();
         local.parameter_values = self.parameter_literals(&dimensions.parameter_values);
         local.functions = Arc::new(self.functions(&dimensions.functions));
+        local.function_return_types =
+            self.function_aliases(dimensions.function_return_types.clone());
         let mut signedness = (*dimensions.expression_signedness).clone();
         for name in &self.shadowed {
             let protected = format!("{OUTER_BINDING}{name}");
@@ -101,6 +103,10 @@ impl Item<'_> {
         for function in functions.values_mut() {
             bindings.qualify_function(function);
         }
+        self.function_aliases(functions)
+    }
+
+    fn function_aliases<T: Clone>(&self, mut functions: HashMap<String, T>) -> HashMap<String, T> {
         // Keep definition-site calls to hidden module functions available to the
         // inliner, then expose only the functions visible in this lexical scope.
         for name in &self.shadowed {
@@ -569,29 +575,36 @@ impl<'a> Elaborator<'a, '_> {
                 continue;
             }
             let node = RefNode::ModuleOrGenerateItem(item);
-            let names: Vec<_> = node
+            let shared_dependencies: HashSet<_> = node
                 .clone()
                 .into_iter()
                 .filter_map(|node| match node {
-                    RefNode::VariableDeclAssignment(
-                        sv_parser::VariableDeclAssignment::Variable(assignment),
-                    ) => {
-                        identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), self.tree)
+                    RefNode::DataDeclaration(sv_parser::DataDeclaration::Variable(variable)) => {
+                        Some(RefNode::DataTypeOrImplicit(&variable.nodes.3))
                     }
-                    RefNode::NetDeclAssignment(assignment) => {
-                        identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), self.tree)
+                    RefNode::NetDeclaration(sv_parser::NetDeclaration::NetType(net)) => {
+                        Some(RefNode::DataTypeOrImplicit(&net.nodes.3))
                     }
-                    RefNode::HierarchicalInstance(instance) => identifier_text(
-                        RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-                        self.tree,
-                    ),
                     _ => None,
                 })
+                .flat_map(|node| dimension_dependencies(node, self.tree))
                 .collect();
-            if names.is_empty() {
-                continue;
-            }
-            for name in &names {
+            let declarators = node.into_iter().filter_map(|node| {
+                let identifier = match node {
+                    RefNode::VariableDeclAssignment(
+                        sv_parser::VariableDeclAssignment::Variable(assignment),
+                    ) => RefNode::VariableIdentifier(&assignment.nodes.0),
+                    RefNode::NetDeclAssignment(assignment) => {
+                        RefNode::NetIdentifier(&assignment.nodes.0)
+                    }
+                    RefNode::HierarchicalInstance(instance) => {
+                        RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0)
+                    }
+                    _ => return None,
+                };
+                identifier_text(identifier, self.tree).map(|name| (name, node))
+            });
+            for (name, declarator) in declarators {
                 if !declared.insert(name.clone()) {
                     return Err(AnalyzerError::Unsupported(format!(
                         "duplicate generate-local declaration `{name}`"
@@ -601,39 +614,24 @@ impl<'a> Elaborator<'a, '_> {
                 // before any local size query or dimension is evaluated.
                 for key in [
                     name.clone(),
-                    parameter_marker(name),
-                    local_parameter_marker(name),
-                    enum_marker(name),
-                    parameter_width_marker(name),
-                    parameter_signed_marker(name),
-                    variable_bits_marker(name),
-                    variable_size_marker(name),
-                    variable_signed_marker(name),
+                    parameter_marker(&name),
+                    local_parameter_marker(&name),
+                    enum_marker(&name),
+                    parameter_width_marker(&name),
+                    parameter_signed_marker(&name),
+                    variable_bits_marker(&name),
+                    variable_size_marker(&name),
+                    variable_signed_marker(&name),
                 ] {
                     scope.env.remove(&key);
                 }
-                scope.literals.remove(name);
+                scope.literals.remove(&name);
+                // The packed type is shared, but each declarator owns its
+                // unpacked bounds. A sibling's bounds must not block this type.
+                let mut dependencies = shared_dependencies.clone();
+                dependencies.extend(dimension_dependencies(declarator, self.tree));
+                signal_declarations.push((name, &**item, dependencies));
             }
-            let dependencies: HashSet<_> = node
-                .into_iter()
-                .filter(|node| {
-                    matches!(
-                        node,
-                        RefNode::PackedDimension(_)
-                            | RefNode::UnpackedDimension(_)
-                            | RefNode::VariableDimension(_)
-                    )
-                })
-                .flat_map(|node| node.into_iter())
-                .filter(|node| {
-                    matches!(
-                        node,
-                        RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
-                    )
-                })
-                .filter_map(|node| identifier_text(node, self.tree))
-                .collect();
-            signal_declarations.push((names, &**item, dependencies));
         }
         let mut pending = Vec::new();
         for item in children {
@@ -716,23 +714,20 @@ impl<'a> Elaborator<'a, '_> {
             let unresolved: HashSet<_> = pending
                 .iter()
                 .map(|(name, _, _)| name.clone())
-                .chain(
-                    signal_declarations
-                        .iter()
-                        .flat_map(|(names, _, _)| names.iter().cloned()),
-                )
+                .chain(signal_declarations.iter().map(|(name, _, _)| name.clone()))
                 .collect();
             if let Some(index) = signal_declarations
                 .iter()
                 .position(|(_, _, dependencies)| dependencies.is_disjoint(&unresolved))
             {
-                let (_, item, _) = signal_declarations.remove(index);
+                let (name, item, _) = signal_declarations.remove(index);
                 let mut signals = Vec::new();
                 signals_from_module_or_generate_item(
                     item,
                     self.tree,
                     self.aliases,
                     &scope.env,
+                    Some(&name),
                     &mut signals,
                 )?;
                 extend_const_env_with_variable_types(
@@ -835,6 +830,7 @@ impl<'a> Elaborator<'a, '_> {
                             self.tree,
                             self.aliases,
                             &scope.env,
+                            None,
                             &mut signals,
                         )?
                     }
@@ -885,6 +881,7 @@ impl<'a> Elaborator<'a, '_> {
                             self.tree,
                             self.aliases,
                             &scope.env,
+                            None,
                             &mut signals,
                         )?;
                     }
@@ -918,6 +915,28 @@ impl<'a> Elaborator<'a, '_> {
     }
 }
 
+// Inspect dimension expressions only, excluding runtime declaration initializers.
+fn dimension_dependencies(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+    node.into_iter()
+        .filter(|node| {
+            matches!(
+                node,
+                RefNode::PackedDimension(_)
+                    | RefNode::UnpackedDimension(_)
+                    | RefNode::VariableDimension(_)
+            )
+        })
+        .flat_map(|node| node.into_iter())
+        .filter(|node| {
+            matches!(
+                node,
+                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
+            )
+        })
+        .filter_map(|node| identifier_text(node, tree))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,6 +945,83 @@ mod tests {
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
         Source::from_syntax(&tree)
+    }
+
+    #[test]
+    fn resolves_shared_packed_and_individual_unpacked_dimensions() {
+        for declaration in [
+            "logic [P-1:0] a[W-1:0], b[N-1:0];",
+            "wire [P-1:0] a[W-1:0], b[N-1:0];",
+            "T a[W-1:0], b[N-1:0];",
+            "logic [P-1:0] a[W-1:0], b[N'(N-1):0];",
+        ] {
+            let source = format!(
+                r#"
+                module Top(output logic y);
+                    typedef logic [2:0] T;
+                    if (1) begin : g
+                        localparam N = $size(a);
+                        localparam W = 2;
+                        localparam P = 3;
+                        {declaration}
+                        assign a[0] = 0;
+                        assign a[1] = 0;
+                        assign b[0] = 0;
+                        assign b[1] = 0;
+                        if (($bits(b) == 6) && ($size(b) == 2)) assign y=1;
+                        else begin initial $fatal; end
+                    end
+                endmodule
+            "#
+            );
+            analyze(&source).unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        }
+    }
+
+    #[test]
+    fn scopes_all_function_return_metadata_and_keeps_hidden_outer_binding() {
+        let tree = crate::syntax::parse_source(
+            r#"
+            module Top();
+                if (1) begin : g
+                    function automatic bit signed [3:0] f(); return 0; endfunction
+                end
+            endmodule
+        "#,
+            Path::new("generate_metadata.sv"),
+        )
+        .unwrap();
+        let module = tree
+            .into_iter()
+            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            .unwrap();
+        let active = items(module, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let outer = FunctionReturnMetadata {
+            width: Some(8),
+            first_packed_dimension_width: Some(2),
+            signed: false,
+            is_2state: false,
+        };
+        let inner = FunctionReturnMetadata {
+            width: Some(4),
+            first_packed_dimension_width: Some(4),
+            signed: true,
+            is_2state: true,
+        };
+        let dimensions = PackedDimensions {
+            function_return_types: [("f".to_string(), outer), ("g.f".to_string(), inner)]
+                .into_iter()
+                .collect(),
+            ..PackedDimensions::default()
+        };
+        let local = active[0].dimensions(&dimensions);
+        assert_eq!(local.function_return_types["f"], inner);
+        assert_eq!(local.function_return_types["g.f"], inner);
+        assert_eq!(
+            local.function_return_types[&format!("{OUTER_BINDING}f")],
+            outer
+        );
+        assert_eq!(dimensions.function_return_types["f"], outer);
     }
 
     #[test]
