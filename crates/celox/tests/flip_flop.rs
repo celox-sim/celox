@@ -4750,12 +4750,18 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     })
     .unwrap();
     let error = sim.tick(clk).unwrap_err();
-    if let celox::RuntimeErrorCode::Runtime { message, signals } = error {
-        assert_eq!(message, "Non-progressing for loop in always_ff (loop variable `i`)");
-        assert_eq!(signals, ["i"]);
+    // Only the Veryl reference adapter lacks Celox's detailed loop diagnostic.
+    let expected = if (&sim as &dyn std::any::Any)
+        .is::<test_utils::veryl_sim::VerylSimAdapter>()
+    {
+        celox::RuntimeErrorCode::DetectedTrueLoop
     } else {
-        assert_eq!(error, celox::RuntimeErrorCode::DetectedTrueLoop);
-    }
+        celox::RuntimeErrorCode::Runtime {
+            message: "Non-progressing for loop in always_ff (loop variable `i`)".into(),
+            signals: vec!["i".into()],
+        }
+    };
+    assert_eq!(error, expected);
 }
 
 fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
@@ -4802,12 +4808,18 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
 
     sim.modify(|io| io.set(count, 0u8)).unwrap();
     let error = sim.tick(clk).unwrap_err();
-    if let celox::RuntimeErrorCode::Runtime { message, signals } = error {
-        assert_eq!(message, "Non-progressing for loop in always_ff (loop variable `i`)");
-        assert_eq!(signals, ["i"]);
+    // Only the Veryl reference adapter lacks Celox's detailed loop diagnostic.
+    let expected = if (&sim as &dyn std::any::Any)
+        .is::<test_utils::veryl_sim::VerylSimAdapter>()
+    {
+        celox::RuntimeErrorCode::DetectedTrueLoop
     } else {
-        assert_eq!(error, celox::RuntimeErrorCode::DetectedTrueLoop);
-    }
+        celox::RuntimeErrorCode::Runtime {
+            message: "Non-progressing for loop in always_ff (loop variable `i`)".into(),
+            signals: vec!["i".into()],
+        }
+    };
+    assert_eq!(error, expected);
 }
 
 fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
