@@ -83,9 +83,9 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
-napi            = "=3.12.6"
-napi-build      = "=2.4.3"
-napi-derive     = "=3.6.7"
+napi            = "=3.12.7"
+napi-build      = "=2.4.4"
+napi-derive     = "=3.6.8"
 num-bigint      = { version = "0.5", features = ["serde"] }
 num-traits      = "0.2.19"
 rand            = { version = "0.10", default-features = false }
