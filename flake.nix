@@ -52,6 +52,7 @@
             ln -s ${mbx}/bin/mbx $out/bin/cargo
           '';
           python = pkgs.python313.withPackages (ps: [ ps.cocotb ]);
+          stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
           # Corepack resolves pnpm from package.json at runtime, independently of nixpkgs.
           tools = [
             (pkgs.lib.hiPrio cargoShim)
@@ -61,7 +62,8 @@
             (pkgs.lib.hiPrio pkgs.corepack)
             python
             pkgs.verilator
-            pkgs.stdenv.cc
+            stdenv.cc
+            pkgs.mold
             pkgs.gnumake
             pkgs.cmake
             pkgs.pkg-config
@@ -84,6 +86,7 @@
             tools
             python
             rust
+            stdenv
             ;
         }
       );
@@ -117,7 +120,7 @@
           e = environments.${system};
         in
         {
-          default = e.pkgs.mkShell {
+          default = (e.pkgs.mkShell.override { stdenv = e.stdenv; }) {
             packages = e.tools;
             CELOX_COCOTB_PYTHON = "${e.python}/bin/python3";
             shellHook = ''

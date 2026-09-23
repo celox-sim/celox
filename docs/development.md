@@ -3,7 +3,7 @@
 The Linux development environment is defined in `flake.nix` and `flake.lock`.
 It supports x86-64 and AArch64. The host and both devcontainer variants use the
 same tools: Rust, Node.js 24, pnpm, Python with cocotb, Verilator, C/C++ build
-tools, cargo-insta, and mbx. Rust reads `rust-toolchain.toml`. Corepack selects
+tools, mold, cargo-insta, and mbx. Rust reads `rust-toolchain.toml`. Corepack selects
 pnpm from the nearest `package.json` with a `packageManager` field, so pnpm
 updates do not depend on the version available in nixpkgs. The first use of a
 version requires network access to download it into the user's Corepack cache;
@@ -31,6 +31,12 @@ The shell sets `CELOX_COCOTB_PYTHON` to its Python with cocotb. It includes
 `wasm32-unknown-unknown` for browser Rust builds. The separate NAPI WASI
 cross-build still needs the WASI target and SDK used by CI; these are not
 part of this native development shell.
+
+Native builds in the shell use mold through the Nix compiler wrapper to reduce
+link time. This applies to both supported Linux architectures and the devcontainer
+shells. No global `RUSTFLAGS` or repository-wide Cargo linker setting is needed,
+so WebAssembly builds and builds outside this environment keep their own linker
+configuration. Re-enter the shell after updating the flake to activate mold.
 
 For automatic activation, install direnv and nix-direnv once:
 
