@@ -78,7 +78,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
     let mut modules = HashMap::default();
     let mut module_ir = HashMap::default();
     let mut module_names = HashMap::default();
-    let mut name_to_id = HashMap::default();
+    let mut signature_to_id = HashMap::default();
     let mut next_id = 0usize;
 
     let root_id = ModuleId(next_id);
@@ -93,7 +93,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             name: resource_table::get_str_value(*top).unwrap_or_default(),
         });
     }
-    name_to_id.insert(*top, root_id);
+    signature_to_id.insert(root_ir.signature.clone(), root_id);
     module_names.insert(
         root_id,
         resource_table::get_str_value(*top).unwrap_or_default(),
@@ -181,12 +181,17 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                             worklist.push((child_id, child_module));
                             inst_ids.push(child_id);
                         } else {
-                            let child_id = if let Some(&existing) = name_to_id.get(&child_name) {
+                            // A value generic need not leave unknown variable types or
+                            // Param variables in the specialized body. Its module name
+                            // alone therefore cannot identify a reusable specialization.
+                            let child_id = if let Some(&existing) =
+                                signature_to_id.get(&child_module.signature)
+                            {
                                 existing
                             } else {
                                 let id = ModuleId(next_id);
                                 next_id += 1;
-                                name_to_id.insert(child_name, id);
+                                signature_to_id.insert(child_module.signature.clone(), id);
                                 module_names.insert(
                                     id,
                                     resource_table::get_str_value(child_name).unwrap_or_default(),
