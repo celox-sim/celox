@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1 (2026-09-24)
+
+## What's Changed
+* fix(veryl): distinguish value-generic module specializations by @tignear in https://github.com/celox-sim/celox/pull/884
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.7.0...v0.7.1
+
 ## 0.7.0 (2026-09-23)
 
 ## What's Changed
