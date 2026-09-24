@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.7.0 (2026-09-23)
+
+## What's Changed
+* perf(native): reduce large-design compile and execution overhead by @tignear in https://github.com/celox-sim/celox/pull/825
+* perf(compiler): reduce compile overhead and tighten x86 lowering by @tignear in https://github.com/celox-sim/celox/pull/827
+* chore(deps): update pnpm to v12.4.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/831
+* chore(deps): update pnpm to v12.4.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/833
+* chore(deps): update updatecli/updatecli-action action to v3.7.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/835
+* chore(deps): update rust crate clap to v4.6.7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/834
+* chore(deps): update dependency ubuntu to v26 by @renovate[bot] in https://github.com/celox-sim/celox/pull/838
+* chore(deps): update napi-rs and emnapi compatibility by @renovate[bot] in https://github.com/celox-sim/celox/pull/797
+* perf(compiler)!: reduce tiered startup and group benchmark comparisons by @tignear in https://github.com/celox-sim/celox/pull/840
+* fix(dev): unify Nix and devcontainer environments with mbx by @tignear in https://github.com/celox-sim/celox/pull/842
+* fix(nix): select pnpm from package.json with Corepack by @tignear in https://github.com/celox-sim/celox/pull/845
+* chore(deps): update rust crate syn to v3.0.6 by @renovate[bot] in https://github.com/celox-sim/celox/pull/847
+* build(nix): use mbx from shared nix-packages flake by @tignear in https://github.com/celox-sim/celox/pull/848
+* chore(deps): update rust crate codspeed-criterion-compat to v5.0.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/851
+* test: re-enable passing backend regression tests by @tignear in https://github.com/celox-sim/celox/pull/850
+* fix(deps): update vitest monorepo to v5 by @renovate[bot] in https://github.com/celox-sim/celox/pull/806
+* fix(bench): migrate benchmarks to Vitest 5 by @tignear in https://github.com/celox-sim/celox/pull/856
+* feat(sv-frontend): lower enums and always_comb control flow by @tignear in https://github.com/celox-sim/celox/pull/662
+* fix(sim): resolve known mismatches in four-state equality by @tignear in https://github.com/celox-sim/celox/pull/857
+* feat(sv): expand generate construct support by @tignear in https://github.com/celox-sim/celox/pull/859
+* fix(deps): update rust crate wasmtime to v49 by @renovate[bot] in https://github.com/celox-sim/celox/pull/862
+* chore(deps): update pnpm to v12.4.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/865
+* chore(deps): update dependency @tybys/wasm-util to v0.10.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/869
+* chore(deps): update dependency @biomejs/biome to v2.5.13 by @renovate[bot] in https://github.com/celox-sim/celox/pull/868
+* chore(deps): update dependency @types/node to v25.9.7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/870
+* chore(deps): update dependency lefthook to v2.1.14 by @renovate[bot] in https://github.com/celox-sim/celox/pull/871
+* chore(deps): update dependency typedoc-vitepress-theme to v1.1.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/873
+* chore(deps): update vitest monorepo to v5.0.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/874
+* chore(deps): update dependency @playwright/test to v1.63.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/876
+* chore(deps): update dependency vite to v8.3.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/877
+* chore(deps): update dependency @biomejs/biome to v2.5.14 by @renovate[bot] in https://github.com/celox-sim/celox/pull/881
+* chore(deps): update rust crate rand to v0.10.3 by @renovate[bot] in https://github.com/celox-sim/celox/pull/879
+* chore(deps): update napi-rs and emnapi compatibility by @renovate[bot] in https://github.com/celox-sim/celox/pull/866
+* build(nix): use mold for native development builds by @tignear in https://github.com/celox-sim/celox/pull/880
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.6.0...v0.7.0
+
 ## 0.6.0 (2026-09-14)
 
 ## What's Changed

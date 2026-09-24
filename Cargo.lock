@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "celox"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
@@ -475,14 +475,14 @@ dependencies = [
 
 [[package]]
 name = "celox-analysis"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-arm64"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -499,14 +499,14 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-common"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
 ]
 
 [[package]]
 name = "celox-backend-cranelift"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-design",
  "celox-sir",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-wasm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-backend-cranelift",
  "celox-design",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-x86"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-analysis",
  "celox-backend-common",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox",
  "celox-design",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "celox-bench-sv"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "veryl-analyzer",
  "veryl-emitter",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "celox-design"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "celox-example-my-frontend-napi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-frontend-sdk",
  "celox-napi",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-design",
  "celox-frontend-sdk",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sdk"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
  "num-bigint",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-sv"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-design",
  "celox-frontend-core",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "celox-frontend-veryl"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "celox-macros"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
  "insta",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "celox-napi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox",
  "celox-design",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "celox-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir-opt"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "celox-slt"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "celox-state-layout"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-design",
  "fxhash",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sv-analyzer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
  "miette",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "celox-testbench"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox-design",
  "num-bigint",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "celox-ts-gen"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fxhash",
  "insta",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "celox-vpi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox",
  "clap",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "celox-wasm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "celox",
  "console_error_panic_hook",
@@ -1026,7 +1026,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1859,7 +1859,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2459,7 +2459,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3730,7 +3730,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4208,10 +4208,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5443,7 +5443,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
