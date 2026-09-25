@@ -511,11 +511,11 @@ dependencies = [
  "celox-design",
  "celox-sir",
  "celox-state-layout",
- "cranelift",
- "cranelift-frontend 0.135.0",
+ "cranelift 0.136.0",
+ "cranelift-frontend 0.136.0",
  "cranelift-jit",
- "cranelift-module",
- "cranelift-native 0.135.0",
+ "cranelift-module 0.136.0",
+ "cranelift-native 0.136.0",
  "fxhash",
  "num-bigint",
  "thiserror 2.0.20",
@@ -1112,7 +1112,18 @@ checksum = "1dbbec87b21cfd7e099e074433ebdb4a354770b5b125399034b9d85c6ebbe6ca"
 dependencies = [
  "cranelift-codegen 0.135.0",
  "cranelift-frontend 0.135.0",
- "cranelift-module",
+ "cranelift-module 0.135.0",
+]
+
+[[package]]
+name = "cranelift"
+version = "0.136.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e2e654aaac428d83402a15a3b2c2793332017663609ca39bff5566b0c2ba732"
+dependencies = [
+ "cranelift-codegen 0.136.0",
+ "cranelift-frontend 0.136.0",
+ "cranelift-module 0.136.0",
 ]
 
 [[package]]
@@ -1375,22 +1386,22 @@ checksum = "2b46ea04636aa506eb49e5a61c54270314912de7f1c33ad7f7c2c57cb0784e23"
 
 [[package]]
 name = "cranelift-jit"
-version = "0.135.0"
+version = "0.136.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa063cc98af51fb9090cd40b674503e21bdfa705d2bff75ebf98b79ffc0f598d"
+checksum = "ba129c2cdd93a32d4042bbfabf3c6ddbe71ba5e4b38edbd65b35d88c62c812dc"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.135.0",
- "cranelift-control 0.135.0",
- "cranelift-entity 0.135.0",
- "cranelift-module",
- "cranelift-native 0.135.0",
+ "cranelift-codegen 0.136.0",
+ "cranelift-control 0.136.0",
+ "cranelift-entity 0.136.0",
+ "cranelift-module 0.136.0",
+ "cranelift-native 0.136.0",
  "libc",
  "log",
  "memmap2",
  "region",
  "target-lexicon",
- "wasmtime-internal-jit-icache-coherence 48.0.0",
+ "wasmtime-internal-jit-icache-coherence 49.0.0",
  "windows-sys 0.61.2",
 ]
 
@@ -1403,6 +1414,18 @@ dependencies = [
  "anyhow",
  "cranelift-codegen 0.135.0",
  "cranelift-control 0.135.0",
+]
+
+[[package]]
+name = "cranelift-module"
+version = "0.136.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e627cc19c3e5409e373625287bb0680b4f73606c0909ee2009e71f1af9832eef"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen 0.136.0",
+ "cranelift-control 0.136.0",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -4719,7 +4742,7 @@ version = "0.21.0"
 source = "git+https://github.com/veryl-lang/veryl.git?rev=2bd44cba2eae4d9565874266ad79828b7c44266a#2bd44cba2eae4d9565874266ad79828b7c44266a"
 dependencies = [
  "clap",
- "cranelift",
+ "cranelift 0.135.0",
  "cranelift-native 0.135.0",
  "daggy",
  "fst-writer",
