@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 (2026-09-26)
+
+## What's Changed
+* fix(deps): update cranelift crates to 0.136.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/890
+* chore(deps): update dependency @napi-rs/cli to v3.10.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/889
+* chore(deps): update dependency typedoc-plugin-markdown to v4.13.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/894
+* chore(deps): update pnpm to v12.5.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/897
+* chore(deps): update dependency @types/node to v25.9.8 by @renovate[bot] in https://github.com/celox-sim/celox/pull/899
+* feat(test-suite)!: add reusable Veryl tests and fix simulator semantics by @tignear in https://github.com/celox-sim/celox/pull/902
+* chore(deps): update rust crate test-case to v3.4.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/903
+* fix(ci): limit Heliodor suite concurrency by @tignear in https://github.com/celox-sim/celox/pull/904
+* chore(deps): update napi-rs and emnapi compatibility by @renovate[bot] in https://github.com/celox-sim/celox/pull/896
+* feat(sv): support $countones in expressions by @tignear in https://github.com/celox-sim/celox/pull/901
+* fix(ci): catch Rust documentation failures before publication by @tignear in https://github.com/celox-sim/celox/pull/907
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.7.1...v0.8.0
+
 ## 0.7.1 (2026-09-24)
 
 ## What's Changed
