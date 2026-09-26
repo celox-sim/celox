@@ -1140,6 +1140,7 @@ fn collect_function_body_effects(
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
+    let body = crate::lowering::function_return::implicit_return_body(body);
     let initial_local_store = local_store.fork();
     fn collect_statements(
         module: &Module,
@@ -2494,7 +2495,7 @@ fn collect_function_body_effects(
         // evaluator's break-aware loop state before exposing output-formal
         // previews to later actual destinations.
         let (_, _, break_aware_store) =
-            eval_function_body_return(module, &initial_local_store, body, ret_id, arena)?;
+            eval_function_body_return(module, &initial_local_store, &body, ret_id, arena)?;
         Ok(break_aware_store)
     } else {
         Ok(final_state.store)

@@ -2825,6 +2825,7 @@ impl<'a> FfParser<'a> {
             ));
         };
 
+        let function_body = crate::lowering::function_return::implicit_return_body(&function_body);
         self.validate_function_call_bindings(call, &function_body)?;
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
@@ -4017,6 +4018,7 @@ impl<'a> FfParser<'a> {
             Ok(merge_branch_state(parser, &cond, then_state, else_state))
         }
 
+        let body = crate::lowering::function_return::implicit_return_body(body);
         fn build_state_from_statements(
             parser: &FfParser,
             statements: &[Statement],
@@ -4049,6 +4051,7 @@ impl<'a> FfParser<'a> {
         body: &veryl_analyzer::ir::FunctionBody,
         ret_id: VarId,
     ) -> Result<Expression, ParserError> {
+        let body = crate::lowering::function_return::implicit_return_body(body);
         fn resolve_return_expr(
             parser: &FfParser,
             statements: &[Statement],
@@ -4305,6 +4308,7 @@ impl<'a> FfParser<'a> {
             .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
             .collect();
 
+        let function_body = crate::lowering::function_return::implicit_return_body(&function_body);
         self.validate_function_call_bindings(call, &function_body)?;
         self.flush_captured_nonlocal_state_before_call(
             call, targets, domain, convert, sources, ir_builder,
@@ -4498,6 +4502,7 @@ impl<'a> FfParser<'a> {
             .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
             .collect();
 
+        let function_body = crate::lowering::function_return::implicit_return_body(&function_body);
         self.validate_function_call_bindings(call, &function_body)?;
 
         let has_runtime_effect =
