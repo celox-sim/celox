@@ -60,9 +60,9 @@ Categories describe the observed blocker. A compilation rejection is not automat
 Keep the manifest limited to reviewed case IDs with a reason and retained evidence. Do not generate a new allowlist from every failing result. For an excluded case, run a focused check, inspect the full compiler/runtime log and emitted SV, then remove only the exclusion that has been resolved. The shared case does not acquire an ignore.
 
 ```sh
-cargo run -p veryl-test-suite --features verilator --bin verify-verilator -- \
+cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator -- \
   --include-ignored --filter array_literal::test_array_literal_default_comb_assignment --jobs 1
-cargo run -p veryl-test-suite --features icarus --bin verify-icarus -- \
+cargo run -p celox-test-suite-veryl --features icarus --bin verify-icarus -- \
   --include-ignored --filter case_switch::test_case_break_inside_comb_function_for --jobs 1
 ```
 

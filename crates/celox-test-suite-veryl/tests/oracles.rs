@@ -1,7 +1,7 @@
 //! Live adapter checks. Run explicitly with --ignored; these require external tools.
 #![cfg(any(feature = "icarus", feature = "verilator"))]
+use celox_test_suite_veryl::{Backend, BigUint, Design, Result, SignalPath, Simulator};
 use std::path::Path;
-use veryl_test_suite::{Backend, BigUint, Design, Result, SignalPath, Simulator};
 
 const DESIGN: &str = r#"
 module Child (
@@ -79,9 +79,9 @@ fn check_edges_and_wide_values(build: fn(&Design, &Path) -> Result<Box<dyn Backe
 fn verilator_edges_nba_and_wide_values() {
     check_edges_and_wide_values(
         |d, p| {
-            Ok(Box::new(veryl_test_suite::verilator::Verilator::build(
-                d, p,
-            )?))
+            Ok(Box::new(
+                celox_test_suite_veryl::verilator::Verilator::build(d, p)?,
+            ))
         },
         "verilator",
     );
@@ -92,7 +92,11 @@ fn verilator_edges_nba_and_wide_values() {
 #[ignore = "requires Icarus, iverilog-vpi, C++ and timeout on PATH"]
 fn icarus_edges_nba_and_wide_values() {
     check_edges_and_wide_values(
-        |d, p| Ok(Box::new(veryl_test_suite::icarus::Icarus::build(d, p)?)),
+        |d, p| {
+            Ok(Box::new(celox_test_suite_veryl::icarus::Icarus::build(
+                d, p,
+            )?))
+        },
         "icarus",
     );
 }
@@ -113,7 +117,7 @@ module Top (a: input logic<70>[2], y: output logic<70>[2]) {
         "Top",
     )
     .four_state(true);
-    let mut backend = veryl_test_suite::icarus::Icarus::build(&design, &dir).unwrap();
+    let mut backend = celox_test_suite_veryl::icarus::Icarus::build(&design, &dir).unwrap();
     let payload: BigUint = (BigUint::from(1u8) << 139) | BigUint::from(0x5au8);
     let mask: BigUint =
         (BigUint::from(1u8) << 139) | (BigUint::from(1u8) << 71) | BigUint::from(0xffu8);
@@ -168,9 +172,9 @@ module Top (
 fn verilator_generated_instance_paths() {
     check_generated_instance_paths(
         |d, p| {
-            Ok(Box::new(veryl_test_suite::verilator::Verilator::build(
-                d, p,
-            )?))
+            Ok(Box::new(
+                celox_test_suite_veryl::verilator::Verilator::build(d, p)?,
+            ))
         },
         "verilator",
     );
@@ -181,7 +185,11 @@ fn verilator_generated_instance_paths() {
 #[ignore = "requires Icarus, iverilog-vpi, C++ and timeout on PATH"]
 fn icarus_generated_instance_paths() {
     check_generated_instance_paths(
-        |d, p| Ok(Box::new(veryl_test_suite::icarus::Icarus::build(d, p)?)),
+        |d, p| {
+            Ok(Box::new(celox_test_suite_veryl::icarus::Icarus::build(
+                d, p,
+            )?))
+        },
         "icarus",
     );
 }
@@ -193,12 +201,12 @@ fn icarus_rejects_invalid_output_connections() {
     let directory =
         std::env::temp_dir().join(format!("veryl-suite-rejections-{}", std::process::id()));
     let mut checked = 0;
-    for case in veryl_test_suite::cases()
-        .filter(|case| case.expectation == veryl_test_suite::Expectation::CompilationError)
+    for case in celox_test_suite_veryl::cases()
+        .filter(|case| case.expectation == celox_test_suite_veryl::Expectation::CompilationError)
     {
         let output = directory.join(case.name.replace("::", "/"));
         case.run(&mut |design| {
-            Ok(Box::new(veryl_test_suite::icarus::Icarus::build(
+            Ok(Box::new(celox_test_suite_veryl::icarus::Icarus::build(
                 design, &output,
             )?))
         });
@@ -217,14 +225,14 @@ fn verilator_rejects_invalid_assignment() {
     ));
     // The other seven negative cases remain excluded for Verilator's acceptance
     // of dynamic output destinations. This one reports an assignment type error.
-    let case = veryl_test_suite::cases()
+    let case = celox_test_suite_veryl::cases()
         .find(|case| {
             case.name == "hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb"
         })
         .unwrap();
     case.run(&mut |design| {
-        Ok(Box::new(veryl_test_suite::verilator::Verilator::build(
-            design, &directory,
-        )?))
+        Ok(Box::new(
+            celox_test_suite_veryl::verilator::Verilator::build(design, &directory)?,
+        ))
     });
 }

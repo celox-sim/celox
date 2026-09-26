@@ -199,7 +199,7 @@
       "ignored": 0
     },
     "suite": {
-      "command": "cargo test --locked -p veryl-test-suite --all-features",
+      "command": "cargo test --locked -p celox-test-suite-veryl --all-features",
       "passed": 15,
       "failed": 0,
       "ignored": 3
@@ -207,7 +207,7 @@
     "host": "x86_64",
     "arm64_execution": "not run; code generation/unit tests only",
     "clippy": {
-      "command": "cargo clippy --locked -p celox -p celox-backend-x86 -p celox-backend-arm64 -p celox-backend-cranelift -p celox-backend-wasm -p veryl-test-suite --all-targets --features celox/systemverilog,veryl-test-suite/verilator,veryl-test-suite/icarus -- -D warnings",
+      "command": "cargo clippy --locked -p celox -p celox-backend-x86 -p celox-backend-arm64 -p celox-backend-cranelift -p celox-backend-wasm -p celox-test-suite-veryl --all-targets --features celox/systemverilog,celox-test-suite-veryl/verilator,celox-test-suite-veryl/icarus -- -D warnings",
       "status": "passed"
     },
     "format": {

@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn retained_reports_cover_the_catalogue_without_losing_failures() {
-    let catalogue: BTreeSet<_> = veryl_test_suite::cases().map(|case| case.name).collect();
+    let catalogue: BTreeSet<_> = celox_test_suite_veryl::cases()
+        .map(|case| case.name)
+        .collect();
     for contents in [
         include_str!("../verification/verilator.json"),
         include_str!("../verification/icarus.json"),
@@ -23,16 +25,19 @@ fn retained_reports_cover_the_catalogue_without_losing_failures() {
         );
         let mut counts = BTreeMap::new();
         for row in rows {
-            let case = veryl_test_suite::case(row["name"].as_str().unwrap()).unwrap();
+            let case = celox_test_suite_veryl::case(row["name"].as_str().unwrap()).unwrap();
             assert_eq!(row["expectation"], format!("{:?}", case.expectation));
             if row["status"] == "rejected" || row["status"] == "unexpected_accept" {
                 assert_eq!(
                     case.expectation,
-                    veryl_test_suite::Expectation::CompilationError
+                    celox_test_suite_veryl::Expectation::CompilationError
                 );
             }
             if row["status"] == "passed" {
-                assert_eq!(case.expectation, veryl_test_suite::Expectation::Simulation);
+                assert_eq!(
+                    case.expectation,
+                    celox_test_suite_veryl::Expectation::Simulation
+                );
             }
             let status = row["status"].as_str().unwrap();
             assert!(

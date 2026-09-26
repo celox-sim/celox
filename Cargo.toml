@@ -19,6 +19,7 @@ members = [
     "crates/celox-state-layout",
     "crates/celox-sv-analyzer",
     "crates/celox-runtime",
+    "crates/celox-test-suite-veryl",
     "crates/celox-testbench",
     "crates/celox-bench-sv",
     "crates/celox-macros",
@@ -26,7 +27,6 @@ members = [
     "crates/celox-ts-gen",
     "crates/celox-wasm",
     "crates/celox-vpi",
-    "crates/veryl-test-suite",
     "examples/my-frontend-napi",
 ]
 resolver = "2"
@@ -46,7 +46,6 @@ description = "Celox HDL Simulator"
 rust-version = "1.98.1"
 
 [workspace.dependencies]
-veryl-test-suite         = { version = "=0.7.1", path = "crates/veryl-test-suite" } # x-release-please-version
 celox                   = { version = "=0.7.1", path = "crates/celox", default-features = false } # x-release-please-version
 celox-analysis          = { version = "=0.7.1", path = "crates/celox-analysis" } # x-release-please-version
 celox-backend-arm64     = { version = "=0.7.1", path = "crates/celox-backend-arm64" } # x-release-please-version
@@ -67,6 +66,7 @@ celox-sir-opt           = { version = "=0.7.1", path = "crates/celox-sir-opt", d
 celox-slt               = { version = "=0.7.1", path = "crates/celox-slt" } # x-release-please-version
 celox-state-layout      = { version = "=0.7.1", path = "crates/celox-state-layout" } # x-release-please-version
 celox-sv-analyzer       = { version = "=0.7.1", path = "crates/celox-sv-analyzer" } # x-release-please-version
+celox-test-suite-veryl   = { version = "=0.7.1", path = "crates/celox-test-suite-veryl" } # x-release-please-version
 celox-testbench         = { version = "=0.7.1", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.7.1", path = "crates/celox-ts-gen" } # x-release-please-version
 

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use celox::{BigUint, ParserError, SimBackend, Simulator, SimulatorError, SimulatorErrorKind};
-use veryl_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath};
+use celox_test_suite_veryl::{Backend, CompilationRejected, Design, Result, SignalPath};
 
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
@@ -118,7 +118,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
 
 // Only source diagnostics satisfy a negative fixture. Codegen, IR verification,
 // runtime, and unrelated unsupported-feature failures must fail the test.
-pub fn classify_build_error(error: SimulatorError) -> veryl_test_suite::Error {
+pub fn classify_build_error(error: SimulatorError) -> celox_test_suite_veryl::Error {
     let rejected = matches!(
         error.kind(),
         SimulatorErrorKind::Analyzer(_)
@@ -153,7 +153,7 @@ fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box
 
 pub fn run_case(name: &str, backend: &str) {
     let run = || {
-        veryl_test_suite::case(name)
+        celox_test_suite_veryl::case(name)
             .unwrap_or_else(|| panic!("unknown Veryl test case: {name}"))
             .run(&mut |design| build(design, backend));
     };

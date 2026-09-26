@@ -1,5 +1,5 @@
 [package]
-name = "veryl-test-suite"
+name = "celox-test-suite-veryl"
 version.workspace = true
 authors.workspace = true
 repository.workspace = true

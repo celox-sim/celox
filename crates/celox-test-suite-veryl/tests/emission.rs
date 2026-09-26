@@ -1,7 +1,7 @@
 #![cfg(feature = "emit")]
 
+use celox_test_suite_veryl::emit::emit_veryl_sources;
 use std::path::Path;
-use veryl_test_suite::emit::emit_veryl_sources;
 
 #[test]
 fn event_polarities_follow_top_port_types_even_when_forwarded() {

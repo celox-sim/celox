@@ -42,7 +42,7 @@ fn main() {
         println!("{constant}");
     }
     if let Some(output) = std::env::args_os().nth(1) {
-        let emitted = veryl_test_suite::emit::emit_veryl_sources(&[(source, path)]);
+        let emitted = celox_test_suite_veryl::emit::emit_veryl_sources(&[(source, path)]);
         let mut sv = emitted.as_sv_sources()[0].0.to_owned();
         sv.push_str(r#"
 module Top;

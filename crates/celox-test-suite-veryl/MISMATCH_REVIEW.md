@@ -334,9 +334,9 @@ the expected 64-bit quotient is unchanged.
 From the repository root, with both simulators on `PATH`:
 
 ```sh
-cargo run -p veryl-test-suite --all-features --example inspect-mismatch-ir -- \
-  crates/veryl-test-suite/verification/repros/mismatches/constant_context.sv
-python3 crates/veryl-test-suite/scripts/reproduce-mismatches.py
+cargo run -p celox-test-suite-veryl --all-features --example inspect-mismatch-ir -- \
+  crates/celox-test-suite-veryl/verification/repros/mismatches/constant_context.sv
+python3 crates/celox-test-suite-veryl/scripts/reproduce-mismatches.py
 ```
 
 The Rust example prints analyzer values and regenerates the SV constant probe.

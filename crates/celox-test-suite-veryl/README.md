@@ -1,4 +1,4 @@
-# veryl-test-suite
+# celox-test-suite-veryl
 
 A reusable corpus of 648 Veryl language tests for compiler and simulator
 implementations. Sources, input sequences, and assertions live together in this
@@ -12,7 +12,7 @@ dependency on the revision containing it:
 
 ```toml
 [dev-dependencies]
-veryl-test-suite = { path = "../celox/crates/veryl-test-suite" }
+celox-test-suite-veryl = { path = "../celox/crates/celox-test-suite-veryl" }
 ```
 
 Implement `Backend` for a wrapper around your simulator. A compiler factory
@@ -22,7 +22,7 @@ a fresh `Box<dyn Backend>`. The four required operations are `write`, `read`,
 writes, and stable signal handles.
 
 ```rust
-use veryl_test_suite::{Category, Factory, case, cases};
+use celox_test_suite_veryl::{Category, Factory, case, cases};
 
 fn check_operators(compile: &mut Factory<'_>) {
     for case in cases().filter(|case| case.category == Category::Operators) {
@@ -131,24 +131,24 @@ from Celox. Compiler diagnostics are not suppressed and emitted SV is not
 rewritten to fit a simulator.
 
 ```sh
-cargo run -p veryl-test-suite --features verilator --bin verify-verilator -- \
+cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator -- \
   --jobs 8 --output /tmp/veryl-suite-verilator \
-  --report crates/veryl-test-suite/verification/verilator.json
-cargo run -p veryl-test-suite --features icarus --bin verify-icarus -- \
+  --report crates/celox-test-suite-veryl/verification/verilator.json
+cargo run -p celox-test-suite-veryl --features icarus --bin verify-icarus -- \
   --jobs 8 --output /tmp/veryl-suite-icarus \
-  --report crates/veryl-test-suite/verification/icarus.json
-python3 crates/veryl-test-suite/scripts/summarize.py
+  --report crates/celox-test-suite-veryl/verification/icarus.json
+python3 crates/celox-test-suite-veryl/scripts/summarize.py
 
 # Reproduce one case; omit --report to preserve the complete retained report:
-cargo run -p veryl-test-suite --features icarus --bin verify-icarus -- \
+cargo run -p celox-test-suite-veryl --features icarus --bin verify-icarus -- \
   --filter four_state::test_four_state_initial_and_set --jobs 1
 
 # Recheck an ignored discrepancy against its unchanged assertions:
-cargo run -p veryl-test-suite --features verilator --bin verify-verilator -- \
+cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator -- \
   --include-ignored --filter signed_divrem::signed_divrem_i64 --jobs 1
 
 # Verify the adapters themselves (requires both tools):
-cargo test -p veryl-test-suite --all-features --test oracles -- --ignored
+cargo test -p celox-test-suite-veryl --all-features --test oracles -- --ignored
 ```
 
 Normal verification excludes the reviewed limitations and succeeds for the

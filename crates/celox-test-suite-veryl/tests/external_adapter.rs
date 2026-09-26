@@ -1,9 +1,9 @@
 //! This integration test is an external consumer: it has no Celox dependency.
-use std::collections::BTreeMap;
-use veryl_test_suite::{
+use celox_test_suite_veryl::{
     Backend, BigUint, Category, CompilationRejected, Result, Scalar, SignalPath, Simulator, case,
     cases,
 };
+use std::collections::BTreeMap;
 
 #[derive(Default)]
 struct Bitwise {
@@ -178,7 +178,7 @@ fn rejection_cases_require_a_compiler_error() {
     let case = case("hierarchy::test_instance_output_concat_advances_each_destination").unwrap();
     assert_eq!(
         case.expectation,
-        veryl_test_suite::Expectation::CompilationError
+        celox_test_suite_veryl::Expectation::CompilationError
     );
     case.run(&mut |_| Err(CompilationRejected("output destination is not constant".into()).into()));
     assert!(
@@ -189,8 +189,8 @@ fn rejection_cases_require_a_compiler_error() {
 #[test]
 fn negative_cases_fail_on_adapter_errors_and_panics() {
     use std::io::{Error, ErrorKind};
-    for case in
-        cases().filter(|case| case.expectation == veryl_test_suite::Expectation::CompilationError)
+    for case in cases()
+        .filter(|case| case.expectation == celox_test_suite_veryl::Expectation::CompilationError)
     {
         for kind in [
             ErrorKind::NotFound,

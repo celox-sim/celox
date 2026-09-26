@@ -3,7 +3,7 @@
 Celox is released as one lockstep distribution. `VERSION`,
 `.release-please-manifest.json`, the npm packages, and all Rust workspace crates
 must always carry the same version. The public Rust entry points are `celox`,
-`celox-frontend-sdk`, `veryl-test-suite`, and the Rust adapter API in `celox-napi`; the remaining
+`celox-frontend-sdk`, `celox-test-suite-veryl`, and the Rust adapter API in `celox-napi`; the remaining
 published `celox-*` crates satisfy their Cargo dependency graph and remain
 implementation details.
 
@@ -109,7 +109,7 @@ the bootstrap is deliberately not a GitHub Actions job:
 
 2. Create a short-expiry crates.io API token with both the `publish-new` and
    **Manage trusted publishing configurations** endpoint scopes, and a crate
-   scope covering `celox`, `celox-*`, and `veryl-test-suite`. Do not save it in GitHub Actions.
+   scope covering `celox` and `celox-*`. Do not save it in GitHub Actions.
 3. Pass the token without putting it in shell history, then publish the
    placeholders and register their Trusted Publisher configurations. The
    confirmation is required because crates.io releases are permanent:

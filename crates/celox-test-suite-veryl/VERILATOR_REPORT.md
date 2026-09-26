@@ -30,7 +30,7 @@ values or runner exclusions were changed to make this verification pass.
 ## Reproduce
 
 ```sh
-cargo run -p veryl-test-suite --features verilator --bin verify-verilator -- \
+cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator -- \
   --jobs 8 --output target/veryl-verilator
 ```
 

@@ -2,7 +2,7 @@
 mod test_utils;
 
 use celox::{CodegenError, ParserError, SimulatorError, SimulatorErrorKind};
-use veryl_test_suite::CompilationRejected;
+use celox_test_suite_veryl::CompilationRejected;
 
 #[test]
 fn negative_suite_cases_accept_only_source_diagnostics() {
