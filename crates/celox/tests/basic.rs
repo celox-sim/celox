@@ -411,6 +411,97 @@ module Top (
 
     }
 
+    fn test_comb_function_call_break_inside_dynamic_for(sim) {
+        @ignore_on(sv);
+        @build Simulator::builder(r#"
+module Top (
+    count: input logic<3>,
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        n: input logic<3>,
+        x: input logic<4>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 8'd0;
+        for i in 0..n {
+            if x[i] {
+                tmp = i + 8'd1;
+                break;
+            }
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q = f(count, d);
+    }
+}
+"#, "Top");
+        let count = sim.signal("count");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        for n in 0..=4u8 {
+            for x in 0..16u8 {
+                sim.modify(|io| {
+                    io.set(count, n);
+                    io.set(d, x);
+                }).unwrap();
+                let expected = (0..n).find(|i| x & (1 << i) != 0).map_or(0, |i| i + 1);
+                assert_eq!(sim.get(q), expected.into(), "count={n}, d={x}");
+            }
+        }
+    }
+
+    fn test_comb_function_call_nested_break_inside_dynamic_for(sim) {
+        @ignore_on(sv);
+        @build Simulator::builder(r#"
+module Top (
+    count: input logic<3>,
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        n: input logic<3>,
+        x: input logic<4>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 8'd0;
+        for i in 0..n {
+            for j in 0..4 {
+                if x[j] {
+                    break;
+                }
+                tmp = tmp + 8'd1;
+            }
+            tmp = tmp + 8'd1;
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q = f(count, d);
+    }
+}
+"#, "Top");
+        let count = sim.signal("count");
+        let d = sim.signal("d");
+        let q = sim.signal("q");
+
+        for n in 0..=4u8 {
+            for x in 0..16u8 {
+                sim.modify(|io| {
+                    io.set(count, n);
+                    io.set(d, x);
+                }).unwrap();
+                let inner_count = (0..4u8).find(|j| x & (1 << j) != 0).unwrap_or(4);
+                assert_eq!(sim.get(q), (n * (inner_count + 1)).into(), "count={n}, d={x}");
+            }
+        }
+    }
+
     fn test_comb_function_call_nested_helper(sim) {
         @setup { let code = r#"
 module Top (
