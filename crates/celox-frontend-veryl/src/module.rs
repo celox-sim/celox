@@ -6,14 +6,13 @@ use crate::{
     BuildConfig, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase, ModuleInitialMemoryValue,
     ParserError, RegionedVarAddr, SimModule,
     bitaccess::{
-        PartSelectGeometry, SelectGeometry, eval_var_select, eval_var_select_with_geometry,
-        is_static_access, select_geometry,
+        eval_var_select, eval_var_select_with_geometry, is_static_access, select_geometry,
     },
     bitslicer::BitSlicer,
     ff::FfParser,
     logic_tree::{
         CombEffectCollector, SymbolicStore, apply_assignment_destination, coerce_node_width,
-        collect_and_advance_expression, collect_written_expression, combine_parts_with_default,
+        collect_and_advance_expression, collect_written_expression,
         eval_assignment_expression_effectful, eval_expression, expression_contains_runtime_effect,
         get_width, parse_comb_with_loop_recovery, subtract_written_sensitivity,
     },
@@ -22,7 +21,7 @@ use crate::{
     resolve_total_width,
 };
 use celox_design::{
-    BinaryOp, BitAccess, InitialStateData as InitialMemoryData,
+    BitAccess, InitialStateData as InitialMemoryData,
     InitialStateWriteRun as InitialMemoryWriteRun, ModuleId, RuntimeEventSite,
     SPARSE_WORKING_REGION, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
@@ -305,453 +304,17 @@ fn find_top_level_connection_colon(text: &str) -> Option<usize> {
     None
 }
 
-fn build_dynamic_output_glue(
-    module: &Module,
-    geometry: &SelectGeometry,
-    parent_store: &mut SymbolicStore<VarId>,
-    parent_arena: &mut SLTNodeArena<VarId>,
-    glue_arena: &mut SLTNodeArena<GlueAddr>,
-    child_port_id: VarId,
-    dst: &AssignDestination,
-    rhs: NodeId,
-    rhs_signed: bool,
-    preview_rhs: NodeId,
-    preview_rhs_sources: HashSet<VarAtomBase<VarId>>,
-    preview_rhs_is_2state: bool,
-) -> Result<
-    (
-        NodeId,
-        BitAccess,
-        HashSet<VarAtomBase<GlueAddr>>,
-        HashSet<VarAtomBase<GlueAddr>>,
-        HashSet<VarAtomBase<GlueAddr>>,
-    ),
-    ParserError,
-> {
-    let mut offset = glue_arena.alloc(SLTNode::Constant(
-        BigUint::from(0u8),
-        BigUint::from(0u8),
-        64,
-        false,
-    ))?;
-    let mut parent_offset = parent_arena.alloc(SLTNode::Constant(
-        BigUint::from(0u8),
-        BigUint::from(0u8),
-        64,
-        false,
-    ))?;
-
-    let mut sources = collect_glue_sources(rhs, glue_arena);
-    let mut address_sources = HashSet::default();
-    let mut preview_sources = preview_rhs_sources;
-
-    let dim_limit = geometry.dimension_count;
-
-    for (dimension, index_expr) in dst
-        .index
-        .0
-        .iter()
-        .chain(&dst.select.0)
-        .take(dim_limit)
-        .enumerate()
-    {
-        let ((index, index_sources), _) = crate::logic_tree::eval_expression_effectful(
-            module,
-            parent_store,
-            index_expr,
-            parent_arena,
-            None,
-        )?;
-        preview_sources.extend(index_sources);
-        let mut cache = HashMap::default();
-        let mapped = parent_arena.get(index).map_addr(
-            index,
-            parent_arena,
-            glue_arena,
-            &mut cache,
-            &|id| {
-                if *id == child_port_id {
-                    GlueAddr::Child(*id)
-                } else {
-                    GlueAddr::Parent(*id)
-                }
-            },
-        )?;
-        let mapped_sources = collect_glue_sources(mapped, glue_arena);
-        sources.extend(mapped_sources.iter().copied());
-        address_sources.extend(mapped_sources);
-        let Some(stride) = geometry.strides.get(dimension).copied() else {
-            return Err(ParserError::illegal_context(
-                "dynamic output port destination",
-                format!(
-                    "index dimension {dimension} is outside the {}-dimension destination",
-                    geometry.strides.len()
-                ),
-                Some(&dst.token),
-            ));
-        };
-        let stride = glue_arena.alloc(SLTNode::Constant(
-            BigUint::from(stride),
-            BigUint::from(0u8),
-            64,
-            false,
-        ))?;
-        let term = glue_arena.alloc(SLTNode::Binary(mapped, BinaryOp::Mul, stride))?;
-        offset = glue_arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term))?;
-        let parent_stride = parent_arena.alloc(SLTNode::Constant(
-            BigUint::from(geometry.strides[dimension]),
-            BigUint::from(0u8),
-            64,
-            false,
-        ))?;
-        let parent_term =
-            parent_arena.alloc(SLTNode::Binary(index, BinaryOp::Mul, parent_stride))?;
-        parent_offset =
-            parent_arena.alloc(SLTNode::Binary(parent_offset, BinaryOp::Add, parent_term))?;
-    }
-
-    if let Some(part) = geometry.part {
-        let anchor_expr = dst.select.0.last().ok_or_else(|| {
-            ParserError::illegal_context(
-                "dynamic output port destination",
-                "part select is missing its anchor expression",
-                Some(&dst.token),
-            )
-        })?;
-        let Some(weight) = geometry.strides.get(dim_limit).copied() else {
-            return Err(ParserError::illegal_context(
-                "dynamic output port destination",
-                format!(
-                    "part-select dimension {dim_limit} is outside the {}-dimension destination",
-                    geometry.strides.len()
-                ),
-                Some(&dst.token),
-            ));
-        };
-        let (part_offset, parent_part_offset) = match part {
-            PartSelectGeometry::Colon { lsb, .. } => {
-                let bit_offset = lsb.checked_mul(weight).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "dynamic output port destination",
-                        "colon-select offset overflows usize",
-                        Some(&dst.token),
-                    )
-                })?;
-                (
-                    glue_arena.alloc(SLTNode::Constant(
-                        BigUint::from(bit_offset),
-                        BigUint::from(0u8),
-                        64,
-                        false,
-                    ))?,
-                    parent_arena.alloc(SLTNode::Constant(
-                        BigUint::from(bit_offset),
-                        BigUint::from(0u8),
-                        64,
-                        false,
-                    ))?,
-                )
-            }
-            PartSelectGeometry::PlusColon { .. }
-            | PartSelectGeometry::MinusColon { .. }
-            | PartSelectGeometry::Step { .. } => {
-                let ((anchor, anchor_sources), _) = crate::logic_tree::eval_expression_effectful(
-                    module,
-                    parent_store,
-                    anchor_expr,
-                    parent_arena,
-                    None,
-                )?;
-                preview_sources.extend(anchor_sources);
-                let parent_anchor = anchor;
-                let mut cache = HashMap::default();
-                let anchor = parent_arena.get(anchor).map_addr(
-                    anchor,
-                    parent_arena,
-                    glue_arena,
-                    &mut cache,
-                    &|id| {
-                        if *id == child_port_id {
-                            GlueAddr::Child(*id)
-                        } else {
-                            GlueAddr::Parent(*id)
-                        }
-                    },
-                )?;
-                let mapped_sources = collect_glue_sources(anchor, glue_arena);
-                sources.extend(mapped_sources.iter().copied());
-                address_sources.extend(mapped_sources);
-
-                let (element_offset, parent_element_offset) = match part {
-                    PartSelectGeometry::PlusColon { .. } => (anchor, parent_anchor),
-                    PartSelectGeometry::MinusColon { elements } => {
-                        let decrement = elements.checked_sub(1).ok_or_else(|| {
-                            ParserError::illegal_context(
-                                "dynamic output port destination",
-                                "minus-colon width underflows",
-                                Some(&dst.token),
-                            )
-                        })?;
-                        let decrement = glue_arena.alloc(SLTNode::Constant(
-                            BigUint::from(decrement),
-                            BigUint::from(0u8),
-                            64,
-                            false,
-                        ))?;
-                        let parent_decrement = parent_arena.alloc(SLTNode::Constant(
-                            BigUint::from(elements - 1),
-                            BigUint::from(0u8),
-                            64,
-                            false,
-                        ))?;
-                        (
-                            glue_arena.alloc(SLTNode::Binary(anchor, BinaryOp::Sub, decrement))?,
-                            parent_arena.alloc(SLTNode::Binary(
-                                parent_anchor,
-                                BinaryOp::Sub,
-                                parent_decrement,
-                            ))?,
-                        )
-                    }
-                    PartSelectGeometry::Step { elements } => {
-                        let element_count = elements;
-                        let elements = glue_arena.alloc(SLTNode::Constant(
-                            BigUint::from(element_count),
-                            BigUint::from(0u8),
-                            64,
-                            false,
-                        ))?;
-                        let parent_elements = parent_arena.alloc(SLTNode::Constant(
-                            BigUint::from(element_count),
-                            BigUint::from(0u8),
-                            64,
-                            false,
-                        ))?;
-                        (
-                            glue_arena.alloc(SLTNode::Binary(anchor, BinaryOp::Mul, elements))?,
-                            parent_arena.alloc(SLTNode::Binary(
-                                parent_anchor,
-                                BinaryOp::Mul,
-                                parent_elements,
-                            ))?,
-                        )
-                    }
-                    PartSelectGeometry::Colon { .. } => {
-                        return Err(ParserError::illegal_context(
-                            "dynamic output port destination",
-                            "inconsistent colon-select geometry",
-                            Some(&dst.token),
-                        ));
-                    }
-                };
-                if weight == 1 {
-                    (element_offset, parent_element_offset)
-                } else {
-                    let weight_value = weight;
-                    let weight = glue_arena.alloc(SLTNode::Constant(
-                        BigUint::from(weight_value),
-                        BigUint::from(0u8),
-                        64,
-                        false,
-                    ))?;
-                    let parent_weight = parent_arena.alloc(SLTNode::Constant(
-                        BigUint::from(weight_value),
-                        BigUint::from(0u8),
-                        64,
-                        false,
-                    ))?;
-                    (
-                        glue_arena.alloc(SLTNode::Binary(element_offset, BinaryOp::Mul, weight))?,
-                        parent_arena.alloc(SLTNode::Binary(
-                            parent_element_offset,
-                            BinaryOp::Mul,
-                            parent_weight,
-                        ))?,
-                    )
-                }
-            }
-        };
-        offset = glue_arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, part_offset))?;
-        parent_offset = parent_arena.alloc(SLTNode::Binary(
-            parent_offset,
-            BinaryOp::Add,
-            parent_part_offset,
-        ))?;
-    }
-
-    let access_width = geometry.selected_width;
-    let variable = &module.variables[&dst.id];
-    let variable_width = resolve_total_width(module, variable)?;
-    if variable_width == 0 || access_width == 0 || access_width > variable_width {
+// Output connections are implicit continuous assignments (IEEE 1800-2023
+// 23.3.3.2); their destination selections must be constant (10.2, Table 10-1).
+fn check_output_destination(dst: &AssignDestination) -> Result<(), ParserError> {
+    if !is_static_access(&dst.index, &dst.select) {
         return Err(ParserError::illegal_context(
-            "dynamic output port destination",
-            format!("destination width {access_width} must be in 1..={variable_width}"),
+            "output port connection",
+            "output port destination must use constant indices and selects",
             Some(&dst.token),
         ));
     }
-    let full_access = BitAccess::new(0, variable_width - 1);
-    // Keep the instance preview sparse. Untracked ranges represent the
-    // unmodified parent input and are materialized only for the destination
-    // touched by this dynamic connection.
-    let range_store = parent_store
-        .entry(dst.id)
-        .or_insert_with(|| RangeStore::new(None, variable_width));
-    let parts = range_store.get_parts_ref(full_access).map_err(|error| {
-        ParserError::illegal_context(
-            "dynamic output port destination",
-            error.to_string(),
-            Some(&dst.token),
-        )
-    })?;
-    let (old_value, old_sources) = combine_parts_with_default(dst.id, 0, parts, parent_arena)
-        .map_err(|error| ParserError::SltVerify {
-            phase: "dynamic output port destination",
-            error,
-        })?;
-    preview_sources.extend(old_sources.into_iter().filter(|source| source.id != dst.id));
-    let preview_old_value = old_value;
-    let mut cache = HashMap::default();
-    let old_value = parent_arena.get(old_value).map_addr(
-        old_value,
-        parent_arena,
-        glue_arena,
-        &mut cache,
-        &|id| {
-            if *id == child_port_id {
-                GlueAddr::Child(*id)
-            } else {
-                GlueAddr::Parent(*id)
-            }
-        },
-    )?;
-    sources.extend(collect_glue_sources(old_value, glue_arena));
-
-    let low_mask = (BigUint::from(1u8) << access_width) - BigUint::from(1u8);
-    let low_mask = glue_arena.alloc(SLTNode::Constant(
-        low_mask,
-        BigUint::from(0u8),
-        variable_width,
-        false,
-    ))?;
-    let shifted_mask = glue_arena.alloc(SLTNode::Binary(low_mask, BinaryOp::Shl, offset))?;
-    let keep_mask = glue_arena.alloc(SLTNode::Unary(UnaryOp::BitNot, shifted_mask))?;
-
-    // First apply assignment coercion to the selected destination width.  Only
-    // after truncation/sign-extension is complete may the value be embedded in
-    // the full variable; otherwise high RHS bits can corrupt adjacent fields.
-    let rhs = coerce_node_width(glue_arena, rhs, Some(access_width), rhs_signed)?;
-    let rhs = if variable.r#type.is_2state() && !preview_rhs_is_2state {
-        glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, rhs))?
-    } else {
-        rhs
-    };
-    let rhs = if access_width < variable_width {
-        let padding_width = variable_width - access_width;
-        let padding = glue_arena.alloc(SLTNode::Constant(
-            BigUint::from(0u8),
-            BigUint::from(0u8),
-            padding_width,
-            false,
-        ))?;
-        glue_arena.alloc(SLTNode::Concat(vec![
-            (padding, padding_width),
-            (rhs, access_width),
-        ]))?
-    } else {
-        rhs
-    };
-    let shifted_rhs = glue_arena.alloc(SLTNode::Binary(rhs, BinaryOp::Shl, offset))?;
-    let shifted_rhs =
-        glue_arena.alloc(SLTNode::Binary(shifted_rhs, BinaryOp::And, shifted_mask))?;
-    let kept_value = glue_arena.alloc(SLTNode::Binary(old_value, BinaryOp::And, keep_mask))?;
-    let updated_value = glue_arena.alloc(SLTNode::Binary(kept_value, BinaryOp::Or, shifted_rhs))?;
-
-    let parent_low_mask = (BigUint::from(1u8) << access_width) - BigUint::from(1u8);
-    let parent_low_mask = parent_arena.alloc(SLTNode::Constant(
-        parent_low_mask,
-        BigUint::from(0u8),
-        variable_width,
-        false,
-    ))?;
-    let parent_shifted_mask = parent_arena.alloc(SLTNode::Binary(
-        parent_low_mask,
-        BinaryOp::Shl,
-        parent_offset,
-    ))?;
-    let parent_keep_mask =
-        parent_arena.alloc(SLTNode::Unary(UnaryOp::BitNot, parent_shifted_mask))?;
-    let preview_rhs = coerce_node_width(parent_arena, preview_rhs, Some(access_width), rhs_signed)?;
-    let preview_rhs = if variable.r#type.is_2state() && !preview_rhs_is_2state {
-        parent_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, preview_rhs))?
-    } else {
-        preview_rhs
-    };
-    let preview_rhs = if access_width < variable_width {
-        let padding_width = variable_width - access_width;
-        let padding = parent_arena.alloc(SLTNode::Constant(
-            BigUint::from(0u8),
-            BigUint::from(0u8),
-            padding_width,
-            false,
-        ))?;
-        parent_arena.alloc(SLTNode::Concat(vec![
-            (padding, padding_width),
-            (preview_rhs, access_width),
-        ]))?
-    } else {
-        preview_rhs
-    };
-    let parent_shifted_rhs =
-        parent_arena.alloc(SLTNode::Binary(preview_rhs, BinaryOp::Shl, parent_offset))?;
-    let parent_shifted_rhs = parent_arena.alloc(SLTNode::Binary(
-        parent_shifted_rhs,
-        BinaryOp::And,
-        parent_shifted_mask,
-    ))?;
-    let parent_kept_value = parent_arena.alloc(SLTNode::Binary(
-        preview_old_value,
-        BinaryOp::And,
-        parent_keep_mask,
-    ))?;
-    let parent_updated_value = parent_arena.alloc(SLTNode::Binary(
-        parent_kept_value,
-        BinaryOp::Or,
-        parent_shifted_rhs,
-    ))?;
-
-    let prefix = eval_var_select_with_geometry(&dst.index, &dst.select, geometry)?;
-    let result = if prefix == full_access {
-        updated_value
-    } else {
-        glue_arena.alloc(SLTNode::Slice {
-            expr: updated_value,
-            access: prefix,
-        })?
-    };
-    let preview_result = if prefix == full_access {
-        parent_updated_value
-    } else {
-        parent_arena.alloc(SLTNode::Slice {
-            expr: parent_updated_value,
-            access: prefix,
-        })?
-    };
-    range_store
-        .update(prefix, Some((preview_result, preview_sources)))
-        .map_err(|error| {
-            ParserError::illegal_context(
-                "dynamic output port destination preview",
-                error.to_string(),
-                Some(&dst.token),
-            )
-        })?;
-    let previous_sources = std::iter::once(VarAtomBase::new(
-        GlueAddr::Parent(dst.id),
-        prefix.lsb,
-        prefix.msb,
-    ))
-    .collect();
-    Ok((result, prefix, sources, previous_sources, address_sources))
+    Ok(())
 }
 
 fn collect_parent_address_expression_sources(
@@ -1598,7 +1161,7 @@ impl<'a> ModuleParser<'a> {
             })?;
             let mut destination_written_accesses = HashMap::default();
             let mut destination_address_sources = HashMap::default();
-            let mut composed_output_accesses = Vec::new();
+            let composed_output_accesses = Vec::new();
             let output_effect_arena_start = self.arena.len();
             let mut output_effects = CombEffectCollector::with_capture_namespace(
                 self.comb_runtime_event_sites.len() as u32,
@@ -1622,6 +1185,7 @@ impl<'a> ModuleParser<'a> {
             };
             for destination_index in destination_order {
                 let dst = &output.dst[destination_index];
+                check_output_destination(dst)?;
                 for address in dst.index.0.iter().chain(dst.select.0.iter()) {
                     let address_sources = collect_and_advance_expression(
                         self.module,
@@ -1695,45 +1259,18 @@ impl<'a> ModuleParser<'a> {
                 ))
                 .collect();
 
-                let dynamic_access = !is_static_access(&dst.index, &dst.select);
-                let (expr, access, sources, previous_sources, address_sources) = if !dynamic_access
-                {
-                    let mut sources = HashSet::default();
-                    sources.insert(VarAtomBase::new(
-                        GlueAddr::Child(child_port_id),
-                        0,
-                        width - 1,
-                    ));
-                    (
-                        rhs_part,
-                        prefix_access,
-                        sources,
-                        HashSet::default(),
-                        HashSet::default(),
-                    )
-                } else {
-                    build_dynamic_output_glue(
-                        self.module,
-                        &geometry,
-                        &mut destination_store,
-                        &mut destination_arena,
-                        &mut glue_arena,
-                        child_port_id,
-                        dst,
-                        rhs_part,
-                        output.dst.len() == 1
-                            && child_module.variables[&child_port_id].r#type.signed,
-                        preview_rhs_part,
-                        preview_rhs_sources.clone(),
-                        child_port.r#type.is_2state(),
-                    )?
-                };
-                if dynamic_access {
-                    // The dynamic child assignment expression was built from
-                    // the advanced destination store, so it already contains
-                    // preceding index-call writes within this access.
-                    composed_output_accesses.push((dst.id, access));
-                }
+                let mut sources = HashSet::default();
+                sources.insert(VarAtomBase::new(
+                    GlueAddr::Child(child_port_id),
+                    0,
+                    width - 1,
+                ));
+                let (expr, access, previous_sources, address_sources) = (
+                    rhs_part,
+                    prefix_access,
+                    HashSet::default(),
+                    HashSet::default(),
+                );
 
                 let path = LogicPath {
                     target: LogicPathTarget::Var(VarAtomBase::new(
@@ -1753,7 +1290,7 @@ impl<'a> ModuleParser<'a> {
                 };
                 output_ports.push((vec![dst.id], path));
 
-                if !dynamic_access {
+                {
                     let (next_store, _) = apply_assignment_destination(
                         self.module,
                         destination_store,
@@ -1946,6 +1483,9 @@ impl<'a> ModuleParser<'a> {
                     "child port has zero width",
                     Some(&parent_dst.token),
                 ));
+            }
+            if child_var.kind == crate::VariableKind::Output {
+                check_output_destination(parent_dst)?;
             }
             let parent_var = &self.module.variables[&parent_dst.id];
             let parent_access = eval_var_select(

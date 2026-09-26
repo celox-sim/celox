@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-26",
+  "celox_version": "0.7.1",
+  "veryl_version": "0.21.0",
+  "case": "signed_divrem::signed_divrem_four_state_zero_divisor",
+  "standard": "IEEE 1800-2023 11.4.3",
+  "expected_payload": "ffffffffffffffffffffffffffffffff",
+  "expected_mask": "ffffffffffffffffffffffffffffffff",
+  "command": "cargo test --locked -p celox --features systemverilog --test signed_divrem signed_divrem_four_state_zero_divisor -- --include-ignored",
+  "counts": {
+    "passed": 2,
+    "mismatch": 4
+  },
+  "cases": [
+    {
+      "backend": "cranelift",
+      "status": "mismatch",
+      "actual_payload": "0",
+      "actual_mask": "0"
+    },
+    {
+      "backend": "interp",
+      "status": "mismatch",
+      "actual_payload": "0",
+      "actual_mask": "0"
+    },
+    {
+      "backend": "native",
+      "status": "mismatch",
+      "actual_payload": "0",
+      "actual_mask": "0"
+    },
+    {
+      "backend": "sv",
+      "status": "passed"
+    },
+    {
+      "backend": "veryl",
+      "status": "passed"
+    },
+    {
+      "backend": "wasm",
+      "status": "mismatch",
+      "actual_payload": "0",
+      "actual_mask": "0"
+    }
+  ]
+}

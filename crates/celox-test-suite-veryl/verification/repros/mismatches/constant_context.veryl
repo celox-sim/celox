@@ -1,0 +1,10 @@
+module ConstantContext (bits_result: output logic<32>, argument_result: output logic, shift_result: output logic<8>) {
+    function f (x: input logic<4>) -> logic { return x[2]; }
+    const SIGNED_VALUE: signed logic<8> = 8'hff;
+    const BITS_CONTEXT: logic<32> = if 1'b0 ? $bits(logic<5>) : SIGNED_VALUE;
+    const ARGUMENT_CONTEXT: logic = f(2'b11 + 2'b01);
+    const SHIFT_CONTEXT: logic<8> = 8'bxzxzxzxz >> 0;
+    assign shift_result = SHIFT_CONTEXT;
+    assign bits_result = BITS_CONTEXT;
+    assign argument_result = ARGUMENT_CONTEXT;
+}

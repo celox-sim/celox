@@ -3,7 +3,7 @@
 Celox is released as one lockstep distribution. `VERSION`,
 `.release-please-manifest.json`, the npm packages, and all Rust workspace crates
 must always carry the same version. The public Rust entry points are `celox`,
-`celox-frontend-sdk`, and the Rust adapter API in `celox-napi`; the remaining
+`celox-frontend-sdk`, `celox-test-suite-veryl`, and the Rust adapter API in `celox-napi`; the remaining
 published `celox-*` crates satisfy their Cargo dependency graph and remain
 implementation details.
 

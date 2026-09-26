@@ -9,287 +9,38 @@ all_backends! {
 
 fn test_expression_bounds_in_synth_for_loops(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top #(
-            param LIMIT: u32 = 4,
-        ) (
-            sum_fwd: output logic<32>,
-            sum_rev: output logic<32>,
-            sum_inc: output logic<32>,
-            sum_step: output logic<32>,
-        ) {
-            always_comb {
-                sum_fwd = 0;
-                for i in 0..(LIMIT + 1) {
-                    sum_fwd += i;
-                }
-
-                sum_rev = 0;
-                for i in rev 0..LIMIT {
-                    sum_rev = sum_rev * 10 + i as 32;
-                }
-
-                sum_inc = 0;
-                for i in 0..=LIMIT {
-                    sum_inc += i;
-                }
-
-                sum_step = 0;
-                for i in 1..(LIMIT + 4) step *= 2 {
-                    sum_step += i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-    sim.eval_comb().unwrap();
-
-    let sum_fwd = sim.signal("sum_fwd");
-    let sum_rev = sim.signal("sum_rev");
-    let sum_inc = sim.signal("sum_inc");
-    let sum_step = sim.signal("sum_step");
-
-    assert_eq!(sim.get(sum_fwd), 10u32.into());
-    assert_eq!(sim.get(sum_rev), 3210u32.into());
-    assert_eq!(sim.get(sum_inc), 10u32.into());
-    assert_eq!(sim.get(sum_step), 7u32.into());
+    @case "synth_dynamic_loop::test_expression_bounds_in_synth_for_loops";
 }
 
 fn test_constant_break_in_synth_comb_loop(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            sum: output logic<32>,
-        ) {
-            always_comb {
-                sum = 0;
-                for i in 0..8 {
-                    if i == 3 {
-                        break;
-                    }
-                    sum += i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let sum = sim.signal("sum");
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(sum), 3u32.into());
+    @case "synth_dynamic_loop::test_constant_break_in_synth_comb_loop";
 }
 
 
 #[ignore]
 fn test_constant_signed_bounds_in_unrolled_synth_loops(sim) {
-    // Constant signed reverse bounds are currently broken in the upstream
-    // Veryl analyzer unroller, so this regression is parked until upstream
-    // Veryl is fixed.
-    @setup { let code = r#"
-        module Top (
-            sum_fwd: output logic<32>,
-            sum_rev: output logic<32>
-        ) {
-            always_comb {
-                sum_fwd = 0;
-                for i in (0 - 1)..=1 {
-                    sum_fwd += i as 32;
-                }
-
-                sum_rev = 0;
-                for i in rev (0 - 1)..=1 {
-                    sum_rev = sum_rev * 10 + (i + 1) as 32;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-    let sum_fwd = sim.signal("sum_fwd");
-    let sum_rev = sim.signal("sum_rev");
-
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(sum_fwd), 0u32.into());
-    assert_eq!(sim.get(sum_rev), 210u32.into());
+    @case "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops";
 }
 
 fn test_runtime_bounds_in_synth_for_loops(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<32>,
-            step_start: input logic<32>,
-            sum_fwd: output logic<32>,
-            sum_rev: output logic<32>,
-            sum_inc: output logic<32>,
-            sum_step: output logic<32>,
-        ) {
-            always_comb {
-                sum_fwd = 0;
-                for i in 0..count {
-                    sum_fwd += i;
-                }
-
-                sum_rev = 0;
-                for i in rev 0..count {
-                    sum_rev = sum_rev * 10 + i as 32;
-                }
-
-                sum_inc = 0;
-                for i in 0..=count {
-                    sum_inc += i;
-                }
-
-                sum_step = 0;
-                for i in step_start..(count + 4) step *= 2 {
-                    sum_step += i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let step_start = sim.signal("step_start");
-    let sum_fwd = sim.signal("sum_fwd");
-    let sum_rev = sim.signal("sum_rev");
-    let sum_inc = sim.signal("sum_inc");
-    let sum_step = sim.signal("sum_step");
-
-    sim.set(count, 4u32);
-    sim.set(step_start, 1u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(sum_fwd), 6u32.into());
-    assert_eq!(sim.get(sum_rev), 3210u32.into());
-    assert_eq!(sim.get(sum_inc), 10u32.into());
-    assert_eq!(sim.get(sum_step), 7u32.into());
-
-    sim.set(count, 5u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(sum_fwd), 10u32.into());
-    assert_eq!(sim.get(sum_rev), 43210u32.into());
-    assert_eq!(sim.get(sum_inc), 15u32.into());
-    assert_eq!(sim.get(sum_step), 15u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_in_synth_for_loops";
 }
 
 fn test_runtime_bitwise_steps_in_synth_for_loops(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            or_end: input logic<32>,
-            xor_end: input logic<32>,
-            or_last: output logic<32>,
-            xor_last: output logic<32>
-        ) {
-            always_comb {
-                or_last = 0;
-                for i in 3..=or_end step |= 6 {
-                    or_last = i;
-                    if i == or_end {
-                        break;
-                    }
-                }
-
-                xor_last = 0;
-                for i in 3..=xor_end step ^= 6 {
-                    xor_last = i;
-                    if i == xor_end {
-                        break;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let or_end = sim.signal("or_end");
-    let xor_end = sim.signal("xor_end");
-    let or_last = sim.signal("or_last");
-    let xor_last = sim.signal("xor_last");
-
-    sim.set(or_end, 7u32);
-    sim.set(xor_end, 5u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(or_last), 7u32.into());
-    assert_eq!(sim.get(xor_last), 5u32.into());
+    @case "synth_dynamic_loop::test_runtime_bitwise_steps_in_synth_for_loops";
 }
 
 fn test_signed_xor_step_uses_loop_counter_width(sim) {
-    // The Veryl simulator currently converts the signed dynamic start bound to an
-    // unsigned runtime counter and executes zero iterations.
     @ignore_on(veryl, sv);
-    @setup { let code = r#"
-        module Top (
-            wide_end: input signed logic<128>,
-            last: output signed logic<32>
-        ) {
-            var start: signed logic<32>;
-            always_comb {
-                start = (0 - 8) as 32;
-                last = 0;
-                for i in start..=wide_end step ^= 2147483648 {
-                    last = i;
-                    if i == 2147483640 {
-                        break;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let wide_end = sim.signal("wide_end");
-    let last = sim.signal("last");
-    sim.modify(|io| io.set_wide(wide_end, BigUint::from(2_147_483_640u32)))
-        .unwrap();
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(last), 0x7fff_fff8u32.into());
+    @case "synth_dynamic_loop::test_signed_xor_step_uses_loop_counter_width";
 }
 
 fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
     @ignore_on(veryl, sv);
-    @setup { let code = r#"
-        module Top (
-            start: input signed logic<32>,
-            or_end: input signed logic<128>,
-            xor_end: input signed logic<128>,
-            or_last: output signed logic<32>,
-            xor_last: output signed logic<32>
-        ) {
-            always_comb {
-                or_last = 0;
-                for i in start..=or_end step |= 4294967302 {
-                    or_last = i;
-                    if i == 7 {
-                        break;
-                    }
-                }
-
-                xor_last = 0;
-                for i in start..=xor_end step ^= 4294967302 {
-                    xor_last = i;
-                    if i == 5 {
-                        break;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let or_end = sim.signal("or_end");
-    let xor_end = sim.signal("xor_end");
-    let or_last = sim.signal("or_last");
-    let xor_last = sim.signal("xor_last");
-    sim.modify(|io| {
-        io.set(start, 3i32);
-        io.set_wide(or_end, BigUint::from(7u8));
-        io.set_wide(xor_end, BigUint::from(5u8));
-    })
-    .unwrap();
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(or_last), 7u32.into());
-    assert_eq!(sim.get(xor_last), 5u32.into());
+    @case "synth_dynamic_loop::test_i32_bitwise_steps_discard_bits_above_the_counter_width";
 }
 
 fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
@@ -416,29 +167,7 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_reports_true_loop(sim) {
 
 fn test_runtime_reverse_step_matches_emitted_sv_order(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            start: input signed logic<64>,
-            end_bound: input signed logic<64>,
-            digits: output logic<32>
-        ) {
-            always_comb {
-                digits = 0;
-                for i in rev start..end_bound step += 2 {
-                    digits = digits * 10 + i as 32;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let end_bound = sim.signal("end_bound");
-    let digits = sim.signal("digits");
-    sim.set(start, 0u64);
-    sim.set(end_bound, 10u64);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(digits), 97_531u32.into());
+    @case "synth_dynamic_loop::test_runtime_reverse_step_matches_emitted_sv_order";
 }
 
 fn test_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
@@ -468,123 +197,22 @@ fn test_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
 
 fn test_runtime_break_in_synth_comb_loop(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<32>,
-            sum: output logic<32>
-        ) {
-            always_comb {
-                sum = 0;
-                for i in 0..count {
-                    if i == 3 {
-                        break;
-                    }
-                    sum += i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let sum = sim.signal("sum");
-
-    sim.set(count, 8u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(sum), 3u32.into());
+    @case "synth_dynamic_loop::test_runtime_break_in_synth_comb_loop";
 }
 
 fn test_runtime_break_after_assign_in_synth_comb_loop(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<32>,
-            sum: output logic<32>
-        ) {
-            always_comb {
-                sum = 0;
-                for i in 0..count {
-                    if i == 2 {
-                        sum += 10;
-                        break;
-                    }
-                    sum += 1;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let sum = sim.signal("sum");
-
-    sim.set(count, 8u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(sum), 12u32.into());
+    @case "synth_dynamic_loop::test_runtime_break_after_assign_in_synth_comb_loop";
 }
 
 fn test_runtime_if_without_break_in_synth_comb_loop(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<32>,
-            sel: input logic,
-            o: output logic<32>
-        ) {
-            always_comb {
-                o = 0;
-                for i in 0..count {
-                    if sel {
-                        o += 1;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let sel = sim.signal("sel");
-    let o = sim.signal("o");
-
-    sim.set(count, 5u32);
-    sim.set(sel, 1u8);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(o), 5u32.into());
+    @case "synth_dynamic_loop::test_runtime_if_without_break_in_synth_comb_loop";
 }
 
 fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            start: input logic<32>,
-            count: input logic<32>,
-            sel: input logic,
-            out: output logic<32>
-        ) {
-            always_comb {
-                out = 0;
-                for i in start..count step *= 2 {
-                    out += 1;
-                    if sel {
-                        break;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let count = sim.signal("count");
-    let sel = sim.signal("sel");
-    let out = sim.signal("out");
-
-    sim.set(start, 0u32);
-    sim.set(count, 4u32);
-    sim.set(sel, 1u8);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 1u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_stalled_step_with_break_exits_cleanly";
 }
 
 fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim) {
@@ -621,346 +249,52 @@ fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim
 
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
     @ignore_on(veryl, sv);
-    @setup { let code = r#"
-        module Top (
-            start: input logic<32>,
-            count: input logic<32>,
-            hits: output logic<32>,
-            sum: output logic<32>
-        ) {
-            always_comb {
-                hits = 0;
-                sum = 0;
-                for i in start..=count {
-                    hits += 1;
-                    sum += i as 32;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let count = sim.signal("count");
-    let hits = sim.signal("hits");
-    let sum = sim.signal("sum");
-
-    sim.set(start, 0xffff_ffffu32);
-    sim.set(count, 1u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(hits), 3u32.into());
-    assert_eq!(sim.get(sum), 0u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds";
 }
 
 fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<32>,
-            wrapped_hits: output logic<32>
-        ) {
-            always_comb {
-                wrapped_hits = 0;
-                for i in 254..count {
-                    if (i as u8) <: 8'd4 {
-                        wrapped_hits += 1;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let wrapped_hits = sim.signal("wrapped_hits");
-
-    sim.set(count, 260u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(wrapped_hits), 4u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_truncate_loop_var_to_declared_width";
 }
 
 fn test_constant_bounds_preserve_wide_limit_above_loop_width(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            start: input logic<32>,
-            wrapped_hits: output logic<32>
-        ) {
-            always_comb {
-                wrapped_hits = 0;
-                for i in start..260 {
-                    if (i as u8) <: 8'd4 {
-                        wrapped_hits += 1;
-                    }
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let wrapped_hits = sim.signal("wrapped_hits");
-
-    sim.set(start, 254u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(wrapped_hits), 4u32.into());
+    @case "synth_dynamic_loop::test_constant_bounds_preserve_wide_limit_above_loop_width";
 }
 
 fn test_runtime_bounds_track_initial_seed_dependency(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            seed: input logic<32>,
-            count: input logic<32>,
-            out: output logic<32>
-        ) {
-            var acc: logic<32>;
-            always_comb {
-                acc = seed;
-                for i in 0..count {
-                    acc += 1;
-                }
-                out = acc;
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let seed = sim.signal("seed");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(seed, 10u32);
-    sim.set(count, 3u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 13u32.into());
-
-    sim.set(seed, 20u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 23u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_track_initial_seed_dependency";
 }
 
 fn test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            seed: input logic<2>,
-            count: input logic<32>,
-            out: output logic<2>
-        ) {
-            var x: logic<2>;
-            always_comb {
-                x = seed;
-                for i in 0..count {
-                    x[0] = x[1];
-                }
-                out = x;
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let seed = sim.signal("seed");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(seed, 2u8);
-    sim.set(count, 1u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 3u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates";
 }
 
 fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            seed: input logic<2>,
-            count: input logic<32>,
-            out: output logic<2>
-        ) {
-            var x: logic<2>;
-            always_comb {
-                x = seed;
-                for i in 0..count {
-                    x[0] = x == 2'b10;
-                }
-                out = x;
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let seed = sim.signal("seed");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(seed, 2u8);
-    sim.set(count, 2u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 2u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state";
 }
 
 fn test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            seed: input logic<2>,
-            idx: input logic<32>,
-            count: input logic<32>,
-            out: output logic
-        ) {
-            var x: logic<2>;
-            var y: logic;
-            always_comb {
-                x = seed;
-                y = 0;
-                for i in 0..count {
-                    x[0] = 0;
-                    y = x[idx];
-                }
-                out = y;
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let seed = sim.signal("seed");
-    let idx = sim.signal("idx");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(seed, 2u8);
-    sim.set(idx, 1u32);
-    sim.set(count, 1u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 1u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads";
 }
 
 fn test_runtime_bounds_reverse_singleton_exits_cleanly(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            start: input logic<32>,
-            count: input logic<32>,
-            out: output logic<32>
-        ) {
-            always_comb {
-                out = 0;
-                for i in rev start..=count {
-                    out = i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(start, 4u32);
-    sim.set(count, 4u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 4u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_reverse_singleton_exits_cleanly";
 }
 
 fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Child (
-            seed: input logic<32>,
-            count: input logic<32>,
-            out: output logic<32>
-        ) {
-            var acc: logic<32>;
-            always_comb {
-                acc = seed;
-                for i in 0..count {
-                    acc += 1;
-                }
-                out = acc;
-            }
-        }
-
-        module Top (
-            seed: input logic<32>,
-            count: input logic<32>,
-            out: output logic<32>
-        ) {
-            var child_out: logic<32>;
-            inst u_child: Child (
-                seed: seed,
-                count: count,
-                out: child_out
-            );
-            assign out = child_out;
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let seed = sim.signal("seed");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(seed, 10u32);
-    sim.set(count, 3u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 13u32.into());
-
-    sim.set(seed, 20u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 23u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_track_initial_seed_dependency_across_module_boundary";
 }
 
 fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Child (
-            sel: input logic,
-            count: input logic<32>,
-            out: output logic<32>
-        ) {
-            var acc: logic<32>;
-            always_comb {
-                acc = 0;
-                for i in 0..count {
-                    acc += 1;
-                    if sel {
-                        break;
-                    }
-                }
-                out = acc;
-            }
-        }
-
-        module Top (
-            sel: input logic,
-            count: input logic<32>,
-            out: output logic<32>
-        ) {
-            var child_out: logic<32>;
-            inst u_child: Child (
-                sel: sel,
-                count: count,
-                out: child_out
-            );
-            assign out = child_out;
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let sel = sim.signal("sel");
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(sel, false);
-    sim.set(count, 4u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 4u32.into());
-
-    sim.set(sel, true);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 1u32.into());
+    @case "synth_dynamic_loop::test_runtime_break_condition_dependency_across_module_boundary";
 }
 
 fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
@@ -991,114 +325,22 @@ fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
 
 fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<32>,
-            out: output logic<3>
-        ) {
-            var x: logic<3>;
-            always_comb {
-                x = 3'b100;
-                for i in 0..count {
-                    x[i + 1] = x[i];
-                }
-                out = x;
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let out = sim.signal("out");
-
-    sim.set(count, 2u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(out), 0u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads";
 }
 
 fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            start: input logic<32>,
-            hits: output logic<32>,
-            last: output logic<8>
-        ) {
-            always_comb {
-                hits = 0;
-                last = 8'hee;
-                for i in start..255 step += 10 {
-                    hits += 1;
-                    last = i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let hits = sim.signal("hits");
-    let last = sim.signal("last");
-
-    sim.set(start, 250u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(hits), 1u32.into());
-    assert_eq!(sim.get(last), 250u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_forward_overshoot_exits_without_wraparound";
 }
 
 fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            start: input logic<32>,
-            hits: output logic<32>,
-            last: output logic<8>
-        ) {
-            always_comb {
-                hits = 0;
-                last = 8'hee;
-                for i in start..255 step += 300 {
-                    hits += 1;
-                    last = i;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let start = sim.signal("start");
-    let hits = sim.signal("hits");
-    let last = sim.signal("last");
-
-    sim.set(start, 250u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(hits), 1u32.into());
-    assert_eq!(sim.get(last), 250u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_large_additive_step_exits_without_wraparound";
 }
 
 fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
     @ignore_on(sv);
-    @setup { let code = r#"
-        module Top (
-            count: input logic<8>,
-            hits: output logic<32>
-        ) {
-            always_comb {
-                hits = 0;
-                for i in 0..=count {
-                    hits += 1;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let count = sim.signal("count");
-    let hits = sim.signal("hits");
-
-    sim.set(count, 255u8);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(hits), 256u32.into());
+    @case "synth_dynamic_loop::test_runtime_bounds_inclusive_max_bound_runs_full_range";
 }
 
 }

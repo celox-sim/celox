@@ -438,6 +438,7 @@ dependencies = [
  "celox-sir-opt",
  "celox-slt",
  "celox-state-layout",
+ "celox-test-suite-veryl",
  "celox-testbench",
  "clap",
  "codspeed-criterion-compat",
@@ -785,6 +786,21 @@ dependencies = [
  "num-bigint",
  "sv-parser",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "celox-test-suite-veryl"
+version = "0.7.1"
+dependencies = [
+ "clap",
+ "num-bigint",
+ "num-traits",
+ "serde_json",
+ "veryl-analyzer",
+ "veryl-emitter",
+ "veryl-metadata",
+ "veryl-parser",
+ "veryl-std",
 ]
 
 [[package]]

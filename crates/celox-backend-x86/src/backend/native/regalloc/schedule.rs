@@ -328,6 +328,9 @@ impl InstructionDag {
         // Existing emitter pseudos own XMM scratch registers. Preserve their
         // position relative to explicit vector operations so no scheduled
         // vector live range can silently cross an unmodelled scratch clobber.
+        // Late Perms split blocks at constrained instructions; keep the selected
+        // block-local vector lifetimes on their original side of those too.
+        // This target-independent DAG conservatively uses legacy shift constraints.
         let mut vector_since_barrier = Vec::new();
         let mut last_vector_barrier = None;
         for (instruction, inst) in region.iter().enumerate() {
@@ -337,6 +340,9 @@ impl InstructionDag {
                 MInst::PackedLaneCompare { .. }
                     | MInst::PackedByteAffineCompare { .. }
                     | MInst::MemCopy { .. }
+            ) || super::assignment::is_constraint_boundary(
+                inst,
+                crate::native::features::VariableShiftEncoding::LegacyCl,
             );
             if is_vector {
                 if let Some(barrier) = last_vector_barrier {
@@ -1296,6 +1302,44 @@ mod tests {
     use crate::native::mir::{
         BaseReg, BlockId, MBlock, MemoryAliasRange, OpSize, SpillDesc, VRegAllocator,
     };
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn vector_lifetimes_stay_on_their_side_of_perm_boundaries() {
+        use crate::native::mir::{X86SimdInst, X86VecReg};
+        for boundary in [
+            MInst::SDiv {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Shl {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+        ] {
+            let region = vec![
+                MInst::X86Simd(X86SimdInst::Zero128 { dst: X86VecReg(0) }),
+                MInst::X86Simd(X86SimdInst::Store128 {
+                    base: BaseReg::SimState,
+                    offset: 0,
+                    src: X86VecReg(0),
+                }),
+                boundary,
+                MInst::X86Simd(X86SimdInst::Zero128 { dst: X86VecReg(1) }),
+                MInst::X86Simd(X86SimdInst::Store128 {
+                    base: BaseReg::SimState,
+                    offset: 16,
+                    src: X86VecReg(1),
+                }),
+            ];
+            let dag = InstructionDag::build(&region).unwrap();
+            assert!(dependency_order_valid(&dag.dependencies, &[0, 1, 2, 3, 4]));
+            assert!(!dependency_order_valid(&dag.dependencies, &[0, 2, 1, 3, 4]));
+            assert!(!dependency_order_valid(&dag.dependencies, &[0, 1, 3, 2, 4]));
+        }
+    }
 
     #[test]
     fn local_pressure_counts_match_materialized_oracle() {
