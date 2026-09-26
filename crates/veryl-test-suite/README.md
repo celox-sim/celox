@@ -171,6 +171,14 @@ Only assertion disagreements are mismatches. Every status other than
 `passed`/`rejected`/`unsupported`/`ignored` makes the command exit nonzero. Verilator
 reports four-state designs as unsupported; Icarus runs their X/Z assertions.
 
+Icarus's exit code alone never establishes compilation rejection. The adapter
+requires a recognized source diagnostic naming an emitted file and line, and
+checks the remaining log for unrecognized or mixed failures. Empty logs, error
+summaries alone, internal errors, I/O failures, and timeout/tool-launch statuses
+remain build failures. Recognition covers the retained negative-fixture
+diagnostics; new diagnostic formats must be reviewed before they can satisfy
+an expected rejection. The full build log remains available for investigation.
+
 The external runners default to ignoring ten reviewed conformance discrepancies:
 Verilator's read-before-write scheduling and signed 64-bit division overflow,
 its acceptance of seven invalid dynamic output connections, and Icarus's

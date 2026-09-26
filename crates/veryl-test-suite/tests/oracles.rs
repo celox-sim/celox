@@ -185,3 +185,24 @@ fn icarus_generated_instance_paths() {
         "icarus",
     );
 }
+
+#[cfg(feature = "icarus")]
+#[test]
+#[ignore = "requires Icarus and timeout on PATH"]
+fn icarus_rejects_invalid_output_connections() {
+    let directory =
+        std::env::temp_dir().join(format!("veryl-suite-rejections-{}", std::process::id()));
+    let mut checked = 0;
+    for case in veryl_test_suite::cases()
+        .filter(|case| case.expectation == veryl_test_suite::Expectation::CompilationError)
+    {
+        let output = directory.join(case.name.replace("::", "/"));
+        case.run(&mut |design| {
+            Ok(Box::new(veryl_test_suite::icarus::Icarus::build(
+                design, &output,
+            )?))
+        });
+        checked += 1;
+    }
+    assert_eq!(checked, 8);
+}

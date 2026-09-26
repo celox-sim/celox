@@ -283,3 +283,25 @@ the five opt-in live tests also pass when run explicitly. Celox's focused
 documented backend exclusions. Clippy with `-D warnings` passes for all targets
 of Celox, the ARM64 backend, and the shared suite with both external adapters
 and the SystemVerilog frontend enabled.
+
+## Icarus rejection diagnostic checks
+
+The Icarus adapter now requires recognized, source-located diagnostics in
+addition to a nonzero compiler exit. It checks the complete log and leaves
+unrecognized or mixed compiler/tool failures as `compile_error`. Empty logs,
+error-count summaries alone, unreadable input, internal compiler failures,
+and reserved timeout/tool-launch statuses cannot satisfy a negative fixture.
+An unsupported function-port diagnostic alone also does not qualify.
+
+The retained diagnostics for all eight negative fixtures pass this classifier.
+A process-level CLI regression exercises 21 scenarios through fake compiler
+executables, including ordinary exit codes 1, 2, and 123, source diagnostics
+followed by an internal error, and timeout statuses even with source diagnostics.
+Only the source-rejection control reports `rejected`; every failure scenario
+reports `compile_error` and makes the CLI exit nonzero.
+
+Live Icarus 13.0 execution revalidates all eight expected rejections using the
+public `TestCase::run` API. All six opt-in adapter tests pass, as do the shared
+crate's 20 non-ignored tests with all features enabled. The existing 648-case
+reports and exclusions are unchanged. Unknown diagnostic formats deliberately
+remain failures until reviewed, rather than being counted as rejection.
