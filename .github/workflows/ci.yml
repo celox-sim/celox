@@ -107,6 +107,12 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo clippy --locked -p celox-test-suite-veryl -p celox -p celox-frontend-core -p celox-frontend-sv -p celox-frontend-veryl -p celox-macros -p celox-napi -p celox-sv-analyzer -p celox-ts-gen -p celox-vpi --all-targets --features celox/systemverilog,celox-test-suite-veryl/verilator,celox-test-suite-veryl/icarus --no-deps
 
+      - name: Build Rust API documentation
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --no-deps
+
       - uses: pnpm/action-setup@v6
         if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
 
