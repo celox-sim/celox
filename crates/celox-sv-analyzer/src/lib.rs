@@ -4,6 +4,9 @@
 //! SystemVerilog syntax parsing, semantic analysis, elaboration, and analyzer
 //! IR. It does not depend on `celox` and must not know about SLT or SIR.
 
+// Rustdoc's auto-trait analysis traverses sv-parser's deeply nested syntax tree.
+#![recursion_limit = "512"]
+
 use std::path::Path;
 
 use fxhash::FxHashMap as HashMap;
