@@ -1,7 +1,7 @@
 //! Live adapter checks. Run explicitly with --ignored; these require external tools.
 #![cfg(any(feature = "icarus", feature = "verilator"))]
 use std::path::Path;
-use veryl_test_suite::{Backend, BigUint, Design, Result, SignalPath};
+use veryl_test_suite::{Backend, BigUint, Design, Result, SignalPath, Simulator};
 
 const DESIGN: &str = r#"
 module Child (
@@ -108,6 +108,7 @@ module Top (a: input logic<70>[2], y: output logic<70>[2]) {
     assign y[0] = a[0];
     assign y[1] = a[1];
 }
+
 "#,
         "Top",
     )
@@ -120,4 +121,67 @@ module Top (a: input logic<70>[2], y: output logic<70>[2]) {
         .write(&signal("a"), payload.clone(), mask.clone())
         .unwrap();
     assert_eq!(backend.read(&signal("y")).unwrap(), (payload, mask));
+}
+
+fn check_generated_instance_paths(
+    build: fn(&Design, &Path) -> Result<Box<dyn Backend>>,
+    tool: &str,
+) {
+    let directory =
+        std::env::temp_dir().join(format!("veryl-suite-paths-{tool}-{}", std::process::id()));
+    let design = Design::new(
+        r#"
+module Child (d: input logic<8>, q: output logic<8>) {
+    assign q = d;
+}
+module Top (
+    d: input logic<8>[2], q: output logic<8>[2],
+    plain_d: input logic<8>, plain_q: output logic<8>,
+) {
+    inst plain: Child (d: plain_d, q: plain_q);
+    for i in 0..2: unit {
+        inst leaf: Child (d: d[i], q: q[i]);
+    }
+}
+"#,
+        "Top",
+    );
+    let mut sim = Simulator::new(build(&design, &directory).unwrap());
+    let d = sim.signal("d");
+    let plain_d = sim.signal("plain_d");
+    sim.modify(|io| {
+        io.set(d, 0x3322u16);
+        io.set(plain_d, 0x11u8);
+    })
+    .unwrap();
+    let plain = sim.child_signal(&[("plain", None)], "q");
+    let first = sim.child_signal(&[("unit", Some(0)), ("leaf", None)], "q");
+    let second = sim.child_signal(&[("unit", Some(1)), ("leaf", None)], "q");
+    assert_eq!(sim.get_as::<u8>(plain), 0x11);
+    assert_eq!(sim.get_as::<u8>(first), 0x22);
+    assert_eq!(sim.get_as::<u8>(second), 0x33);
+}
+
+#[cfg(feature = "verilator")]
+#[test]
+#[ignore = "requires Verilator, C++, make and timeout on PATH"]
+fn verilator_generated_instance_paths() {
+    check_generated_instance_paths(
+        |d, p| {
+            Ok(Box::new(veryl_test_suite::verilator::Verilator::build(
+                d, p,
+            )?))
+        },
+        "verilator",
+    );
+}
+
+#[cfg(feature = "icarus")]
+#[test]
+#[ignore = "requires Icarus, iverilog-vpi, C++ and timeout on PATH"]
+fn icarus_generated_instance_paths() {
+    check_generated_instance_paths(
+        |d, p| Ok(Box::new(veryl_test_suite::icarus::Icarus::build(d, p)?)),
+        "icarus",
+    );
 }

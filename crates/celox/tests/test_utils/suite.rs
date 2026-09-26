@@ -1,8 +1,8 @@
 //! Celox and reference adapters for the independent Veryl corpus.
 #![allow(dead_code)]
 
-use celox::{BigUint, SimBackend, Simulator};
-use veryl_test_suite::{Backend, Design, Result, SignalPath};
+use celox::{BigUint, ParserError, SimBackend, Simulator, SimulatorError, SimulatorErrorKind};
+use veryl_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath};
 
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
@@ -11,7 +11,7 @@ impl<B: SimBackend> CeloxBackend<B> {
         let instances: Vec<_> = path
             .instances
             .iter()
-            .map(|i| (i.name.as_str(), i.index))
+            .map(|i| (i.name.as_str(), i.index.unwrap_or(0)))
             .collect();
         self.0.child_signal(&instances, &path.name)
     }
@@ -48,7 +48,7 @@ impl VerylBackend {
         let instances: Vec<_> = path
             .instances
             .iter()
-            .map(|i| (i.name.as_str(), i.index))
+            .map(|i| (i.name.as_str(), i.index.unwrap_or(0)))
             .collect();
         self.0.child_signal(&instances, &path.name)
     }
@@ -100,12 +100,43 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .allow_always_ff_function_effects(true);
     Ok(match backend {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        "native" => Box::new(CeloxBackend(builder.build_native()?)),
-        "cranelift" => Box::new(CeloxBackend(builder.build_cranelift()?)),
-        "wasm" => Box::new(CeloxBackend(builder.build_wasm()?)),
-        "interp" => Box::new(CeloxBackend(builder.build_interpreter()?)),
+        "native" => Box::new(CeloxBackend(
+            builder.build_native().map_err(classify_build_error)?,
+        )),
+        "cranelift" => Box::new(CeloxBackend(
+            builder.build_cranelift().map_err(classify_build_error)?,
+        )),
+        "wasm" => Box::new(CeloxBackend(
+            builder.build_wasm().map_err(classify_build_error)?,
+        )),
+        "interp" => Box::new(CeloxBackend(
+            builder.build_interpreter().map_err(classify_build_error)?,
+        )),
         _ => return Err(format!("unknown suite backend: {backend}").into()),
     })
+}
+
+// Only source diagnostics satisfy a negative fixture. Codegen, IR verification,
+// runtime, and unrelated unsupported-feature failures must fail the test.
+pub fn classify_build_error(error: SimulatorError) -> veryl_test_suite::Error {
+    let rejected = matches!(
+        error.kind(),
+        SimulatorErrorKind::Analyzer(_)
+            | SimulatorErrorKind::Frontend(_)
+            | SimulatorErrorKind::SIRParser(
+                ParserError::IllegalContext { .. }
+                    | ParserError::InvalidFunctionArgumentBinding { .. }
+                    | ParserError::Unsupported {
+                        feature: "systemverilog output port lvalue connection",
+                        ..
+                    }
+            )
+    );
+    if rejected {
+        CompilationRejected(error.to_string()).into()
+    } else {
+        error.into()
+    }
 }
 
 // Keep the recursive SV frontend out of the multi-backend dispatch frame.
@@ -115,7 +146,8 @@ fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box
     Ok(Box::new(CeloxBackend(
         Simulator::from_sv_sources(emitted.as_sv_sources(), &design.top)
             .four_state(design.four_state)
-            .build()?,
+            .build()
+            .map_err(classify_build_error)?,
     )))
 }
 

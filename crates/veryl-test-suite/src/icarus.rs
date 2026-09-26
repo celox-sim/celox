@@ -63,7 +63,7 @@ impl Icarus {
                 directory.join("build.log").display()
             );
             return Err(if matches!(status.code(), Some(1..=123)) {
-                Box::new(crate::verification::CompilationRejected(message))
+                Box::new(crate::CompilationRejected(message))
             } else {
                 message.into()
             });

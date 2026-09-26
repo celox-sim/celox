@@ -21,7 +21,11 @@ macro_rules! cases {
                     let design = $design;
                     let compiled = factory(&design);
                     if cases!(@expectation $($expectation)?) == crate::Expectation::CompilationError {
-                        assert!(compiled.is_err(), "invalid design was accepted: {}::{}", $group, stringify!($name));
+                        match compiled {
+                            Err(error) if error.is::<crate::CompilationRejected>() => {}
+                            Err(error) => panic!("compile {}::{}: expected language rejection, got adapter failure: {error}", $group, stringify!($name)),
+                            Ok(_) => panic!("invalid design was accepted: {}::{}", $group, stringify!($name)),
+                        }
                         return;
                     }
                     let backend = compiled.unwrap_or_else(|error| {

@@ -36,12 +36,12 @@ impl Design {
     }
 }
 
-/// An instance in a hierarchical signal path. `index` is the element index for
-/// generated instance arrays and zero for an ordinary instance.
+/// An instance in a hierarchical signal path. `None` identifies an ordinary
+/// instance; `Some(index)` identifies an array element, including `Some(0)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Instance {
     pub name: String,
-    pub index: usize,
+    pub index: Option<usize>,
 }
 
 /// A signal name relative to an instance path. Empty `instances` means the top.
@@ -104,7 +104,7 @@ impl Simulator {
         self.child_signal(&[], name)
     }
 
-    pub fn child_signal(&self, instances: &[(&str, usize)], name: &str) -> Signal {
+    pub fn child_signal(&self, instances: &[(&str, Option<usize>)], name: &str) -> Signal {
         let path = SignalPath {
             instances: instances
                 .iter()

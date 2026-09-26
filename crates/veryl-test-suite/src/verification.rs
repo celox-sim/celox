@@ -1,7 +1,9 @@
 //! Command-line runner shared by the optional independent simulators.
 mod known_issues;
 
-use crate::{Backend, BigUint, Design, Expectation, Result, SignalPath, cases};
+use crate::{
+    Backend, BigUint, CompilationRejected, Design, Expectation, Result, SignalPath, cases,
+};
 use clap::Parser;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -44,17 +46,6 @@ impl std::fmt::Display for EmissionError {
     }
 }
 impl std::error::Error for EmissionError {}
-
-/// A language compiler rejected the HDL. Infrastructure errors, timeouts,
-/// emitter panics, and C++ harness failures must not use this marker.
-#[derive(Debug)]
-pub(crate) struct CompilationRejected(pub String);
-impl std::fmt::Display for CompilationRejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-impl std::error::Error for CompilationRejected {}
 
 /// Entry point for simulator-specific binaries. A report never labels an
 /// unexecuted assertion as a mismatch or as a pass.

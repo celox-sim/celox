@@ -1129,8 +1129,8 @@ o_data: top_out
     let top_in = sim.signal("top_in");
 
     // Access child instance signal via child_signal()
-    let child_i_data = sim.child_signal(&[("u_sub", 0)], "i_data");
-    let child_o_data = sim.child_signal(&[("u_sub", 0)], "o_data");
+    let child_i_data = sim.child_signal(&[("u_sub", None)], "i_data");
+    let child_o_data = sim.child_signal(&[("u_sub", None)], "o_data");
 
     sim.modify(|io| io.set(top_in, 0x10u8)).unwrap();
     assert_eq!(sim.get(child_i_data), 0x10u8.into());

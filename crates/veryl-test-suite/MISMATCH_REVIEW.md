@@ -18,8 +18,12 @@ mapping remain historical evidence.
 The two signed-bound declarations and the X/Z expectation are now fixed. Celox
 preserves Z in shifts and in a narrowed result, including 8/64/65/128/256-bit
 regressions. Eight dynamic output connection cases now have
-`Expectation::CompilationError`, retaining their stable IDs. Both Celox frontends
-reject dynamic destinations; the former lowering extension has been removed.
+`Expectation::CompilationError`, retaining their stable IDs. Celox's Veryl
+frontend rejects dynamic destinations; the former lowering extension has been
+removed. The SV frontend rejects the supported forms, while earlier analyzer
+limitations remain excluded. In particular, three indexed part-select cases
+cannot validate the intended rejection; the [review regression checks](VERIFICATION_REPORT.md#review-regression-checks)
+record their diagnostics and exclusions.
 
 The external runners report ten reviewed conformance discrepancies as `ignored` by default:
 nine for Verilator (including seven accepted invalid dynamic output connections)

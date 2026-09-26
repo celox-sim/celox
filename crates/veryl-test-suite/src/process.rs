@@ -62,8 +62,8 @@ impl ProcessBackend {
         for instance in &signal.instances {
             path.push('.');
             path.push_str(&instance.name);
-            if instance.index != 0 {
-                path.push_str(&format!("[{}]", instance.index));
+            if let Some(index) = instance.index {
+                path.push_str(&format!("[{index}]"));
             }
         }
         format!("{path}.{}", signal.name)

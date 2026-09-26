@@ -1,7 +1,8 @@
 //! This integration test is an external consumer: it has no Celox dependency.
 use std::collections::BTreeMap;
 use veryl_test_suite::{
-    Backend, BigUint, Category, Result, Scalar, SignalPath, Simulator, case, cases,
+    Backend, BigUint, Category, CompilationRejected, Result, Scalar, SignalPath, Simulator, case,
+    cases,
 };
 
 #[derive(Default)]
@@ -115,7 +116,7 @@ impl Backend for Echo {
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         assert_eq!(signal.name, "data");
         assert_eq!(signal.instances[0].name, "unit");
-        assert_eq!(signal.instances[0].index, 3);
+        assert_eq!(signal.instances[0].index, Some(3));
         assert_eq!(payload, BigUint::from(1u8) << 200);
         assert_eq!(mask, BigUint::from(3u8) << 199);
         Ok(())
@@ -135,7 +136,7 @@ impl Backend for Echo {
 #[test]
 fn driver_preserves_hierarchy_wide_xz_bits_and_event_errors() {
     let mut sim = Simulator::new(Box::new(Echo));
-    let signal = sim.child_signal(&[("unit", 3)], "data");
+    let signal = sim.child_signal(&[("unit", Some(3))], "data");
     let expected: (BigUint, BigUint) = (BigUint::from(1u8) << 200, BigUint::from(3u8) << 199);
     sim.modify(|io| io.set_four_state(signal, expected.0.clone(), expected.1.clone()))
         .unwrap();
@@ -145,14 +146,77 @@ fn driver_preserves_hierarchy_wide_xz_bits_and_event_errors() {
 }
 
 #[test]
+fn driver_distinguishes_plain_instances_from_array_element_zero() {
+    struct Paths(usize);
+    impl Backend for Paths {
+        fn write(&mut self, signal: &SignalPath, _: BigUint, _: BigUint) -> Result<()> {
+            assert_eq!(signal.instances[0].name, "unit");
+            assert_eq!(signal.instances[0].index, [None, Some(0), Some(1)][self.0]);
+            self.0 += 1;
+            Ok(())
+        }
+        fn read(&mut self, _: &SignalPath) -> Result<(BigUint, BigUint)> {
+            unreachable!()
+        }
+        fn eval_comb(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self, _: &str) -> Result<()> {
+            unreachable!()
+        }
+    }
+    let mut sim = Simulator::new(Box::new(Paths(0)));
+    let signals =
+        [None, Some(0), Some(1)].map(|index| sim.child_signal(&[("unit", index)], "data"));
+    for signal in signals {
+        sim.set(signal, 0u8);
+    }
+}
+
+#[test]
 fn rejection_cases_require_a_compiler_error() {
     let case = case("hierarchy::test_instance_output_concat_advances_each_destination").unwrap();
     assert_eq!(
         case.expectation,
         veryl_test_suite::Expectation::CompilationError
     );
-    case.run(&mut |_| Err("output destination is not constant".into()));
+    case.run(&mut |_| Err(CompilationRejected("output destination is not constant".into()).into()));
     assert!(
         std::panic::catch_unwind(|| case.run(&mut |_| Ok(Box::new(Bitwise::default())))).is_err()
     );
+}
+
+#[test]
+fn negative_cases_fail_on_adapter_errors_and_panics() {
+    use std::io::{Error, ErrorKind};
+    for case in
+        cases().filter(|case| case.expectation == veryl_test_suite::Expectation::CompilationError)
+    {
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::TimedOut,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    case.run(&mut |_| Err(Error::new(kind, "compiler unavailable").into()));
+                })
+                .is_err(),
+                "{} accepted {kind:?}",
+                case.name
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| {
+                case.run(&mut |_| Err("compiler adapter failed".into()));
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                case.run(&mut |_| panic!("compiler panicked"));
+            })
+            .is_err()
+        );
+    }
 }

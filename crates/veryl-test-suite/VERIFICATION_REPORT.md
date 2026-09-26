@@ -39,8 +39,10 @@ execute; the remaining eight have five emission and three compilation errors.
   Both cases also pass Veryl's reference simulator, so their exclusions in the
   Celox runner were removed.
 - Eight dynamic output connection cases now require compilation rejection.
-  Both Celox frontends reject these destinations, and the old extension was
-  removed. Icarus rejects all eight; Verilator rejects one and accepts seven.
+  Celox's Veryl frontend rejects these destinations, and the old extension was
+  removed. Its SV frontend checks the forms it supports; cases blocked by
+  earlier unsupported constructs remain excluded (see the review checks below).
+  Icarus rejects all eight; Verilator rejects one and accepts seven.
   Six of those seven previously counted as passes. Accepting an invalid design
   no longer counts as numerical validation. The seven acceptances are now
   ignored on Verilator only, with their pre-exclusion failures retained in
@@ -101,7 +103,9 @@ their exclusions cite the observed acceptances and checked SV rules. The detaile
 review keeps these different kinds of evidence explicit. Ignored cases are not executed
 or counted as passing; `--include-ignored` reruns the original assertions and
 reports actual failures. The reusable corpus has no skips; Celox's backend
-matrix separately ignores the 11 variants affected by the two deferred fixes.
+matrix separately ignores the 11 variants affected by the two deferred fixes,
+alongside existing backend limitations. The review checks below record three
+additional SV variants blocked by unsupported indexed part-selects.
 All six variants of the four-state zero-divisor case remain enabled.
 
 The IEEE clauses were checked in the locally supplied 2023 edition. They specify
@@ -238,3 +242,44 @@ retained tool versions. Their ignored cases remain unvalidated, and forced
 runs expose their real failures. Celox's normal test runs ignore the deferred
 implementation failures; explicitly including those variants reproduces the
 failures against the specification-based expectations.
+
+## Review regression checks
+
+- `CompilationRejected` is now a public marker available with default features.
+  `TestCase::run` accepts only that marker for a negative fixture. Independent
+  consumer tests exercise all eight negative cases with missing-tool, timeout,
+  I/O, generic adapter, and panic failures; none can pass as language rejection.
+  Celox maps source diagnostics explicitly and keeps codegen/adapter errors as
+  failures. The external runners use the same public marker.
+- The stricter Celox adapter exposed three earlier false-positive SV rejections:
+  `hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits`,
+  `hierarchy::test_dynamic_minus_colon_output_port_rmw`, and
+  `hierarchy::test_dynamic_step_output_port_rmw` stop with
+  `Unsupported SystemVerilog construct: indexed part-select` before reaching
+  the output-destination check. These three SV variants are now ignored for
+  that limitation; explicitly running them still fails. The four Celox backends
+  using the Veryl frontend continue to check their intended rejection.
+- Hierarchical paths distinguish ordinary instances (`None`) from array
+  elements (`Some(index)`). Live Icarus and Verilator checks both read an ordinary
+  instance and generated elements `[0]` and `[1]`, including their nested child.
+  All five opt-in live adapter checks pass; the corpus and external-runner
+  exclusions are unchanged.
+- ARM64 shifts now retain shifted Z payload bits. An X/Z shift count sets both
+  output planes to all X, including unknown bits above bit 63 in a wide count.
+  The backend regression covers left/right shifts of 8/64/65/128/256-bit values,
+  four-bit destinations, constant/runtime counts, and word/width boundaries.
+  Unlike the earlier host-only run, all 85 ARM64 backend library tests execute
+  successfully under `qemu-aarch64` (QEMU 11.1.0).
+
+The ARM64 run uses the installed Rust 1.98.1 AArch64 standard library, an
+`aarch64-unknown-linux-gnu-gcc` linker, and `qemu-aarch64` as Cargo's target runner:
+`cargo test --locked -p celox-backend-arm64 --target aarch64-unknown-linux-gnu --lib`.
+This validates generated machine-code execution under emulation; physical ARM64
+hardware has not been used for this review.
+
+The shared crate passes 10 tests with default features and 17 with all features;
+the five opt-in live tests also pass when run explicitly. Celox's focused
+`hierarchy`, `four_state`, and `suite_adapter` binaries pass 612 tests with 75
+documented backend exclusions. Clippy with `-D warnings` passes for all targets
+of Celox, the ARM64 backend, and the shared suite with both external adapters
+and the SystemVerilog frontend enabled.

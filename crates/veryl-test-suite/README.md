@@ -40,8 +40,11 @@ process. Integrate each `TestCase` into your preferred test harness using its
 stable `group::test_name` identifier. Failed assertions panic; compiler and
 adapter errors also fail simulation tests. Eight cases instead specify
 `Expectation::CompilationError`: their designs must be rejected by the compiler.
-Factories must distinguish language diagnostics from unavailable tools or other
-infrastructure failures. The crate never silently ignores cases.
+Factories return `Err(CompilationRejected(diagnostic).into())` for a language
+rejection. The public marker is available without optional features. Ordinary
+errors (including unavailable tools, I/O failures, timeouts, and unsupported
+adapter operations) fail negative cases too; panics also fail them. The crate
+never silently ignores cases.
 `tests/external_adapter.rs` is an executable example using a small independent
 behavioral model and verifies that incorrect results are rejected.
 
@@ -62,8 +65,11 @@ behavioral model and verifies that incorrect results are rejected.
   four-state signals. Initial combinational outputs must be readable before an
   input is written. Generic clock/reset types use Veryl's defaults (positive
   edge / asynchronous active-low reset).
-- `SignalPath` distinguishes top-level names from hierarchical instance paths
-  and includes each instance-array index. Internal signals are observable in
+- `SignalPath` distinguishes top-level names from hierarchical instance paths.
+  Each `Instance.index` is `None` for an ordinary instance or `Some(index)` for
+  an array element, including zero. For example,
+  `child_signal(&[("unit", Some(0)), ("leaf", None)], "data")` preserves
+  `unit[0].leaf.data`. Internal signals are observable in
   some cases; do not optimize away required observations.
 
 These are the stimulus conventions inherited from the original test suite.

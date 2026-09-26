@@ -27,6 +27,23 @@ pub use scalar::Scalar;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Explicit language rejection returned by a compiler factory.
+///
+/// Return `Err(CompilationRejected(diagnostic).into())` only when the compiler
+/// rejects the input HDL. Missing tools, I/O errors, timeouts, unsupported
+/// adapter operations, and compiler panics must remain ordinary errors.
+/// Only this marker satisfies [`Expectation::CompilationError`].
+#[derive(Debug)]
+pub struct CompilationRejected(pub String);
+
+impl std::fmt::Display for CompilationRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CompilationRejected {}
+
 /// Language area used to select a subset of the suite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -62,8 +79,8 @@ pub struct TestCase {
 
 impl TestCase {
     /// Compile and run this case with a fresh backend supplied by `factory`.
-    /// For `CompilationError`, the factory must return a compilation diagnostic;
-    /// adapters must keep infrastructure failures distinct from language rejection.
+    /// For `CompilationError`, the factory must return [`CompilationRejected`].
+    /// Every other error fails the case, including infrastructure failures.
     /// Panics on a failed assertion or adapter error. A factory may be invoked
     /// more than once when a case exercises several designs.
     pub fn run(&self, factory: &mut Factory<'_>) {

@@ -96,7 +96,7 @@ impl Verilator {
                     && !line.contains("Command Failed")
             });
             return Err(if status.code() == Some(1) && hdl_error {
-                Box::new(crate::verification::CompilationRejected(message))
+                Box::new(crate::CompilationRejected(message))
             } else {
                 message.into()
             });
