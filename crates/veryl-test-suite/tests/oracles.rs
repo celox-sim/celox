@@ -206,3 +206,25 @@ fn icarus_rejects_invalid_output_connections() {
     }
     assert_eq!(checked, 8);
 }
+
+#[cfg(feature = "verilator")]
+#[test]
+#[ignore = "requires Verilator and timeout on PATH"]
+fn verilator_rejects_invalid_assignment() {
+    let directory = std::env::temp_dir().join(format!(
+        "veryl-suite-verilator-rejection-{}",
+        std::process::id()
+    ));
+    // The other seven negative cases remain excluded for Verilator's acceptance
+    // of dynamic output destinations. This one reports an assignment type error.
+    let case = veryl_test_suite::cases()
+        .find(|case| {
+            case.name == "hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb"
+        })
+        .unwrap();
+    case.run(&mut |design| {
+        Ok(Box::new(veryl_test_suite::verilator::Verilator::build(
+            design, &directory,
+        )?))
+    });
+}

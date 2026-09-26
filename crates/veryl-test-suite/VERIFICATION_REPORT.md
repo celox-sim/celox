@@ -305,3 +305,41 @@ public `TestCase::run` API. All six opt-in adapter tests pass, as do the shared
 crate's 20 non-ignored tests with all features enabled. The existing 648-case
 reports and exclusions are unchanged. Unknown diagnostic formats deliberately
 remain failures until reviewed, rather than being counted as rejection.
+
+## Wide-count, padding, and Verilator diagnostic checks
+
+Three additional review regressions reproduced on the previous implementation:
+
+- A 128-bit count with Z at bit 64 made native x86 `1 << count` return known
+  `8'hff` instead of all X. Both payload and mask lowering now reduce every
+  count-mask chunk through the same helper. The Celox regression checks
+  left, logical-right, and arithmetic-right shifts of 8/65/129/257-bit values,
+  X and Z at count bits 0/63/64/127, and recovery to a known count on all four
+  Celox execution backends.
+- Cranelift's unknown shifts filled physical padding above a partial-width
+  result with ones. A wider bitwise consumer exposed definite ones in the
+  register path and excess X bits in the memory path. Both planes now clear
+  padding before the result is reused. Direct SIR regressions cover 65/129-bit
+  register results, 193/257-bit memory results, and 257-bit shifts narrowed to
+  65/129-bit register results. They execute generated code and consume the
+  result directly in a wider OR, without an intervening cast/store that could
+  conceal the padding bug.
+- Verilator's generic `%Error` prefix allowed an I/O failure to satisfy a
+  negative case. Recognition now requires the reviewed assignment-type
+  diagnostic with an emitted source path and position, and checks the entire
+  log. A CLI process regression covers 22 scenarios: the source-rejection
+  control, empty/summary-only logs, internal/unsupported/I/O/C++/make/command
+  failures, mixed source and tool failures, and abnormal exit statuses. Only
+  the source-rejection control succeeds. The retained real diagnostic also
+  passes, while a log naming a different source or a signalled process fails.
+
+Focused Celox and x86/Cranelift backend checks pass **1,336 tests**, with 21
+existing exclusions, including the new regressions and the existing four-state,
+wide-shift, shift-signedness, and native shift-boundary suites. The shared crate
+passes **22 tests** with all features. All **seven opt-in live adapter checks**
+pass on Verilator 5.052 and Icarus 13.0, including Verilator's actual assignment
+rejection and Icarus's eight negative fixtures.
+All-target Clippy with `-D warnings` passes for Celox, x86, Cranelift, and the
+shared suite with the SV frontend and both external adapters enabled.
+The 648-case catalogue, expected values, retained external reports, and all
+existing conformance/limitation exclusions are unchanged.

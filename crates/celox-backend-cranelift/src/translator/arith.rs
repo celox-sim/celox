@@ -858,6 +858,30 @@ impl SIRTranslator {
                     None
                 };
 
+                // Physical chunks can outlive this shift in a wider consumer.
+                // Clear padding in both planes before keeping the stack slot
+                // or materializing it into registers, including all-X results.
+                let last_chunk_bits = d_width % 64;
+                if last_chunk_bits != 0 {
+                    let width_mask = state
+                        .builder
+                        .ins()
+                        .iconst(types::I64, ((1u64 << last_chunk_bits) - 1) as i64);
+                    let offset = ((final_num_chunks - 1) * 8) as i32;
+                    for addr in std::iter::once(dst_addr).chain(mask_addr) {
+                        let value =
+                            state
+                                .builder
+                                .ins()
+                                .load(types::I64, MemFlags::new(), addr, offset);
+                        let value = state.builder.ins().band(value, width_mask);
+                        state
+                            .builder
+                            .ins()
+                            .store(MemFlags::new(), value, addr, offset);
+                    }
+                }
+
                 // Only keep MemBacked if the destination is still wide enough.
                 // Narrow destinations must be materialized as TwoState/FourState
                 // so that subsequent narrow paths can access first_value().
@@ -1286,7 +1310,8 @@ impl SIRTranslator {
                         res_masks.push(state.builder.ins().iconst(types::I64, 0));
                     }
 
-                    // Mask width normalization: clear bits beyond d_width in the last chunk
+                    // Shifts preserve the payload (including Z), but neither
+                    // plane may retain bits beyond the logical result width.
                     let last_chunk_bits = d_width % 64;
                     if last_chunk_bits != 0 && !res_masks.is_empty() {
                         let width_mask_val = ((1u64 << last_chunk_bits) - 1) as i64;
@@ -1294,6 +1319,10 @@ impl SIRTranslator {
                         let last_idx = res_masks.len() - 1;
                         res_masks[last_idx] =
                             state.builder.ins().band(res_masks[last_idx], width_mask);
+                        if is_shift {
+                            res_chunks[last_idx] =
+                                state.builder.ins().band(res_chunks[last_idx], width_mask);
+                        }
                     }
 
                     // Logical/arithmetic computations produce X; shifts move Z.

@@ -2,7 +2,7 @@
 use crate::process::{ProcessBackend, write_if_changed};
 use crate::{Backend, BigUint, Design, Result, SignalPath};
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 pub struct Verilator(ProcessBackend);
 
@@ -89,13 +89,7 @@ impl Verilator {
                 directory.join("build.log").display()
             );
             let log = fs::read_to_string(directory.join("build.log")).unwrap_or_default();
-            // Verilator also invokes a C++ compiler; its failure is not HDL rejection.
-            let hdl_error = log.lines().any(|line| {
-                line.starts_with("%Error")
-                    && !line.contains("make")
-                    && !line.contains("Command Failed")
-            });
-            return Err(if status.code() == Some(1) && hdl_error {
+            return Err(if is_source_rejection(status.code(), &log, &paths) {
                 Box::new(crate::CompilationRejected(message))
             } else {
                 message.into()
@@ -112,6 +106,75 @@ impl Verilator {
         )?))
     }
 }
+
+// A %Error prefix also covers internal failures, unsupported constructs and
+// build infrastructure. Accept only reviewed source diagnostics, checking the
+// whole log so a real language error cannot hide a second tool failure.
+fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) -> bool {
+    if code != Some(1) {
+        return false;
+    }
+    let mut rejected = false;
+    let mut source_context = false;
+    for line in log.lines().filter(|line| !line.trim().is_empty()) {
+        if line
+            .strip_prefix("%Error: Exiting due to ")
+            .and_then(|s| s.strip_suffix(" error(s)"))
+            .is_some_and(|count| count.parse::<usize>().is_ok_and(|n| n > 0))
+        {
+            source_context = false;
+        } else if let Some(error) = line.strip_prefix("%Error: ") {
+            if source_diagnostic(error, sources)
+                != Some(
+                    "Illegal assignment: types are not assignment compatible (IEEE 1800-2023 7.6)",
+                )
+            {
+                return false;
+            }
+            rejected = true;
+            source_context = true;
+        } else if let Some(warning) = line.strip_prefix("%Warning-WIDTHEXPAND: ") {
+            if !source_diagnostic(warning, sources)
+                .is_some_and(|text| text.starts_with("Operator ASSIGN expects "))
+            {
+                return false;
+            }
+            source_context = true;
+        } else if !(source_context && is_diagnostic_context(line)) {
+            return false;
+        }
+    }
+    rejected
+}
+
+fn source_diagnostic<'a>(line: &'a str, sources: &[PathBuf]) -> Option<&'a str> {
+    sources.iter().find_map(|source| {
+        let tail = line.strip_prefix(source.to_str()?)?.strip_prefix(':')?;
+        let (number, tail) = tail.split_once(':')?;
+        let (column, diagnostic) = tail.split_once(':')?;
+        for position in [number, column] {
+            position.parse::<usize>().ok().filter(|n| *n > 0)?;
+        }
+        Some(diagnostic.trim_start())
+    })
+}
+
+fn is_diagnostic_context(line: &str) -> bool {
+    let line = line.trim_start();
+    if let Some((number, excerpt)) = line.split_once('|') {
+        return number.trim().parse::<usize>().is_ok_and(|n| n > 0)
+            || (number.trim().is_empty() && excerpt.chars().all(|c| matches!(c, ' ' | '^' | '~')));
+    }
+    [
+        ": ... note: In instance '",
+        ": ... Left-hand data type: '",
+        ": ... Right-hand data type: '",
+        "... See the manual at https://verilator.org/verilator_doc.html?",
+        "... For warning description see https://verilator.org/warn/WIDTHEXPAND?",
+        "... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.",
+    ].iter().any(|prefix| line.starts_with(prefix))
+}
+
 impl Backend for Verilator {
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         if mask != BigUint::default() {
@@ -127,5 +190,29 @@ impl Backend for Verilator {
     }
     fn tick(&mut self, event: &str) -> Result<()> {
         self.0.tick(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_negative_diagnostic_is_a_source_rejection() {
+        let report: serde_json::Value =
+            serde_json::from_str(include_str!("../verification/verilator.json")).unwrap();
+        let mut checked = 0;
+        for case in report["cases"].as_array().unwrap() {
+            if case["status"] != "rejected" {
+                continue;
+            }
+            let (_, log) = case["detail"].as_str().unwrap().split_once('\n').unwrap();
+            let sources = [PathBuf::from("<case>/source_0.sv")];
+            assert!(is_source_rejection(Some(1), log, &sources));
+            assert!(!is_source_rejection(Some(1), log, &["other.sv".into()]));
+            assert!(!is_source_rejection(None, log, &sources));
+            checked += 1;
+        }
+        assert_eq!(checked, 1);
     }
 }

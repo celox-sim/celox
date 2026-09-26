@@ -13480,28 +13480,7 @@ fn finish_shift_value(ctx: &mut ISelContext, block: &mut MBlock, dst: RegisterId
         &rhs,
         ISelContext::num_chunks(ctx.sir_width(&rhs)),
     );
-    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-    block.push(MInst::LoadImm {
-        dst: zero,
-        value: 0,
-    });
-    let mut unknown_bits = zero;
-    for mask in masks {
-        let combined = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Or {
-            dst: combined,
-            lhs: unknown_bits,
-            rhs: mask,
-        });
-        unknown_bits = combined;
-    }
-    let has_unknown = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Cmp {
-        dst: has_unknown,
-        lhs: unknown_bits,
-        rhs: zero,
-        kind: CmpKind::Ne,
-    });
+    let has_unknown = any_chunk_has_x(ctx, block, &masks);
     let chunks = ctx
         .wide_regs
         .get(&dst)
@@ -13849,20 +13828,12 @@ fn lower_wide_binary_mask(
         }
         BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
             // If shift amount has X → all-X. Otherwise, shift mask same way as value.
-            // Check shift amount mask (rhs is scalar, so rm_chunks[0] is the mask)
+            let shift_has_x = any_chunk_has_x(ctx, block, &rm_chunks);
             let zero = ctx.alloc_vreg(SpillDesc::remat(0));
             block.push(MInst::LoadImm {
                 dst: zero,
                 value: 0,
             });
-            let shift_has_x = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Cmp {
-                dst: shift_has_x,
-                lhs: rm_chunks[0],
-                rhs: zero,
-                kind: CmpKind::Ne,
-            });
-
             let n_dst = ISelContext::num_chunks(d_width);
             // Get the result value chunks (already computed by lower_wide_binary)
             // The mask should follow the same pattern as the value.
