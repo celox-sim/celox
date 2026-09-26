@@ -58,9 +58,9 @@ execute; the remaining eight have five emission and three compilation errors.
 - Two-state zero division retains the Verilator-compatible zero result.
   A separate four-state case requires all-X quotient and remainder, including
   positive/negative numerators and 0 / 0. Icarus, Veryl's reference simulator,
-  and Celox's SV frontend pass; Celox's four Veryl-path backends currently
-  return known zero and are ignored for this new case pending a fix. The
-  existing unknown-operand case remains enabled on those backends.
+  and all Celox paths now pass. Celox's four Veryl-path backends were fixed,
+  and their four temporary ignores were removed. The expanded case also
+  covers mixed bit widths and the resolved x86 SIMD lifetime failure.
 
 The new `rejected` status means an HDL compiler rejected a negative fixture;
 its actual diagnostic remains in the report. It does not establish support for
@@ -101,8 +101,8 @@ their exclusions cite the observed acceptances and checked SV rules. The detaile
 review keeps these different kinds of evidence explicit. Ignored cases are not executed
 or counted as passing; `--include-ignored` reruns the original assertions and
 reports actual failures. The reusable corpus has no skips; Celox's backend
-matrix separately ignores the 11 variants affected by the two deferred fixes
-and four variants of the new four-state zero-divisor case.
+matrix separately ignores the 11 variants affected by the two deferred fixes.
+All six variants of the four-state zero-divisor case remain enabled.
 
 The IEEE clauses were checked in the locally supplied 2023 edition. They specify
 SystemVerilog, not an independent definition of Veryl semantics. Retained Veryl
