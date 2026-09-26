@@ -1,0 +1,4 @@
+case,n,four_state,masks,statements,unroll,compile_ms,recover_schedule_ms,baseline_backend_ms,candidate_compile_ms,decision_ms,baseline_bytes,candidate_bytes,repeats,baseline_us,candidate_us,speedup,p_numerator,p_denominator,selected
+producer_consumer,512,false,known,4,32,75.940,1.987,30.062,9.270,25.499,18064,2560,1280,0.1941,0.2504,0.775,155104014,155117520,baseline
+producer_consumer,512,true,known,4,32,58.780,2.104,141.680,18.888,30.698,68091,8819,226,0.9519,0.8371,1.137,139,155117520,candidate
+producer_consumer,512,true,mixed,4,16,48.502,1.694,112.189,20.656,34.216,68091,4552,254,1.0010,0.9694,1.033,18056603,155117520,baseline
