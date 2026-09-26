@@ -3822,6 +3822,47 @@ mod tests {
     }
 
     #[test]
+    fn folds_countones_with_self_determined_argument_types() {
+        let ir = analyze_source(
+            r#"
+                module Top #(
+                    parameter logic signed [7:0] NEG = -1,
+                    parameter C = $countones(NEG),
+                    parameter X = $countones(8'b10xz_11xz),
+                    parameter F = $countones('1),
+                    parameter N = $countones(-1),
+                    parameter W = $countones(256'hffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff),
+                    parameter S = ($countones(NEG) - 32'sd9) < 0,
+                    parameter B = $bits($countones(NEG)),
+                    parameter D = $size($countones(NEG)),
+                    parameter logic [7:0] MASK = 8'hfe,
+                    parameter SELECTED = $countones(MASK[0])
+                )(output logic [C-1:0] y);
+                    assign y = '0;
+                endmodule
+            "#,
+            Path::new("countones.sv"),
+        )
+        .expect("countones constants should be evaluated");
+        let module = &ir.modules()[0];
+        for (parameter, expected) in module
+            .parameters()
+            .iter()
+            .zip([-1, 8, 3, 1, 32, 144, 1, 32, 32, 254, 0])
+        {
+            assert_eq!(
+                parameter.resolved_value(),
+                Some(expected),
+                "{}",
+                parameter.name()
+            );
+        }
+        assert_eq!(module.parameters()[1].resolved_width(), Some(32));
+        assert_eq!(module.parameters()[1].resolved_signed(), Some(true));
+        assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+    }
+
+    #[test]
     fn folds_supported_system_functions() {
         let ir = analyze_source(
             r#"
