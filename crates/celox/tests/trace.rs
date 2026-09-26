@@ -28,7 +28,7 @@ module ModuleA {
 }
 
 #[test]
-fn test_dynamic_glue_preserves_address_and_previous_value_roles() {
+fn test_compilation_trace_rejects_dynamic_output_glue() {
     let code = r#"
 module Child (a: input logic<2>, y: output logic<2>) {
     assign y = a;
@@ -44,42 +44,20 @@ module Top (idx: input logic<3>, a: input logic<2>, out: output logic<8>) {
         .trace_sim_modules()
         .trace_flattened_comb_blocks()
         .build_with_trace();
-    result.res.expect("dynamic glue should build");
-
-    let sim_modules = result
-        .trace
-        .sim_modules
-        .expect("module-level paths should be captured");
-    let glue_path = sim_modules
-        .values()
-        .flat_map(|module| module.glue_blocks.values())
-        .flatten()
-        .flat_map(|block| block.output_ports.iter().map(|(_, path)| path))
-        .find(|path| !path.address_sources.is_empty())
-        .expect("dynamic output glue must record address sources");
-    assert!(!glue_path.previous_sources.is_empty());
-    assert!(glue_path.address_sources.iter().all(|address| {
-        glue_path
-            .sources
-            .iter()
-            .any(|source| source.id == address.id && source.access.overlaps(&address.access))
-    }));
-
-    let (flattened, _) = result
-        .trace
-        .flattened_comb_blocks
-        .expect("flattened paths should be captured");
-    let flattened_path = flattened
-        .iter()
-        .find(|path| !path.address_sources.is_empty())
-        .expect("address-source roles must survive mapping and atomization");
-    assert!(!flattened_path.previous_sources.is_empty());
-    assert!(flattened_path.address_sources.iter().all(|address| {
-        flattened_path
-            .sources
-            .iter()
-            .any(|source| source.id == address.id && source.access.overlaps(&address.access))
-    }));
+    let error = match result.res {
+        Ok(_) => panic!("dynamic output destination unexpectedly accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("output port destination must use constant indices and selects"),
+        "{error}"
+    );
+    assert!(
+        result.trace.flattened_comb_blocks.is_none(),
+        "invalid glue must be rejected before flattening"
+    );
 }
 
 #[test]

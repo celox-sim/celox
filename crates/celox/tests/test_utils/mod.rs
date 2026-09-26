@@ -1,3 +1,4 @@
+pub mod suite;
 pub mod veryl_sim;
 pub mod veryl_sv;
 
@@ -352,6 +353,94 @@ macro_rules! all_backends {
             body { $($body)* }
         );
     };
+
+    // Portable cases keep Celox's test identities and exclusions at call sites.
+    (@dispatch
+        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+        { @case $case:literal; }
+    ) => {
+        all_backends!(@case_impl $(#[$meta])* fn $name
+            () emit $case);
+    };
+    (@dispatch
+        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+        { @ignore_on $ignore_list:tt; @case $case:literal; }
+    ) => {
+        all_backends!(@case_impl $(#[$meta])* fn $name
+            $ignore_list emit $case);
+    };
+    (@dispatch
+        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+        { @omit_veryl; @case $case:literal; }
+    ) => {
+        all_backends!(@case_impl $(#[$meta])* fn $name
+            () skip $case);
+    };
+    (@dispatch
+        $(#[$meta:meta])* fn $name:ident ($sim:ident)
+        { @omit_veryl; @ignore_on $ignore_list:tt; @case $case:literal; }
+    ) => {
+        all_backends!(@case_impl $(#[$meta])* fn $name
+            $ignore_list skip $case);
+    };
+    (@case_impl $(#[$meta:meta])* fn $name:ident
+        $ignore_list:tt $veryl:ident $case:literal
+    ) => {
+        mod $name {
+            use super::*;
+            all_backends!(@with_ignore native; $ignore_list; {
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                #[test]
+                $(#[$meta])*
+                fn native() {
+                    test_utils::suite::run_case($case, "native");
+                }
+            });
+            all_backends!(@with_ignore cranelift; $ignore_list; {
+
+                #[test]
+                $(#[$meta])*
+                fn cranelift() {
+                    test_utils::suite::run_case($case, "cranelift");
+                }
+            });
+            all_backends!(@with_ignore wasm; $ignore_list; {
+
+                #[test]
+                $(#[$meta])*
+                fn wasm() {
+                    test_utils::suite::run_case($case, "wasm");
+                }
+            });
+            all_backends!(@with_ignore interp; $ignore_list; {
+
+                #[test]
+                $(#[$meta])*
+                fn interp() {
+                    test_utils::suite::run_case($case, "interp");
+                }
+            });
+            all_backends!(@with_ignore sv; $ignore_list; {
+                #[cfg(feature = "systemverilog")]
+                #[test]
+                $(#[$meta])*
+                fn sv() {
+                    test_utils::suite::run_case($case, "sv");
+                }
+            });
+            all_backends!(@case_veryl $veryl $ignore_list $(#[$meta])* $case);
+        }
+    };
+    (@case_veryl emit $ignore_list:tt $(#[$meta:meta])* $case:literal) => {
+        all_backends!(@with_ignore veryl; $ignore_list; {
+            #[test]
+            $(#[$meta])*
+            fn veryl() {
+                test_utils::suite::run_case($case, "veryl");
+            }
+        });
+    };
+    (@case_veryl skip $ignore_list:tt $(#[$meta:meta])* $case:literal) => {};
 
     // ── entry point ─────────────────────────────────────────────────
     ($(

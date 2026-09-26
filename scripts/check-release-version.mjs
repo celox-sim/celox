@@ -47,7 +47,7 @@ for (const block of cargoLock.split("[[package]]").slice(1)) {
   const name = block.match(/^\s*name = "([^"]+)"/m)?.[1];
   const candidate = block.match(/^\s*version = "([^"]+)"/m)?.[1];
   if (
-    (name === "celox" || name?.startsWith("celox-")) &&
+    (name === "celox" || name === "veryl-test-suite" || name?.startsWith("celox-")) &&
     candidate !== version
   ) {
     throw new Error(`Cargo.lock has ${name} ${candidate}; expected ${version}`);

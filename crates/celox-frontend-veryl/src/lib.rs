@@ -12,6 +12,7 @@ pub mod hierarchy;
 pub mod loop_provenance;
 pub(crate) mod lowering;
 pub mod module;
+mod output_alias_check;
 mod schedule;
 mod source;
 mod testbench;
@@ -31,6 +32,7 @@ pub use dynamic_for_check::{check_dynamic_for_bounds, check_elaborated_dynamic_f
 pub use error::{FrontendDiagnostic, LoweringPhase, ParserError, SourceLocation};
 pub use hierarchy::{parse_ir, parse_ir_with_external_hierarchy, parse_ir_with_loop_provenance};
 pub use lowering::types::{resolve_dims, resolve_total_width};
+pub use output_alias_check::check_function_output_aliases;
 pub use schedule::schedule_symbolic_rtl;
 pub use source::{
     AbsoluteAddr, GlueAddr, GlueBlock, ModuleInitialMemoryValue, RegionedAbsoluteAddr,

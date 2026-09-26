@@ -2610,274 +2610,48 @@ module Top (
 }
 
 fn test_comb_function_packed_array_literal_preserves_source_order(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
-    @build Simulator::builder(r#"
-module Top (
-    q: output logic<2>,
-    side: output logic<8>,
-) {
-    function observe (
-        value: input logic<8>,
-        written: output logic<8>,
-    ) -> logic {
-        written = value;
-        return value[0];
-    }
-    function identity (x: input logic<2>) -> logic<2> {
-        return x;
-    }
-
-    always_comb {
-        side = 0;
-        q = identity('{default: observe(8'h11, side), observe(8'h22, side)});
-    }
-}
-"#, "Top");
-
-    let side = sim.signal("side");
-    assert_eq!(sim.get_as::<u8>(side), 0x22);
+    @ignore_on(veryl, sv);
+    @case "comb_observer::test_comb_function_packed_array_literal_preserves_source_order";
 }
 
 fn test_comb_function_nested_array_literals_preserve_each_dimension_order(sim) {
     @ignore_on(sv);
-    @build Simulator::builder(r#"
-module Top (
-    q00: output logic<4>,
-    q01: output logic<4>,
-    q10: output logic<4>,
-    q11: output logic<4>,
-) {
-    function pick (
-        x: input logic<4> [2, 2],
-        row: input logic,
-        col: input logic,
-    ) -> logic<4> {
-        return x[row][col];
-    }
-
-    always_comb {
-        q00 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 0, 0);
-        q01 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 0, 1);
-        q10 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 1, 0);
-        q11 = pick('{'{4'h1, 4'h2}, '{4'h3, 4'h4}}, 1, 1);
-    }
-}
-"#, "Top");
-
-    let q00 = sim.signal("q00");
-    let q01 = sim.signal("q01");
-    let q10 = sim.signal("q10");
-    let q11 = sim.signal("q11");
-    assert_eq!(sim.get_as::<u8>(q00), 1);
-    assert_eq!(sim.get_as::<u8>(q01), 2);
-    assert_eq!(sim.get_as::<u8>(q10), 3);
-    assert_eq!(sim.get_as::<u8>(q11), 4);
+    @case "comb_observer::test_comb_function_nested_array_literals_preserve_each_dimension_order";
 }
 
 fn test_comb_function_array_literal_converts_scalar_items_per_element(sim) {
     @ignore_on(sv);
-    @build Simulator::builder(r#"
-module Top (
-    q0: output signed logic<8>,
-    q1: output signed logic<8>,
-    q_default: output signed logic<8>,
-) {
-    function pick (
-        x: input signed logic<8> [2],
-        index: input logic,
-    ) -> signed logic<8> {
-        return x[index];
-    }
-
-    always_comb {
-        q0 = pick('{4'sh8, 4'sh1}, 0);
-        q1 = pick('{4'sh8, 4'sh1}, 1);
-        q_default = pick('{default: 4'sh8}, 1);
-    }
-}
-"#, "Top");
-
-    let q0 = sim.signal("q0");
-    let q1 = sim.signal("q1");
-    let q_default = sim.signal("q_default");
-    assert_eq!(sim.get_as::<u8>(q0), 0xf8);
-    assert_eq!(sim.get_as::<u8>(q1), 0x01);
-    assert_eq!(sim.get_as::<u8>(q_default), 0xf8);
+    @case "comb_observer::test_comb_function_array_literal_converts_scalar_items_per_element";
 }
 
 fn test_comb_function_nested_array_scalar_default_converts_each_element(sim) {
     @ignore_on(veryl, sv);
-    @build Simulator::builder(r#"
-module Top (
-    q00: output signed logic<8>,
-    q01: output signed logic<8>,
-    q10: output signed logic<8>,
-    q11: output signed logic<8>,
-) {
-    function pick (
-        x: input signed logic<8> [2, 2],
-        row: input logic,
-        col: input logic,
-    ) -> signed logic<8> {
-        return x[row][col];
-    }
-
-    always_comb {
-        q00 = pick('{default: 4'sh8}, 0, 0);
-        q01 = pick('{default: 4'sh8}, 0, 1);
-        q10 = pick('{default: 4'sh8}, 1, 0);
-        q11 = pick('{default: 4'sh8}, 1, 1);
-    }
-}
-"#, "Top");
-
-    let q00 = sim.signal("q00");
-    let q01 = sim.signal("q01");
-    let q10 = sim.signal("q10");
-    let q11 = sim.signal("q11");
-    assert_eq!(sim.get_as::<u8>(q00), 0xf8);
-    assert_eq!(sim.get_as::<u8>(q01), 0xf8);
-    assert_eq!(sim.get_as::<u8>(q10), 0xf8);
-    assert_eq!(sim.get_as::<u8>(q11), 0xf8);
+    @case "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element";
 }
 
 fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
-    @build Simulator::builder(r#"
-module Top (
-    q: output signed logic<8>,
-) {
-    function first (x: input signed logic<8> [2, 2]) -> signed logic<8> {
-        return x[0][0];
-    }
-    function pass (
-        row0: input signed logic<4> [2],
-        row1: input signed logic<4> [2],
-    ) -> signed logic<8> {
-        return first('{row0, row1});
-    }
-
-    always_comb {
-        q = pass('{4'h8, 4'h0}, '{4'h1, 4'h2});
-    }
-}
-"#, "Top");
-
-    let q = sim.signal("q");
-    assert_eq!(sim.get_as::<u8>(q), 0xf8);
+    @ignore_on(veryl, sv);
+    @case "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type";
 }
 
 fn test_comb_function_array_literal_accepts_array_returning_items(sim) {
-    @ignore_on(veryl, sv); // https://github.com/veryl-lang/veryl/pull/3131
-    @build Simulator::builder(r#"
-module Top (
-    q: output logic<4>,
-) {
-    type row_t = logic<4> [2];
-    type matrix_t = logic<4> [2, 2];
-
-    function make_row (base: input logic<4>) -> row_t {
-        var row: row_t;
-        row[0] = base;
-        row[1] = base + 1;
-        return row;
-    }
-    function pick (x: input matrix_t) -> logic<4> {
-        return x[1][0];
-    }
-
-    always_comb {
-        q = pick('{make_row(1), make_row(3)});
-    }
-}
-"#, "Top");
-
-    let q = sim.signal("q");
-    assert_eq!(sim.get_as::<u8>(q), 3);
+    @ignore_on(veryl, sv);
+    @case "comb_observer::test_comb_function_array_literal_accepts_array_returning_items";
 }
 
 fn test_comb_function_direct_array_argument_converts_each_element(sim) {
     @ignore_on(veryl, sv);
-    @build Simulator::builder(r#"
-module Top (
-    q0: output signed logic<8>,
-    q1: output signed logic<8>,
-) {
-    function pick (
-        x: input signed logic<8> [2],
-        index: input logic,
-    ) -> signed logic<8> {
-        return x[index];
-    }
-
-    var narrow: signed logic<4> [2];
-    always_comb {
-        narrow[0] = 4'sh8;
-        narrow[1] = 4'sh1;
-        q0 = pick(narrow, 0);
-        q1 = pick(narrow, 1);
-    }
-}
-"#, "Top");
-
-    let q0 = sim.signal("q0");
-    let q1 = sim.signal("q1");
-    assert_eq!(sim.get_as::<u8>(q0), 0xf8);
-    assert_eq!(sim.get_as::<u8>(q1), 0x01);
+    @case "comb_observer::test_comb_function_direct_array_argument_converts_each_element";
 }
 
 fn test_comb_function_direct_array_return_preserves_all_elements(sim) {
     @ignore_on(veryl, sv);
-    @build Simulator::builder(r#"
-module Top (
-    q: output logic<4>,
-) {
-    type row_t = logic<4> [2];
-
-    function make_row () -> row_t {
-        var row: row_t;
-        row[0] = 4'd3;
-        row[1] = 4'd4;
-        return row;
-    }
-    function pick (x: input row_t) -> logic<4> {
-        return x[1];
-    }
-
-    always_comb {
-        q = pick(make_row());
-    }
-}
-"#, "Top");
-
-    let q = sim.signal("q");
-    assert_eq!(sim.get_as::<u8>(q), 4);
+    @case "comb_observer::test_comb_function_direct_array_return_preserves_all_elements";
 }
 
 fn test_comb_statement_function_direct_array_argument_converts_each_element(sim) {
     @ignore_on(veryl, sv);
-    @build Simulator::builder(r#"
-module Top (
-    q: output signed logic<8>,
-) {
-    function capture (
-        x: input signed logic<8> [2],
-        dst: output signed logic<8>,
-    ) {
-        dst = x[0];
-    }
-
-    var narrow: signed logic<4> [2];
-    always_comb {
-        narrow[0] = 4'sh8;
-        narrow[1] = 4'sh1;
-        capture(narrow, q);
-    }
-}
-"#, "Top");
-
-    let q = sim.signal("q");
-    assert_eq!(sim.get_as::<u8>(q), 0xf8);
+    @case "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element";
 }
 
 fn test_comb_function_effects_use_typed_array_arguments(sim) {
@@ -2905,77 +2679,12 @@ module Top (
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
     @ignore_on(sv);
-    @build Simulator::builder(r#"
-module Top (
-    value: input logic<8>,
-    tmp: output logic<8>,
-    out: output logic<8>,
-) {
-    function write_tmp (
-        x: input logic<8>,
-        dst: output logic<8>,
-    ) -> logic<8> {
-        dst = x;
-        return x;
-    }
-
-    function add (
-        first: input logic<8>,
-        second: input logic<8>,
-    ) -> logic<8> {
-        return first + second;
-    }
-
-    always_comb {
-        tmp = 8'd0;
-        out = add(
-            second: write_tmp(value, tmp),
-            first: tmp,
-        );
-    }
-}
-"#, "Top");
-
-    let value = sim.signal("value");
-    let tmp = sim.signal("tmp");
-    let out = sim.signal("out");
-
-    sim.modify(|io| io.set(value, 13u8)).unwrap();
-    assert_eq!(sim.get_as::<u8>(tmp), 13);
-    assert_eq!(sim.get_as::<u8>(out), 26);
+    @case "comb_observer::test_named_function_inputs_evaluate_in_source_order";
 }
 
 fn test_named_function_outputs_apply_in_source_order(sim) {
     @ignore_on(sv);
-    @build Simulator::builder(r#"
-module Top (
-    tmp: output logic<8>,
-    out: output logic,
-) {
-    function write_outputs (
-        first: output logic<8>,
-        second: output logic<8>,
-    ) -> logic {
-        first = 8'd1;
-        second = 8'd2;
-        return 1'b1;
-    }
-
-    always_comb {
-        tmp = 8'd0;
-        out = write_outputs(
-            second: tmp,
-            first: tmp,
-        );
-    }
-}
-"#, "Top");
-
-    let tmp = sim.signal("tmp");
-    let out = sim.signal("out");
-
-    assert_eq!(sim.get_as::<u8>(tmp), 1);
-    assert_eq!(sim.get_as::<u8>(out), 1);
+    @case "comb_observer::test_named_function_outputs_apply_in_source_order";
 }
 
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
@@ -4558,68 +4267,6 @@ module Top (
     );
 }
 
-fn test_comb_display_dynamic_port_alias_write_excludes_only_prefix(sim) {
-    @omit_veryl;
-    @ignore_on(sv);
-    @build Simulator::builder(r#"
-module Child (
-    a: input logic,
-    y: output logic,
-) {
-    always_comb {
-        y = a;
-    }
-}
-
-module Top (
-    idx: input logic,
-    a: input logic,
-    b: input logic<8>,
-    out: output logic<8>,
-    dynamic_out: output logic<8>,
-) {
-    var mem: logic<8>[4];
-
-    always_comb {
-        mem[2] = b;
-    }
-
-    inst child: Child (
-        a: a,
-        y: mem[1][idx],
-    );
-
-    always_comb {
-        out = mem[2];
-        dynamic_out = mem[1];
-        $display("v=%0d", mem[2]);
-    }
-}
-"#, "Top");
-
-    let idx = sim.signal("idx");
-    let a = sim.signal("a");
-    let b = sim.signal("b");
-    let out = sim.signal("out");
-    let dynamic_out = sim.signal("dynamic_out");
-
-    sim.drain_runtime_events();
-
-    sim.modify(|io| {
-        io.set(idx, 1u8);
-        io.set(a, 1u8);
-        io.set(b, 0x44u8);
-    })
-    .unwrap();
-    assert_eq!(sim.get_as::<u8>(out), 0x44);
-    assert_eq!(sim.get_as::<u8>(dynamic_out), 0x02);
-    assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::Display {
-            message: "v=68".to_string(),
-        }],
-    );
-}
 
 fn test_comb_display_duplicate_store_alias_keeps_capture_activation(sim) {
     @omit_veryl;
@@ -4848,94 +4495,13 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
 }
 
 fn test_comb_function_loop_bounds_apply_output_effects_left_to_right(sim) {
-    // Veryl 0.20.3 executes the design but drops the function output effects.
     @ignore_on(veryl, sv);
-    @build Simulator::builder(r#"
-module Top (value: input logic<4>, out: output logic<8>) {
-    function start_bound (x: input logic<4>, seen: output logic<8>) -> logic<4> {
-        seen = 8'd16 + x;
-        return 4'd0;
-    }
-    function end_bound (seen: input logic<8>) -> logic<4> {
-        return seen[3:0];
-    }
-    function run (x: input logic<4>, seen: output logic<8>) -> logic<8> {
-        seen = 8'd0;
-        for i in start_bound(x, seen)..end_bound(seen) {}
-        return seen;
-    }
-    var seen: logic<8>;
-    always_comb {
-        out = run(value, seen);
-    }
-}
-"#, "Top");
-
-    let value = sim.signal("value");
-    let out = sim.signal("out");
-    sim.modify(|io| io.set(value, 5u8)).unwrap();
-    assert_eq!(sim.get_as::<u8>(out), 21);
+    @case "comb_observer::test_comb_function_loop_bounds_apply_output_effects_left_to_right";
 }
 
 fn test_comb_function_loop_skips_conditions_after_break(sim) {
-    // Veryl 0.20.3 executes the design but drops the function output effects.
     @ignore_on(veryl, sv);
-    @build Simulator::builder(r#"
-module Top (
-    stop: input logic,
-    value: input logic<8>,
-    if_out: output logic<8>,
-    case_out: output logic<8>,
-) {
-    function mark (x: input logic<8>, seen: output logic<8>) -> logic {
-        seen = x;
-        return 1'b0;
-    }
-    function run_if (
-        stop: input logic, x: input logic<8>, seen: output logic<8>,
-    ) -> logic<8> {
-        seen = 8'd0;
-        for i in 0..3 {
-            if stop { break; }
-            if mark(x, seen) { break; }
-        }
-        return seen;
-    }
-    function run_case (
-        stop: input logic, x: input logic<8>, seen: output logic<8>,
-    ) -> logic<8> {
-        seen = 8'd0;
-        for i in 0..3 {
-            if stop { break; }
-            case mark(x, seen) {
-                1'b1: { break; }
-                default: {}
-            }
-        }
-        return seen;
-    }
-    var if_seen: logic<8>;
-    var case_seen: logic<8>;
-    always_comb {
-        if_out = run_if(stop, value, if_seen);
-        case_out = run_case(stop, value, case_seen);
-    }
-}
-"#, "Top");
-
-    let stop = sim.signal("stop");
-    let value = sim.signal("value");
-    let if_out = sim.signal("if_out");
-    let case_out = sim.signal("case_out");
-    sim.modify(|io| {
-        io.set(stop, 1u8);
-        io.set(value, 29u8);
-    }).unwrap();
-    assert_eq!(sim.get_as::<u8>(if_out), 0);
-    assert_eq!(sim.get_as::<u8>(case_out), 0);
-    sim.modify(|io| io.set(stop, 0u8)).unwrap();
-    assert_eq!(sim.get_as::<u8>(if_out), 29);
-    assert_eq!(sim.get_as::<u8>(case_out), 29);
+    @case "comb_observer::test_comb_function_loop_skips_conditions_after_break";
 }
 
 fn test_comb_function_output_preview_honors_loop_break(sim) {
@@ -5637,8 +5203,8 @@ module Top (
 }
 
 #[test]
-fn test_comb_observer_sensitivity_dynamic_port_alias_write_excludes_only_prefix() {
-    let sim = Simulator::builder(
+fn test_comb_observer_rejects_dynamic_port_alias_write() {
+    let error = match Simulator::builder(
         r#"
 module Child (
     a: input logic,
@@ -5674,29 +5240,16 @@ module Top (
 "#,
         "Top",
     )
-    .build()
-    .unwrap();
-
-    let mem_addr = sim.program().get_addr(&[], &["mem"]).unwrap();
-    let observer =
-        sim.program()
-            .runtime_schema
-            .comb_observers
-            .iter()
-            .find(|observer| {
-                observer.sensitivity.iter().any(|atom| {
-                    atom.id == mem_addr && atom.access.lsb <= 16 && atom.access.msb >= 23
-                })
-            })
-            .expect("missing observer sensitive to mem[2]");
-
+    .build_interpreter()
+    {
+        Ok(_) => panic!("dynamic output destination unexpectedly accepted"),
+        Err(error) => error,
+    };
     assert!(
-        observer
-            .sensitivity
-            .iter()
-            .all(|atom| atom.id != mem_addr || atom.access.msb < 8 || atom.access.lsb > 15),
-        "dynamic port alias write should exclude only written mem[1]: {:?}",
-        observer.sensitivity,
+        error
+            .to_string()
+            .contains("output port destination must use constant indices and selects"),
+        "{error}"
     );
 }
 
@@ -5914,5 +5467,54 @@ module Top (
     assert!(
         sir.contains("CombCaptureEvent("),
         "dynamic for observer should lower to a comb capture event:\n{sir}"
+    );
+}
+
+#[test]
+fn test_comb_display_rejects_dynamic_port_alias_write() {
+    let code = r#"
+module Child (
+    a: input logic,
+    y: output logic,
+) {
+    always_comb {
+        y = a;
+    }
+}
+
+module Top (
+    idx: input logic,
+    a: input logic,
+    b: input logic<8>,
+    out: output logic<8>,
+    dynamic_out: output logic<8>,
+) {
+    var mem: logic<8>[4];
+
+    always_comb {
+        mem[2] = b;
+    }
+
+    inst child: Child (
+        a: a,
+        y: mem[1][idx],
+    );
+
+    always_comb {
+        out = mem[2];
+        dynamic_out = mem[1];
+        $display("v=%0d", mem[2]);
+    }
+}
+"#;
+    let error = match Simulator::builder(code, "Top").build_interpreter() {
+        Ok(_) => panic!("dynamic output destination unexpectedly accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("output port destination must use constant indices and selects"),
+        "{error}"
     );
 }

@@ -1,0 +1,181 @@
+{
+  "versions": {
+    "verilator": "Verilator 5.052 2026-09-05 rev v5.052",
+    "icarus": "Icarus Verilog version 13.0 (stable) (v13_0)"
+  },
+  "probes": [
+    {
+      "tool": "verilator",
+      "probe": "constant_context",
+      "status": "executed",
+      "observed": [
+        "review:constant_bits=ffffffff constant_argument=1 constant_shift=00000000"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "constant_context",
+      "status": "executed",
+      "observed": [
+        "review:constant_bits=ffffffff constant_argument=1 constant_shift=xzxzxzxz"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "verilator",
+      "probe": "expression_context",
+      "status": "executed",
+      "observed": [
+        "review:bits_signed=ffffffff bits_unsigned_control=000000ff",
+        "review:argument_context=1 argument_self_sized_control=0",
+        "review:bits_selected=00000005"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "expression_context",
+      "status": "executed",
+      "observed": [
+        "review:bits_signed=ffffffff bits_unsigned_control=000000ff",
+        "review:argument_context=1 argument_self_sized_control=0",
+        "review:bits_selected=00000005"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "verilator",
+      "probe": "output_alias",
+      "status": "executed",
+      "observed": [
+        "review:positional=  2 named_forward=  2 named_reverse=  2 separate_first=  1 separate_second=  2 return=1",
+        "review:void_positional=  2 void_named_reverse=  2"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "output_alias",
+      "status": "compile_error",
+      "observed": [],
+      "detail": "<crate>/verification/repros/mismatches/output_alias.sv:5: error: Function Top.outputs port first is not an input port.\n<crate>/verification/repros/mismatches/output_alias.sv:5:      : Function arguments must be input ports.\n<crate>/verification/repros/mismatches/output_alias.sv:5: error: Function Top.outputs port second is not an input port.\n<crate>/verification/repros/mismatches/output_alias.sv:5:      : Function arguments must be input ports.\n<crate>/verification/repros/mismatches/output_alias.sv:8: error: Function Top.split port first is not an input port.\n<crate>/verification/repros/mismatches/output_alias.sv:8:      : Function arguments must be input ports.\n<crate>/verification/repros/mismatches/output_alias.sv:8: error: Function Top.split port second is not an input port.\n<crate>/verification/repros/mismatches/output_alias.sv:8:      : Function arguments must be input ports.\n4 error(s) during elaboration.\n"
+    },
+    {
+      "tool": "verilator",
+      "probe": "output_concat",
+      "status": "executed",
+      "observed": [
+        "review:mem=11 tmp=1"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "output_concat",
+      "status": "compile_error",
+      "observed": [],
+      "detail": "<crate>/verification/repros/mismatches/output_concat.sv:6: error: A reference to a net or variable (`tmp') is not allowed in a constant expression.\n<crate>/verification/repros/mismatches/output_concat.sv:6: error: Bit select expressions must be a constant integral value.\n<crate>/verification/repros/mismatches/output_concat.sv:6:      : This expression violates that rule: tmp\n2 error(s) during elaboration.\n"
+    },
+    {
+      "tool": "verilator",
+      "probe": "read_before_write",
+      "status": "executed",
+      "observed": [
+        "review:step0=0",
+        "review:step1=1",
+        "review:step2=0"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "read_before_write",
+      "status": "executed",
+      "observed": [
+        "review:step0=0",
+        "review:step1=0",
+        "review:step2=1"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "shift_xz",
+      "status": "executed",
+      "observed": [
+        "review:shift0=xzxzxzxz",
+        "review:shift64=xzxzxzxz",
+        "review:all_x_control=xxxxxxxx"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "verilator",
+      "probe": "signed_bounds",
+      "status": "executed",
+      "observed": [
+        "review:unsigned_hits=         0 unsigned_sum=00000000 unsigned_last=deadbeef",
+        "review:signed_control_hits=         3 signed_control_sum=00000000 signed_control_last=00000001"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "signed_bounds",
+      "status": "executed",
+      "observed": [
+        "review:unsigned_hits=         0 unsigned_sum=00000000 unsigned_last=deadbeef",
+        "review:signed_control_hits=         3 signed_control_sum=00000000 signed_control_last=00000001"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "verilator",
+      "probe": "task_output_alias",
+      "status": "executed",
+      "observed": [
+        "review:task_positional=  2 task_named_forward=  2 task_named_reverse=  2 task_separate_first=  1 task_separate_second=  2"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "task_output_alias",
+      "status": "executed",
+      "observed": [
+        "review:task_positional=  2 task_named_forward=  2 task_named_reverse=  2 task_separate_first=  1 task_separate_second=  2"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "verilator",
+      "probe": "integer_edges",
+      "status": "executed",
+      "observed": [
+        "signed_division=0000000000000000 port_sum=100"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "icarus",
+      "probe": "integer_edges",
+      "status": "executed",
+      "observed": [
+        "signed_division=8000000000000000 port_sum=000"
+      ],
+      "detail": ""
+    },
+    {
+      "tool": "verilator",
+      "probe": "read_before_write_public",
+      "status": "executed",
+      "observed": [
+        "review:step0=0",
+        "review:step1=1",
+        "review:step2=0"
+      ],
+      "detail": ""
+    }
+  ]
+}

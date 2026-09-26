@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-26",
+  "celox_version": "0.7.1",
+  "veryl_version": "0.21.0",
+  "command": "cargo test --locked -p celox --features systemverilog --test expression_semantics --test flip_flop --no-fail-fast",
+  "exit_code": 101,
+  "scope": "Only the two corrected specification cases are listed; the command also runs the other cases in both test binaries.",
+  "backends": {
+    "native": "Celox Veryl frontend / native backend",
+    "cranelift": "Celox Veryl frontend / Cranelift backend",
+    "wasm": "Celox Veryl frontend / Wasm backend",
+    "interp": "Celox Veryl frontend / interpreter",
+    "veryl": "Veryl reference simulator",
+    "sv": "Celox SystemVerilog frontend / native backend"
+  },
+  "counts": {
+    "compile_error": 1,
+    "mismatch": 9,
+    "passed": 1,
+    "runtime_error": 1
+  },
+  "cases": [
+    {
+      "name": "expression_semantics::system_function_results_obey_ternary_width_contexts",
+      "backend": "cranelift",
+      "standard": "IEEE 1800-2023 20.6.2, 11.8.1 and 11.8.2",
+      "expected": "0xffffffff",
+      "status": "mismatch",
+      "actual": "0xff",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "expression_semantics::system_function_results_obey_ternary_width_contexts",
+      "backend": "interp",
+      "standard": "IEEE 1800-2023 20.6.2, 11.8.1 and 11.8.2",
+      "expected": "0xffffffff",
+      "status": "mismatch",
+      "actual": "0xff",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "expression_semantics::system_function_results_obey_ternary_width_contexts",
+      "backend": "native",
+      "standard": "IEEE 1800-2023 20.6.2, 11.8.1 and 11.8.2",
+      "expected": "0xffffffff",
+      "status": "mismatch",
+      "actual": "0xff",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "expression_semantics::system_function_results_obey_ternary_width_contexts",
+      "backend": "sv",
+      "standard": "IEEE 1800-2023 20.6.2, 11.8.1 and 11.8.2",
+      "expected": "0xffffffff",
+      "status": "compile_error",
+      "detail": "unsupported_simulator_parser: Unsupported in simulator parser: systemverilog analysis [tracking issue #64] (Unsupported SystemVerilog construct: always_comb assignment expression)"
+    },
+    {
+      "name": "expression_semantics::system_function_results_obey_ternary_width_contexts",
+      "backend": "veryl",
+      "standard": "IEEE 1800-2023 20.6.2, 11.8.1 and 11.8.2",
+      "expected": "0xffffffff",
+      "status": "runtime_error",
+      "detail": "internal error: entered unreachable code: system function calls are resolved by the analyzer"
+    },
+    {
+      "name": "expression_semantics::system_function_results_obey_ternary_width_contexts",
+      "backend": "wasm",
+      "standard": "IEEE 1800-2023 20.6.2, 11.8.1 and 11.8.2",
+      "expected": "0xffffffff",
+      "status": "mismatch",
+      "actual": "0xff",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "backend": "cranelift",
+      "standard": "IEEE 1800-2023 10.8 and 11.8.2",
+      "expected": "1",
+      "status": "mismatch",
+      "actual": "0",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "backend": "interp",
+      "standard": "IEEE 1800-2023 10.8 and 11.8.2",
+      "expected": "1",
+      "status": "mismatch",
+      "actual": "0",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "backend": "native",
+      "standard": "IEEE 1800-2023 10.8 and 11.8.2",
+      "expected": "1",
+      "status": "mismatch",
+      "actual": "0",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "backend": "sv",
+      "standard": "IEEE 1800-2023 10.8 and 11.8.2",
+      "expected": "1",
+      "status": "passed",
+      "actual": "1",
+      "detail": "All shared assertions passed."
+    },
+    {
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "backend": "veryl",
+      "standard": "IEEE 1800-2023 10.8 and 11.8.2",
+      "expected": "1",
+      "status": "mismatch",
+      "actual": "0",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    },
+    {
+      "name": "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion",
+      "backend": "wasm",
+      "standard": "IEEE 1800-2023 10.8 and 11.8.2",
+      "expected": "1",
+      "status": "mismatch",
+      "actual": "0",
+      "detail": "The current implementation disagrees with the specification-based shared assertion."
+    }
+  ]
+}

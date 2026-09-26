@@ -26,6 +26,7 @@ members = [
     "crates/celox-ts-gen",
     "crates/celox-wasm",
     "crates/celox-vpi",
+    "crates/veryl-test-suite",
     "examples/my-frontend-napi",
 ]
 resolver = "2"
@@ -45,6 +46,7 @@ description = "Celox HDL Simulator"
 rust-version = "1.98.1"
 
 [workspace.dependencies]
+veryl-test-suite         = { version = "=0.7.1", path = "crates/veryl-test-suite" } # x-release-please-version
 celox                   = { version = "=0.7.1", path = "crates/celox", default-features = false } # x-release-please-version
 celox-analysis          = { version = "=0.7.1", path = "crates/celox-analysis" } # x-release-please-version
 celox-backend-arm64     = { version = "=0.7.1", path = "crates/celox-backend-arm64" } # x-release-please-version

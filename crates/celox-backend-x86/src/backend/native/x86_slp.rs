@@ -6,11 +6,12 @@
 
 use std::collections::BTreeMap;
 
+use super::features::VariableShiftEncoding;
 use super::memory_effect::{self, UnknownMemory};
 use super::mir::{
     BaseReg, MFunction, MInst, OpSize, VReg, X86SimdBinaryOp, X86SimdInst, X86VecReg,
 };
-use super::regalloc::assignment::{X86PhysVec, X86VectorLocation};
+use super::regalloc::assignment::{X86PhysVec, X86VectorLocation, is_constraint_boundary};
 use crate::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -190,7 +191,9 @@ pub(crate) fn select(func: &mut MFunction) -> SlpStats {
                 .expect("a source group has at least one Store pair");
             if block.insts[first_load.instruction..=last_store]
                 .iter()
-                .any(clobbers_selected_xmm_registers)
+                .any(|inst| {
+                    blocks_vector_live_range(inst, func.target_features.variable_shift_encoding())
+                })
             {
                 continue;
             }
@@ -480,10 +483,9 @@ fn select_binary_store_pairs(func: &mut MFunction, stats: &mut SlpStats) {
                 .last()
                 .expect("binary result has at least one Store pair")
                 .1;
-            if block.insts[first..=last]
-                .iter()
-                .any(clobbers_selected_xmm_registers)
-            {
+            if block.insts[first..=last].iter().any(|inst| {
+                blocks_vector_live_range(inst, func.target_features.variable_shift_encoding())
+            }) {
                 continue;
             }
             plans.push(BinaryPairPlan {
@@ -660,10 +662,9 @@ fn select_store_fanout_packs(func: &mut MFunction, stats: &mut SlpStats) {
             }
             let first_store = store_pairs[0].0;
             let last_store = store_pairs.last().expect("non-empty store fanout").1;
-            if block.insts[first_store..=last_store]
-                .iter()
-                .any(clobbers_selected_xmm_registers)
-            {
+            if block.insts[first_store..=last_store].iter().any(|inst| {
+                blocks_vector_live_range(inst, func.target_features.variable_shift_encoding())
+            }) {
                 continue;
             }
             pack_plans.push(PackPairPlan {
@@ -860,11 +861,11 @@ fn allocate_from_registers(
     result
 }
 
-fn clobbers_selected_xmm_registers(inst: &MInst) -> bool {
+fn blocks_vector_live_range(inst: &MInst, shift_encoding: VariableShiftEncoding) -> bool {
     matches!(
         inst,
         MInst::PackedLaneCompare { .. } | MInst::PackedByteAffineCompare { .. }
-    )
+    ) || is_constraint_boundary(inst, shift_encoding)
 }
 
 pub(crate) fn clobbers_xmm(inst: &MInst, register: X86PhysVec) -> bool {
@@ -1367,6 +1368,60 @@ mod tests {
         assert!(matches!(scratch, X86VectorLocation::Register(_)));
         assert!(matches!(destination, X86VectorLocation::Register(_)));
         assert_ne!(scratch, destination);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn store_fanout_does_not_span_late_perm_boundaries() {
+        for boundary in [
+            MInst::SDiv {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::URem {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Shl {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+        ] {
+            let mut scalar = VRegAllocator::new();
+            let low = scalar.alloc();
+            let high = scalar.alloc();
+            scalar.alloc();
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::LoadImm { dst: low, value: 1 });
+            block.push(MInst::LoadImm {
+                dst: high,
+                value: 2,
+            });
+            for offset in [32, 64, 96, 128] {
+                if offset == 96 {
+                    block.push(boundary.clone());
+                }
+                for (lane, src) in [(0, low), (8, high)] {
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: offset + lane,
+                        src,
+                        size: OpSize::S64,
+                    });
+                }
+            }
+            block.push(MInst::Return);
+            let mut func = MFunction::new(scalar, vec![SpillDesc::transient(); 3]);
+            func.target_features = crate::native::features::X86Features::for_test(false);
+            func.blocks.push(block);
+            let stats = select(&mut func);
+            assert_eq!(stats.vector_packs, 0, "{boundary:?}");
+            assert_eq!(stats.vector_stores, 0, "{boundary:?}");
+            func.verify();
+        }
     }
 
     #[test]

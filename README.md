@@ -226,6 +226,12 @@ The development environment includes cocotb and Verilator for native VPI
 integration tests and SystemVerilog benchmarks. Cargo runs through mbx to share
 compiler outputs and manage target directories.
 
+### Reusable Veryl language tests
+
+[`veryl-test-suite`](crates/veryl-test-suite/README.md) provides 648 language
+cases and a simulator adapter contract for other Veryl implementations, plus
+an optional Verilator verifier for checking the expectations independently.
+
 ## License
 
 Licensed under either [Apache License 2.0](LICENSE-APACHE) or

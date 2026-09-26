@@ -1,0 +1,45 @@
+[package]
+name = "veryl-test-suite"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+description = "Reusable Veryl language tests for compiler and simulator implementations"
+readme = "README.md"
+
+[features]
+default = []
+emit = ["dep:veryl-analyzer", "dep:veryl-emitter", "dep:veryl-parser", "dep:veryl-metadata"]
+verilator = ["emit", "dep:clap", "dep:serde_json"]
+icarus = ["emit", "dep:clap", "dep:serde_json"]
+
+[[bin]]
+name = "verify-verilator"
+path = "src/bin/verify-verilator.rs"
+required-features = ["verilator"]
+
+[[bin]]
+name = "verify-icarus"
+path = "src/bin/verify-icarus.rs"
+required-features = ["icarus"]
+
+[[example]]
+name = "inspect-mismatch-ir"
+required-features = ["emit"]
+
+[dependencies]
+veryl-analyzer = { workspace = true, optional = true }
+veryl-emitter = { workspace = true, optional = true }
+veryl-parser = { workspace = true, optional = true }
+veryl-metadata = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+num-bigint.workspace = true
+num-traits.workspace = true
+veryl-std.workspace = true
+
+[lints]
+workspace = true

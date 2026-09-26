@@ -5055,6 +5055,13 @@ impl SLTToSIRLowerer {
         access: &BitAccess,
     ) -> RegisterId {
         let width = access.msb - access.lsb + 1;
+        if self.four_state {
+            // A bit-select transports Z. Lowering it to bitwise AND would
+            // incorrectly turn every retained Z into X (IEEE 1800 11.4.8).
+            let dest = builder.alloc_logic(width);
+            builder.emit(SIRInstruction::Slice(dest, reg, access.lsb, width));
+            return dest;
+        }
         let shift_amt = builder.alloc_bit(64, false);
         builder.emit(SIRInstruction::Imm(
             shift_amt,

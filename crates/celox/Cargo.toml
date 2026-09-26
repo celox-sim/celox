@@ -83,6 +83,7 @@ celox-backend-arm64   = { workspace = true }
 libc.workspace = true
 
 [dev-dependencies]
+veryl-test-suite = { workspace = true, features = ["emit"] }
 insta      = "1.46"
 libc.workspace = true
 criterion  = "0.8"

@@ -470,6 +470,7 @@ dependencies = [
  "veryl-path",
  "veryl-simulator",
  "veryl-std",
+ "veryl-test-suite",
  "wasmtime 49.0.0",
 ]
 
@@ -4794,6 +4795,21 @@ dependencies = [
  "rust-embed",
  "thiserror 2.0.20",
  "veryl-path",
+]
+
+[[package]]
+name = "veryl-test-suite"
+version = "0.7.1"
+dependencies = [
+ "clap",
+ "num-bigint",
+ "num-traits",
+ "serde_json",
+ "veryl-analyzer",
+ "veryl-emitter",
+ "veryl-metadata",
+ "veryl-parser",
+ "veryl-std",
 ]
 
 [[package]]
