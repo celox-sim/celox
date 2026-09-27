@@ -5483,6 +5483,14 @@
       "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
+      "name": "operators::test_ff_constant_two_state_initialization",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "operators::test_ff_div",
       "phase": "execute",
       "status": "passed"
@@ -7476,7 +7484,7 @@
     "emission_error": 0,
     "ignored": 185,
     "mismatch": 0,
-    "passed": 455,
+    "passed": 456,
     "rejected": 8,
     "runtime_error": 0,
     "unexpected_accept": 0,
@@ -7486,5 +7494,14 @@
   "schema_version": 2,
   "suite_version": "0.7.1",
   "tool": "icarus",
-  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "partial_refresh": {
+    "date": "2026-09-27",
+    "suite_version": "0.8.0",
+    "cases": [
+      "operators::test_ff_comb_constant_folding_consistency",
+      "operators::test_ff_constant_two_state_initialization"
+    ],
+    "note": "Only these cases were rerun; all other observations are retained from the earlier report."
+  }
 }

@@ -4385,6 +4385,14 @@
       "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
+      "name": "operators::test_ff_constant_two_state_initialization",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Operators",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "operators::test_ff_div",
       "phase": "execute",
       "status": "passed"
@@ -6218,7 +6226,7 @@
     "emission_error": 0,
     "ignored": 82,
     "mismatch": 0,
-    "passed": 456,
+    "passed": 457,
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,
@@ -6228,5 +6236,14 @@
   "schema_version": 2,
   "suite_version": "0.7.1",
   "tool": "verilator",
-  "version": "Verilator 5.052 2026-09-05 rev v5.052"
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "partial_refresh": {
+    "date": "2026-09-27",
+    "suite_version": "0.8.0",
+    "cases": [
+      "operators::test_ff_comb_constant_folding_consistency",
+      "operators::test_ff_constant_two_state_initialization"
+    ],
+    "note": "Only these cases were rerun; all other observations are retained from the earlier report."
+  }
 }
