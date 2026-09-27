@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.1 (2026-09-27)
+
+## What's Changed
+* chore(deps): update rust crate thiserror to v2.0.21 by @renovate[bot] in https://github.com/celox-sim/celox/pull/908
+* refactor(sv-analyzer): extract function analysis and tests by @tignear in https://github.com/celox-sim/celox/pull/909
+* fix(ci): detect missing crates.io bootstrap before publishing by @tignear in https://github.com/celox-sim/celox/pull/911
+* test(veryl): separate constant folding and zero-initialization checks by @tignear in https://github.com/celox-sim/celox/pull/917
+* refactor(x86): split instruction selection by responsibility by @tignear in https://github.com/celox-sim/celox/pull/914
+* fix(ci): validate stacked PRs in the target merge queue by @tignear in https://github.com/celox-sim/celox/pull/924
+* refactor(x86): split MIR optimization passes by responsibility by @tignear in https://github.com/celox-sim/celox/pull/915
+* refactor(x86): split machine code emission by responsibility by @tignear in https://github.com/celox-sim/celox/pull/916
+* refactor(sv): split AST construction by responsibility by @tignear in https://github.com/celox-sim/celox/pull/918
+* refactor(arm64): split instruction selection by responsibility by @tignear in https://github.com/celox-sim/celox/pull/919
+* refactor(sir): split mux branchification by responsibility by @tignear in https://github.com/celox-sim/celox/pull/920
+* refactor(slt): split symbolic tree lowering by responsibility by @tignear in https://github.com/celox-sim/celox/pull/922
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.8.0...v0.8.1
+
 ## 0.8.0 (2026-09-26)
 
 ## What's Changed
