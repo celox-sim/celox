@@ -1101,14 +1101,15 @@ o_comb = 32'hffff_ffff + 1;
     let o_ff = sim.signal("o_ff");
     let o_comb = sim.signal("o_comb");
 
-    // Before tick: o_comb is evaluated, o_ff is 0
+    // Before tick, only the combinational output has a defined value.
+    // The uninitialized FF must not be assumed to start at zero; this case
+    // checks constant folding, not a backend-specific initialization policy.
     let expected = BigUint::from(1u32) << 32;
     assert_eq!(
         sim.get(o_comb),
         expected,
         "always_comb constant folding failed"
     );
-    assert_eq!(sim.get(o_ff), BigUint::from(0u8));
 
     // After tick: o_ff is evaluated
     sim.tick(clk).unwrap();
