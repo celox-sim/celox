@@ -6,7 +6,9 @@ use crate::HashMap;
 use crate::native::mir::{BlockId, MBlock, MFunction, MInst, PhiNode, SpillDesc, VReg};
 
 use super::analysis::AnalysisResult;
-use super::assignment::{ALLOCATABLE_REGS, PhysReg, RegConstraint, clobbers, use_constraints};
+use super::assignment::{
+    ALLOCATABLE_REGS, PhysReg, RegConstraint, clobbers, is_constraint_boundary, use_constraints,
+};
 use super::cfg::NormalizedCfg;
 
 #[derive(Debug, Clone)]
@@ -576,13 +578,7 @@ fn constraint_boundaries(
 ) -> Vec<usize> {
     let mut result = BTreeSet::new();
     for (instruction, inst) in block.insts.iter().enumerate() {
-        if !clobbers(inst).is_empty() {
-            result.insert(instruction);
-        }
-        if use_constraints(inst, shift_encoding)
-            .into_iter()
-            .any(|constraint| matches!(constraint, RegConstraint::Fixed(_)))
-        {
+        if is_constraint_boundary(inst, shift_encoding) {
             result.insert(instruction);
         }
     }

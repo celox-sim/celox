@@ -288,6 +288,19 @@ impl VerylSimAdapter {
         self.sim.mark_comb_dirty();
     }
 
+    pub fn set_four_state(&mut self, signal: VerylSignalRef, val: BigUint, mask: BigUint) {
+        self.discard_initial_diagnostics();
+        let name = &self.names[signal.0];
+        let width = self
+            .sim
+            .get(name)
+            .or_else(|| self.sim.get_var(name))
+            .unwrap_or_else(|| panic!("signal '{name}' not found in veryl-simulator"))
+            .width();
+        self.sim.set(name, four_state_value(val, mask, width));
+        self.sim.mark_comb_dirty();
+    }
+
     pub fn child_signal(&mut self, instance_path: &[(&str, usize)], var: &str) -> VerylSignalRef {
         let mut parts = Vec::new();
         for (name, _idx) in instance_path {

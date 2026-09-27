@@ -438,6 +438,7 @@ dependencies = [
  "celox-sir-opt",
  "celox-slt",
  "celox-state-layout",
+ "celox-test-suite-veryl",
  "celox-testbench",
  "clap",
  "codspeed-criterion-compat",
@@ -785,6 +786,21 @@ dependencies = [
  "num-bigint",
  "sv-parser",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "celox-test-suite-veryl"
+version = "0.7.1"
+dependencies = [
+ "clap",
+ "num-bigint",
+ "num-traits",
+ "serde_json",
+ "veryl-analyzer",
+ "veryl-emitter",
+ "veryl-metadata",
+ "veryl-parser",
+ "veryl-std",
 ]
 
 [[package]]
@@ -2836,9 +2852,9 @@ dependencies = [
 
 [[package]]
 name = "napi"
-version = "3.12.7"
+version = "3.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7d3c1107f2fda46a7bd2676d65221b7b8160054494b38554b0e055c731714db"
+checksum = "3b12638855cec016784a7e17cc4ecbdee7ca8b0a3456aa50640d0ee5ed1a42f8"
 dependencies = [
  "bitflags 2.13.0",
  "ctor",
@@ -2854,15 +2870,15 @@ dependencies = [
 
 [[package]]
 name = "napi-build"
-version = "2.4.4"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9befcb51d87271051c0c11aaf625d09340266b7f1ac3fef5975e62274dc2813f"
+checksum = "0941983559cd62bfa7f04646a16428967a847365adeef27711e4e3927046bbed"
 
 [[package]]
 name = "napi-derive"
-version = "3.6.8"
+version = "3.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e332e701386d8101b093203e296059ad8aeef58ddd4c75594f3c84ce637405e"
+checksum = "6b1d232c24dc6754979b27efdf2047a5849efc7c92c1245de87e6bedbb9f5c3c"
 dependencies = [
  "convert_case",
  "ctor",
@@ -4264,34 +4280,34 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "test-case"
-version = "3.3.1"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb2550dd13afcd286853192af8601920d959b14c401fcece38071d53bf0768a8"
+checksum = "124953e7f67cb0b2fcfb87e899e4ae5a64fb68e2e160767933cc67b646fb0042"
 dependencies = [
  "test-case-macros",
 ]
 
 [[package]]
 name = "test-case-core"
-version = "3.3.1"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adcb7fd841cd518e279be3d5a3eb0636409487998a4aff22f3de87b81e88384f"
+checksum = "bd097615b407247e102046ba34426bb594923ab3554cf0f3cdfed050f1a5a3e8"
 dependencies = [
  "cfg-if",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
 name = "test-case-macros"
-version = "3.3.1"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c89e72a01ed4c579669add59014b9a524d609c0c88c6a585ce37485879f6ffb"
+checksum = "f4ce35ece947bccac166e1ded639133827a953f69a48ba134d17f91108333082"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
  "test-case-core",
 ]
 

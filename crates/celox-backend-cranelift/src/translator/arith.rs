@@ -669,7 +669,15 @@ impl SIRTranslator {
                         let zero = state.builder.ins().iconst(common_ty, 0);
                         let any_x_l = state.builder.ins().icmp(IntCC::NotEqual, l_m, zero);
                         let any_x_r = state.builder.ins().icmp(IntCC::NotEqual, r_m, zero);
-                        let any_x = state.builder.ins().bor(any_x_l, any_x_r);
+                        let mut any_x = state.builder.ins().bor(any_x_l, any_x_r);
+                        if matches!(
+                            op,
+                            BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+                        ) {
+                            // IEEE 1800-2023 11.4.3: a zero divisor also produces all X.
+                            let zero_divisor = state.builder.ins().icmp(IntCC::Equal, r, zero);
+                            any_x = state.builder.ins().bor(any_x, zero_divisor);
+                        }
 
                         let all_ones = state.builder.ins().iconst(common_ty, -1);
                         state.builder.ins().select(any_x, all_ones, zero)
@@ -678,8 +686,13 @@ impl SIRTranslator {
 
                 let final_res_v = promote_to_physical(state, res_v, d_width, false, dst_ty);
                 let final_res_m = promote_to_physical(state, res_m, d_width, false, dst_ty);
-                // Normalize: operations produce X (v=1,m=1), never Z (v=0,m=1)
-                let normalized_v = state.builder.ins().bor(final_res_v, final_res_m);
+                // Shifts preserve Z. An unknown shift count instead produces all X.
+                let normalized_v = if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+                    let has_x = state.builder.ins().icmp_imm_u(IntCC::NotEqual, r_m, 0);
+                    state.builder.ins().select(has_x, final_res_m, final_res_v)
+                } else {
+                    state.builder.ins().bor(final_res_v, final_res_m)
+                };
                 state.regs.insert(
                     *dst,
                     TransValue::FourState {
@@ -810,7 +823,8 @@ impl SIRTranslator {
                         );
                     }
 
-                    // If shift amount has X, override all mask chunks to all-ones
+                    // An unknown count produces X in both planes; known counts
+                    // preserve the shifted payload, including Z bits.
                     let all_ones = state.builder.ins().iconst(types::I64, -1i64);
                     for i in 0..num_chunks {
                         let m = state.builder.ins().load(
@@ -819,6 +833,17 @@ impl SIRTranslator {
                             mask_dst_addr,
                             (i * 8) as i32,
                         );
+                        let v = state.builder.ins().load(
+                            types::I64,
+                            MemFlags::new(),
+                            dst_addr,
+                            (i * 8) as i32,
+                        );
+                        let v = state.builder.ins().select(shift_has_x, all_ones, v);
+                        state
+                            .builder
+                            .ins()
+                            .store(MemFlags::new(), v, dst_addr, (i * 8) as i32);
                         let selected = state.builder.ins().select(shift_has_x, all_ones, m);
                         state.builder.ins().store(
                             MemFlags::new(),
@@ -832,6 +857,30 @@ impl SIRTranslator {
                 } else {
                     None
                 };
+
+                // Physical chunks can outlive this shift in a wider consumer.
+                // Clear padding in both planes before keeping the stack slot
+                // or materializing it into registers, including all-X results.
+                let last_chunk_bits = d_width % 64;
+                if last_chunk_bits != 0 {
+                    let width_mask = state
+                        .builder
+                        .ins()
+                        .iconst(types::I64, ((1u64 << last_chunk_bits) - 1) as i64);
+                    let offset = ((final_num_chunks - 1) * 8) as i32;
+                    for addr in std::iter::once(dst_addr).chain(mask_addr) {
+                        let value =
+                            state
+                                .builder
+                                .ins()
+                                .load(types::I64, MemFlags::new(), addr, offset);
+                        let value = state.builder.ins().band(value, width_mask);
+                        state
+                            .builder
+                            .ins()
+                            .store(MemFlags::new(), value, addr, offset);
+                    }
+                }
 
                 // Only keep MemBacked if the destination is still wide enough.
                 // Narrow destinations must be materialized as TwoState/FourState
@@ -875,16 +924,11 @@ impl SIRTranslator {
                                 .map(|_| state.builder.ins().iconst(types::I64, 0))
                                 .collect()
                         };
-                        // Normalize: operations produce X, never Z
-                        let normalized: Vec<_> = res_chunks
-                            .iter()
-                            .zip(res_masks.iter())
-                            .map(|(&v, &m)| state.builder.ins().bor(v, m))
-                            .collect();
+                        // The memory shift has already handled an unknown count.
                         state.regs.insert(
                             *dst,
                             TransValue::FourState {
-                                values: normalized,
+                                values: res_chunks,
                                 masks: res_masks,
                             },
                         );
@@ -987,6 +1031,11 @@ impl SIRTranslator {
                             let zero = state.builder.ins().iconst(types::I64, 0);
                             let shift_has_x =
                                 state.builder.ins().icmp(IntCC::NotEqual, r_any_x, zero);
+
+                            let all_x = state.builder.ins().iconst(types::I64, -1);
+                            for value in &mut res_chunks {
+                                *value = state.builder.ins().select(shift_has_x, all_x, *value);
+                            }
 
                             let shifted_masks = if matches!(op, BinaryOp::Sar) {
                                 wide_ops::emit_wide_sar(
@@ -1236,7 +1285,20 @@ impl SIRTranslator {
                                 any_x = state.builder.ins().bor(any_x, m_i64);
                             }
                             let zero = state.builder.ins().iconst(types::I64, 0);
-                            let has_x = state.builder.ins().icmp(IntCC::NotEqual, any_x, zero);
+                            let mut has_x = state.builder.ins().icmp(IntCC::NotEqual, any_x, zero);
+                            if matches!(
+                                op,
+                                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+                            ) {
+                                let mut divisor = zero;
+                                for &chunk in &r_chunks {
+                                    let chunk = cast_type(state.builder, chunk, types::I64);
+                                    divisor = state.builder.ins().bor(divisor, chunk);
+                                }
+                                let zero_divisor =
+                                    state.builder.ins().icmp(IntCC::Equal, divisor, zero);
+                                has_x = state.builder.ins().bor(has_x, zero_divisor);
+                            }
                             let all_ones = state.builder.ins().iconst(types::I64, -1i64);
                             let mask_val = state.builder.ins().select(has_x, all_ones, zero);
                             vec![mask_val; final_num_chunks]
@@ -1248,7 +1310,8 @@ impl SIRTranslator {
                         res_masks.push(state.builder.ins().iconst(types::I64, 0));
                     }
 
-                    // Mask width normalization: clear bits beyond d_width in the last chunk
+                    // Shifts preserve the payload (including Z), but neither
+                    // plane may retain bits beyond the logical result width.
                     let last_chunk_bits = d_width % 64;
                     if last_chunk_bits != 0 && !res_masks.is_empty() {
                         let width_mask_val = ((1u64 << last_chunk_bits) - 1) as i64;
@@ -1256,14 +1319,22 @@ impl SIRTranslator {
                         let last_idx = res_masks.len() - 1;
                         res_masks[last_idx] =
                             state.builder.ins().band(res_masks[last_idx], width_mask);
+                        if is_shift {
+                            res_chunks[last_idx] =
+                                state.builder.ins().band(res_chunks[last_idx], width_mask);
+                        }
                     }
 
-                    // Normalize: operations produce X, never Z
-                    let normalized: Vec<_> = res_chunks
-                        .iter()
-                        .zip(res_masks.iter())
-                        .map(|(&v, &m)| state.builder.ins().bor(v, m))
-                        .collect();
+                    // Logical/arithmetic computations produce X; shifts move Z.
+                    let normalized: Vec<_> = if is_shift {
+                        res_chunks
+                    } else {
+                        res_chunks
+                            .iter()
+                            .zip(&res_masks)
+                            .map(|(&v, &m)| state.builder.ins().bor(v, m))
+                            .collect()
+                    };
                     state.regs.insert(
                         *dst,
                         TransValue::FourState {

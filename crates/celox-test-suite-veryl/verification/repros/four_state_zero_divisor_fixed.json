@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-26",
+  "celox_version": "0.7.1",
+  "veryl_version": "0.21.0",
+  "case": "signed_divrem::signed_divrem_four_state_zero_divisor",
+  "standard": "IEEE 1800-2023 11.4.3",
+  "previous_observations": "four_state_zero_divisor.json",
+  "command": "cargo test --locked -p celox --features systemverilog --test signed_divrem signed_divrem_four_state_zero_divisor",
+  "coverage": {
+    "widths": [
+      8,
+      64,
+      65,
+      128
+    ],
+    "signedness": [
+      "signed",
+      "unsigned"
+    ],
+    "divisors": [
+      "runtime zero",
+      "constant zero",
+      "known nonzero",
+      "nonzero high word",
+      "high Z bit"
+    ],
+    "transitions": [
+      "known -> zero -> known"
+    ]
+  },
+  "counts": {
+    "passed": 6,
+    "failed": 0,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "backend": "cranelift",
+      "status": "passed"
+    },
+    {
+      "backend": "interp",
+      "status": "passed"
+    },
+    {
+      "backend": "native",
+      "status": "passed"
+    },
+    {
+      "backend": "sv",
+      "status": "passed"
+    },
+    {
+      "backend": "veryl",
+      "status": "passed"
+    },
+    {
+      "backend": "wasm",
+      "status": "passed"
+    }
+  ],
+  "expanded_case_before_slp_fix": {
+    "native": "register allocation Perm structural verification [X86_VECTOR.BLOCK_LOCAL_DOMINANCE] at bb6/i7: xv0 has no earlier definition in this block",
+    "sv": "register allocation Perm structural verification [X86_VECTOR.BLOCK_LOCAL_DOMINANCE] at bb4/i9: xv0 has no earlier definition in this block",
+    "resolution": "Keep selected SIMD values and scheduled vector instructions within late Perm block boundaries."
+  },
+  "state_mode_matrix": {
+    "command": "cargo test --locked -p celox --features systemverilog --test divrem_state_modes",
+    "backends": [
+      "native",
+      "cranelift",
+      "wasm",
+      "interpreter"
+    ],
+    "designs_per_backend": 32,
+    "four_state": [
+      false,
+      true
+    ],
+    "execution": [
+      "comb",
+      "always_ff"
+    ],
+    "widths": [
+      8,
+      64,
+      65,
+      128
+    ],
+    "signedness": [
+      "signed",
+      "unsigned"
+    ],
+    "divisor_source": [
+      "input",
+      "constant zero"
+    ],
+    "passed": 4,
+    "failed": 0,
+    "ignored": 0
+  },
+  "external_verification": [
+    {
+      "tool": "icarus",
+      "state_mode": "four-state",
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "case": "signed_divrem::signed_divrem_four_state_zero_divisor",
+      "status": "passed"
+    },
+    {
+      "tool": "verilator",
+      "state_mode": "two-state",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "command": "verify-verilator --filter signed_divrem",
+      "counts": {
+        "compile_error": 0,
+        "emission_error": 0,
+        "ignored": 1,
+        "mismatch": 0,
+        "passed": 3,
+        "rejected": 0,
+        "runtime_error": 0,
+        "unexpected_accept": 0,
+        "unsupported": 2
+      },
+      "cases": [
+        {
+          "category": "Operators",
+          "detail": "",
+          "expectation": "Simulation",
+          "name": "signed_divrem::signed_divrem_always_ff",
+          "phase": "execute",
+          "status": "passed"
+        },
+        {
+          "category": "Operators",
+          "detail": "four-state expectations",
+          "expectation": "Simulation",
+          "name": "signed_divrem::signed_divrem_four_state_unknown",
+          "phase": "compile",
+          "status": "unsupported"
+        },
+        {
+          "category": "Operators",
+          "detail": "four-state expectations",
+          "expectation": "Simulation",
+          "name": "signed_divrem::signed_divrem_four_state_zero_divisor",
+          "phase": "compile",
+          "status": "unsupported"
+        },
+        {
+          "category": "Operators",
+          "detail": "",
+          "expectation": "Simulation",
+          "name": "signed_divrem::signed_divrem_i128",
+          "phase": "execute",
+          "status": "passed"
+        },
+        {
+          "category": "Operators",
+          "detail": "Verilator intentionally returns zero for MIN / -1 to avoid a host division exception (#2460). That discussion gives no SV rule permitting zero.",
+          "expectation": "Simulation",
+          "known_issue": {
+            "evidence": [],
+            "observed_version": "5.052",
+            "reason": "Verilator intentionally returns zero for MIN / -1 to avoid a host division exception (#2460). That discussion gives no SV rule permitting zero.",
+            "standard": "IEEE 1800-2023 6.9.1, 11.4.3 and 11.6.1: fixed-width arithmetic modulo 2^64 preserves 0x8000000000000000 for MIN / -1.",
+            "upstream": [
+              "https://github.com/verilator/verilator/issues/2460#issuecomment-656970666"
+            ]
+          },
+          "name": "signed_divrem::signed_divrem_i64",
+          "phase": "skip",
+          "status": "ignored"
+        },
+        {
+          "category": "Operators",
+          "detail": "",
+          "expectation": "Simulation",
+          "name": "signed_divrem::signed_divrem_i8",
+          "phase": "execute",
+          "status": "passed"
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "celox": {
+      "command": "cargo test --locked -p celox --features systemverilog",
+      "passed": 5731,
+      "failed": 0,
+      "ignored": 783
+    },
+    "backends": {
+      "command": "cargo test --locked -p celox-backend-x86 -p celox-backend-arm64 -p celox-backend-cranelift -p celox-backend-wasm --lib",
+      "passed": 659,
+      "failed": 0,
+      "ignored": 0
+    },
+    "suite": {
+      "command": "cargo test --locked -p celox-test-suite-veryl --all-features",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 3
+    },
+    "host": "x86_64",
+    "arm64_execution": "not run; code generation/unit tests only",
+    "clippy": {
+      "command": "cargo clippy --locked -p celox -p celox-backend-x86 -p celox-backend-arm64 -p celox-backend-cranelift -p celox-backend-wasm -p celox-test-suite-veryl --all-targets --features celox/systemverilog,celox-test-suite-veryl/verilator,celox-test-suite-veryl/icarus -- -D warnings",
+      "status": "passed"
+    },
+    "format": {
+      "command": "cargo fmt --all -- --check",
+      "status": "passed"
+    }
+  }
+}

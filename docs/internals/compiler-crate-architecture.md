@@ -71,6 +71,15 @@ labels, preserving X/Z according to IEEE 1800-2023 section 12.5. Inactive
 branches are not lowered. Generate-local typedefs and function declarations
 inside loop-generate remain unsupported.
 
+The SystemVerilog frontend supports `$countones` in constant expressions,
+continuous assignments, combinational and clocked processes, and module port
+connections. Its argument keeps its own expression width, and its result is a
+32-bit signed `int` (IEEE 1800-2023 section 20.9). Constant evaluation and runtime
+lowering both count only known one bits; X and Z do not contribute. Runtime
+lowering converts unknown bits to zero and uses the shared `PopCount` operation,
+including for vectors wider than a machine word. Constant arguments are limited
+to expression forms supported by the existing constant evaluator.
+
 Each adapter projects parser-native identities into the source-independent
 `SourceVarId` namespace before constructing core symbolic structures. Veryl IDs
 therefore remain in the Veryl adapter and its source sidecars; they do not enter

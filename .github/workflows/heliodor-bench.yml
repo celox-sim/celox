@@ -476,6 +476,9 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      # The full suite has 26 long-running jobs per branch. Leave runner
+      # capacity for PR and merge-queue CI when master and develop overlap.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.linux-suite-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360

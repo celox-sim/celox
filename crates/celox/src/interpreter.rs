@@ -422,6 +422,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 regs.width(*rhs),
                 dst_width,
                 regs.is_signed(*lhs),
+                four_state,
             )?;
             regs.set(*dst, truncate(out, dst_width));
         }
@@ -842,9 +843,8 @@ fn alu_unary_u64(
 
 // ── ALU ───────────────────────────────────────────────────────────────
 
-/// Normalize a value into the compiled backends' register convention:
-/// unknown bits carry payload one (`payload |= mask`), so a value migrated
-/// between the interpreter and generated code is bit-identical in memory.
+/// Arithmetic and logical results encode unknown bits as X (`payload |= mask`).
+/// Transport operations such as shifts and slices preserve Z and skip this step.
 fn normalize(value: SIRValue) -> SIRValue {
     SIRValue {
         payload: &value.payload | &value.mask,
@@ -860,6 +860,7 @@ fn alu_binary(
     rhs_width: usize,
     dst_width: usize,
     lhs_signed: bool,
+    four_state: bool,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
@@ -891,8 +892,9 @@ fn alu_binary(
         }
         BinaryOp::DivU | BinaryOp::RemU => {
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
-            // Division by zero yields zero, matching the compiled contract.
-            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+            // IEEE 1800-2023 11.4.3: division/remainder by zero is all X.
+            // Two-state simulation retains the Verilator-compatible zero.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() || (four_state && rhs.payload.is_zero()) {
                 all_x(dst_width)
             } else if rhs.payload.is_zero() {
                 SIRValue::new(BigUint::zero())
@@ -904,10 +906,9 @@ fn alu_binary(
         }
         BinaryOp::DivS | BinaryOp::RemS => {
             // SEMANTICS-CHECK: any X/Z operand bit makes the whole result X.
-            // Signed division truncates toward zero; division by zero yields
-            // zero, and MIN / -1 wraps to MIN (rem: 0), matching the compiled
-            // overflow guards.
-            if !lhs.mask.is_zero() || !rhs.mask.is_zero() {
+            // Signed division truncates toward zero; MIN / -1 wraps to MIN
+            // (rem: 0). A zero divisor is X in four-state simulation.
+            if !lhs.mask.is_zero() || !rhs.mask.is_zero() || (four_state && rhs.payload.is_zero()) {
                 all_x(dst_width)
             } else {
                 let dividend = to_signed(&lhs.payload, lhs_width);
@@ -1181,7 +1182,15 @@ fn alu_binary(
             }
         }
     };
-    Ok(normalize(truncate(out, dst_width)))
+    let out = truncate(out, dst_width);
+    // IEEE 1800-2023 11.4.10: retained shift bits preserve X versus Z.
+    Ok(
+        if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+            out
+        } else {
+            normalize(out)
+        },
+    )
 }
 
 /// Interpret a shift amount register value as `usize`.
@@ -1953,6 +1962,7 @@ mod tests {
                                         rhs_width,
                                         dst_width,
                                         lhs_signed,
+                                        false,
                                     )
                                     .unwrap();
                                     let actual = alu_binary_u64(

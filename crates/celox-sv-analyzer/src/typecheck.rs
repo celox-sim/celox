@@ -699,7 +699,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
         ConstExpr::Function { name, args } => {
             let value = eval_const_function(name, args, &HashMap::default())?;
             let (width, signing) = match name.as_str() {
-                "$clog2" => (32, "s"),
+                "$clog2" | "$countones" => (32, "s"),
                 "$onehot" | "$onehot0" => (1, ""),
                 _ => return None,
             };
@@ -987,10 +987,11 @@ fn eval_const_function(
     };
     match name {
         "$clog2" => clog2(eval_const_expr(arg, constants)?),
-        "$onehot" | "$onehot0" => {
+        "$countones" | "$onehot" | "$onehot0" => {
             let value = const_expr_known_one_bits(arg, constants)?;
             let ones = value.iter_u64_digits().map(u64::count_ones).sum::<u32>();
             Some(match name {
+                "$countones" => ones as i32 as i128,
                 "$onehot" => (ones == 1) as i128,
                 "$onehot0" => (ones <= 1) as i128,
                 _ => unreachable!(),

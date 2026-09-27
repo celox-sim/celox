@@ -1632,7 +1632,7 @@ fn compile_binary_narrow(
             locals,
             instrs,
         );
-        normalize_reg_with_mask(&d, d_width, instrs);
+        finish_binary_four_state(&d, op, &r, d_width, instrs);
     }
 }
 
@@ -2314,7 +2314,7 @@ fn compile_binary_wide(
             locals,
             instrs,
         );
-        normalize_reg_with_mask(&d, d_width, instrs);
+        finish_binary_four_state(&d, op, &r, d_width, instrs);
     }
 }
 
@@ -2550,6 +2550,16 @@ fn compile_binary_mask_narrow(
             instrs.push(Instruction::LocalGet(lhs_mask));
             instrs.push(Instruction::LocalGet(rhs_mask));
             instrs.push(Instruction::I64Or);
+            if matches!(
+                op,
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+            ) {
+                // IEEE 1800-2023 11.4.3: a zero divisor also produces all X.
+                instrs.push(Instruction::LocalGet(rhs.value_idx));
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::I64ExtendI32U);
+                instrs.push(Instruction::I64Or);
+            }
             instrs.push(Instruction::LocalSet(any_x));
             instrs.push(Instruction::LocalGet(any_x));
             instrs.push(Instruction::I64Eqz);
@@ -2914,6 +2924,21 @@ fn compile_binary_mask_wide(
                 instrs.push(Instruction::I64Or);
                 instrs.push(Instruction::LocalSet(any_x));
             }
+            if matches!(
+                op,
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+            ) {
+                instrs.push(Instruction::I64Const(0));
+                for c in 0..rhs.num_chunks {
+                    emit_wide_get_chunk(instrs, rhs, c);
+                    instrs.push(Instruction::I64Or);
+                }
+                instrs.push(Instruction::I64Eqz);
+                instrs.push(Instruction::I64ExtendI32U);
+                instrs.push(Instruction::LocalGet(any_x));
+                instrs.push(Instruction::I64Or);
+                instrs.push(Instruction::LocalSet(any_x));
+            }
             for c in 0..dst.num_chunks {
                 let chunk_mask = chunk_mask_for_width(c, dst.num_chunks, d_width);
                 instrs.push(Instruction::LocalGet(any_x));
@@ -2927,6 +2952,37 @@ fn compile_binary_mask_wide(
                 instrs.push(Instruction::End);
             }
         }
+    }
+}
+
+// Shifts transport X/Z bits unchanged; only an unknown count makes all bits X.
+fn finish_binary_four_state(
+    dst: &RegLocal,
+    op: &BinaryOp,
+    rhs: &RegLocal,
+    width: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    if !matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+        normalize_reg_with_mask(dst, width, instrs);
+        return;
+    }
+    if let Some(mask) = rhs.mask_idx {
+        instrs.push(Instruction::I64Const(0));
+        for c in 0..rhs.num_chunks {
+            instrs.push(Instruction::LocalGet(mask + c as u32));
+            instrs.push(Instruction::I64Or);
+        }
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::I64Ne);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+        for c in 0..dst.num_chunks {
+            instrs.push(Instruction::I64Const(
+                chunk_mask_for_width(c, dst.num_chunks, width) as i64,
+            ));
+            instrs.push(Instruction::LocalSet(dst.value_idx + c as u32));
+        }
+        instrs.push(Instruction::End);
     }
 }
 

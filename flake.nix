@@ -62,6 +62,7 @@
             (pkgs.lib.hiPrio pkgs.corepack)
             python
             pkgs.verilator
+            pkgs.iverilog
             stdenv.cc
             pkgs.mold
             pkgs.gnumake

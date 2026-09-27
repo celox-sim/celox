@@ -1,0 +1,77 @@
+{
+  "schema_version": 2,
+  "suite_version": "0.7.1",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "include_ignored": false,
+  "note": "Observed subset from the full run before adding dynamic-output exclusions. These seven negative fixtures were accepted; assertions and observations are unchanged.",
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 7,
+    "unsupported": 0
+  },
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_minus_colon_output_port_rmw",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_minus_colon_output_port_rmw",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_dynamic_step_output_port_rmw",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_dynamic_step_output_port_rmw",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_instance_output_concat_advances_each_destination",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_instance_output_concat_advances_each_destination",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: hierarchy::test_instance_output_dynamic_index_function_output_writeback",
+      "expectation": "CompilationError",
+      "name": "hierarchy::test_instance_output_dynamic_index_function_output_writeback",
+      "phase": "execute",
+      "status": "unexpected_accept"
+    }
+  ]
+}

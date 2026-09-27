@@ -51,7 +51,6 @@ struct SvVariable {
     width: usize,
     signed: bool,
     is_4state: bool,
-    is_net: bool,
     packed_ranges: Vec<(i128, i128)>,
     array_dims: Vec<usize>,
     domain_kind: DomainKind,
@@ -849,7 +848,6 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
-            is_net: port.is_net(),
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
             domain_kind: DomainKind::Other,
@@ -893,7 +891,6 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
-            is_net: signal.is_net(),
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
             domain_kind: DomainKind::Other,
@@ -1438,7 +1435,6 @@ fn ensure_parent_output_signals(
             width: 1,
             signed: false,
             is_4state: true,
-            is_net: true,
             packed_ranges: Vec::new(),
             array_dims: Vec::new(),
             domain_kind: DomainKind::Other,
@@ -1589,21 +1585,6 @@ fn build_instance_glue(
                 let Some(actual_expr) = connection.actual_expr.as_ref() else {
                     continue;
                 };
-                if let Some(dynamic_output) = lower_dynamic_output_glue(
-                    actual_expr,
-                    parent_variables,
-                    parent_signal_names,
-                    parent_constants,
-                    parent_parameter_types,
-                    *child_port_id,
-                    child_var,
-                    &mut arena,
-                    &formal,
-                    actual,
-                )? {
-                    output_ports.push(dynamic_output);
-                    continue;
-                }
                 let Some(accesses) = output_lvalue_accesses(
                     actual_expr,
                     parent_variables,
@@ -1701,152 +1682,6 @@ fn build_instance_glue(
     }
 
     Ok((input_ports, output_ports, arena))
-}
-
-fn lower_dynamic_output_glue(
-    actual_expr: &sv::ir::Expr,
-    parent_variables: &HashMap<SourceVarId, SvVariable>,
-    parent_signal_names: &HashMap<String, SourceVarId>,
-    parent_constants: &HashMap<String, i128>,
-    parent_parameter_types: &HashMap<String, (usize, bool)>,
-    child_port_id: SourceVarId,
-    child_var: &SvVariable,
-    arena: &mut SLTNodeArena<GlueAddr>,
-    formal: &str,
-    actual: &str,
-) -> Result<Option<(Vec<SourceVarId>, LogicPath<GlueAddr>)>, ParserError> {
-    let sv::ir::Expr::Select { expr, msb, lsb, .. } = actual_expr else {
-        return Ok(None);
-    };
-    let Some((parent_signal_id, element_width, access)) = dynamic_array_element_subselection(
-        expr,
-        msb,
-        lsb,
-        parent_variables,
-        parent_signal_names,
-        parent_constants,
-        parent_parameter_types,
-    ) else {
-        return Ok(None);
-    };
-    let parent_var = &parent_variables[&parent_signal_id];
-    if parent_var.is_net {
-        return Err(ParserError::unsupported(
-            64,
-            LoweringPhase::SimulatorParser,
-            "dynamic child output connection to a net",
-            format!("{formal} -> {actual}: {actual_expr:?}"),
-            None,
-        ));
-    }
-    let (offset, index_sources, index_source_ids) = lower_dynamic_array_element_index_glue(
-        lsb,
-        parent_variables,
-        parent_signal_names,
-        parent_constants,
-        parent_parameter_types,
-        arena,
-        element_width,
-    )
-    .ok_or_else(|| {
-        ParserError::unsupported(
-            64,
-            LoweringPhase::SimulatorParser,
-            "systemverilog output port lvalue connection",
-            format!("{formal} -> {actual}: {actual_expr:?}"),
-            None,
-        )
-    })?;
-    let element_count = parent_var.width / element_width;
-    let child_node = arena.alloc(SLTNode::Input {
-        variable: GlueAddr::Child(child_port_id),
-        signed: child_var.signed,
-        index: Vec::new(),
-        access: BitAccess::new(0, child_var.width - 1),
-    })?;
-    let target_width = access.msb - access.lsb + 1;
-    let child_expr = coerce_node_width(arena, child_node, Some(target_width), child_var.signed)?;
-    let old = arena.alloc(SLTNode::Input {
-        variable: GlueAddr::Parent(parent_signal_id),
-        signed: parent_var.signed,
-        index: Vec::new(),
-        access: BitAccess::new(0, parent_var.width - 1),
-    })?;
-    let mut parts = Vec::with_capacity(element_count);
-    for element in (0..element_count).rev() {
-        let lsb = element * element_width;
-        let old_element = arena.alloc(SLTNode::Slice {
-            expr: old,
-            access: BitAccess::new(lsb, lsb + element_width - 1),
-        })?;
-        let element_literal = arena.alloc(SLTNode::Constant(
-            BigUint::from(element),
-            BigUint::default(),
-            64,
-            false,
-        ))?;
-        let condition = arena.alloc(SLTNode::Binary(offset, BinaryOp::EqCase, element_literal))?;
-        let Some(updated_element) = replace_slt_slice(
-            arena,
-            old_element,
-            child_expr,
-            access.lsb,
-            target_width,
-            element_width,
-        ) else {
-            return Ok(None);
-        };
-        let updated = arena.alloc(SLTNode::Mux {
-            cond: condition,
-            then_expr: updated_element,
-            else_expr: old_element,
-        })?;
-        parts.push((updated, element_width));
-    }
-    let mut expr = if parts.len() == 1 {
-        parts[0].0
-    } else {
-        arena.alloc(SLTNode::Concat(parts))?
-    };
-    if !parent_var.is_4state {
-        expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
-    }
-    let mut sources = index_sources.clone();
-    sources.insert(VarAtomBase::new(
-        GlueAddr::Child(child_port_id),
-        0,
-        child_var.width - 1,
-    ));
-    let previous_sources = [VarAtomBase::new(
-        GlueAddr::Parent(parent_signal_id),
-        0,
-        parent_var.width - 1,
-    )]
-    .into_iter()
-    .collect();
-    let mut source_ids = index_source_ids;
-    source_ids.push(parent_signal_id);
-    source_ids.sort();
-    source_ids.dedup();
-    Ok(Some((
-        source_ids,
-        LogicPath {
-            target: LogicPathTarget::Var(VarAtomBase::new(
-                GlueAddr::Parent(parent_signal_id),
-                0,
-                parent_var.width - 1,
-            )),
-            expr,
-            sources,
-            address_sources: index_sources,
-            previous_sources,
-            local_inputs: Vec::new(),
-            order_before: HashSet::default(),
-            comb_capture_enable_sites: Vec::new(),
-            comb_capture_enable_always: false,
-            pre_lower_nodes: Vec::new(),
-        },
-    )))
 }
 
 fn simple_output_lvalue_ident(expr: &sv::ir::Expr) -> Option<&str> {
@@ -2492,6 +2327,26 @@ fn lower_glue_parent_expr(
                         else_expr,
                     })
                     .ok()?,
+                sources,
+                source_ids,
+            ))
+        }
+        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => {
+            let arg = &args[0];
+            let width =
+                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+            let (inner, sources, source_ids) = lower_glue_parent_expr(
+                arg,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                Some(width),
+                None,
+            )?;
+            Some((
+                lower_countones_slt(arena, inner, context_width, context_signed)?,
                 sources,
                 source_ids,
             ))
@@ -3377,6 +3232,22 @@ fn lower_lvalue_target(
         .then(|| LogicPathTarget::Var(VarAtomBase::new(target_id, lsb, msb)))
 }
 
+// IEEE 1800-2023 20.9: X/Z do not contribute and the result is a signed int.
+// PopCount operates on known bits and has a minimal unsigned result width.
+fn lower_countones_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    inner: NodeId,
+    context_width: Option<usize>,
+    context_signed: Option<bool>,
+) -> Option<NodeId> {
+    let known = arena
+        .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
+        .ok()?;
+    let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
+    let result = coerce_node_width(arena, count, Some(32), false).ok()?;
+    coerce_node_width(arena, result, context_width, context_signed.unwrap_or(true)).ok()
+}
+
 fn lower_expr(
     expr: &sv::ir::Expr,
     variables: &HashMap<SourceVarId, SvVariable>,
@@ -3904,6 +3775,25 @@ fn lower_expr_with_context(
                         else_expr,
                     })
                     .ok()?,
+                sources,
+            ))
+        }
+        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => {
+            let arg = &args[0];
+            let width =
+                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+            let (inner, sources) = lower_expr_with_context(
+                arg,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                Some(width),
+                None,
+            )?;
+            Some((
+                lower_countones_slt(arena, inner, context_width, context_signed)?,
                 sources,
             ))
         }
@@ -5462,9 +5352,8 @@ fn sv_glue_expr_is_signed(
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
-        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } | sv::ir::Expr::Call { .. } => {
-            false
-        }
+        sv::ir::Expr::Call { name, args } => name == "$countones" && args.len() == 1,
+        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
@@ -5518,9 +5407,8 @@ fn sv_expr_is_signed_with_parameters(
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
-        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } | sv::ir::Expr::Call { .. } => {
-            false
-        }
+        sv::ir::Expr::Call { name, args } => name == "$countones" && args.len() == 1,
+        sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
                 op,
@@ -5817,6 +5705,7 @@ fn sv_expr_natural_width(
                     parameter_types,
                 )?),
         ),
+        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(32),
         sv::ir::Expr::Call { .. } => None,
     }
 }
@@ -6327,6 +6216,32 @@ fn lower_expr_to_sir_with_context(
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Mux(reg, condition, then_expr, else_expr));
             Some(reg)
+        }
+        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => {
+            let arg = &args[0];
+            let width =
+                sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
+            let inner = lower_expr_to_sir_with_context(
+                builder,
+                arg,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                Some(width),
+                None,
+            )?;
+            let known = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, inner));
+            let count = builder.alloc_bit(UnaryOp::PopCount.result_width(width), false);
+            builder.emit(SIRInstruction::Unary(count, UnaryOp::PopCount, known));
+            let result = resize_sir_register(builder, count, 32, false)?;
+            resize_sir_register(
+                builder,
+                result,
+                context_width.unwrap_or(32),
+                context_signed.unwrap_or(true),
+            )
         }
         sv::ir::Expr::Call { .. } => None,
     }

@@ -1096,6 +1096,7 @@ fn size_function_expression_type(
         selected_expression_first_dimension_width(argument, syntax_tree, &packed_dimensions)
             .or_else(|| match &expression {
                 Expr::Ident(name) => variable_size_function_width(const_env, name, true),
+                Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(32),
                 Expr::Call { name, .. } => packed_dimensions
                     .function_return_types
                     .get(name)
@@ -4626,7 +4627,7 @@ fn infer_const_expr_type(
             signed: false,
         }),
         ConstExpr::Function { name, .. } => match name.as_str() {
-            "$clog2" => Some(ExprType {
+            "$clog2" | "$countones" => Some(ExprType {
                 width: 32,
                 signed: true,
             }),
@@ -7665,6 +7666,7 @@ fn expr_signedness_with_return_types(
                 function_return_types,
             )?,
         ),
+        Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(true),
         Expr::Call { name, .. } => functions
             .get(name)
             .map(|function| function.return_signed)
@@ -9383,6 +9385,7 @@ fn expr_static_width(expr: &Expr, packed_dimensions: &PackedDimensions) -> Optio
             expr_static_width(then_expr, packed_dimensions)?
                 .max(expr_static_width(else_expr, packed_dimensions)?),
         ),
+        Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(32),
         Expr::Call { name, .. } => packed_dimensions
             .function_return_types
             .get(name)
@@ -11084,6 +11087,7 @@ fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimensions) -> bool 
                     || (expr_is_two_state(condition, packed_dimensions)
                         && expr_is_two_state(else_expr, packed_dimensions)))
         }
+        Expr::Call { name, args } if name == "$countones" && args.len() == 1 => true,
         Expr::Call { name, .. } => packed_dimensions
             .function_return_types
             .get(name)
@@ -12992,6 +12996,22 @@ fn expr_from_function_subroutine_call(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
+    if let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 {
+        let sv_parser::SystemTfCall::ArgExpression(call) = &**call else {
+            return None;
+        };
+        let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
+        let args = call.nodes.1.nodes.1.0.contents();
+        if name != "$countones" || args.len() != 1 || call.nodes.1.nodes.1.1.is_some() {
+            return None;
+        }
+        let arg =
+            expr_from_expression_with_types(args[0].as_ref()?, syntax_tree, packed_dimensions)?;
+        return Some(Expr::Call {
+            name: name.to_string(),
+            args: vec![arg],
+        });
+    }
     let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0 else {
         return None;
     };
@@ -14594,16 +14614,27 @@ fn const_expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
     syntax_tree: &SyntaxTree,
 ) -> Option<ConstExpr> {
-    let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 else {
+    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
         return None;
     };
-    let (identifier, arguments) = match &**call {
+    let (identifier, arguments) = match &**system_call {
         sv_parser::SystemTfCall::ArgExpression(call) => {
             (&call.nodes.0, call.nodes.1.nodes.1.0.contents())
         }
         _ => return None,
     };
     let name = syntax_tree.get_str(&identifier.nodes.0)?.to_string();
+    if name == "$countones" {
+        // Use expression lowering so selections are never silently discarded
+        // by the limited constant-primary identifier path below. Unsupported
+        // constant argument forms must remain unresolved rather than counting
+        // the entire identifier in place of its selection.
+        return expr_to_const(expr_from_function_subroutine_call(
+            call,
+            syntax_tree,
+            &PackedDimensions::default(),
+        )?);
+    }
     let args = arguments
         .into_iter()
         .filter_map(|argument| argument.as_ref())

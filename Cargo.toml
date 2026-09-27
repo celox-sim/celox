@@ -19,6 +19,7 @@ members = [
     "crates/celox-state-layout",
     "crates/celox-sv-analyzer",
     "crates/celox-runtime",
+    "crates/celox-test-suite-veryl",
     "crates/celox-testbench",
     "crates/celox-bench-sv",
     "crates/celox-macros",
@@ -65,6 +66,7 @@ celox-sir-opt           = { version = "=0.7.1", path = "crates/celox-sir-opt", d
 celox-slt               = { version = "=0.7.1", path = "crates/celox-slt" } # x-release-please-version
 celox-state-layout      = { version = "=0.7.1", path = "crates/celox-state-layout" } # x-release-please-version
 celox-sv-analyzer       = { version = "=0.7.1", path = "crates/celox-sv-analyzer" } # x-release-please-version
+celox-test-suite-veryl   = { version = "=0.7.1", path = "crates/celox-test-suite-veryl" } # x-release-please-version
 celox-testbench         = { version = "=0.7.1", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.7.1", path = "crates/celox-ts-gen" } # x-release-please-version
 
@@ -83,9 +85,9 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
-napi            = "=3.12.7"
-napi-build      = "=2.4.4"
-napi-derive     = "=3.6.8"
+napi            = "=3.13.0"
+napi-build      = "=2.5.0"
+napi-derive     = "=3.6.9"
 num-bigint      = { version = "0.5", features = ["serde"] }
 num-traits      = "0.2.19"
 rand            = { version = "0.10", default-features = false }

@@ -1218,7 +1218,7 @@ fn connects_runtime_selected_unpacked_array_elements_to_child_inputs() {
 }
 
 #[test]
-fn connects_runtime_selected_unpacked_array_elements_to_child_outputs() {
+fn rejects_runtime_selected_unpacked_array_elements_to_child_outputs() {
     let source = r#"
         module Child(output logic [7:0] output_value);
             assign output_value = 8'h5a;
@@ -1232,20 +1232,15 @@ fn connects_runtime_selected_unpacked_array_elements_to_child_outputs() {
             assign value = values[sel];
         endmodule
         "#;
-    let mut sim = Simulator::from_sv_sources(
-        vec![(source, Path::new("array_output_dynamic_connection.sv"))],
-        "Top",
-    )
-    .build_cranelift()
-    .unwrap();
-    let sel = sim.signal("sel");
-    let value = sim.signal("value");
-    sim.modify(|io| io.set(sel, 2u8)).unwrap();
-    assert_eq!(sim.get(value), 0x5au8.into());
+    let error = cranelift_build_error(source);
+    assert!(
+        error.contains("systemverilog output port lvalue connection"),
+        "{error}"
+    );
 }
 
 #[test]
-fn connects_runtime_selected_packed_subselects_to_child_outputs() {
+fn rejects_runtime_selected_packed_subselects_to_child_outputs() {
     let source = r#"
         module Child(
             input logic [3:0] input_value,
@@ -1263,24 +1258,11 @@ fn connects_runtime_selected_packed_subselects_to_child_outputs() {
             assign value = values[sel][3:0];
         endmodule
         "#;
-    let mut sim = Simulator::from_sv_sources(
-        vec![(
-            source,
-            Path::new("array_output_dynamic_packed_subselect.sv"),
-        )],
-        "Top",
-    )
-    .build_cranelift()
-    .unwrap();
-    let sel = sim.signal("sel");
-    let input_value = sim.signal("input_value");
-    let value = sim.signal("value");
-    sim.modify(|io| {
-        io.set(sel, 2u8);
-        io.set(input_value, 0xau8);
-    })
-    .unwrap();
-    assert_eq!(sim.get(value), 0xau8.into());
+    let error = cranelift_build_error(source);
+    assert!(
+        error.contains("systemverilog output port lvalue connection"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1299,7 +1281,7 @@ fn rejects_runtime_selected_child_outputs_to_nets() {
     );
     assert!(
         error.contains("undriven net declaration `values`")
-            || error.contains("dynamic child output connection to a net"),
+            || error.contains("systemverilog output port lvalue connection"),
         "unexpected error: {error}"
     );
 }

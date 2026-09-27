@@ -56,6 +56,12 @@ impl From<celox_frontend_core::LoweringPhase> for LoweringPhase {
 /// source identities are discarded by lowering.
 #[derive(Error, Debug)]
 pub enum FrontendDiagnostic {
+    #[error("Function output copy-out order is unspecified: {detail}")]
+    UnspecifiedOutputCopyOrder {
+        detail: String,
+        source_location: SourceLocation,
+    },
+
     #[error("Loop continuation bound is not stable: {detail}")]
     MutableForBound {
         detail: String,
@@ -76,6 +82,13 @@ pub enum FrontendDiagnostic {
 }
 
 impl FrontendDiagnostic {
+    pub fn unspecified_output_copy_order(token: &TokenRange, detail: impl Into<String>) -> Self {
+        Self::UnspecifiedOutputCopyOrder {
+            detail: detail.into(),
+            source_location: SourceLocation::from_token(token),
+        }
+    }
+
     pub fn mutable_for_bound(token: &TokenRange, detail: impl Into<String>) -> Self {
         Self::MutableForBound {
             detail: detail.into(),
@@ -111,6 +124,9 @@ impl FrontendDiagnostic {
             }
             | Self::UnknownForBoundEffect {
                 source_location, ..
+            }
+            | Self::UnspecifiedOutputCopyOrder {
+                source_location, ..
             } => source_location,
         }
     }
@@ -119,6 +135,7 @@ impl FrontendDiagnostic {
 impl miette::Diagnostic for FrontendDiagnostic {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self {
+            Self::UnspecifiedOutputCopyOrder { .. } => "unspecified_output_copy_order",
             Self::MutableForBound { .. } => "mutable_for_bound",
             Self::TimeAdvancingForBound { .. } => "time_advancing_for_bound",
             Self::UnknownForBoundEffect { .. } => "unknown_for_bound_effect",
@@ -135,6 +152,9 @@ impl miette::Diagnostic for FrontendDiagnostic {
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self {
+            Self::UnspecifiedOutputCopyOrder { .. } => {
+                "use distinct output destinations, then assign them to shared storage in the intended order after the call"
+            }
             Self::MutableForBound { .. } => {
                 "copy the bound to a value that is not modified by the loop body"
             }
@@ -153,11 +173,12 @@ impl miette::Diagnostic for FrontendDiagnostic {
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
         let location = self.source_location();
+        let label = match self {
+            Self::UnspecifiedOutputCopyOrder { .. } => "overlapping output arguments in this call",
+            _ => "loop with an unstable continuation bound",
+        };
         Some(Box::new(std::iter::once(
-            miette::LabeledSpan::new_with_span(
-                Some("loop with an unstable continuation bound".to_string()),
-                location.span,
-            ),
+            miette::LabeledSpan::new_with_span(Some(label.to_string()), location.span),
         )))
     }
 }

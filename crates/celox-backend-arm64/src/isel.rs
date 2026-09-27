@@ -7138,7 +7138,9 @@ fn lower_instruction(
                 lower_wide_binary(ctx, block, *dst, *lhs, op, *rhs);
                 if ctx.four_state {
                     lower_wide_binary_mask(ctx, block, *dst, *lhs, op, *rhs, d_width);
-                    normalize_wide_value(ctx, block, *dst);
+                    if !matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+                        normalize_wide_value(ctx, block, *dst);
+                    }
                 }
                 ctx.canonicalize_narrow_wide_result(block, *dst);
                 return;
@@ -7855,14 +7857,24 @@ fn lower_instruction(
                     lower_binary_mask(ctx, block, op, lhs_vreg, rhs_vreg, l_m, r_m, d_width);
                 ctx.set_mask(*dst, res_m);
 
-                // Normalize: X positions must have v=1 (X encoding = v:1, m:1)
+                // IEEE 1800-2023 11.4.10: known shifts preserve Z. Only an
+                // unknown count forces their payload to all X, like the mask.
                 let old_v = ctx.reg_map.get(*dst);
                 let normalized = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Or {
-                    dst: normalized,
-                    lhs: old_v,
-                    rhs: res_m,
-                });
+                if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+                    block.push(MInst::Select {
+                        dst: normalized,
+                        cond: r_m,
+                        true_val: res_m,
+                        false_val: old_v,
+                    });
+                } else {
+                    block.push(MInst::Or {
+                        dst: normalized,
+                        lhs: old_v,
+                        rhs: res_m,
+                    });
+                }
                 ctx.reg_map.set(*dst, normalized);
             }
         }
@@ -11615,7 +11627,7 @@ fn equality_result_mask(
 ///   res_m = (lm & rm) | (lm & ~rv) | (rm & ~lv)
 /// - XOR: res_m = lm | rm
 /// - Shift: if shift amount has X → all-X; else shift mask normally
-/// - Arithmetic (Add/Sub/Mul/Div/Rem): conservative — any X → all-X
+/// - Arithmetic (Add/Sub/Mul/Div/Rem): any X → all-X; Div/Rem by zero → all-X
 /// - Equality: known mismatch → definite result; otherwise any X → result X
 /// - Ordered comparison: any X → result X (1-bit mask)
 /// - LogicAnd: dominant-false (v|m==0) → mask=0; else if any X → mask=all-X
@@ -11972,9 +11984,31 @@ fn lower_binary_mask(
             // this arm should never be reached.
             unreachable!("wildcard mask is computed inline, not via lower_binary_mask")
         }
+        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS => {
+            // IEEE 1800-2023 11.4.3: a zero divisor also produces all X.
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            let zero_divisor = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp {
+                dst: zero_divisor,
+                lhs: rv,
+                rhs: zero,
+                kind: CmpKind::Eq,
+            });
+            let invalid_rhs = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or {
+                dst: invalid_rhs,
+                lhs: rm,
+                rhs: zero_divisor,
+            });
+            conservative_mask(ctx, block, lm, invalid_rhs, d_width)
+        }
         _ => {
             // Conservative: any X in either operand → all-X result
-            // Covers: Add, Sub, Mul, Div, Rem, ordered comparisons (Lt/Le/Gt/Ge)
+            // Covers: Add, Sub, Mul, ordered comparisons (Lt/Le/Gt/Ge)
             conservative_mask(ctx, block, lm, rm, d_width)
         }
     }
@@ -12550,19 +12584,7 @@ fn lower_wide_binary_mask(
         }
         BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
             // If shift amount has X → all-X. Otherwise, shift mask same way as value.
-            // Check shift amount mask (rhs is scalar, so rm_chunks[0] is the mask)
-            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-            block.push(MInst::LoadImm {
-                dst: zero,
-                value: 0,
-            });
-            let shift_has_x = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Cmp {
-                dst: shift_has_x,
-                lhs: rm_chunks[0],
-                rhs: zero,
-                kind: CmpKind::Ne,
-            });
+            let shift_has_x = any_chunk_has_x(ctx, block, &rm_chunks);
 
             let n_dst = ISelContext::num_chunks(d_width);
             // Get the result value chunks (already computed by lower_wide_binary)
@@ -12848,6 +12870,27 @@ fn lower_wide_binary_mask(
                 ctx.set_mask(dst, final_m_chunks[0].0);
                 ctx.wide_masks.insert(dst, final_m_chunks);
             }
+
+            // Keep the shifted X/Z payload for a known count. An unknown
+            // count instead produces all X in both planes, including when a
+            // wide operation has a narrow destination.
+            let values = ctx.get_wide_chunks(&dst, block);
+            let masks = ctx.wide_masks[&dst].clone();
+            let values = values
+                .into_iter()
+                .zip(masks)
+                .map(|((value, width), (mask, _))| {
+                    let selected = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Select {
+                        dst: selected,
+                        cond: shift_has_x,
+                        true_val: mask,
+                        false_val: value,
+                    });
+                    (selected, width)
+                })
+                .collect();
+            ctx.set_wide_chunks(dst, values);
         }
         BinaryOp::LogicAnd | BinaryOp::LogicOr => {
             let (lhs_is_true, lhs_is_unknown) = lower_mux_condition_state(ctx, block, lhs);
@@ -12928,7 +12971,36 @@ fn lower_wide_binary_mask(
         }
         _ => {
             // Conservative: any X in any chunk of either operand → all-X result
-            let all_masks: Vec<VReg> = lm_chunks.iter().chain(rm_chunks.iter()).copied().collect();
+            let mut all_masks: Vec<VReg> =
+                lm_chunks.iter().chain(rm_chunks.iter()).copied().collect();
+            if matches!(
+                op,
+                BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+            ) {
+                let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm {
+                    dst: zero,
+                    value: 0,
+                });
+                let mut divisor = zero;
+                for (chunk, _) in ctx.get_wide_chunks(&rhs, block) {
+                    let combined = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: combined,
+                        lhs: divisor,
+                        rhs: chunk,
+                    });
+                    divisor = combined;
+                }
+                let zero_divisor = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Cmp {
+                    dst: zero_divisor,
+                    lhs: divisor,
+                    rhs: zero,
+                    kind: CmpKind::Eq,
+                });
+                all_masks.push(zero_divisor);
+            }
             let has_x = any_chunk_has_x(ctx, block, &all_masks);
 
             let n_dst = ISelContext::num_chunks(d_width);
@@ -13244,6 +13316,7 @@ fn lower_wide_unary_mask(
 }
 #[cfg(test)]
 mod tests {
+    mod shifts;
     mod strided;
 
     use super::*;

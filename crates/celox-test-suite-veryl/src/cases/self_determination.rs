@@ -1,0 +1,202 @@
+use crate::Design;
+
+cases! { Types, "self_determination";
+
+
+    fn test_concatenation_self_determination(sim) {
+        @setup { // IEEE 1800-2023 Clause 11.6.1: Both operands of a concatenation are self-determined.
+// In Veryl, {exp} is a concatenation item.
+let code = r#"
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+o: output logic<16>
+) {
+// Addition inside {} should be self-determined (8-bit).
+// 8'hff + 8'h1 = 8'h00 (overflow truncated)
+// {8'h00} is then zero-extended to 16-bit -> 16'h0000
+assign o = {a + b};
+}
+"#; }
+        @build Design::new(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let o = sim.signal("o");
+
+    sim.modify(|io| {
+        io.set(a, 0xFFu8);
+        io.set(b, 0x01u8);
+    })
+    .unwrap();
+
+    assert_eq!(
+        sim.get(o),
+        0u16.into(),
+        "Concatenation failed to isolate addition width (self-determination)"
+    );
+
+    }
+
+
+
+    fn test_comparison_self_determination(sim) {
+        @setup { // Comparison results are self-determined.
+// logic<16> y = (a <: b) + c;
+// (a <: b) should be 1-bit, regardless of 16-bit context.
+let code = r#"
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+c: input  logic<16>,
+o: output logic<16>
+) {
+assign o = (a <: b) + c;
+}
+"#; }
+        @build Design::new(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let o = sim.signal("o");
+
+    sim.modify(|io| {
+        io.set(a, 10u8);
+        io.set(b, 20u8);
+        io.set(c, 1u16);
+    })
+    .unwrap();
+
+    // true(1) + 1 = 2
+    assert_eq!(sim.get(o), 2u16.into());
+
+    }
+
+
+
+    fn test_shift_rhs_self_determination(sim) {
+        @setup { // Shift amount (RHS) is self-determined.
+let code = r#"
+module Top (
+a: input  logic<16>,
+b: input  logic<8>,
+c: input  logic<8>,
+o: output logic<16>
+) {
+// b + c should be evaluated at 8-bit.
+// 8'hff + 8'h1 = 8'h00.
+// 16'h1 << 0 = 16'h1.
+assign o = a << (b + c);
+}
+"#; }
+        @build Design::new(code, "Top");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    let o = sim.signal("o");
+
+    sim.modify(|io| {
+        io.set(a, 1u16);
+        io.set(b, 0xFFu8);
+        io.set(c, 0x01u8);
+    })
+    .unwrap();
+
+    assert_eq!(
+        sim.get(o),
+        1u16.into(),
+        "Shift RHS failed to isolate addition width (self-determination)"
+    );
+
+    }
+
+
+
+    fn test_shift_rhs_constant_self_determination(sim) {
+        @setup { // Constant shift RHS should be self-determined.
+let code = r#"
+module Top (
+o: output logic<16>
+) {
+// 8'hff + 8'h1 = 8'h00.
+// 16'h1 << 0 = 16'h1.
+assign o = 16'h1 << (8'hff + 8'h1);
+}
+"#; }
+        @build Design::new(code, "Top");
+    let o = sim.signal("o");
+
+    assert_eq!(
+        sim.get(o),
+        1u16.into(),
+        "Constant shift RHS failed self-determination boundary"
+    );
+
+    }
+
+
+
+    // Constant folding should also respect self-determination.
+    fn test_concatenation_constant_self_determination(sim) {
+        @setup {
+            let code = r#"
+        module Top (
+            o: output logic<16>,
+            o2: output logic<16>,
+            o3: output logic<16>,
+        ) {
+            // 8'hff + 8'h1 = 8'h00 (self-determined)
+            assign o = {8'hff + 8'h1};
+            assign o2 = 8'hff + 8'h1;
+            assign o3 = {8'hf0, 8'hff + 8'h1};
+        }
+    "#;
+        }
+        @build Design::new(code, "Top");
+
+        let o = sim.signal("o");
+        let o2 = sim.signal("o2");
+        let o3 = sim.signal("o3");
+        assert_eq!(
+            sim.get(o),
+            0u16.into(),
+            "Concatenation should be self-determined"
+        );
+        assert_eq!(
+            sim.get(o2),
+            256u16.into(),
+            "Normal addition should not be self-determined"
+        );
+        assert_eq!(
+            sim.get(o3),
+            0xf000u16.into(),
+            "Concatenation should be self-determined"
+        );
+    }
+
+
+
+    // Constant folding should also respect self-determination.
+    fn test_concatenation_constant_self_determination_runtime(sim) {
+        @setup {
+            let code = r#"
+        module Top (
+            i: input logic<8>,
+            o: output logic<16>
+        ) {
+            // 8'hff + 8'h1 = 8'h00 (self-determined)
+            assign o = {8'hff + i};
+        }
+    "#;
+        }
+        @build Design::new(code, "Top");
+
+        let i = sim.signal("i");
+        let o = sim.signal("o");
+        sim.modify(|io| io.set(i, 0x1u8)).unwrap();
+        assert_eq!(
+            sim.get(o),
+            0u16.into(),
+            "Constant concatenation failed to isolate addition width"
+        );
+    }
+}

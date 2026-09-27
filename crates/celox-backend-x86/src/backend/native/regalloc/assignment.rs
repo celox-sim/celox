@@ -105,6 +105,15 @@ pub type RegConstraint = CommonRegConstraint<PhysReg>;
 /// Physical location of a phi source at one predecessor edge.
 pub type EdgeLocation = ValueLocation<PhysReg>;
 
+/// Instructions that will start a new block when late SSA Perms are inserted.
+/// Explicit vector values are block-local and must not live across these points.
+pub(crate) fn is_constraint_boundary(inst: &MInst, shift_encoding: VariableShiftEncoding) -> bool {
+    !clobbers(inst).is_empty()
+        || use_constraints(inst, shift_encoding)
+            .into_iter()
+            .any(|constraint| matches!(constraint, RegConstraint::Fixed(_)))
+}
+
 pub(super) fn use_constraints(
     inst: &MInst,
     shift_encoding: VariableShiftEncoding,
