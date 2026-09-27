@@ -1,6 +1,6 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 648 Veryl language tests for compiler and simulator
+A reusable corpus of 649 Veryl language tests for compiler and simulator
 implementations. Sources, input sequences, and assertions live together in this
 crate. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.
@@ -76,6 +76,14 @@ These are the stimulus conventions inherited from the original test suite.
 Simulator agreement alone does not establish language conformance. A compiler
 that deliberately uses different initialization or scheduling must account for
 that in its runner, with explicit exclusions and reasons.
+
+The `operators::test_ff_comb_constant_folding_consistency` case checks the
+combinational constant expression before the clock and both outputs after it.
+The separate `operators::test_ff_constant_two_state_initialization` case checks
+that a constant-driven FF starts at zero in two-state mode and captures its
+constant on the first clock. Runners with a different initialization policy can
+explicitly exclude the latter with a reason while retaining the folding checks;
+this separation does not relax the shared zero-initialization contract.
 
 The two aliased function-output cases accept either copy-out order: IEEE
 1800-2023 specifies blocking copy-out but does not order different output
