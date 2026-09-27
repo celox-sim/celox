@@ -285,15 +285,11 @@ async function loadRepositoryFile(repository, path, ref) {
   );
 }
 
-export function collectMergeQueuePullRequests(entries, targetPosition, baseRef) {
-  const baseBranch = baseRef.replace(/^refs\/heads\//, "");
+export function collectMergeQueuePullRequests(entries, targetPosition) {
   const pullRequests = new Map();
   for (const entry of entries) {
     const pullRequest = entry.pullRequest;
-    if (
-      entry.position <= targetPosition &&
-      pullRequest?.baseRefName === baseBranch
-    ) {
+    if (entry.position <= targetPosition && pullRequest) {
       pullRequests.set(pullRequest.number, {
         number: pullRequest.number,
         title: pullRequest.title,
@@ -311,26 +307,30 @@ export function mergeGroupHeadPullRequestNumber(headRef) {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-async function loadMergeGroupPullRequests(repository, headRef, baseRef) {
+export async function loadMergeGroupPullRequests(
+  repository,
+  headRef,
+  baseRef,
+  queryGithub = githubGraphql,
+) {
   const [owner, name, ...extra] = repository.split("/");
   const targetNumber = mergeGroupHeadPullRequestNumber(headRef);
   if (!owner || !name || extra.length > 0 || targetNumber === null) {
     throw new Error(`Invalid merge group repository or head ref: ${headRef}`);
   }
 
+  // A stacked PR targets the preceding branch, but belongs to the trunk's
+  // merge queue. Scope by the event's queue branch, not each PR's baseRefName.
   const query = `
-    query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+    query($owner: String!, $name: String!, $branch: String!, $cursor: String) {
       repository(owner: $owner, name: $name) {
-        pullRequest(number: $number) {
-          mergeQueueEntry { position }
-          mergeQueue {
-            entries(first: 100, after: $cursor) {
-              nodes {
-                position
-                pullRequest { number title baseRefName }
-              }
-              pageInfo { hasNextPage endCursor }
+        mergeQueue(branch: $branch) {
+          entries(first: 100, after: $cursor) {
+            nodes {
+              position
+              pullRequest { number title }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }
       }
@@ -338,19 +338,16 @@ async function loadMergeGroupPullRequests(repository, headRef, baseRef) {
   `;
   const entries = [];
   let cursor = null;
-  let targetPosition;
   for (;;) {
-    const data = await githubGraphql(query, {
+    const data = await queryGithub(query, {
       owner,
       name,
-      number: targetNumber,
+      branch: baseRef.replace(/^refs\/heads\//, ""),
       cursor,
     });
-    const pullRequest = data.repository?.pullRequest;
-    targetPosition ??= pullRequest?.mergeQueueEntry?.position;
-    const connection = pullRequest?.mergeQueue?.entries;
-    if (!Number.isSafeInteger(targetPosition) || !connection) {
-      throw new Error(`Pull request #${targetNumber} is not in a merge queue`);
+    const connection = data.repository?.mergeQueue?.entries;
+    if (!connection) {
+      throw new Error(`No merge queue found for ${baseRef}`);
     }
     entries.push(...connection.nodes);
     if (!connection.pageInfo.hasNextPage) {
@@ -362,11 +359,15 @@ async function loadMergeGroupPullRequests(repository, headRef, baseRef) {
     }
   }
 
-  const pullRequests = collectMergeQueuePullRequests(
-    entries,
-    targetPosition,
-    baseRef,
-  );
+  const targetPosition = entries.find(
+    (entry) => entry.pullRequest?.number === targetNumber,
+  )?.position;
+  if (!Number.isSafeInteger(targetPosition)) {
+    throw new Error(
+      `Pull request #${targetNumber} is not in the ${baseRef} merge queue`,
+    );
+  }
+  const pullRequests = collectMergeQueuePullRequests(entries, targetPosition);
 
   if (!pullRequests.some((pullRequest) => pullRequest.number === targetNumber)) {
     throw new Error(
