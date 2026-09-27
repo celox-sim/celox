@@ -1,4 +1,4 @@
-//! Function declaration validation and lowering of function bodies to expressions.
+//! Function declaration validation and function-body expression construction.
 
 use super::*;
 
@@ -1463,6 +1463,16 @@ fn coerce_function_local_assignment(expr: Expr, r#type: FunctionLocalType) -> Ex
     }
 }
 
+pub(super) fn procedural_truth_condition(condition: Expr) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::RedOr,
+        expr: Box::new(Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(condition),
+        }),
+    }
+}
+
 fn function_expr_from_case_statement(
     statement: &sv_parser::CaseStatement,
     locals: &mut HashMap<String, Expr>,
@@ -1581,4 +1591,12 @@ fn function_expr_from_case_statement(
         name: "$unsupported_mixed_function_case".to_string(),
         args: Vec::new(),
     })
+}
+
+pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
+    Expr::Binary {
+        left: Box::new(case_expr),
+        op: BinaryOp::EqCase,
+        right: Box::new(item_expr),
+    }
 }
