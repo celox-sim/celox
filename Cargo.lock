@@ -459,7 +459,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-case",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml",
  "tracing",
  "vcd",
@@ -519,7 +519,7 @@ dependencies = [
  "cranelift-native 0.136.0",
  "fxhash",
  "num-bigint",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -566,7 +566,7 @@ dependencies = [
  "fxhash",
  "libc",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing-subscriber",
  "veryl-analyzer",
  "veryl-metadata",
@@ -617,7 +617,7 @@ dependencies = [
  "miette",
  "num-bigint",
  "serde",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -629,7 +629,7 @@ dependencies = [
  "num-bigint",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -643,7 +643,7 @@ dependencies = [
  "celox-sv-analyzer",
  "fxhash",
  "num-bigint",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -661,7 +661,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
  "veryl-analyzer",
  "veryl-metadata",
@@ -748,7 +748,7 @@ dependencies = [
  "itertools 0.15.0",
  "num-bigint",
  "num-traits",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -764,7 +764,7 @@ dependencies = [
  "num-traits",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -785,7 +785,7 @@ dependencies = [
  "miette",
  "num-bigint",
  "sv-parser",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -957,7 +957,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1687,7 +1687,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1969,7 +1969,7 @@ checksum = "77be37fdc968866fa4f0cee73e42185e6d4699a761a51a54e6ebc9a3d73ed537"
 dependencies = [
  "lz4_flex",
  "miniz_oxide",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3180,7 +3180,7 @@ dependencies = [
  "syntree",
  "syntree_layout",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "ts-rs",
  "ume",
 ]
@@ -3208,7 +3208,7 @@ dependencies = [
  "scnr2",
  "syntree",
  "syntree_layout",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3625,7 +3625,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4111,7 +4111,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4906405c210df0f38e970d4386b9cea9e90b2eee817e713c8a6cbc5e672d5590"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4223,7 +4223,7 @@ checksum = "24d027955f5f14d526450b6a11ef5aa962761e924dcd092298dd0d1466570565"
 dependencies = [
  "anyhow",
  "syntree",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "xml_writer",
 ]
 
@@ -4331,11 +4331,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.20",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -4351,9 +4351,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4492,7 +4492,7 @@ version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "ts-rs-macros",
 ]
 
@@ -4656,7 +4656,7 @@ dependencies = [
  "strnum_bitwidth",
  "strum",
  "strum_macros",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml",
  "vcd",
  "veryl-component-sys",
@@ -4699,7 +4699,7 @@ dependencies = [
  "serde_json",
  "serde_regex",
  "spdx",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml",
  "url",
  "uuid",
@@ -4727,7 +4727,7 @@ dependencies = [
  "regex",
  "scnr2",
  "serde",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4741,7 +4741,7 @@ dependencies = [
  "log",
  "miette",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "walkdir",
 ]
 
@@ -4775,7 +4775,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "target-lexicon",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml",
  "twox-hash",
  "vcd",
@@ -4796,7 +4796,7 @@ dependencies = [
  "miette",
  "relative-path",
  "sourcemap",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4808,7 +4808,7 @@ dependencies = [
  "merkle_hash",
  "miette",
  "rust-embed",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "veryl-path",
 ]
 
@@ -5254,7 +5254,7 @@ dependencies = [
  "pulley-interpreter 48.0.0",
  "smallvec",
  "target-lexicon",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "wasmparser 0.254.0",
  "wasmtime-environ 48.0.0",
  "wasmtime-internal-core 48.0.0",
@@ -5280,7 +5280,7 @@ dependencies = [
  "pulley-interpreter 49.0.0",
  "smallvec",
  "target-lexicon",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "wasmparser 0.258.0",
  "wasmtime-environ 49.0.0",
  "wasmtime-internal-core 49.0.0",
