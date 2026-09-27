@@ -13,7 +13,7 @@ use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
     FunctionCall, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind,
-    TbMethod, TbMethodCall, VarId, VarIndex, VarSelect, VarSelectOp,
+    SystemFunctionOutput, TbMethod, TbMethodCall, VarId, VarIndex, VarSelect, VarSelectOp,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
@@ -227,7 +227,7 @@ pub(crate) fn resolve_hierarchical_reference<'a>(
     resolve_hierarchical_reference_from(lookup, root_instance, reference)
 }
 
-fn resolve_hierarchical_reference_from<'a>(
+pub(crate) fn resolve_hierarchical_reference_from<'a>(
     lookup: &'a FrontendLookup,
     base_instance: InstanceId,
     reference: &HierVarRef,
@@ -911,7 +911,12 @@ fn collect_system_function_reads(
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
         | SystemFunctionKind::Unsigned(input) => collect_input(input),
-        SystemFunctionKind::Readmemh(input, _) => collect_input(input),
+        SystemFunctionKind::Readmemh(input, output) => {
+            collect_input(input);
+            if let SystemFunctionOutput::Hier(reference) = output {
+                reads.push(TestbenchRead::Hierarchical(reference.clone()));
+            }
+        }
         SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
             for input in inputs {
                 collect_input(input);
@@ -2286,6 +2291,7 @@ struct SemanticTestbenchBuilder<'a> {
     event_map: HashMap<StrId, StateAddr>,
     signal_map: HashMap<StrId, SemanticSignal<StateAddr>>,
     default_reset_duration: u64,
+    prepared_readmem: super::readmem::PreparedReadmem,
 }
 
 impl<'a> SemanticTestbenchBuilder<'a> {
@@ -2301,6 +2307,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             event_map: Default::default(),
             signal_map: Default::default(),
             default_reset_duration: 3,
+            prepared_readmem: Default::default(),
         }
     }
 
@@ -2529,6 +2536,9 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         match stmt {
             Statement::TbMethodCall(tb) => self.convert_tb_method(tb, ec),
             Statement::SystemFunctionCall(sf) => match &sf.kind {
+                SystemFunctionKind::Readmemh(_, SystemFunctionOutput::Hier(_)) => {
+                    self.prepared_readmem.get(&sf.comptime.token).cloned()
+                }
                 SystemFunctionKind::Assert { kind, cond, args } => {
                     let site_id = *next_assert_site_id;
                     *next_assert_site_id = next_assert_site_id.saturating_add(1);
@@ -3359,6 +3369,7 @@ pub fn compile_semantic_testbench(
     let _ = collect_testbench_observability(lookup, source)?;
     validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
+    builder.prepared_readmem = super::readmem::prepare_testbench_memories(lookup, source)?;
     builder.build_event_map(initial_stmts);
     let component_bindings = builder.convert_component_bindings()?;
     let statements = builder.convert(initial_stmts);

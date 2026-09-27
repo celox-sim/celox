@@ -14,9 +14,8 @@ all_backends! {
         @case "expression_semantics::parent_context_and_self_determined_boundaries_match_between_comb_and_ff";
     }
 
-    #[ignore = "Veryl 0.20.2 folds signed numeric casts before Celox receives AIR"]
     fn constant_and_runtime_casts_use_the_same_resize_rule(sim) {
-        @omit_veryl;
+        @ignore_on(sv);
         @case "expression_semantics::constant_and_runtime_casts_use_the_same_resize_rule";
     }
 
@@ -37,7 +36,7 @@ all_backends! {
     }
 
     fn signed_type_cast_keeps_comparison_operands_signed(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "expression_semantics::signed_type_cast_keeps_comparison_operands_signed";
     }
 

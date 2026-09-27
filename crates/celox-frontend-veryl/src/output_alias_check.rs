@@ -7,7 +7,7 @@
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, CasePattern, Component, Declaration, Expression, Factor,
     ForBound, ForRange, FunctionCall, Ir, Module, Statement, SystemFunctionCall,
-    SystemFunctionKind, TbMethod, VarIndex, VarSelect,
+    SystemFunctionKind, SystemFunctionOutput, TbMethod, VarIndex, VarSelect,
 };
 
 use crate::{
@@ -216,7 +216,12 @@ impl Checker<'_, '_> {
             | SystemFunctionKind::Unsigned(x) => self.expression(&x.0),
             SystemFunctionKind::Readmemh(input, output) => {
                 self.expression(&input.0);
-                self.destinations(&output.0);
+                match output {
+                    SystemFunctionOutput::Local(destinations) => self.destinations(destinations),
+                    SystemFunctionOutput::Hier(reference) => {
+                        self.select(&reference.index, &reference.select);
+                    }
+                }
             }
             SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
                 for arg in args {

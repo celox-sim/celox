@@ -465,16 +465,6 @@ pub(super) fn eval_function_body_return(
         }
     }
 
-    fn for_range_is_dynamic(range: &ForRange) -> bool {
-        match range {
-            ForRange::Forward { start, end, .. }
-            | ForRange::Reverse { start, end, .. }
-            | ForRange::Stepped { start, end, .. } => {
-                matches!(start, ForBound::Expression(_)) || matches!(end, ForBound::Expression(_))
-            }
-        }
-    }
-
     fn validate_function_body_expression(
         module: &Module,
         expr: &Expression,
@@ -625,18 +615,8 @@ pub(super) fn eval_function_body_return(
                 Ok(())
             }
             Statement::For(for_stmt) => {
-                if for_range_is_dynamic(&for_stmt.range)
-                    && for_stmt.body.iter().any(statement_contains_break)
-                {
-                    return Err(ParserError::unsupported(
-                        57,
-                        LoweringPhase::CombLowering,
-                        "break in dynamic function-local for",
-                        format!("module `{}`", module.name),
-                        Some(&for_stmt.token),
-                    ));
-                }
-
+                // The analyzer preserves loop ownership for source breaks;
+                // eval_function_for tracks loop exits separately from returns.
                 match &for_stmt.range {
                     ForRange::Forward { start, end, .. }
                     | ForRange::Reverse { start, end, .. }
@@ -2219,6 +2199,7 @@ pub(super) fn eval_function_body_return(
         }
     }
 
+    let body = crate::lowering::function_return::implicit_return_body(body);
     let mut local_store = caller_store.fork();
     let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
