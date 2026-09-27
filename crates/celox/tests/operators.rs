@@ -176,6 +176,10 @@ all_backends! {
         @case "operators::test_ff_comb_constant_folding_consistency";
     }
 
+    fn test_ff_constant_two_state_initialization(sim) {
+        @case "operators::test_ff_constant_two_state_initialization";
+    }
+
     // Reduction NOR in always_ff.
     fn test_ff_reduction_nor(sim) {
         @case "operators::test_ff_reduction_nor";

@@ -1,7 +1,8 @@
 # Independent expectation verification
 
-Verified on 2026-09-26 with Veryl 0.21.0, Verilator 5.052, and Icarus Verilog
-13.0 on x86_64 Linux. The current corpus has **648 cases: 640 simulation cases
+The earlier full run used Veryl 0.21.0, Verilator 5.052, and Icarus Verilog
+13.0 on x86_64 Linux on 2026-09-26; the incremental refresh is described below.
+The current corpus has **649 cases: 641 simulation cases
 and 8 compilation-rejection cases**. The original 646-case reports remain in
 [verification/baseline](verification/baseline/README.md).
 The [expectation review](MISMATCH_REVIEW.md) records the specification clauses,
@@ -11,7 +12,7 @@ and both JSON reports are retained in the crate.
 
 | Outcome | Verilator | Icarus |
 | --- | ---: | ---: |
-| Simulation assertions passed | 456 | 455 |
+| Simulation assertions passed | 457 | 456 |
 | Expected compilation rejection | 1 | 8 |
 | Invalid design unexpectedly accepted | 0 | 0 |
 | Assertion disagreement | 0 | 0 |
@@ -20,12 +21,22 @@ and both JSON reports are retained in the crate.
 | SystemVerilog compilation blocked | 0 | 0 |
 | Execution error / unrepresentable result | 0 | 0 |
 | Unsupported four-state design | 109 | 0 |
-| Total | 648 | 648 |
+| Total | 649 | 649 |
 
-350 simulation cases pass both tools and 561 pass at least one. This does not
+351 simulation cases pass both tools and 562 pass at least one. This does not
 certify portability: a pass in one tool can coexist with a disagreement in the
 other. Icarus validates 101 of the 109 four-state cases that Verilator cannot
 execute; the remaining eight have five emission and three compilation errors.
+
+On 2026-09-27, `operators::test_ff_comb_constant_folding_consistency` and the
+new `operators::test_ff_constant_two_state_initialization` were run with both
+adapters using suite 0.8.0 and the same tool versions. Both cases passed both
+tools. Their observations replace/add the corresponding rows in the retained
+reports; other rows retain their earlier observations. Each JSON report records
+this incremental refresh in `partial_refresh`; its top-level `suite_version`
+still identifies the earlier full run. The matrix and counts were regenerated.
+The zero-start assertion is now in the dedicated initialization case; the shared
+two-state initialization contract remains unchanged.
 
 ## Corrections since the baseline
 
