@@ -94,6 +94,11 @@ Create a GitHub environment named `crates-io` before the first release. Limit
 deployments to protected tags matching `v*` and add required reviewers if
 publication should require a human approval.
 
+The validation job checks that every public crate name already exists before
+building packages or requesting an OIDC token. A missing name requires the local
+bootstrap below; retrying Trusted Publishing cannot create it. Registry failures
+other than HTTP 404 are reported as lookup errors, not missing crates.
+
 ### First crates.io release
 
 crates.io cannot configure a trusted publisher for a crate name that has never

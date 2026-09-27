@@ -70,6 +70,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check crates.io bootstrap
+        run: ./scripts/publish-crates.sh preflight
+
       - name: Check synchronized release versions
         run: node scripts/check-release-version.mjs
 

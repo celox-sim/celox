@@ -2,8 +2,8 @@
 set -euo pipefail
 
 mode="${1:-package}"
-if [[ "$mode" != "list" && "$mode" != "package" && "$mode" != "publish" ]]; then
-  echo "usage: $0 [list|package|publish]" >&2
+if [[ "$mode" != "preflight" && "$mode" != "list" && "$mode" != "package" && "$mode" != "publish" ]]; then
+  echo "usage: $0 [list|preflight|package|publish]" >&2
   exit 2
 fi
 
@@ -50,19 +50,63 @@ if [[ "$mode" == "publish" ]]; then
   : "${CARGO_REGISTRY_TOKEN:?CARGO_REGISTRY_TOKEN is required for publication}"
 fi
 
+# Only a 404 means absent: authentication, rate limits and network failures
+# must not be mistaken for an unpublished crate.
+registry_exists() {
+  local path="$1"
+  local status
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --user-agent "celox-release-workflow/$version (https://github.com/celox-sim/celox)" \
+    "https://crates.io/api/v1/crates/$path")" || return 2
+  case "$status" in
+    200) return 0 ;;
+    404) return 1 ;;
+    *) echo "crates.io lookup for $path failed (HTTP $status)" >&2; return 2 ;;
+  esac
+}
+
+preflight() {
+  local crate status missing=false
+  for crate in "${crates[@]}"; do
+    if registry_exists "$crate"; then
+      continue
+    else
+      status=$?
+    fi
+    if [[ $status -ne 1 ]]; then
+      return "$status"
+    fi
+    echo "$crate has not been bootstrapped on crates.io" >&2
+    missing=true
+  done
+  if [[ "$missing" == true ]]; then
+    echo "Trusted Publishing cannot create new crates. Complete the local bootstrap in .github/RELEASING.md (First crates.io release), then retry." >&2
+    return 1
+  fi
+}
+
+if [[ "$mode" == "preflight" || "$mode" == "publish" ]]; then
+  preflight
+  if [[ "$mode" == "preflight" ]]; then
+    exit 0
+  fi
+fi
+
 crate_exists() {
   local crate="$1"
-  curl --fail --silent --show-error \
-    --user-agent "celox-release-workflow/$version (https://github.com/celox-sim/celox)" \
-    "https://crates.io/api/v1/crates/$crate/$version" \
-    >/dev/null 2>&1
+  registry_exists "$crate/$version"
 }
 
 wait_for_crate() {
-  local crate="$1"
+  local crate="$1" status
   for _ in {1..12}; do
     if crate_exists "$crate"; then
       return 0
+    else
+      status=$?
+      if [[ $status -ne 1 ]]; then
+        return "$status"
+      fi
     fi
     sleep 5
   done
@@ -84,6 +128,11 @@ for crate in "${crates[@]}"; do
   if crate_exists "$crate"; then
     echo "$crate@$version is already published; skipping"
     continue
+  else
+    status=$?
+    if [[ $status -ne 1 ]]; then
+      exit "$status"
+    fi
   fi
 
   echo "building and checking package archive for $crate@$version"
@@ -119,6 +168,10 @@ for crate in "${crates[@]}"; do
     if grep -Eqi 'already (exists|uploaded)|already been uploaded' <<<"$output"; then
       published=true
       break
+    fi
+    if grep -Fq 'Trusted Publishing tokens do not support creating new crates' <<<"$output"; then
+      echo "Complete the local bootstrap in .github/RELEASING.md before retrying." >&2
+      exit 1
     fi
     if [[ $attempt -lt 6 ]]; then
       echo "publish attempt $attempt for $crate failed; retrying in 15 seconds" >&2
