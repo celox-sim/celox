@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   collectMergeQueuePullRequests,
   commitReleaseImpact,
+  loadMergeGroupPullRequests,
   mergeGroupHeadPullRequestNumber,
   releasePolicyFromFiles,
   releaseImpactErrors,
@@ -64,7 +65,7 @@ test("collects only queue entries through the merge group head", () => {
           pullRequest: {
             number: 2,
             title: "feat: group head",
-            baseRefName: "master",
+            baseRefName: "feature/first",
           },
         },
         {
@@ -75,17 +76,8 @@ test("collects only queue entries through the merge group head", () => {
             baseRefName: "master",
           },
         },
-        {
-          position: 0,
-          pullRequest: {
-            number: 4,
-            title: "fix: develop",
-            baseRefName: "develop",
-          },
-        },
       ],
       1,
-      "refs/heads/master",
     ),
     [
       { number: 1, title: "fix: first" },
@@ -107,6 +99,118 @@ test("collects only queue entries through the merge group head", () => {
   assert.equal(
     mergeGroupHeadPullRequestNumber("refs/heads/feature/pr-644-deadbeef"),
     null,
+  );
+});
+
+const mergeGroupHeadRef =
+  "refs/heads/gh-readonly-queue/master/pr-915-d61c441f12799b8e1056db31ef183e4f5552ba6f";
+
+function queuePage(nodes, endCursor = null) {
+  return {
+    repository: {
+      mergeQueue: {
+        entries: {
+          nodes,
+          pageInfo: { hasNextPage: endCursor !== null, endCursor },
+        },
+      },
+    },
+  };
+}
+
+test("loads stacked PRs from the event's queue across pages", async () => {
+  const entries = [
+    {
+      position: 0,
+      pullRequest: { number: 914, title: "refactor: first", baseRefName: "master" },
+    },
+    {
+      position: 1,
+      pullRequest: {
+        number: 915,
+        title: "refactor: second",
+        baseRefName: "refactor/split-large-files",
+      },
+    },
+    {
+      position: 2,
+      pullRequest: {
+        number: 916,
+        title: "refactor: third",
+        baseRefName: "refactor/split-mir-optimization",
+      },
+    },
+  ];
+  const cursors = [];
+  const pullRequests = await loadMergeGroupPullRequests(
+    "celox-sim/celox",
+    mergeGroupHeadRef,
+    "refs/heads/master",
+    async (query, variables) => {
+      assert.match(query, /mergeQueue\(branch: \$branch\)/);
+      assert.deepEqual(variables, {
+        owner: "celox-sim",
+        name: "celox",
+        branch: "master",
+        cursor: cursors.length === 0 ? null : "next-page",
+      });
+      cursors.push(variables.cursor);
+      return variables.cursor === null
+        ? queuePage(entries.slice(0, 1), "next-page")
+        : queuePage(entries.slice(1));
+    },
+  );
+  assert.deepEqual(cursors, [null, "next-page"]);
+  assert.deepEqual(pullRequests, [
+    { number: 914, title: "refactor: first" },
+    { number: 915, title: "refactor: second" },
+  ]);
+  assert.equal(
+    releaseImpactErrors(pullRequests[1].title, [commit("fix: hidden patch")], {
+      preMajor: false,
+    }).length,
+    1,
+  );
+});
+
+test("rejects a target absent from the event's queue", async () => {
+  await assert.rejects(
+    loadMergeGroupPullRequests(
+      "celox-sim/celox",
+      mergeGroupHeadRef,
+      "refs/heads/master",
+      async () =>
+        queuePage([
+          { position: 0, pullRequest: { number: 914, title: "refactor: first" } },
+        ]),
+    ),
+    /#915 is not in the refs\/heads\/master merge queue/,
+  );
+});
+
+test("rejects a missing merge queue", async () => {
+  await assert.rejects(
+    loadMergeGroupPullRequests(
+      "celox-sim/celox",
+      mergeGroupHeadRef,
+      "refs/heads/master",
+      async () => ({ repository: { mergeQueue: null } }),
+    ),
+    /No merge queue found/,
+  );
+});
+
+test("rejects merge queue pagination without a cursor", async () => {
+  const page = queuePage([]);
+  page.repository.mergeQueue.entries.pageInfo.hasNextPage = true;
+  await assert.rejects(
+    loadMergeGroupPullRequests(
+      "celox-sim/celox",
+      mergeGroupHeadRef,
+      "refs/heads/master",
+      async () => page,
+    ),
+    /pagination did not return a cursor/,
   );
 });
 
