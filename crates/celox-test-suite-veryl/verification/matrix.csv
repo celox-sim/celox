@@ -432,6 +432,7 @@ operators::test_comb_rem,Operators,Simulation,passed,passed
 operators::test_comparisons,Operators,Simulation,passed,passed
 operators::test_ff_bitxnor,Operators,Simulation,passed,passed
 operators::test_ff_comb_constant_folding_consistency,Operators,Simulation,passed,passed
+operators::test_ff_constant_two_state_initialization,Operators,Simulation,passed,passed
 operators::test_ff_div,Operators,Simulation,passed,passed
 operators::test_ff_reduction_nand,Operators,Simulation,passed,passed
 operators::test_ff_reduction_nor,Operators,Simulation,passed,passed

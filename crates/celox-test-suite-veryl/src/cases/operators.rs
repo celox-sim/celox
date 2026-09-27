@@ -1101,14 +1101,14 @@ o_comb = 32'hffff_ffff + 1;
     let o_ff = sim.signal("o_ff");
     let o_comb = sim.signal("o_comb");
 
-    // Before tick: o_comb is evaluated, o_ff is 0
+    // Check constant folding independently of the initialization policy.
+    // test_ff_constant_two_state_initialization covers the zero-start contract.
     let expected = BigUint::from(1u32) << 32;
     assert_eq!(
         sim.get(o_comb),
         expected,
         "always_comb constant folding failed"
     );
-    assert_eq!(sim.get(o_ff), BigUint::from(0u8));
 
     // After tick: o_ff is evaluated
     sim.tick(clk).unwrap();
@@ -1118,6 +1118,28 @@ o_comb = 32'hffff_ffff + 1;
     }
 
 
+
+    // Keep the two-state initialization contract separate from constant folding.
+    fn test_ff_constant_two_state_initialization(sim) {
+        @setup { let code = r#"
+module Top (
+    clk: input clock,
+    q: output logic<128>,
+) {
+    always_ff (clk) {
+        q = 128'h1_0000_0000;
+    }
+}
+"#; }
+        @build Design::new(code, "Top");
+        let clk = sim.event("clk");
+        let q = sim.signal("q");
+
+        // Fresh two-state storage starts at zero, even with constant D.
+        assert_eq!(sim.get(q), BigUint::from(0u8));
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), BigUint::from(1u32) << 32);
+    }
 
     // Reduction NOR in always_ff.
     fn test_ff_reduction_nor(sim) {
