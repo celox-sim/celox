@@ -1,0 +1,1141 @@
+//! Constant expression parsing, substitution, and generate-iteration helpers.
+
+use super::*;
+
+pub(super) fn next_genvar_value(
+    value: i128,
+    iteration: &sv_parser::GenvarIteration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    evaluate: impl FnOnce(&sv_parser::ConstantExpression) -> Option<ConstExpr>,
+) -> Option<i128> {
+    match iteration {
+        sv_parser::GenvarIteration::Prefix(iteration) => {
+            let op = syntax_tree.get_str(&iteration.nodes.0.nodes.0.nodes.0)?;
+            match op {
+                "++" => value.checked_add(1),
+                "--" => value.checked_sub(1),
+                _ => None,
+            }
+        }
+        sv_parser::GenvarIteration::Suffix(iteration) => {
+            let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)?;
+            match op {
+                "++" => value.checked_add(1),
+                "--" => value.checked_sub(1),
+                _ => None,
+            }
+        }
+        sv_parser::GenvarIteration::Assignment(iteration) => {
+            let op = syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)?;
+            let rhs = evaluate(&iteration.nodes.2.nodes.0)?;
+            if op == "=" {
+                return eval_ast_const_expr(&rhs, const_env);
+            }
+            let op = match op {
+                "+=" => BinaryOp::Add,
+                "-=" => BinaryOp::Sub,
+                "*=" => BinaryOp::Mul,
+                "/=" => BinaryOp::Div,
+                "%=" => BinaryOp::Mod,
+                "<<=" => BinaryOp::Shl,
+                ">>=" => BinaryOp::Shr,
+                _ => return None,
+            };
+            // A compound assignment performs the typed binary operation before
+            // assignment conversion. Do not erase the RHS width or signedness.
+            eval_ast_const_expr(
+                &ConstExpr::Binary {
+                    left: Box::new(ConstExpr::Literal(format_typed_parameter_literal(
+                        value, 32, true,
+                    ))),
+                    op,
+                    right: Box::new(rhs),
+                },
+                const_env,
+            )
+        }
+    }
+}
+
+pub(super) fn bind_generate_parameter(
+    parameter: Parameter,
+    const_env: &mut HashMap<String, i128>,
+    parameter_literals: &mut HashMap<String, Expr>,
+) {
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let resolved_type = parameter.resolved_type(&parameter_types);
+    let resolved = parameter.resolved_value(const_env, &parameter_types);
+    let literal = if let Some(value) = resolved {
+        const_env.insert(parameter.name().to_string(), value);
+        Some(Expr::Literal(if let Some(ty) = resolved_type {
+            format_typed_parameter_literal(value, ty.width, ty.signed)
+        } else {
+            value.to_string()
+        }))
+    } else {
+        parameter_value_env(std::slice::from_ref(&parameter), const_env)
+            .remove(parameter.name())
+            .map(|value| substitute_expr_idents(value, parameter_literals))
+    };
+    if let Some(ty) = resolved_type {
+        insert_parameter_type_markers(const_env, parameter.name(), ty);
+    }
+    if let Some(literal) = literal {
+        parameter_literals.insert(parameter.name().to_string(), literal);
+    }
+}
+
+pub(super) fn eval_ast_const_expr(
+    expr: &ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> Option<i128> {
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let expr = substitute_typed_parameter_literals(expr.clone(), const_env, &parameter_types);
+    typecheck::eval_const_expr(&expr.into(), const_env)
+}
+
+pub(super) fn substitute_process_constants(
+    process: CombProcess,
+    const_env: &HashMap<String, i128>,
+) -> CombProcess {
+    substitute_process_constants_with_parameter_literals(process, const_env, &HashMap::default())
+}
+
+pub(super) fn substitute_process_constants_with_parameter_literals(
+    process: CombProcess,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> CombProcess {
+    CombProcess::new(
+        process.kind,
+        process
+            .condition
+            .map(|condition| substitute_const_expr_constants(condition, const_env)),
+        process
+            .assignments
+            .into_iter()
+            .map(|assignment| {
+                substitute_assignment_constants_with_parameter_literals(
+                    assignment,
+                    const_env,
+                    parameter_literals,
+                )
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn substitute_assignment_constants(
+    assignment: Assignment,
+    const_env: &HashMap<String, i128>,
+) -> Assignment {
+    substitute_assignment_constants_with_parameter_literals(
+        assignment,
+        const_env,
+        &HashMap::default(),
+    )
+}
+
+pub(super) fn substitute_assignment_constants_with_parameter_literals(
+    assignment: Assignment,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> Assignment {
+    Assignment::new(
+        substitute_lvalue_constants(assignment.lhs, const_env),
+        substitute_expr_constants_with_parameter_literals(
+            assignment.rhs,
+            const_env,
+            parameter_literals,
+        ),
+    )
+}
+
+pub(super) fn substitute_lvalue_constants(
+    lvalue: LValue,
+    const_env: &HashMap<String, i128>,
+) -> LValue {
+    match lvalue {
+        LValue::Ident(name) => LValue::Ident(name),
+        LValue::Select {
+            name,
+            msb,
+            lsb,
+            signed,
+            array_slice_width,
+            array_slice_reversed,
+        } => LValue::Select {
+            name,
+            msb: substitute_const_expr_constants(msb, const_env),
+            lsb: substitute_const_expr_constants(lsb, const_env),
+            signed,
+            array_slice_width: array_slice_width
+                .map(|width| substitute_const_expr_constants(width, const_env)),
+            array_slice_reversed,
+        },
+    }
+}
+
+pub(super) fn substitute_expr_constants_with_parameter_literals(
+    expr: Expr,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> Expr {
+    match expr {
+        Expr::Ident(name) => parameter_literals
+            .get(&name)
+            .cloned()
+            .or_else(|| {
+                let value = *const_env.get(&name)?;
+                if const_env.contains_key(&enum_marker(&name)) {
+                    let width = const_env
+                        .get(&parameter_width_marker(&name))
+                        .and_then(|width| usize::try_from(*width).ok())?;
+                    let signed = const_env
+                        .get(&parameter_signed_marker(&name))
+                        .is_some_and(|signed| *signed != 0);
+                    Some(Expr::Literal(format_typed_parameter_literal(
+                        value, width, signed,
+                    )))
+                } else if !const_env.contains_key(&parameter_marker(&name)) {
+                    Some(Expr::Literal(value.to_string()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(Expr::Ident(name)),
+        Expr::Literal(value) => Expr::Literal(value),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
+            msb: substitute_const_expr_constants(msb, const_env),
+            lsb: substitute_const_expr_constants(lsb, const_env),
+            signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .into_iter()
+                .map(|part| {
+                    substitute_expr_constants_with_parameter_literals(
+                        part,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
+                .collect(),
+        ),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count: substitute_const_expr_constants(count, const_env),
+            parts: parts
+                .into_iter()
+                .map(|part| {
+                    substitute_expr_constants_with_parameter_literals(
+                        part,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
+                .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
+            width,
+            signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(substitute_expr_constants_with_parameter_literals(
+                *left,
+                const_env,
+                parameter_literals,
+            )),
+            op,
+            right: Box::new(substitute_expr_constants_with_parameter_literals(
+                *right,
+                const_env,
+                parameter_literals,
+            )),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(substitute_expr_constants_with_parameter_literals(
+                *condition,
+                const_env,
+                parameter_literals,
+            )),
+            then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *then_expr,
+                const_env,
+                parameter_literals,
+            )),
+            else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *else_expr,
+                const_env,
+                parameter_literals,
+            )),
+        },
+        Expr::Call { name, args } => Expr::Call {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| {
+                    substitute_expr_constants_with_parameter_literals(
+                        arg,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
+                .collect(),
+        },
+    }
+}
+
+pub(super) fn substitute_const_expr_constants(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> ConstExpr {
+    substitute_const_expr_constants_impl(expr, const_env, false, false)
+}
+
+pub(super) fn substitute_dimension_constants(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> ConstExpr {
+    substitute_const_expr_constants_impl(expr, const_env, true, false)
+}
+
+pub(super) fn substitute_const_expr_constants_preserving_enum_types(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> ConstExpr {
+    substitute_const_expr_constants_impl(expr, const_env, false, true)
+}
+
+fn substitute_const_expr_constants_impl(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+    include_local_parameters: bool,
+    preserve_enum_types: bool,
+) -> ConstExpr {
+    match expr {
+        ConstExpr::Ident(name) => {
+            let Some(value) = const_env.get(&name).filter(|_| {
+                !const_env.contains_key(&parameter_marker(&name))
+                    || include_local_parameters
+                        && const_env.contains_key(&local_parameter_marker(&name))
+            }) else {
+                return ConstExpr::Ident(name);
+            };
+            if preserve_enum_types && const_env.contains_key(&enum_marker(&name)) {
+                let width = const_env
+                    .get(&parameter_width_marker(&name))
+                    .and_then(|width| usize::try_from(*width).ok());
+                let signed = const_env
+                    .get(&parameter_signed_marker(&name))
+                    .is_some_and(|signed| *signed != 0);
+                if let Some(width) = width {
+                    return ConstExpr::Literal(format_typed_parameter_literal(
+                        *value, width, signed,
+                    ));
+                }
+            }
+            ConstExpr::Literal(value.to_string())
+        }
+        ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            bit: Box::new(substitute_const_expr_constants_impl(
+                *bit,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+        },
+        ConstExpr::Function { name, args } => ConstExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| {
+                    substitute_const_expr_constants_impl(
+                        arg,
+                        const_env,
+                        include_local_parameters,
+                        preserve_enum_types,
+                    )
+                })
+                .collect(),
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: Box::new(substitute_const_expr_constants_impl(
+                *expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: Box::new(substitute_const_expr_constants_impl(
+                *left,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            op,
+            right: Box::new(substitute_const_expr_constants_impl(
+                *right,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: Box::new(substitute_const_expr_constants_impl(
+                *condition,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            then_expr: Box::new(substitute_const_expr_constants_impl(
+                *then_expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+            else_expr: Box::new(substitute_const_expr_constants_impl(
+                *else_expr,
+                const_env,
+                include_local_parameters,
+                preserve_enum_types,
+            )),
+        },
+    }
+}
+
+pub(super) fn const_expr_from_expr(
+    expr: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+) -> Option<ConstExpr> {
+    match expr {
+        sv_parser::Expression::Primary(primary) => const_expr_from_primary(primary, syntax_tree),
+        sv_parser::Expression::Unary(unary) => {
+            let op = unary_op_from_symbol(&unary.nodes.0.nodes.0.nodes.0, syntax_tree)?;
+            let expr = const_expr_from_primary(&unary.nodes.2, syntax_tree)?;
+            Some(ConstExpr::Unary {
+                op,
+                expr: Box::new(expr),
+            })
+        }
+        sv_parser::Expression::Binary(binary) => {
+            let right_is_grouped = expression_is_grouped(&binary.nodes.3);
+            let left = const_expr_from_expr(&binary.nodes.0, syntax_tree)?;
+            let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
+            let right = const_expr_from_expr(&binary.nodes.3, syntax_tree)?;
+            let expr = ConstExpr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            Some(if right_is_grouped {
+                expr
+            } else {
+                left_associate_const_binary(expr)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn const_expr_from_primary(
+    primary: &sv_parser::Primary,
+    syntax_tree: &SyntaxTree,
+) -> Option<ConstExpr> {
+    match primary {
+        sv_parser::Primary::PrimaryLiteral(_) => {
+            primary_literal_text(RefNode::Primary(primary), syntax_tree).map(ConstExpr::Literal)
+        }
+        sv_parser::Primary::Hierarchical(hierarchical) => identifier_text(
+            RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+            syntax_tree,
+        )
+        .map(ConstExpr::Ident),
+        sv_parser::Primary::FunctionSubroutineCall(call) => {
+            const_expr_from_function_subroutine_call(call, syntax_tree)
+        }
+        sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
+            sv_parser::MintypmaxExpression::Expression(expr) => {
+                const_expr_from_expr(expr, syntax_tree)
+            }
+            sv_parser::MintypmaxExpression::Ternary(_) => None,
+        },
+        _ => expr_from_primary(primary, syntax_tree).and_then(expr_to_const),
+    }
+}
+
+pub(super) fn left_associate_expr_binary(expr: Expr) -> Expr {
+    let Expr::Binary { left, op, right } = expr else {
+        return expr;
+    };
+    match *right {
+        Expr::Binary {
+            left: right_left,
+            op: right_op,
+            right: right_right,
+        } if binary_precedence(op) >= binary_precedence(right_op) => {
+            left_associate_expr_binary(Expr::Binary {
+                left: Box::new(left_associate_expr_binary(Expr::Binary {
+                    left,
+                    op,
+                    right: right_left,
+                })),
+                op: right_op,
+                right: right_right,
+            })
+        }
+        right => Expr::Binary {
+            left,
+            op,
+            right: Box::new(right),
+        },
+    }
+}
+
+fn left_associate_const_binary(expr: ConstExpr) -> ConstExpr {
+    let ConstExpr::Binary { left, op, right } = expr else {
+        return expr;
+    };
+    match *right {
+        ConstExpr::Binary {
+            left: right_left,
+            op: right_op,
+            right: right_right,
+        } if binary_precedence(op) >= binary_precedence(right_op) => {
+            left_associate_const_binary(ConstExpr::Binary {
+                left: Box::new(left_associate_const_binary(ConstExpr::Binary {
+                    left,
+                    op,
+                    right: right_left,
+                })),
+                op: right_op,
+                right: right_right,
+            })
+        }
+        right => ConstExpr::Binary {
+            left,
+            op,
+            right: Box::new(right),
+        },
+    }
+}
+
+fn binary_precedence(op: BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 11,
+        BinaryOp::Add | BinaryOp::Sub => 10,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 9,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 8,
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
+        | BinaryOp::EqWildcard
+        | BinaryOp::NeWildcard => 7,
+        BinaryOp::BitAnd => 6,
+        BinaryOp::BitXor => 5,
+        BinaryOp::BitOr => 4,
+        BinaryOp::LogicAnd => 3,
+        BinaryOp::LogicOr => 2,
+    }
+}
+
+pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
+    match expr {
+        Expr::Ident(name) => Some(ConstExpr::Ident(name)),
+        Expr::Literal(value) => Some(ConstExpr::Literal(value)),
+        Expr::Unary { op, expr } => Some(ConstExpr::Unary {
+            op,
+            expr: Box::new(expr_to_const(*expr)?),
+        }),
+        Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
+            left: Box::new(expr_to_const(*left)?),
+            op,
+            right: Box::new(expr_to_const(*right)?),
+        }),
+        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
+            expr: Box::new(expr_to_const(*expr)?),
+            bit: Box::new(msb),
+        }),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(ConstExpr::Mux {
+            condition: Box::new(expr_to_const(*condition)?),
+            then_expr: Box::new(expr_to_const(*then_expr)?),
+            else_expr: Box::new(expr_to_const(*else_expr)?),
+        }),
+        Expr::Call { name, args } => Some(ConstExpr::Function {
+            name,
+            args: args.into_iter().map(expr_to_const).collect::<Option<_>>()?,
+        }),
+        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
+            None
+        }
+    }
+}
+
+pub(super) fn expr_to_lvalue_const(expr: Expr) -> Option<ConstExpr> {
+    match expr {
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let expr = expr_to_lvalue_const(*expr)?;
+            if width == 0 {
+                return Some(ConstExpr::Literal("0".to_string()));
+            }
+            if width == 1 && !signed {
+                return Some(ConstExpr::Select {
+                    expr: Box::new(expr),
+                    bit: Box::new(ConstExpr::Literal("0".to_string())),
+                });
+            }
+            let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
+            let truncated = ConstExpr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitAnd,
+                right: Box::new(ConstExpr::Literal(format!("{width}'h{mask:x}"))),
+            };
+            if signed {
+                Some(ConstExpr::Mux {
+                    condition: Box::new(ConstExpr::Select {
+                        expr: Box::new(truncated.clone()),
+                        bit: Box::new(ConstExpr::Literal((width - 1).to_string())),
+                    }),
+                    // Every negative packed index is out of range. A stable
+                    // positive sentinel preserves that selection behavior
+                    // without requiring a signed-resize node in ConstExpr.
+                    then_expr: Box::new(ConstExpr::Literal(i128::MAX.to_string())),
+                    else_expr: Box::new(truncated),
+                })
+            } else {
+                Some(truncated)
+            }
+        }
+        Expr::Ident(name) => Some(ConstExpr::Ident(name)),
+        Expr::Literal(value) => Some(ConstExpr::Literal(value)),
+        Expr::Unary { op, expr } => Some(ConstExpr::Unary {
+            op,
+            expr: Box::new(expr_to_lvalue_const(*expr)?),
+        }),
+        Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
+            left: Box::new(expr_to_lvalue_const(*left)?),
+            op,
+            right: Box::new(expr_to_lvalue_const(*right)?),
+        }),
+        Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
+            expr: Box::new(expr_to_lvalue_const(*expr)?),
+            bit: Box::new(msb),
+        }),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(ConstExpr::Mux {
+            condition: Box::new(expr_to_lvalue_const(*condition)?),
+            then_expr: Box::new(expr_to_lvalue_const(*then_expr)?),
+            else_expr: Box::new(expr_to_lvalue_const(*else_expr)?),
+        }),
+        Expr::Call { name, args } => Some(ConstExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(expr_to_lvalue_const)
+                .collect::<Option<_>>()?,
+        }),
+        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } => None,
+    }
+}
+
+pub(super) fn const_expr_from_constant_param_with_env(
+    expr: &sv_parser::ConstantParamExpression,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ConstExpr> {
+    match expr {
+        sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(expr) => match &**expr {
+            sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
+                const_expr_from_ref_node_with_env(
+                    RefNode::ConstantExpression(expr),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+            }
+            sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
+        },
+        _ => None,
+    }
+}
+
+pub(super) fn const_expr_from_param_expression(
+    expr: &sv_parser::ParamExpression,
+    syntax_tree: &SyntaxTree,
+) -> Option<ConstExpr> {
+    match expr {
+        sv_parser::ParamExpression::MintypmaxExpression(expr) => match &**expr {
+            sv_parser::MintypmaxExpression::Expression(expr) => {
+                const_expr_from_expr(expr.as_ref(), syntax_tree)
+            }
+            sv_parser::MintypmaxExpression::Ternary(_) => None,
+        },
+        sv_parser::ParamExpression::DataType(_) | sv_parser::ParamExpression::Dollar(_) => None,
+    }
+}
+
+pub(super) fn const_expr_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Option<ConstExpr> {
+    const_expr_from_ref_node_with_env(node, syntax_tree, &HashMap::default(), &HashMap::default())
+}
+
+pub(super) fn const_expr_from_ref_node_with_env(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ConstExpr> {
+    match node {
+        RefNode::ConstantExpression(expr) => match expr {
+            sv_parser::ConstantExpression::ConstantPrimary(primary) => {
+                const_expr_from_ref_node_with_env(
+                    RefNode::ConstantPrimary(primary),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+            }
+            sv_parser::ConstantExpression::Unary(unary) => {
+                let op = unary_op_from_symbol(&unary.nodes.0.nodes.0.nodes.0, syntax_tree)?;
+                let expr = const_expr_from_ref_node_with_env(
+                    RefNode::ConstantPrimary(&unary.nodes.2),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )?;
+                Some(ConstExpr::Unary {
+                    op,
+                    expr: Box::new(expr),
+                })
+            }
+            sv_parser::ConstantExpression::Binary(binary) => {
+                let right_is_grouped = constant_expression_is_grouped(&binary.nodes.3);
+                let left = const_expr_from_ref_node_with_env(
+                    RefNode::ConstantExpression(&binary.nodes.0),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )?;
+                let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
+                let right = const_expr_from_ref_node_with_env(
+                    RefNode::ConstantExpression(&binary.nodes.3),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )?;
+                let expr = ConstExpr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+                Some(if right_is_grouped {
+                    expr
+                } else {
+                    left_associate_const_binary(expr)
+                })
+            }
+            sv_parser::ConstantExpression::Ternary(expr) => {
+                const_expr_from_constant_expression_ternary_with_env(
+                    expr,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+            }
+            sv_parser::ConstantExpression::Inside(_) => None,
+        },
+        RefNode::ConstantPrimary(primary) => match primary {
+            sv_parser::ConstantPrimary::PrimaryLiteral(_) => {
+                primary_literal_text(node, syntax_tree).map(ConstExpr::Literal)
+            }
+            sv_parser::ConstantPrimary::PsParameter(parameter) => {
+                let identifier = unwrap_node!(
+                    RefNode::ConstantPrimaryPsParameter(parameter),
+                    SimpleIdentifier,
+                    EscapedIdentifier
+                )?;
+                let base = identifier_locate(identifier)
+                    .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
+                    .map(ConstExpr::Ident)?;
+                const_select_expr(
+                    base.clone(),
+                    &parameter.nodes.1,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )
+                .or(Some(base))
+            }
+            sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+                if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some())
+                {
+                    let dimensions =
+                        PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+                    return expr_to_const(expr_from_function_subroutine_call(
+                        &call.nodes.0,
+                        syntax_tree,
+                        &dimensions,
+                    )?);
+                }
+                if let Some(ty) =
+                    size_system_function_expr_type(primary, syntax_tree, const_env, type_aliases)
+                {
+                    return Some(ConstExpr::Literal(ty.width.to_string()));
+                }
+                let lowered = const_expr_from_function_subroutine_call(&call.nodes.0, syntax_tree);
+                if let Some(ConstExpr::Function { name, args }) = &lowered
+                    && name == "$bits"
+                    && let [arg] = args.as_slice()
+                    && let Some(r#type) =
+                        infer_const_expr_type(arg, &parameter_types_from_const_env(const_env))
+                {
+                    return Some(ConstExpr::Literal(r#type.width.to_string()));
+                }
+                lowered.or_else(|| {
+                    let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0 else {
+                        return None;
+                    };
+                    if tf_call.nodes.2.is_some() {
+                        return None;
+                    }
+                    let identifier = unwrap_node!(
+                        RefNode::ConstantFunctionCall(call),
+                        SimpleIdentifier,
+                        EscapedIdentifier
+                    )?;
+                    identifier_locate(identifier)
+                        .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
+                        .map(ConstExpr::Ident)
+                })
+            }
+            sv_parser::ConstantPrimary::ConstantCast(cast) => {
+                constant_cast_const_expr(cast, syntax_tree, const_env, type_aliases)
+            }
+            sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
+                sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
+                    const_expr_from_ref_node_with_env(
+                        RefNode::ConstantExpression(expr),
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                    )
+                }
+                sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
+            },
+            _ => None,
+        },
+        _ => {
+            if let Some(integral_number) = unwrap_node!(node.clone(), IntegralNumber) {
+                return integral_number_literal(integral_number, syntax_tree)
+                    .map(ConstExpr::Literal);
+            }
+            if let Some(identifier) = unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
+                return identifier_locate(identifier)
+                    .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
+                    .map(ConstExpr::Ident);
+            }
+            None
+        }
+    }
+}
+
+fn constant_expression_is_grouped(expr: &sv_parser::ConstantExpression) -> bool {
+    matches!(
+        expr,
+        sv_parser::ConstantExpression::ConstantPrimary(primary)
+            if matches!(
+                &**primary,
+                sv_parser::ConstantPrimary::MintypmaxExpression(_)
+            )
+    )
+}
+
+fn const_expr_from_constant_expression_ternary_with_env(
+    expr: &sv_parser::ConstantExpressionTernary,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ConstExpr> {
+    Some(ConstExpr::Mux {
+        condition: Box::new(const_expr_from_ref_node_with_env(
+            RefNode::ConstantExpression(&expr.nodes.0),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        )?),
+        then_expr: Box::new(const_expr_from_ref_node_with_env(
+            RefNode::ConstantExpression(&expr.nodes.3),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        )?),
+        else_expr: Box::new(const_expr_from_ref_node_with_env(
+            RefNode::ConstantExpression(&expr.nodes.5),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        )?),
+    })
+}
+
+fn const_select_expr(
+    base: ConstExpr,
+    select: &sv_parser::ConstantSelect,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ConstExpr> {
+    let bit_selects = select.nodes.1.nodes.0.as_slice();
+    if bit_selects.len() != 1 || select.nodes.2.is_some() {
+        return None;
+    }
+    let bit = const_expr_from_ref_node_with_env(
+        RefNode::ConstantExpression(&bit_selects[0].nodes.1),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )?;
+    Some(ConstExpr::Select {
+        expr: Box::new(base),
+        bit: Box::new(bit),
+    })
+}
+
+fn const_expr_from_function_subroutine_call(
+    call: &sv_parser::FunctionSubroutineCall,
+    syntax_tree: &SyntaxTree,
+) -> Option<ConstExpr> {
+    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
+        return None;
+    };
+    let (identifier, arguments) = match &**system_call {
+        sv_parser::SystemTfCall::ArgExpression(call) => {
+            (&call.nodes.0, call.nodes.1.nodes.1.0.contents())
+        }
+        _ => return None,
+    };
+    let name = syntax_tree.get_str(&identifier.nodes.0)?.to_string();
+    if name == "$countones" {
+        // Use expression lowering so selections are never silently discarded
+        // by the limited constant-primary identifier path below. Unsupported
+        // constant argument forms must remain unresolved rather than counting
+        // the entire identifier in place of its selection.
+        return expr_to_const(expr_from_function_subroutine_call(
+            call,
+            syntax_tree,
+            &PackedDimensions::default(),
+        )?);
+    }
+    let args = arguments
+        .into_iter()
+        .filter_map(|argument| argument.as_ref())
+        .map(|argument| const_expr_from_expr(argument, syntax_tree))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ConstExpr::Function { name, args })
+}
+
+fn integral_number_literal(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
+    let RefNode::IntegralNumber(number) = node else {
+        return None;
+    };
+    match number {
+        sv_parser::IntegralNumber::DecimalNumber(decimal) => match &**decimal {
+            sv_parser::DecimalNumber::UnsignedNumber(number) => {
+                locate_text(&number.nodes.0, syntax_tree)
+            }
+            sv_parser::DecimalNumber::BaseUnsigned(number) => based_literal(
+                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+                &number.nodes.1.nodes.0,
+                &number.nodes.2.nodes.0,
+                syntax_tree,
+            ),
+            sv_parser::DecimalNumber::BaseXNumber(number) => based_literal(
+                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+                &number.nodes.1.nodes.0,
+                &number.nodes.2.nodes.0,
+                syntax_tree,
+            ),
+            sv_parser::DecimalNumber::BaseZNumber(number) => based_literal(
+                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+                &number.nodes.1.nodes.0,
+                &number.nodes.2.nodes.0,
+                syntax_tree,
+            ),
+        },
+        sv_parser::IntegralNumber::BinaryNumber(number) => based_literal(
+            number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+            &number.nodes.1.nodes.0,
+            &number.nodes.2.nodes.0,
+            syntax_tree,
+        ),
+        sv_parser::IntegralNumber::OctalNumber(number) => based_literal(
+            number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+            &number.nodes.1.nodes.0,
+            &number.nodes.2.nodes.0,
+            syntax_tree,
+        ),
+        sv_parser::IntegralNumber::HexNumber(number) => based_literal(
+            number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+            &number.nodes.1.nodes.0,
+            &number.nodes.2.nodes.0,
+            syntax_tree,
+        ),
+    }
+}
+
+fn based_literal(
+    size: Option<&Locate>,
+    base: &Locate,
+    digits: &Locate,
+    syntax_tree: &SyntaxTree,
+) -> Option<String> {
+    let size = size
+        .and_then(|size| locate_text(size, syntax_tree))
+        .unwrap_or_default();
+    let base = locate_text(base, syntax_tree)?;
+    let digits = locate_text(digits, syntax_tree)?;
+    Some(format!("{size}{base}{digits}"))
+}
+
+fn locate_text(locate: &Locate, syntax_tree: &SyntaxTree) -> Option<String> {
+    syntax_tree.get_str(locate).map(str::to_string)
+}
+
+pub(super) fn primary_literal_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
+    if let Some(integral_number) = unwrap_node!(node.clone(), IntegralNumber) {
+        return integral_number_literal(integral_number, syntax_tree);
+    }
+    let unbased = unwrap_node!(node, UnbasedUnsizedLiteral)?;
+    let RefNode::UnbasedUnsizedLiteral(unbased) = unbased else {
+        return None;
+    };
+    syntax_tree.get_str(&unbased.nodes.0).map(str::to_string)
+}
+
+fn unary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<UnaryOp> {
+    match syntax_tree.get_str(symbol)? {
+        "+" => Some(UnaryOp::Plus),
+        "-" => Some(UnaryOp::Minus),
+        "~" => Some(UnaryOp::BitNot),
+        "!" => Some(UnaryOp::LogicNot),
+        "&" => Some(UnaryOp::RedAnd),
+        "|" => Some(UnaryOp::RedOr),
+        "^" => Some(UnaryOp::RedXor),
+        _ => None,
+    }
+}
+
+pub(super) fn unary_expr_from_symbol(
+    symbol: &Locate,
+    expr: Expr,
+    syntax_tree: &SyntaxTree,
+) -> Option<Expr> {
+    let reduction = match syntax_tree.get_str(symbol)? {
+        "~&" => Some(UnaryOp::RedAnd),
+        "~|" => Some(UnaryOp::RedOr),
+        "~^" | "^~" => Some(UnaryOp::RedXor),
+        _ => None,
+    };
+    if let Some(op) = reduction {
+        return Some(Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(Expr::Unary {
+                op,
+                expr: Box::new(expr),
+            }),
+        });
+    }
+    Some(Expr::Unary {
+        op: unary_op_from_symbol(symbol, syntax_tree)?,
+        expr: Box::new(expr),
+    })
+}
+
+pub(super) fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<BinaryOp> {
+    match syntax_tree.get_str(symbol)? {
+        "+" => Some(BinaryOp::Add),
+        "-" => Some(BinaryOp::Sub),
+        "*" => Some(BinaryOp::Mul),
+        "/" => Some(BinaryOp::Div),
+        "%" => Some(BinaryOp::Mod),
+        "<<" => Some(BinaryOp::Shl),
+        "<<<" => Some(BinaryOp::Shl),
+        ">>" => Some(BinaryOp::Shr),
+        ">>>" => Some(BinaryOp::Sar),
+        "&" => Some(BinaryOp::BitAnd),
+        "|" => Some(BinaryOp::BitOr),
+        "^" => Some(BinaryOp::BitXor),
+        "&&" => Some(BinaryOp::LogicAnd),
+        "||" => Some(BinaryOp::LogicOr),
+        "==" => Some(BinaryOp::Eq),
+        "!=" => Some(BinaryOp::Ne),
+        "===" => Some(BinaryOp::EqCase),
+        "!==" => Some(BinaryOp::NeCase),
+        "==?" => Some(BinaryOp::EqWildcard),
+        "!=?" => Some(BinaryOp::NeWildcard),
+        "<" => Some(BinaryOp::Lt),
+        "<=" => Some(BinaryOp::Le),
+        ">" => Some(BinaryOp::Gt),
+        ">=" => Some(BinaryOp::Ge),
+        _ => None,
+    }
+}
