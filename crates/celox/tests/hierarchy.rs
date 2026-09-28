@@ -215,37 +215,37 @@ fn test_dynamic_prefix_colon_output_port_allows_zero_lsb(sim) {
     }
 
     fn test_hierarchical_concat_feedback_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_concat_feedback_runtime";
     }
 
     fn test_hierarchical_concat_feedback_runtime_multi_observe(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_concat_feedback_runtime_multi_observe";
     }
 
     fn test_hierarchical_concat_feedback_with_constant_middle_bit(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_concat_feedback_with_constant_middle_bit";
     }
 
     fn test_hierarchical_dynamic_index_feedback_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_dynamic_index_feedback_runtime";
     }
 
     fn test_hierarchical_dual_dynamic_readers_feedback_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_dual_dynamic_readers_feedback_runtime";
     }
 
     fn test_hierarchical_overlapping_partial_write_dynamic_index_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_overlapping_partial_write_dynamic_index_runtime";
     }
 
     fn test_hierarchical_concat_then_overlap_dynamic_index_runtime(sim) {
-        @ignore_on(native, cranelift, wasm, interp, sv);
+        @ignore_on(sv);
         @case "hierarchy::test_hierarchical_concat_then_overlap_dynamic_index_runtime";
     }
 
