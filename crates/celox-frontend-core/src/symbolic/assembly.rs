@@ -380,7 +380,12 @@ pub fn schedule_symbolic_rtl(
     let ignored_loops = parse_ignored_loops(ignored_loops, &instance_modules, &modules, &expanded);
     let true_loops = parse_true_loops(true_loops, &instance_modules, &modules, &expanded);
 
-    flattening::refine_cyclic_fold_groups(&mut comb_blocks, &mut global_arena)?;
+    flattening::refine_cyclic_logic_paths(
+        &mut comb_blocks,
+        &global_boundaries,
+        &unpacked_element_widths,
+        &mut global_arena,
+    )?;
 
     // Build reset -> clock mapping with AbsoluteAddr
     let mut reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();

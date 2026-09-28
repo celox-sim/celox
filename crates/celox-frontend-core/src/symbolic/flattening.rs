@@ -18,6 +18,41 @@ pub struct FlattenedModule {
     pub pre_atomized_comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
 }
 
+/// Preserve coarse copies on acyclic designs. A merged copy can introduce a
+/// dependency cycle when its bits have independent writers; split only paths
+/// on those cycles before refining recovered loop groups and scheduling.
+pub(super) fn refine_cyclic_logic_paths(
+    paths: &mut Vec<LogicPath<AbsoluteAddr>>,
+    boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) -> Result<(), SLTNodeFactsError> {
+    // Leave other graph errors to the scheduler's normal diagnostics.
+    let Ok(cyclic) = celox_slt::scheduler::cyclic_logic_paths(paths) else {
+        return Ok(());
+    };
+    if cyclic.is_empty() {
+        return Ok(());
+    }
+    let cyclic: BTreeSet<_> = cyclic.into_iter().collect();
+    let mut refined = Vec::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        if cyclic.contains(&index) {
+            refined.extend(atomize_logic_paths(
+                std::slice::from_ref(path),
+                boundaries,
+                unpacked_element_widths,
+                arena,
+                SourceCoalescing::ExactRanges,
+            )?);
+        } else {
+            refined.push(path.clone());
+        }
+    }
+    *paths = refined;
+    refine_cyclic_fold_groups(paths, arena)
+}
+
 /// A recovered loop may bundle independent reductions into one atomic node.
 /// Its union of inputs can invent feedback through another combinational
 /// process. Split only groups on such cycles: keeping acyclic groups intact
@@ -238,6 +273,7 @@ pub fn flatten_module(
         global_boundaries,
         unpacked_element_widths,
         arena,
+        SourceCoalescing::SameVariable,
     )?;
 
     Ok(FlattenedModule {
@@ -252,12 +288,19 @@ pub fn flatten_module(
     })
 }
 
+#[derive(Clone, Copy)]
+enum SourceCoalescing {
+    SameVariable,
+    ExactRanges,
+}
+
 /// Atomizes the given logic paths based on the provided boundary map.
 fn atomize_logic_paths(
-    paths: &Vec<LogicPath<AbsoluteAddr>>,
+    paths: &[LogicPath<AbsoluteAddr>],
     boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
+    coalescing: SourceCoalescing,
 ) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let mut atomized_paths = Vec::new();
 
@@ -338,8 +381,10 @@ fn atomize_logic_paths(
                     let crosses_strided_element = element_width.is_some_and(|width| {
                         !width.is_multiple_of(8) && next.0.lsb.is_multiple_of(width)
                     });
-                    let may_recover_coarse_range = source_objects_match
-                        && (pointwise_single_bits || contiguous_unpacked_elements);
+                    let may_recover_coarse_range =
+                        matches!(coalescing, SourceCoalescing::SameVariable)
+                            && source_objects_match
+                            && (pointwise_single_bits || contiguous_unpacked_elements);
                     if !(exact_sources_match || may_recover_coarse_range) || crosses_strided_element
                     {
                         break;
@@ -942,7 +987,7 @@ fn convert_glue_block(
 }
 
 #[cfg(test)]
-mod fold_refinement_tests {
+mod tests {
     use super::*;
     use celox_slt::SLTForFoldGroupState;
 
@@ -986,6 +1031,160 @@ mod fold_refinement_tests {
             pre_lower_nodes: Vec::new(),
             expr,
         }
+    }
+
+    #[test]
+    fn cyclic_atomization_preserves_independent_bit_and_byte_feedback() {
+        for (width, element_width) in [(1, None), (8, Some(8))] {
+            let mut arena = SLTNodeArena::new();
+            let mut copy = |target_id, target_access, source_id, source_access| {
+                let expr = arena
+                    .alloc(SLTNode::Input {
+                        variable: addr(source_id),
+                        signed: false,
+                        index: Vec::new(),
+                        access: source_access,
+                    })
+                    .unwrap();
+                let mut result = path(target_id, expr, &arena);
+                result.target = LogicPathTarget::Var(VarAtomBase {
+                    id: addr(target_id),
+                    access: target_access,
+                });
+                result
+            };
+            let low = BitAccess::new(0, width - 1);
+            let high = BitAccess::new(width, 2 * width - 1);
+            let full = BitAccess::new(0, 2 * width - 1);
+            // input -> v.high -> a.high -> v.low -> a.low is acyclic.
+            // Treating a = v as an indivisible copy invents feedback.
+            let paths = vec![
+                copy(0, high, 2, low),
+                copy(1, full, 0, full),
+                copy(0, low, 1, high),
+            ];
+            assert!(
+                !celox_slt::scheduler::cyclic_logic_paths(&paths)
+                    .unwrap()
+                    .is_empty()
+            );
+            let boundaries = [0, 1]
+                .map(|id| (addr(id), [0, width, 2 * width].into_iter().collect()))
+                .into_iter()
+                .collect();
+            let element_widths = element_width
+                .into_iter()
+                .flat_map(|width| [0, 1].map(|id| (addr(id), width)))
+                .collect();
+            let mut atomized = atomize_logic_paths(
+                &paths,
+                &boundaries,
+                &element_widths,
+                &mut arena,
+                SourceCoalescing::SameVariable,
+            )
+            .unwrap();
+            refine_cyclic_logic_paths(&mut atomized, &boundaries, &element_widths, &mut arena)
+                .unwrap();
+            assert!(
+                celox_slt::scheduler::cyclic_logic_paths(&atomized)
+                    .unwrap()
+                    .is_empty(),
+                "independent {width}-bit ranges must be schedulable"
+            );
+
+            // Feeding a.high back to v.high creates a real cycle instead.
+            let expr = arena
+                .alloc(SLTNode::Input {
+                    variable: addr(1),
+                    signed: false,
+                    index: Vec::new(),
+                    access: high,
+                })
+                .unwrap();
+            let mut feedback = path(0, expr, &arena);
+            feedback.target = LogicPathTarget::Var(VarAtomBase {
+                id: addr(0),
+                access: high,
+            });
+            let mut paths = paths;
+            paths[0] = feedback;
+            let mut atomized = atomize_logic_paths(
+                &paths,
+                &boundaries,
+                &element_widths,
+                &mut arena,
+                SourceCoalescing::SameVariable,
+            )
+            .unwrap();
+            refine_cyclic_logic_paths(&mut atomized, &boundaries, &element_widths, &mut arena)
+                .unwrap();
+            assert!(
+                !celox_slt::scheduler::cyclic_logic_paths(&atomized)
+                    .unwrap()
+                    .is_empty(),
+                "actual {width}-bit feedback must remain a cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn acyclic_coalesced_copies_keep_paths_and_arena_unchanged() {
+        for (width, element_width) in [(1, None), (8, Some(8))] {
+            let mut arena = SLTNodeArena::new();
+            let expr = arena
+                .alloc(SLTNode::Input {
+                    variable: addr(0),
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 2 * width - 1),
+                })
+                .unwrap();
+            let mut copy = path(1, expr, &arena);
+            copy.target = LogicPathTarget::Var(VarAtomBase::new(addr(1), 0, 2 * width - 1));
+            let boundaries = [(addr(1), [0, width, 2 * width].into_iter().collect())]
+                .into_iter()
+                .collect();
+            let element_widths = element_width.map(|w| (addr(1), w)).into_iter().collect();
+            let mut paths = atomize_logic_paths(
+                std::slice::from_ref(&copy),
+                &boundaries,
+                &element_widths,
+                &mut arena,
+                SourceCoalescing::SameVariable,
+            )
+            .unwrap();
+            assert_eq!(paths, vec![copy]);
+            let before = paths.clone();
+            let nodes = arena.len();
+            refine_cyclic_logic_paths(&mut paths, &boundaries, &element_widths, &mut arena)
+                .unwrap();
+            assert_eq!(paths, before);
+            assert_eq!(arena.len(), nodes);
+        }
+    }
+
+    #[test]
+    fn atomization_still_coalesces_identical_bit_dependencies() {
+        let mut arena = SLTNodeArena::new();
+        let bit = input(0, &mut arena);
+        let repeated = arena
+            .alloc(SLTNode::Concat(vec![(bit, 1), (bit, 1)]))
+            .unwrap();
+        let mut repeated_path = path(1, repeated, &arena);
+        repeated_path.target = LogicPathTarget::Var(VarAtomBase::new(addr(1), 0, 1));
+        let boundaries = [(addr(1), [0, 1, 2].into_iter().collect())]
+            .into_iter()
+            .collect();
+        let atomized = atomize_logic_paths(
+            &vec![repeated_path.clone()],
+            &boundaries,
+            &HashMap::default(),
+            &mut arena,
+            SourceCoalescing::SameVariable,
+        )
+        .unwrap();
+        assert_eq!(atomized, vec![repeated_path]);
     }
 
     // a reduces an external input; b reduces c. Connecting c to a creates
