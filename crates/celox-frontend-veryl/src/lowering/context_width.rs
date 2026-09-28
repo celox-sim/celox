@@ -96,9 +96,9 @@ pub fn expression_signed(expr: &Expression) -> bool {
 pub fn factor_signed(factor: &Factor) -> bool {
     match factor {
         Factor::SystemFunctionCall(call) => match call.kind {
-            // IEEE 1800-2023 20.6.2: $bits returns a signed integer.
-            // Veryl's AIR currently marks this result unsigned.
-            SystemFunctionKind::Bits(_) => true,
+            // IEEE 1800-2023 20.6.2 and 20.7: $bits/$size return signed integers.
+            // Veryl's AIR currently marks these results unsigned.
+            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => true,
             SystemFunctionKind::Signed(_) => true,
             SystemFunctionKind::Unsigned(_) => false,
             _ => call.comptime.r#type.signed,

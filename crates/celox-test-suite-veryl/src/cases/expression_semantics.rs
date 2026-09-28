@@ -503,7 +503,7 @@ module Top (
 
 
     fn system_function_results_obey_ternary_width_contexts(sim) {
-        // IEEE 1800-2023 20.6.2: $bits returns a signed integer. Both arms
+        // IEEE 1800-2023 20.6.2 and 20.7: $bits/$size return signed integers. Both arms
         // are signed, so 11.8.1/11.8.2 require sign extension to 32 bits.
 
 
@@ -518,12 +518,20 @@ module Top (
     c_wide: output logic<40>,
     f_natural: output logic<32>,
     f_wide: output logic<40>,
+    c_size_natural: output logic<32>,
+    c_size_wide: output logic<40>,
+    f_size_natural: output logic<32>,
+    f_size_wide: output logic<40>,
 ) {
     assign c_natural = if sel ? $bits(a) : signed_arm;
     assign c_wide = if sel ? $bits(a) : wide_arm;
+    assign c_size_natural = if sel ? $size(a) : signed_arm;
+    assign c_size_wide = if sel ? $size(a) : wide_arm;
     always_ff (clk) {
         f_natural = if sel ? $bits(a) : signed_arm;
         f_wide = if sel ? $bits(a) : wide_arm;
+        f_size_natural = if sel ? $size(a) : signed_arm;
+        f_size_wide = if sel ? $size(a) : wide_arm;
     }
 }
 "#, "Top");
@@ -539,7 +547,7 @@ module Top (
         })
         .unwrap();
         sim.tick(clk).unwrap();
-        for prefix in ["c", "f"] {
+        for prefix in ["c", "f", "c_size", "f_size"] {
             let natural = sim.signal(&format!("{prefix}_natural"));
             let wide = sim.signal(&format!("{prefix}_wide"));
             assert_eq!(
@@ -554,7 +562,7 @@ module Top (
 
         sim.modify(|io| io.set(sel, 1u8)).unwrap();
         sim.tick(clk).unwrap();
-        for prefix in ["c", "f"] {
+        for prefix in ["c", "f", "c_size", "f_size"] {
             let natural = sim.signal(&format!("{prefix}_natural"));
             let wide = sim.signal(&format!("{prefix}_wide"));
             assert_eq!(sim.get(natural), 5u32.into());
