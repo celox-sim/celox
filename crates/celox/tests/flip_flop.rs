@@ -4352,10 +4352,6 @@ fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(si
     @case "flip_flop::test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items";
 }
 
-fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
-    @case "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal";
-}
-
 }
 
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]

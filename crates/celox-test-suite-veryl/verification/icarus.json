@@ -2502,27 +2502,6 @@
     },
     {
       "category": "Sequential",
-      "detail": "Veryl emits an un-ranged scalar logic formal and then selects bit 0. Both compilers reject selecting this scalar; the Veryl-to-SV representation needs review.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "sv_emission_issue",
-        "evidence": [
-          "verification/limitations/verilator.json",
-          "verification/limitations/icarus.json",
-          "LIMITATIONS.md#sv-scalar-select"
-        ],
-        "id": "sv_scalar_select",
-        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
-        "phase": "compile",
-        "reason": "Veryl emits an un-ranged scalar logic formal and then selects bit 0. Both compilers reject selecting this scalar; the Veryl-to-SV representation needs review.",
-        "upstream": []
-      },
-      "name": "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal",
-      "phase": "skip",
-      "status": "ignored"
-    },
-    {
-      "category": "Sequential",
       "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
       "expectation": "Simulation",
       "known_issue": {
@@ -7480,7 +7459,7 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 185,
+    "ignored": 184,
     "mismatch": 0,
     "passed": 456,
     "rejected": 8,
@@ -7512,5 +7491,14 @@
     ],
     "forced_results": "repros/inout_icarus.json",
     "note": "Only these exclusions were refreshed from focused default and forced runs; other rows retain their earlier observations."
+  },
+  "catalogue_removal": {
+    "date": "2026-09-28",
+    "veryl_revision": "3799a119518aadd75c5cc643eeeeaff87a631284",
+    "suite_version": "0.8.1",
+    "cases": [
+      "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal"
+    ],
+    "note": "This case was removed from the catalogue; upstream Veryl rejects a select on a scalar logic or bit, so the fixture can no longer be emitted or executed. Other rows, including the inout refresh, are retained from the earlier reports."
   }
 }

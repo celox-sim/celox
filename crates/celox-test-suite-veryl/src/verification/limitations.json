@@ -399,27 +399,6 @@
     }
   },
   {
-    "id": "sv_scalar_select",
-    "category": "sv_emission_issue",
-    "phase": "compile",
-    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
-    "reason": "Veryl emits an un-ranged scalar logic formal and then selects bit 0. Both compilers reject selecting this scalar; the Veryl-to-SV representation needs review.",
-    "upstream": [],
-    "evidence": [
-      "verification/limitations/verilator.json",
-      "verification/limitations/icarus.json",
-      "LIMITATIONS.md#sv-scalar-select"
-    ],
-    "cases": {
-      "verilator": [
-        "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal"
-      ],
-      "icarus": [
-        "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal"
-      ]
-    }
-  },
-  {
     "id": "sv_type_cast_syntax",
     "category": "sv_emission_issue",
     "phase": "compile",
