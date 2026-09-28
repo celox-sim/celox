@@ -45,8 +45,10 @@ all_backends! {
         @case "expression_semantics::aggregate_results_consume_the_unary_parent_context";
     }
 
-    #[ignore = "Deferred $bits fix: Celox returns 0xff; Veryl simulator panics; SV frontend unsupported. See celox-test-suite-veryl/MISMATCH_REVIEW.md section 2"]
     fn system_function_results_obey_ternary_width_contexts(sim) {
+        // Veryl 0.21.0 cannot evaluate this system function; the SV frontend
+        // cannot lower this assignment expression. See MISMATCH_REVIEW.md section 2.
+        @ignore_on(veryl, sv);
         @case "expression_semantics::system_function_results_obey_ternary_width_contexts";
     }
 
