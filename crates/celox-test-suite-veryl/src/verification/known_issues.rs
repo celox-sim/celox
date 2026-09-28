@@ -139,27 +139,33 @@ mod tests {
 
     #[test]
     fn limitations_only_exclude_cases_with_retained_failure_evidence() {
-        for (tool, contents) in [
-            (
-                "verilator",
-                include_str!("../../verification/limitations/verilator.json"),
-            ),
-            (
-                "icarus",
-                include_str!("../../verification/limitations/icarus.json"),
-            ),
-        ] {
-            let report: Value = serde_json::from_str(contents).unwrap();
+        for tool in ["verilator", "icarus"] {
             for group in limitations() {
                 let Some(cases) = group["cases"][tool].as_array() else {
                     continue;
                 };
                 assert!(!cases.is_empty());
+                // Use the evidence cited by the exclusion, including focused
+                // rechecks, without rewriting historical failure reports.
+                let reports: Vec<Value> = group["evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|path| {
+                        let path = path.as_str().unwrap();
+                        if !path.ends_with(".json") {
+                            return None;
+                        }
+                        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+                        let report: Value =
+                            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                        (report["tool"] == tool).then_some(report)
+                    })
+                    .collect();
                 for case in cases {
-                    let row = report["cases"]
-                        .as_array()
-                        .unwrap()
+                    let row = reports
                         .iter()
+                        .flat_map(|report| report["cases"].as_array().unwrap().iter())
                         .find(|row| row["name"] == *case)
                         .unwrap_or_else(|| panic!("missing retained {tool} failure for {case}"));
                     assert_eq!(row["phase"], group["phase"]);

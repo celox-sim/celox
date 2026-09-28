@@ -1,0 +1,62 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "compile function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal: Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: error: Function Top.update port value is not an input port.\n<case>/source_0.sv:7:      : Function arguments must be input ports.\n<case>/source_0.sv:9: error: Function Top.update port observed is not an input port.\n<case>/source_0.sv:9:      : Function arguments must be input ports.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "icarus_function_inout",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Icarus 13.0",
+        "reason": "Icarus 13.0 rejects inout function arguments (Function arguments must be input ports). Veryl analysis and SV emission succeed.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/inout_icarus.json",
+          "LIMITATIONS.md#icarus-function-inout"
+        ]
+      },
+      "name": "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "compile function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments: Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: error: Function Top.advance port value is not an input port.\n<case>/source_0.sv:9:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "icarus_function_inout",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Icarus 13.0",
+        "reason": "Icarus 13.0 rejects inout function arguments (Function arguments must be input ports). Veryl analysis and SV emission succeed.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/inout_icarus.json",
+          "LIMITATIONS.md#icarus-function-inout"
+        ]
+      },
+      "name": "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "phase": "compile",
+      "status": "compile_error"
+    }
+  ],
+  "counts": {
+    "compile_error": 2,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "schema_version": 2,
+  "suite_version": "0.8.1",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "veryl_revision": "d1f7025898b90dc5a8200e0b619b4b8f7bda357a",
+  "command": "cargo run -p celox-test-suite-veryl --all-features --bin verify-icarus -- --filter inout_ --include-ignored --jobs 1"
+}

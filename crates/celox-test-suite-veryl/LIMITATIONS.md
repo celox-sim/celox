@@ -50,7 +50,8 @@ Categories describe the observed blocker. A compilation rejection is not automat
 | [sv_type_cast_syntax](#sv-type-cast-syntax) | compile | 1 | 0 |
 | [verilator_variable_wildcard](#verilator-variable-wildcard) | compile | 1 | 0 |
 | [veryl_ff_effects](#veryl-ff-effects) | emission | 47 | 52 |
-| [veryl_inout_panic](#veryl-inout-panic) | emission | 2 | 2 |
+| [verilator_inout_dfg_crash](#verilator-inout-dfg-crash) | compile | 2 | 0 |
+| [icarus_function_inout](#icarus-function-inout) | compile | 0 | 2 |
 | [veryl_negative_for_bounds](#veryl-negative-for-bounds) | emission | 2 | 2 |
 | [veryl_runtime_system_calls](#veryl-runtime-system-calls) | emission | 4 | 4 |
 | [icarus_two_state_zero_division](#icarus-two-state-zero-division) | execute | 0 | 1 |
@@ -228,13 +229,45 @@ Category: `veryl_extension`. Observed stage: `emission`. Versions: Veryl 0.21.0;
 
 Affected cases: verilator 47, icarus 52. See the manifest for exact IDs.
 
-## veryl-inout-panic
+## Function inout recheck on develop
 
-Veryl 0.21.0 panics with entered unreachable code while emitting these function inout cases. No SV simulator is reached.
+Veryl `d1f7025898b90dc5a8200e0b619b4b8f7bda357a` supports function
+`inout logic` arguments. The old `inout tri logic` fixtures now receive
+`InvalidModifier::NetInFunction`, rather than the historical unreachable-code
+panic. The old observations remain in `verification/limitations/*.json` as
+historical evidence; `veryl_inout_panic` is no longer an active exclusion.
 
-Category: `veryl_emitter_bug`. Observed stage: `emission`. Versions: Veryl 0.21.0; Verilator 5.052 / Icarus 13.0.
+Both shared fixtures now omit `tri`. The clocked fixture computes its next
+state with the inout function in `always_comb`, then explicitly commits that
+state in `always_ff`. This retains pre-clock state and sampled/returned-value
+assertions without requiring an effectful function call inside `always_ff`.
+The case ID is retained for report continuity. A separate Celox test requires
+`SideEffectFunctionCallInAlwaysFf` for direct register copyout in `always_ff`.
 
-Affected cases: verilator 2, icarus 2. See the manifest for exact IDs.
+IEEE 1800-2023 13.5.2 distinguishes inout copy-in/copy-out from reference
+arguments: the actual is copied in on entry and updated on return. The comb
+fixture checks aliased input sampling before that copyout.
+
+The two positive cases run on Celox's native, Cranelift, Wasm, and interpreter
+backends. The comb case also runs on the Veryl reference simulator. The clocked
+case still fails there after the first tick (`state=0`, expected `7`), so only
+that reference variant remains ignored. Celox's SV frontend still rejects
+function inout arguments. [Backend observations](verification/repros/inout_backends.json)
+record these remaining exclusions separately from the resolved analyzer panic.
+
+### verilator-inout-dfg-crash
+
+Verilator 5.052 fails compiling both emitted functions with an internal
+`V3DfgSynthesize.cpp: Non-ReadOnly reference` error. Veryl analysis and SV
+emission succeed. Category: `simulator_crash`; stage: `compile`; affected cases:
+Verilator 2, Icarus 0. [Forced recheck](verification/repros/inout_verilator.json).
+
+### icarus-function-inout
+
+Icarus 13.0 rejects both emitted functions because their arguments include
+inout ports (`Function arguments must be input ports`). Veryl analysis and SV
+emission succeed. Category: `simulator_unsupported`; stage: `compile`; affected
+cases: Verilator 0, Icarus 2. [Forced recheck](verification/repros/inout_icarus.json).
 
 ## veryl-negative-for-bounds
 

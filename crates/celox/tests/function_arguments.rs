@@ -1,5 +1,32 @@
 use celox::Simulator;
 
+#[test]
+fn test_ff_inout_copyout_directly_to_register_is_rejected() {
+    let code = r#"
+        module Top (clk: input clock, state: output logic<8>, returned: output logic<8>) {
+            function advance (value: inout logic<8>) -> logic<8> {
+                let previous: logic<8> = value;
+                value += 8'd1;
+                return previous;
+            }
+            always_ff (clk) {
+                returned = advance(state);
+            }
+        }
+    "#;
+    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    let celox::SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+        panic!("expected analyzer rejection, got: {error:?}");
+    };
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            veryl_analyzer::AnalyzerError::SideEffectFunctionCallInAlwaysFf { .. }
+        )),
+        "expected SideEffectFunctionCallInAlwaysFf, got: {errors:?}"
+    );
+}
+
 #[path = "test_utils/mod.rs"]
 #[macro_use]
 #[allow(unused_macros)]
@@ -8,15 +35,15 @@ mod test_utils;
 // The SV frontend currently rejects output/inout function arguments.
 all_backends! {
 
-// Keep direct-syntax regressions ready for an upstream fix: Veryl 0.21.0's
-// conv_function matches only Input/Output for scalar formals and panics on Inout.
-#[ignore = "Veryl 0.21.0 conv_function panics on scalar inout arguments"]
 fn test_comb_inout_statement_copies_input_before_mutating_formal(sim) {
+    @ignore_on(sv);
     @case "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal";
 }
 
-#[ignore = "Veryl 0.21.0 conv_function panics on scalar inout arguments"]
+// Veryl d1f70258 leaves state at 0 after the first tick (expected 7).
+// Retained in verification/repros/inout_backends.json in the shared suite.
 fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
+    @ignore_on(veryl, sv);
     @case "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments";
 }
 
