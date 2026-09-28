@@ -118,6 +118,41 @@ runner by default while retaining the required result.
 
 ## 2. `$bits` and function-argument sizing: require the SV results
 
+**Celox follow-up (Veryl 0.21.0):** The runtime `$bits`/`$size` ternary fixture
+now passes native, Cranelift, Wasm, and interpreter. Celox derives their signedness
+from their signed integer results and variable signedness from its intrinsic type,
+rather than the analyzer's propagated sibling context. Those four ignores are
+removed. Forced checks still find an unresolved-system-function internal error
+in the Veryl 0.21.0 reference simulator and an unsupported
+`always_comb` assignment expression in the SV frontend, so those two variants
+remain ignored.
+
+This fixes expressions whose operators survive in AIR. It does **not** repair
+the all-constant probe below: Veryl folds those expressions before Celox receives
+them. The constant function-argument case likewise still reaches Celox as the
+incorrect literal `0`, so its exclusions remain. The original observations below
+are historical and describe the state before this Celox follow-up.
+
+The shared fixture covers `$bits` and `$size` with both a signed 8-bit arm
+(required sign extension to 32 bits) and an unsigned 40-bit arm, in combinational
+and clocked assignments. Both branch selections are checked.
+
+Related upstream work, checked on 2026-09-28:
+
+- [PR #3410](https://github.com/veryl-lang/veryl/pull/3410) fixes element widths,
+  `$bits` on unpacked arrays, and `$size` returning the leading dimension.
+- [Issue #2555](https://github.com/veryl-lang/veryl/issues/2555), resolved by
+  [PR #3449](https://github.com/veryl-lang/veryl/pull/3449), concerns the optional
+  dimension argument of `$size`.
+- [PR #2804](https://github.com/veryl-lang/veryl/pull/2804) fixes extension of
+  ternaries whose arms are both signed.
+
+These are merged but do not resolve this query-result signedness discrepancy.
+On upstream master `1a6c00adb3589d4d6a25e4e75508d5ed1dc91e8d`, the constant
+probe `if 1'b0 ? $size(logic<5>) : SIGNED_VALUE` still evaluates to `0xff`
+instead of `0xffffffff`, just like the `$bits` probe. No issue or PR directly
+addressing this return-signedness mismatch was found during this investigation.
+
 Both disagreements can be demonstrated using constants in a single
 [Veryl module](verification/repros/mismatches/constant_context.veryl), so neither
 clock scheduling nor the Rust/VPI adapters are involved.
