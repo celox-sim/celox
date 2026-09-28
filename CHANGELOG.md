@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2 (2026-09-28)
+
+## What's Changed
+* fix(veryl): preserve signedness of $bits and $size by @tignear in https://github.com/celox-sim/celox/pull/930
+* fix(frontend): refine cyclic connections at bit boundaries by @tignear in https://github.com/celox-sim/celox/pull/931
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.8.1...v0.8.2
+
 ## 0.8.1 (2026-09-27)
 
 ## What's Changed

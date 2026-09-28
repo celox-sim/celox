@@ -24,12 +24,29 @@ test("suite splits only long comparisons and runs all 72 backend cases exactly o
     }
   }
   for (const job of jobs) {
-    assert.ok(job.timeout_sec + 30 * 60 <= 360 * 60);
+    assert.ok(job.timeout_sec + 20 * 60 <= job.group_timeout_sec);
+    assert.ok(job.group_timeout_sec + 10 * 60 <= 360 * 60);
     if (job.test.endsWith("4hart") || job.test.endsWith("8hart")) assert.ok(job.timeout_sec > 3600);
   }
   assert.deepEqual(matrix({ test: "test_soc_66_smp_linux_boot_4hart", runner: "celox", arch: "aarch64" }).include,
     jobs.filter(j => j.test === "test_soc_66_smp_linux_boot_4hart" && j.arch === "aarch64" && j.group === "sync").map(j => ({ ...j, runner: "celox" })));
   for (const field of ["test", "runner", "arch"]) assert.throws(() => matrix({ [field]: "invalid" }), /Unknown suite/);
+});
+
+test("N=8 runner time remains available after a cold build inside the group budget", () => {
+  // The 2026-09-27 ARM native job built for 13m24s before starting its
+  // 5.5-hour runner timeout. An identical outer timeout killed it first.
+  const buildSeconds = 13 * 60 + 24;
+  const jobs = matrix({ test: "test_soc_smp_linux_boot_8hart", arch: "aarch64" }).include;
+  for (const job of jobs) {
+    assert.equal(job.timeout_sec, 19800);
+    assert.ok(buildSeconds + job.timeout_sec + 30 < job.group_timeout_sec,
+      `${job.runner}: group must allow the runner to finish and record its result`);
+  }
+  for (const runner of runners) {
+    assert.deepEqual(matrix({ test: "test_soc_smp_linux_boot_8hart", arch: "aarch64", runner }).include,
+      jobs.filter(job => job.runner === runner));
+  }
 });
 
 test("explicit backends retain their groups and run in the requested order within each group", () => {
