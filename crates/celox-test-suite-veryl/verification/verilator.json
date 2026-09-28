@@ -1732,27 +1732,6 @@
     },
     {
       "category": "Sequential",
-      "detail": "Veryl emits an un-ranged scalar logic formal and then selects bit 0. Both compilers reject selecting this scalar; the Veryl-to-SV representation needs review.",
-      "expectation": "Simulation",
-      "known_issue": {
-        "category": "sv_emission_issue",
-        "evidence": [
-          "verification/limitations/verilator.json",
-          "verification/limitations/icarus.json",
-          "LIMITATIONS.md#sv-scalar-select"
-        ],
-        "id": "sv_scalar_select",
-        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
-        "phase": "compile",
-        "reason": "Veryl emits an un-ranged scalar logic formal and then selects bit 0. Both compilers reject selecting this scalar; the Veryl-to-SV representation needs review.",
-        "upstream": []
-      },
-      "name": "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal",
-      "phase": "skip",
-      "status": "ignored"
-    },
-    {
-      "category": "Sequential",
       "detail": "Veryl 0.21.0 rejects function output or non-local effects in always_ff. These fixtures use the Celox extension; strict SV emission stops before either simulator runs.",
       "expectation": "Simulation",
       "known_issue": {
@@ -6224,7 +6203,7 @@
   "counts": {
     "compile_error": 0,
     "emission_error": 0,
-    "ignored": 82,
+    "ignored": 81,
     "mismatch": 0,
     "passed": 457,
     "rejected": 1,
@@ -6238,12 +6217,11 @@
   "tool": "verilator",
   "version": "Verilator 5.052 2026-09-05 rev v5.052",
   "partial_refresh": {
-    "date": "2026-09-27",
-    "suite_version": "0.8.0",
+    "date": "2026-09-28",
+    "suite_version": "0.8.1",
     "cases": [
-      "operators::test_ff_comb_constant_folding_consistency",
-      "operators::test_ff_constant_two_state_initialization"
+      "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal"
     ],
-    "note": "Only these cases were rerun; all other observations are retained from the earlier report."
+    "note": "This case was removed from the catalogue; upstream Veryl rejects a select on a scalar logic or bit, so the fixture can no longer be emitted or executed. All other rows, including the 2026-09-27 refresh, are retained from the earlier reports."
   }
 }

@@ -46,7 +46,6 @@ Categories describe the observed blocker. A compilation rejection is not automat
 | [sv_enum_conversion](#sv-enum-conversion) | compile | 1 | 1 |
 | [sv_mixed_assignment_patterns](#sv-mixed-assignment-patterns) | compile | 6 | 6 |
 | [sv_mux_port_shape](#sv-mux-port-shape) | compile | 2 | 0 |
-| [sv_scalar_select](#sv-scalar-select) | compile | 1 | 1 |
 | [sv_type_cast_syntax](#sv-type-cast-syntax) | compile | 1 | 0 |
 | [verilator_variable_wildcard](#verilator-variable-wildcard) | compile | 1 | 0 |
 | [veryl_ff_effects](#veryl-ff-effects) | emission | 47 | 52 |
@@ -195,14 +194,6 @@ Verilator rejects the emitted standard-library mux/demux connection because its 
 Category: `sv_emission_issue`. Observed stage: `compile`. Versions: Veryl 0.21.0; Verilator 5.052 / Icarus 13.0.
 
 Affected cases: verilator 2. See the manifest for exact IDs.
-
-## sv-scalar-select
-
-Veryl emits an un-ranged scalar logic formal and then selects bit 0. Both compilers reject selecting this scalar; the Veryl-to-SV representation needs review.
-
-Category: `sv_emission_issue`. Observed stage: `compile`. Versions: Veryl 0.21.0; Verilator 5.052 / Icarus 13.0.
-
-Affected cases: verilator 1, icarus 1. See the manifest for exact IDs.
 
 ## sv-type-cast-syntax
 
