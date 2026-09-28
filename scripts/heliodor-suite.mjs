@@ -57,6 +57,11 @@ export function matrix({ test = "", runner = "", arch = "", profile = false } = 
       // ARM N=8 Celox tiering reached 41M cycles at the former five-hour
       // limit; allow the measured ~44.3M-cycle boot to finish with headroom.
       timeout_sec: t.endsWith("8hart") ? 19800 : t.endsWith("4hart") ? 10800 : 3600,
+      // run_all also prepares the checkout and builds the Rust runners. The
+      // former 19800s group limit cut off an ARM N=8 boot at 43M cycles after
+      // a 13-minute build. Reserve 20 minutes beyond the longest runner limit,
+      // leaving about 10 minutes for setup, termination and artifact upload.
+      group_timeout_sec: 21000,
     }))),
   ).filter(job => job.runner && (!test || job.test === test) && (!arch || job.arch === arch)) };
 }

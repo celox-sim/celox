@@ -165,8 +165,10 @@ gh workflow run heliodor-bench.yml --ref <branch> \
   -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=aarch64
 ```
 
-Each group has a shared 5.5-hour budget, including building the runners,
-to preserve logs before the [hosted job's six-hour limit](https://docs.github.com/en/actions/reference/limits).
+Each group has a shared 5-hour-50-minute budget, including building the runners.
+This reserves 20 minutes beyond the longest per-runner timeout for checkout and
+Rust builds, with about 10 minutes left for setup, termination, and artifact upload
+before the [hosted job's six-hour limit](https://docs.github.com/en/actions/reference/limits).
 A timeout or missing backend fails the comparison, and partial results are never
 published as completed boots. The per-backend limits above also apply within
 this shared budget. Separate workflow runs, including different commits, can use different
