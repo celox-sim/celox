@@ -96,6 +96,9 @@ pub fn expression_signed(expr: &Expression) -> bool {
 pub fn factor_signed(factor: &Factor) -> bool {
     match factor {
         Factor::SystemFunctionCall(call) => match call.kind {
+            // IEEE 1800-2023 20.6.2: $bits returns a signed integer.
+            // Veryl's AIR currently marks this result unsigned.
+            SystemFunctionKind::Bits(_) => true,
             SystemFunctionKind::Signed(_) => true,
             SystemFunctionKind::Unsigned(_) => false,
             _ => call.comptime.r#type.signed,
@@ -112,10 +115,12 @@ pub fn factor_signed(factor: &Factor) -> bool {
             .unwrap_or(comptime.expr_context.signed),
         // VarSelect is a packed bit/part selection. Its value is unsigned;
         // VarIndex has already been split out and does not change signedness.
-        Factor::Variable(_, _, select, comptime) => {
-            select.is_empty() && comptime.expr_context.signed
+        // The declaration type retains intrinsic signedness even when the
+        // analyzer propagates an unsigned sibling into expr_context.
+        Factor::Variable(_, _, select, comptime) => select.is_empty() && comptime.r#type.signed,
+        Factor::HierVariable(reference) => {
+            reference.select.is_empty() && reference.comptime.r#type.signed
         }
-        Factor::HierVariable(reference) => reference.comptime.expr_context.signed,
         Factor::FunctionCall(call) => call.comptime.r#type.signed,
         Factor::Anonymous(comptime) | Factor::Unknown(comptime) => comptime.r#type.signed,
     }

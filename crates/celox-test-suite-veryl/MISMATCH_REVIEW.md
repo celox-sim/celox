@@ -118,6 +118,21 @@ runner by default while retaining the required result.
 
 ## 2. `$bits` and function-argument sizing: require the SV results
 
+**Celox follow-up (Veryl 0.21.0 and d1f70258):** The runtime `$bits` ternary fixture now
+passes native, Cranelift, Wasm, and interpreter. Celox derives `$bits` signedness
+from its signed integer result and variable signedness from its intrinsic type,
+rather than the analyzer's propagated sibling context. Those four ignores are
+removed. Forced checks still find an unresolved-system-function internal error
+in the Veryl 0.21.0 reference simulator (`0xff` with d1f70258) and an unsupported
+`always_comb` assignment expression in the SV frontend, so those two variants
+remain ignored.
+
+This fixes expressions whose operators survive in AIR. It does **not** repair
+the all-constant probe below: Veryl folds those expressions before Celox receives
+them. The constant function-argument case likewise still reaches Celox as the
+incorrect literal `0`, so its exclusions remain. The original observations below
+are historical and describe the state before this Celox follow-up.
+
 Both disagreements can be demonstrated using constants in a single
 [Veryl module](verification/repros/mismatches/constant_context.veryl), so neither
 clock scheduling nor the Rust/VPI adapters are involved.
