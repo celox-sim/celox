@@ -551,22 +551,35 @@
     }
   },
   {
-    "id": "veryl_inout_panic",
-    "category": "veryl_emitter_bug",
-    "phase": "emission",
-    "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
-    "reason": "Veryl 0.21.0 panics with entered unreachable code while emitting these function inout cases. No SV simulator is reached.",
+    "id": "verilator_inout_dfg_crash",
+    "category": "simulator_crash",
+    "phase": "compile",
+    "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Verilator 5.052",
+    "reason": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
     "upstream": [],
     "evidence": [
-      "verification/limitations/verilator.json",
-      "verification/limitations/icarus.json",
-      "LIMITATIONS.md#veryl-inout-panic"
+      "verification/repros/inout_verilator.json",
+      "LIMITATIONS.md#verilator-inout-dfg-crash"
     ],
     "cases": {
       "verilator": [
         "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal",
         "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments"
-      ],
+      ]
+    }
+  },
+  {
+    "id": "icarus_function_inout",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Icarus 13.0",
+    "reason": "Icarus 13.0 rejects inout function arguments (Function arguments must be input ports). Veryl analysis and SV emission succeed.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/inout_icarus.json",
+      "LIMITATIONS.md#icarus-function-inout"
+    ],
+    "cases": {
       "icarus": [
         "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal",
         "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments"

@@ -3595,19 +3595,18 @@
     },
     {
       "category": "Functions",
-      "detail": "Veryl 0.21.0 panics with entered unreachable code while emitting these function inout cases. No SV simulator is reached.",
+      "detail": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
       "expectation": "Simulation",
       "known_issue": {
-        "category": "veryl_emitter_bug",
+        "category": "simulator_crash",
         "evidence": [
-          "verification/limitations/verilator.json",
-          "verification/limitations/icarus.json",
-          "LIMITATIONS.md#veryl-inout-panic"
+          "verification/repros/inout_verilator.json",
+          "LIMITATIONS.md#verilator-inout-dfg-crash"
         ],
-        "id": "veryl_inout_panic",
-        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
-        "phase": "emission",
-        "reason": "Veryl 0.21.0 panics with entered unreachable code while emitting these function inout cases. No SV simulator is reached.",
+        "id": "verilator_inout_dfg_crash",
+        "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
         "upstream": []
       },
       "name": "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal",
@@ -3656,19 +3655,18 @@
     },
     {
       "category": "Functions",
-      "detail": "Veryl 0.21.0 panics with entered unreachable code while emitting these function inout cases. No SV simulator is reached.",
+      "detail": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
       "expectation": "Simulation",
       "known_issue": {
-        "category": "veryl_emitter_bug",
+        "category": "simulator_crash",
         "evidence": [
-          "verification/limitations/verilator.json",
-          "verification/limitations/icarus.json",
-          "LIMITATIONS.md#veryl-inout-panic"
+          "verification/repros/inout_verilator.json",
+          "LIMITATIONS.md#verilator-inout-dfg-crash"
         ],
-        "id": "veryl_inout_panic",
-        "observed_version": "Veryl 0.21.0; Verilator 5.052 / Icarus 13.0",
-        "phase": "emission",
-        "reason": "Veryl 0.21.0 panics with entered unreachable code while emitting these function inout cases. No SV simulator is reached.",
+        "id": "verilator_inout_dfg_crash",
+        "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
         "upstream": []
       },
       "name": "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
@@ -6217,11 +6215,32 @@
   "tool": "verilator",
   "version": "Verilator 5.052 2026-09-05 rev v5.052",
   "partial_refresh": {
+    "date": "2026-09-27",
+    "suite_version": "0.8.0",
+    "cases": [
+      "operators::test_ff_comb_constant_folding_consistency",
+      "operators::test_ff_constant_two_state_initialization"
+    ],
+    "note": "Only these cases were rerun; all other observations are retained from the earlier report."
+  },
+  "inout_refresh": {
     "date": "2026-09-28",
+    "veryl_revision": "d1f7025898b90dc5a8200e0b619b4b8f7bda357a",
+    "suite_version": "0.8.1",
+    "cases": [
+      "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal",
+      "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments"
+    ],
+    "forced_results": "repros/inout_verilator.json",
+    "note": "Only these exclusions were refreshed from focused default and forced runs; other rows retain their earlier observations."
+  },
+  "catalogue_removal": {
+    "date": "2026-09-28",
+    "veryl_revision": "3799a119518aadd75c5cc643eeeeaff87a631284",
     "suite_version": "0.8.1",
     "cases": [
       "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal"
     ],
-    "note": "This case was removed from the catalogue; upstream Veryl rejects a select on a scalar logic or bit, so the fixture can no longer be emitted or executed. All other rows, including the 2026-09-27 refresh, are retained from the earlier reports."
+    "note": "This case was removed from the catalogue; upstream Veryl rejects a select on a scalar logic or bit, so the fixture can no longer be emitted or executed. Other rows, including the inout refresh, are retained from the earlier reports."
   }
 }
