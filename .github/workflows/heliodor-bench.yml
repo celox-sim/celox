@@ -489,6 +489,7 @@ jobs:
       HELIODOR_TESTS: ${{ matrix.test }}
       HELIODOR_RUNNERS: ${{ matrix.runner }}
       HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}
+      HELIODOR_GROUP_TIMEOUT_SEC: ${{ matrix.group_timeout_sec }}
       HELIODOR_CELOX_CARGO_PROFILE: release
       CELOX_OPT_LEVEL: O2
       # Keep phase/progress evidence when a large workload times out.
@@ -535,8 +536,9 @@ jobs:
           trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
           set -o pipefail
           # run_all waits for each backend before starting the next one. Bound
-          # each group so artifacts survive the six-hour job limit.
-          /usr/bin/time -v timeout --kill-after=30s 19800s bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
+          # each group, including checkout/build time, separately from the
+          # per-runner limit so artifacts survive the six-hour job limit.
+          /usr/bin/time -v timeout --kill-after=30s "${HELIODOR_GROUP_TIMEOUT_SEC}s" bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-suite-output.txt
       - name: Verify complete selected results
         run: node scripts/heliodor-suite.mjs validate-results target/heliodor/results/results.tsv "$HELIODOR_TESTS" "$HELIODOR_RUNNERS"
       - name: Verify tiered promotion

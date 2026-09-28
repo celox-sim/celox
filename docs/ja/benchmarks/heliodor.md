@@ -150,7 +150,9 @@ gh workflow run heliodor-bench.yml --ref <branch> \
   -f suite_runner="celox-tiered veryl-cc-tiered" -f suite_arch=aarch64
 ```
 
-各グループの実行上限はビルドを含めて 5.5 時間です。
+各グループの実行上限はビルドを含めて 5 時間 50 分です。
+最長のバックエンド実行枠とは別に、checkout と Rust ビルドのために 20 分を確保し、
+セットアップ・終了処理・成果物アップロード用に約 10 分を残します。
 [GitHub ホストジョブの 6 時間上限](https://docs.github.com/en/actions/reference/limits)までにログを保存するためです。
 時間切れやバックエンドの結果欠落は比較失敗とし、途中結果を
 完走ベンチマークとして公開しません。各バックエンドの個別上限もこの共通予算内で適用します。
