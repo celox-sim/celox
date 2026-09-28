@@ -499,7 +499,6 @@ fn detect_hierarchical_true_concat_feedback_loop() {
 }
 
 #[test]
-#[ignore = "Veryl 0.20.1 post-pass2 reports this conservative hierarchical comb loop before celox bit-level analysis"]
 fn test_hierarchical_read_slice_feedback_should_not_form_loop() {
     let code = r#"
         module Child (
