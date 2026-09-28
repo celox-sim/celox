@@ -1177,7 +1177,7 @@ mod tests {
             .into_iter()
             .collect();
         let atomized = atomize_logic_paths(
-            &vec![repeated_path.clone()],
+            std::slice::from_ref(&repeated_path),
             &boundaries,
             &HashMap::default(),
             &mut arena,
