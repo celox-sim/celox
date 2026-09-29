@@ -1095,7 +1095,10 @@ fn emit_slice_chunks(
             instrs.push(Instruction::I64ShrU);
         }
 
-        if bits_in_chunk < remaining {
+        // Pull from the next source word only when this output word crosses
+        // a boundary. Wasm shifts by 64 wrap to zero and would OR the next
+        // word into a complete, aligned output word.
+        if bits_in_chunk < chunk_width {
             emit_wide_get_chunk(instrs, src, chunk_idx + 1);
             instrs.push(Instruction::I64Const(bits_in_chunk as i64));
             instrs.push(Instruction::I64Shl);
@@ -5963,6 +5966,8 @@ fn emit_trigger_detection(
 
 #[cfg(test)]
 mod bit_count_tests {
+    mod slice_tests;
+
     use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
     use wasmtime::{Engine, Linker, Memory, Module as WasmtimeModule, Store};
