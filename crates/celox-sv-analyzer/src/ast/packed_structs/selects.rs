@@ -183,6 +183,7 @@ pub(in crate::ast) fn variable_member(
         &leaf_select,
         syntax_tree,
         &member_dimensions(&path[0], r#type, dimensions),
+        true,
     )?;
     finish_lvalue(&path, offset, r#type, relative, dimensions)
 }
@@ -217,6 +218,7 @@ pub(in crate::ast) fn net_member(
         &leaf_select,
         syntax_tree,
         &member_dimensions(&path[0], r#type, dimensions),
+        true,
     )?;
     finish_lvalue(&path, offset, r#type, relative, dimensions)
 }

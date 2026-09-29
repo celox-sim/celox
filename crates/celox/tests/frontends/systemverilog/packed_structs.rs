@@ -286,3 +286,34 @@ sv_backends! {
         }
     }
 }
+
+sv_backends! {
+    fn packed_struct_alias_packed_dimensions(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] raw, output logic [15:0] whole,
+                           output logic [7:0] high, low, output logic [31:0] widths);
+                    typedef struct packed { logic [3:0] a, b; } t;
+                    typedef t [1:0] pair_t;
+                    pair_t value;
+                    assign value = raw;
+                    assign whole = value;
+                    assign high = value[1];
+                    assign low = value[0];
+                    localparam WIDTHS = $bits(pair_t) + $bits(value) + $size(value);
+                    assign widths = WIDTHS;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("struct_alias_dimensions.sv"))], "Top")
+            .four_state(true);
+        let raw = sim.signal("raw");
+        for (value, mask) in [(0u16, 0u16), (0xabcd, 0), (0x1234, 0x8041), (0xffff, 0xffff)] {
+            sim.modify(|io| io.set_four_state(raw, value.into(), mask.into())).unwrap();
+            assert_eq!(sim.get_four_state(sim.signal("whole")), (value.into(), mask.into()));
+            assert_eq!(sim.get_four_state(sim.signal("high")), ((value >> 8).into(), (mask >> 8).into()));
+            assert_eq!(sim.get_four_state(sim.signal("low")), ((value & 255).into(), (mask & 255).into()));
+            assert_eq!(sim.get(sim.signal("widths")), 34u32.into());
+        }
+    }
+}

@@ -151,6 +151,13 @@ fn add_type_alias_from_data_declaration(
     let Some(r#type) = r#type else {
         return Ok(());
     };
+    let r#type = type_with_fallback_ranges_with_env(
+        r#type,
+        RefNode::DataType(&declaration.nodes.1),
+        syntax_tree,
+        const_env,
+        aliases,
+    );
     let r#type = type_with_unpacked_ranges(
         r#type,
         unpacked_ranges_from_variable_dimensions_with_env(

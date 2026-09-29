@@ -25,7 +25,13 @@ pub(super) fn net_lvalue_from_node(
                 RefNode::PsOrHierarchicalNetIdentifier(&identifier.nodes.0),
                 syntax_tree,
             )?;
-            lvalue_from_constant_select(name, &identifier.nodes.1, syntax_tree, packed_dimensions)
+            lvalue_from_constant_select(
+                name,
+                &identifier.nodes.1,
+                syntax_tree,
+                packed_dimensions,
+                false,
+            )
         }
         _ => None,
     }
@@ -52,10 +58,45 @@ pub(super) fn variable_lvalue_from_node(
                 RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
                 syntax_tree,
             )?;
-            lvalue_from_select(name, &identifier.nodes.2, syntax_tree, packed_dimensions)
+            lvalue_from_select(
+                name,
+                &identifier.nodes.2,
+                syntax_tree,
+                packed_dimensions,
+                false,
+            )
         }
         _ => None,
     }
+}
+
+fn constant_packed_indices_in_range(
+    name: &str,
+    indices: &[ConstExpr],
+    dimensions: &PackedDimensions,
+) -> bool {
+    let Some(variable) = dimensions.get(name) else {
+        return false;
+    };
+    if indices.len() > variable.packed.len().max(1) {
+        return false;
+    }
+    indices.iter().enumerate().all(|(position, index)| {
+        let Some(index) = eval_ast_const_expr(index, &dimensions.const_env) else {
+            return false;
+        };
+        let Some(dimension) = variable.packed.get(position) else {
+            // A scalar integral member can only select bit zero.
+            return index == 0;
+        };
+        let (Some(left), Some(right)) = (
+            eval_ast_const_expr(&dimension.left, &dimensions.const_env),
+            eval_ast_const_expr(&dimension.right, &dimensions.const_env),
+        ) else {
+            return false;
+        };
+        (left.min(right)..=left.max(right)).contains(&index)
+    })
 }
 
 pub(super) fn lvalue_from_select(
@@ -63,6 +104,7 @@ pub(super) fn lvalue_from_select(
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
+    require_constant_in_range: bool,
 ) -> Option<LValue> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
@@ -82,6 +124,14 @@ pub(super) fn lvalue_from_select(
             ))
         })
         .collect::<Option<Vec<_>>>()?;
+    // Struct members cannot use the raw-vector fallback: an invalid index
+    // would otherwise become a different bit or the entire member.
+    if require_constant_in_range
+        && !constant_packed_indices_in_range(&name, &indices, packed_dimensions)
+    {
+        return None;
+    }
+
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;
@@ -201,6 +251,7 @@ pub(super) fn lvalue_from_constant_select(
     select: &sv_parser::ConstantSelect,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
+    require_constant_in_range: bool,
 ) -> Option<LValue> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
@@ -212,6 +263,14 @@ pub(super) fn lvalue_from_constant_select(
             )
         })
         .collect::<Option<Vec<_>>>()?;
+    // Struct members cannot use the raw-vector fallback: an invalid index
+    // would otherwise become a different bit or the entire member.
+    if require_constant_in_range
+        && !constant_packed_indices_in_range(&name, &indices, packed_dimensions)
+    {
+        return None;
+    }
+
     if let Some(range) = &select.nodes.2 {
         let sv_parser::ConstantPartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;
