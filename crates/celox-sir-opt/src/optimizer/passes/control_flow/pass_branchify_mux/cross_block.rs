@@ -720,7 +720,7 @@ pub(super) fn find_cross_block_group_branchify_plan(
             (muxes[0].mux_idx, root.0, *inverted as u8)
         });
 
-        for ((branch_cond, _), muxes) in groups {
+        for ((branch_cond, condition_inverted), muxes) in groups {
             let first_mux_idx = muxes[0].mux_idx;
             if !cross_group_value_available(
                 &cfg,
@@ -811,6 +811,14 @@ pub(super) fn find_cross_block_group_branchify_plan(
                 continue;
             }
 
+            // The branch uses the resolved predicate, while the collected
+            // definitions still follow the original Mux condition. Inverted
+            // groups must swap the computations along with their edge values.
+            let (true_defs, false_defs) = if condition_inverted {
+                (false_defs, true_defs)
+            } else {
+                (true_defs, false_defs)
+            };
             let plan = CrossBlockGroupBranchifyPlan {
                 block_id,
                 first_mux_idx,
