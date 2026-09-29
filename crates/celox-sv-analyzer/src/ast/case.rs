@@ -204,11 +204,13 @@ pub(super) fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimension
                     || (expr_is_two_state(condition, packed_dimensions)
                         && expr_is_two_state(else_expr, packed_dimensions)))
         }
-        Expr::Call { name, args } if name == "$countones" && args.len() == 1 => true,
-        Expr::Call { name, .. } => packed_dimensions
-            .function_return_types
-            .get(name)
-            .is_some_and(|metadata| metadata.is_2state),
+        Expr::Call { name, args } => {
+            typecheck::bit_vector_function_return_type(name, args.len()).is_some()
+                || packed_dimensions
+                    .function_return_types
+                    .get(name)
+                    .is_some_and(|metadata| metadata.is_2state)
+        }
     }
 }
 
@@ -351,14 +353,12 @@ pub(super) fn two_state_case_item_reachability(
             .into_iter()
             .map(|(name, r#type)| (name, r#type.signed)),
     );
-    let selector_signed = if let Expr::Call { name, .. } = &selector {
-        packed_dimensions
-            .function_return_types
-            .get(name)
-            .map(|metadata| metadata.signed)
-    } else {
-        expr_signedness(&selector, &identifiers, &HashMap::default())
-    };
+    let selector_signed = expr_signedness_with_return_types(
+        &selector,
+        &identifiers,
+        &HashMap::default(),
+        &packed_dimensions.function_return_types,
+    );
     let Some(selector_signed) = selector_signed else {
         return has_duplicate.then_some((duplicate_reachability, default_index.is_some()));
     };

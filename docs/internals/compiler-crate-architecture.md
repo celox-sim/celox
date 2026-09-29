@@ -80,6 +80,15 @@ lowering converts unknown bits to zero and uses the shared `PopCount` operation,
 including for vectors wider than a machine word. Constant arguments are limited
 to expression forms supported by the existing constant evaluator.
 
+`$onehot`, `$onehot0`, and `$isunknown` are also supported in constant and
+runtime expressions, including combinational and clocked processes and module
+port connections. Each returns a one-bit unsigned, two-state `bit`; the operand
+retains its own width regardless of the result's context. `$onehot` and
+`$onehot0` count only known one bits, while `$isunknown` detects either X or Z
+(IEEE 1800-2023 section 20.9, "Bit vector system functions"). These operations
+support packed integral operands, including vectors wider than a machine word;
+general unpacked bit-stream operands and `$countbits` remain unsupported.
+
 Each adapter projects parser-native identities into the source-independent
 `SourceVarId` namespace before constructing core symbolic structures. Veryl IDs
 therefore remain in the Veryl adapter and its source sidecars; they do not enter

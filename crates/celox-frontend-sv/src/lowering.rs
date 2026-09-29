@@ -2331,7 +2331,9 @@ fn lower_glue_parent_expr(
                 source_ids,
             ))
         }
-        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => {
+        sv::ir::Expr::Call { name, args }
+            if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
+        {
             let arg = &args[0];
             let width =
                 sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
@@ -2346,7 +2348,7 @@ fn lower_glue_parent_expr(
                 None,
             )?;
             Some((
-                lower_countones_slt(arena, inner, context_width, context_signed)?,
+                lower_bit_vector_function_slt(arena, name, inner, context_width, context_signed)?,
                 sources,
                 source_ids,
             ))
@@ -3232,10 +3234,10 @@ fn lower_lvalue_target(
         .then(|| LogicPathTarget::Var(VarAtomBase::new(target_id, lsb, msb)))
 }
 
-// IEEE 1800-2023 20.9: X/Z do not contribute and the result is a signed int.
-// PopCount operates on known bits and has a minimal unsigned result width.
-fn lower_countones_slt<A: std::hash::Hash + Eq + Clone>(
+// IEEE 1800-2023 20.9: count only known ones; predicates return a two-state bit.
+fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
+    name: &str,
     inner: NodeId,
     context_width: Option<usize>,
     context_signed: Option<bool>,
@@ -3243,9 +3245,43 @@ fn lower_countones_slt<A: std::hash::Hash + Eq + Clone>(
     let known = arena
         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
         .ok()?;
-    let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
-    let result = coerce_node_width(arena, count, Some(32), false).ok()?;
-    coerce_node_width(arena, result, context_width, context_signed.unwrap_or(true)).ok()
+    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, 1)?;
+    let result = if name == "$isunknown" {
+        // Case inequality detects either X or Z, including unknown bits whose
+        // value plane is zero and would disappear during two-state conversion.
+        arena
+            .alloc(SLTNode::Binary(inner, BinaryOp::NeCase, known))
+            .ok()?
+    } else {
+        let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
+        // PopCount has a minimal unsigned width; $countones returns signed int.
+        let count = coerce_node_width(arena, count, Some(32), false).ok()?;
+        if name == "$countones" {
+            count
+        } else {
+            let one = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(1u8),
+                    BigUint::default(),
+                    32,
+                    false,
+                ))
+                .ok()?;
+            let op = if name == "$onehot" {
+                BinaryOp::Eq
+            } else {
+                BinaryOp::LeU
+            };
+            arena.alloc(SLTNode::Binary(count, op, one)).ok()?
+        }
+    };
+    coerce_node_width(
+        arena,
+        result,
+        Some(context_width.unwrap_or(width)),
+        context_signed.unwrap_or(signed),
+    )
+    .ok()
 }
 
 fn lower_expr(
@@ -3778,7 +3814,9 @@ fn lower_expr_with_context(
                 sources,
             ))
         }
-        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => {
+        sv::ir::Expr::Call { name, args }
+            if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
+        {
             let arg = &args[0];
             let width =
                 sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
@@ -3793,7 +3831,7 @@ fn lower_expr_with_context(
                 None,
             )?;
             Some((
-                lower_countones_slt(arena, inner, context_width, context_signed)?,
+                lower_bit_vector_function_slt(arena, name, inner, context_width, context_signed)?,
                 sources,
             ))
         }
@@ -5352,7 +5390,10 @@ fn sv_glue_expr_is_signed(
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
-        sv::ir::Expr::Call { name, args } => name == "$countones" && args.len() == 1,
+        sv::ir::Expr::Call { name, args } => {
+            sv::typecheck::bit_vector_function_return_type(name, args.len())
+                .is_some_and(|(_, signed)| signed)
+        }
         sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
@@ -5407,7 +5448,10 @@ fn sv_expr_is_signed_with_parameters(
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
-        sv::ir::Expr::Call { name, args } => name == "$countones" && args.len() == 1,
+        sv::ir::Expr::Call { name, args } => {
+            sv::typecheck::bit_vector_function_return_type(name, args.len())
+                .is_some_and(|(_, signed)| signed)
+        }
         sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
@@ -5705,8 +5749,9 @@ fn sv_expr_natural_width(
                     parameter_types,
                 )?),
         ),
-        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(32),
-        sv::ir::Expr::Call { .. } => None,
+        sv::ir::Expr::Call { name, args } => {
+            sv::typecheck::bit_vector_function_return_type(name, args.len()).map(|(width, _)| width)
+        }
     }
 }
 
@@ -6217,7 +6262,9 @@ fn lower_expr_to_sir_with_context(
             builder.emit(SIRInstruction::Mux(reg, condition, then_expr, else_expr));
             Some(reg)
         }
-        sv::ir::Expr::Call { name, args } if name == "$countones" && args.len() == 1 => {
+        sv::ir::Expr::Call { name, args }
+            if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
+        {
             let arg = &args[0];
             let width =
                 sv_expr_natural_width(arg, variables, name_to_id, constants, parameter_types)?;
@@ -6233,14 +6280,41 @@ fn lower_expr_to_sir_with_context(
             )?;
             let known = builder.alloc_bit(width, false);
             builder.emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, inner));
-            let count = builder.alloc_bit(UnaryOp::PopCount.result_width(width), false);
-            builder.emit(SIRInstruction::Unary(count, UnaryOp::PopCount, known));
-            let result = resize_sir_register(builder, count, 32, false)?;
+            let (return_width, signed) =
+                sv::typecheck::bit_vector_function_return_type(name, args.len())?;
+            let result = if name == "$isunknown" {
+                let result = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Binary(
+                    result,
+                    inner,
+                    BinaryOp::NeCase,
+                    known,
+                ));
+                result
+            } else {
+                let count = builder.alloc_bit(UnaryOp::PopCount.result_width(width), false);
+                builder.emit(SIRInstruction::Unary(count, UnaryOp::PopCount, known));
+                let count = resize_sir_register(builder, count, 32, false)?;
+                if name == "$countones" {
+                    count
+                } else {
+                    let one = builder.alloc_bit(32, false);
+                    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+                    let result = builder.alloc_bit(1, false);
+                    let op = if name == "$onehot" {
+                        BinaryOp::Eq
+                    } else {
+                        BinaryOp::LeU
+                    };
+                    builder.emit(SIRInstruction::Binary(result, count, op, one));
+                    result
+                }
+            };
             resize_sir_register(
                 builder,
                 result,
-                context_width.unwrap_or(32),
-                context_signed.unwrap_or(true),
+                context_width.unwrap_or(return_width),
+                context_signed.unwrap_or(signed),
             )
         }
         sv::ir::Expr::Call { .. } => None,
