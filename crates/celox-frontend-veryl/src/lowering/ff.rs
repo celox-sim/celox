@@ -909,11 +909,9 @@ impl<'a> FfParser<'a> {
             }
             dest
         } else {
-            let mask_val = (BigUint::from(1u64) << target_width) - BigUint::from(1u64);
-            let mask = ir_builder.alloc_bit(target_width, false);
-            ir_builder.emit(SIRInstruction::Imm(mask, SIRValue::new(mask_val)));
             let dest = alloc_like_source(ir_builder, target_width, signed);
-            ir_builder.emit(SIRInstruction::Binary(dest, reg, BinaryOp::And, mask));
+            // Resizing transports X/Z bits; a bitwise mask would turn Z into X.
+            ir_builder.emit(SIRInstruction::Slice(dest, reg, 0, target_width));
             dest
         }
     }

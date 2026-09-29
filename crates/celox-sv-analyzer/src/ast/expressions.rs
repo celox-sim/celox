@@ -298,7 +298,9 @@ pub(super) fn expr_from_function_subroutine_call(
         };
         let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
         let args = call.nodes.1.nodes.1.0.contents();
-        if name != "$countones" || args.len() != 1 || call.nodes.1.nodes.1.1.is_some() {
+        if typecheck::bit_vector_function_return_type(name, args.len()).is_none()
+            || call.nodes.1.nodes.1.1.is_some()
+        {
             return None;
         }
         let arg =

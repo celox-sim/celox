@@ -1557,15 +1557,11 @@ impl SIRTranslator {
                     });
 
                 let mut res_masks = match op {
-                    // Bitwise ops: mask is preserved per-chunk
-                    UnaryOp::Ident | UnaryOp::BitNot => {
-                        let mut masks = r_masks.clone();
-                        masks.truncate(final_num_chunks);
-                        while masks.len() < final_num_chunks {
-                            masks.push(state.builder.ins().iconst(types::I64, 0));
-                        }
-                        masks
-                    }
+                    // Widen scalar masks to i64 before constructing a chunked
+                    // result, just as emit_wide_unary does for the payload.
+                    UnaryOp::Ident | UnaryOp::BitNot => (0..final_num_chunks)
+                        .map(|i| get_chunk_as_i64(state.builder, &r_masks, i))
+                        .collect(),
                     UnaryOp::ToTwoState => (0..final_num_chunks)
                         .map(|_| state.builder.ins().iconst(types::I64, 0))
                         .collect(),

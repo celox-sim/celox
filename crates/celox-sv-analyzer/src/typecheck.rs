@@ -14,6 +14,18 @@ pub struct IntegralLiteral {
     pub mask: BigUint,
 }
 
+/// Width and signedness of the supported bit vector system functions (20.9).
+pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
+    if arity != 1 {
+        return None;
+    }
+    match name {
+        "$countones" => Some((32, true)),
+        "$onehot" | "$onehot0" | "$isunknown" => Some((1, false)),
+        _ => None,
+    }
+}
+
 pub fn resolve_packed_width(ranges: &[PackedRange]) -> Option<usize> {
     resolve_packed_width_with_env(ranges, &HashMap::default())
 }
@@ -700,7 +712,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             let value = eval_const_function(name, args, &HashMap::default())?;
             let (width, signing) = match name.as_str() {
                 "$clog2" | "$countones" => (32, "s"),
-                "$onehot" | "$onehot0" => (1, ""),
+                "$onehot" | "$onehot0" | "$isunknown" => (1, ""),
                 _ => return None,
             };
             parse_integral_literal(&format!("{width}'{signing}d{value}"))
@@ -987,6 +999,13 @@ fn eval_const_function(
     };
     match name {
         "$clog2" => clog2(eval_const_expr(arg, constants)?),
+        "$isunknown" => {
+            if let Some(literal) = self_determined_integral_literal(arg) {
+                Some((literal.mask != BigUint::default()) as i128)
+            } else {
+                eval_const_expr(arg, constants).map(|_| 0)
+            }
+        }
         "$countones" | "$onehot" | "$onehot0" => {
             let value = const_expr_known_one_bits(arg, constants)?;
             let ones = value.iter_u64_digits().map(u64::count_ones).sum::<u32>();
