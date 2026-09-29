@@ -1658,7 +1658,7 @@ fn collect_system_function_effects(
 ) {
     match &call.kind {
         SystemFunctionKind::Bits(input)
-        | SystemFunctionKind::Size(input)
+        | SystemFunctionKind::Size(input, _)
         | SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)

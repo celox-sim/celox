@@ -402,7 +402,7 @@ fn collect_parent_output_address_sources(
                         Ok(())
                     }
                     SystemFunctionKind::Bits(_)
-                    | SystemFunctionKind::Size(_)
+                    | SystemFunctionKind::Size(..)
                     | SystemFunctionKind::Readmemh(_, _)
                     | SystemFunctionKind::Finish => Ok(()),
                 }

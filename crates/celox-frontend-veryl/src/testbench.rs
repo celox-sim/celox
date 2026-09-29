@@ -906,7 +906,7 @@ fn collect_system_function_reads(
     };
     match kind {
         SystemFunctionKind::Bits(input)
-        | SystemFunctionKind::Size(input)
+        | SystemFunctionKind::Size(input, _)
         | SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
@@ -3122,7 +3122,7 @@ fn validate_testbench_system_function(
     };
     match kind {
         SystemFunctionKind::Bits(input)
-        | SystemFunctionKind::Size(input)
+        | SystemFunctionKind::Size(input, _)
         | SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
