@@ -204,10 +204,9 @@ pub(super) fn expr_signedness_with_return_types(
                 function_return_types,
             )?,
         ),
-        Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(true),
-        Expr::Call { name, .. } => functions
-            .get(name)
-            .map(|function| function.return_signed)
+        Expr::Call { name, args } => typecheck::bit_vector_function_return_type(name, args.len())
+            .map(|(_, signed)| signed)
+            .or_else(|| functions.get(name).map(|function| function.return_signed))
             .or_else(|| {
                 function_return_types
                     .get(name)

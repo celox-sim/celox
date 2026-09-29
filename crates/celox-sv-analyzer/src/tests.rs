@@ -3736,6 +3736,65 @@ fn folds_countones_with_self_determined_argument_types() {
 }
 
 #[test]
+fn folds_bit_vector_predicates_with_self_determined_argument_types() {
+    let ir = analyze_source(
+        r#"
+            module Top #(
+                parameter H = $onehot(8'b0x0z_0001),
+                parameter H0 = $onehot('x),
+                parameter Z = $onehot0('z),
+                parameter U = $isunknown(256'hx),
+                parameter K = $isunknown(-1),
+                parameter B = $bits($onehot(8'd1)),
+                parameter D = $size($isunknown('z)),
+                parameter logic [7:0] MASK = 8'hfe,
+                parameter SELECTED = $onehot(MASK[0]),
+                parameter SELECTED_ZERO = $onehot0(MASK[0]),
+                parameter UNKNOWN_Z = $isunknown(1'bz),
+                parameter SUM = $onehot(8'hff + 8'd1),
+                parameter MIXED = $isunknown(1'bx ? 4'b1010 : 4'b1000)
+            ) (output logic y);
+                assign y = H;
+            endmodule
+        "#,
+        Path::new("bit_vector_predicate_constants.sv"),
+    )
+    .expect("bit vector predicates should be evaluated with their declared return types");
+    let module = &ir.modules()[0];
+    assert_eq!(module.parameters().len(), 13);
+    for (parameter, expected) in module
+        .parameters()
+        .iter()
+        .zip([1, 0, 1, 1, 0, 1, 1, 254, 0, 1, 1, 0, 1])
+    {
+        assert_eq!(
+            parameter.resolved_value(),
+            Some(expected),
+            "{}",
+            parameter.name()
+        );
+    }
+    for index in [0, 1, 2, 3, 4, 8, 9, 10, 11, 12] {
+        assert_eq!(module.parameters()[index].resolved_width(), Some(1));
+        assert_eq!(module.parameters()[index].resolved_signed(), Some(false));
+    }
+}
+
+#[test]
+fn rejects_malformed_constant_bit_vector_function_calls() {
+    for name in ["$countones", "$onehot", "$onehot0", "$isunknown"] {
+        for args in ["", "1, 1", ", 1", "1,"] {
+            let source =
+                format!("module Top(output logic y); assign y = {name}({args}); endmodule");
+            assert!(
+                analyze_source(&source, Path::new("invalid_system_function.sv")).is_err(),
+                "{name}({args})"
+            );
+        }
+    }
+}
+
+#[test]
 fn folds_supported_system_functions() {
     let ir = analyze_source(
         r#"

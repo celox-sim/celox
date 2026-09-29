@@ -974,7 +974,10 @@ fn const_expr_from_function_subroutine_call(
         _ => return None,
     };
     let name = syntax_tree.get_str(&identifier.nodes.0)?.to_string();
-    if name == "$countones" {
+    if matches!(
+        name.as_str(),
+        "$countones" | "$onehot" | "$onehot0" | "$isunknown"
+    ) {
         // Use expression lowering so selections are never silently discarded
         // by the limited constant-primary identifier path below. Unsupported
         // constant argument forms must remain unresolved rather than counting
