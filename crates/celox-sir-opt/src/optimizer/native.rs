@@ -46,7 +46,13 @@ pub fn optimize_merged_chain(
         skip_final_schedule: false,
         element_widths: Arc::clone(&element_widths),
     }
-    .run(eu, &PassOptions::default());
+    .run(
+        eu,
+        &PassOptions {
+            four_state,
+            ..PassOptions::default()
+        },
+    );
     verify(eu, "after native block optimization")?;
     // The native function is assembled after the ordinary per-EU pipeline.
     // Merging exposes constants and control-flow facts across the old EU
