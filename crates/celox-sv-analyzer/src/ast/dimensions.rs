@@ -199,11 +199,16 @@ fn size_function_expression_type(
         selected_expression_first_dimension_width(argument, syntax_tree, &packed_dimensions)
             .or_else(|| match &expression {
                 Expr::Ident(name) => variable_size_function_width(const_env, name, true),
-                Expr::Call { name, args } if name == "$countones" && args.len() == 1 => Some(32),
-                Expr::Call { name, .. } => packed_dimensions
-                    .function_return_types
-                    .get(name)
-                    .and_then(|metadata| metadata.first_packed_dimension_width),
+                Expr::Call { name, args } => {
+                    typecheck::bit_vector_function_return_type(name, args.len())
+                        .map(|(width, _)| width)
+                        .or_else(|| {
+                            packed_dimensions
+                                .function_return_types
+                                .get(name)
+                                .and_then(|metadata| metadata.first_packed_dimension_width)
+                        })
+                }
                 _ => expr_static_width(&expression, &packed_dimensions),
             })
     } else {

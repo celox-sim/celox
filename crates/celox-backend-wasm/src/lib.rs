@@ -1095,9 +1095,8 @@ fn emit_slice_chunks(
             instrs.push(Instruction::I64ShrU);
         }
 
-        // Pull from the next source word only when this output word crosses
-        // a boundary. Wasm shifts by 64 wrap to zero and would OR the next
-        // word into a complete, aligned output word.
+        // Only join the next source chunk when this destination chunk crosses
+        // a boundary. Shifting by 64 would wrap to zero in Wasm.
         if bits_in_chunk < chunk_width {
             emit_wide_get_chunk(instrs, src, chunk_idx + 1);
             instrs.push(Instruction::I64Const(bits_in_chunk as i64));

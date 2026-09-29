@@ -316,14 +316,9 @@ impl SLTToSIRLowerer {
             return dest;
         }
 
-        let mask_val = (BigUint::from(1u64) << width) - BigUint::from(1u64);
-        let mask_reg = builder.alloc_bit(current_width, false);
-        builder.emit(SIRInstruction::Imm(mask_reg, SIRValue::new(mask_val)));
-        let masked = alloc_like_source(builder, current_width, signed);
-        builder.emit(SIRInstruction::Binary(masked, reg, BinaryOp::And, mask_reg));
-        let sliced = self.slice_reg(builder, masked, &BitAccess::new(0, width - 1));
         let dest = alloc_like_source(builder, width, signed);
-        builder.emit(SIRInstruction::Unary(dest, UnaryOp::Ident, sliced));
+        // Truncation preserves the selected four-state bits, including Z.
+        builder.emit(SIRInstruction::Slice(dest, reg, 0, width));
         dest
     }
 }

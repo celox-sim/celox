@@ -56,6 +56,7 @@ export function affectsHeliodorArm64(files) {
           "crates/celox/src/backend.rs",
           "crates/celox-bench/src/bin/celox-heliodor.rs",
           "scripts/run-heliodor-bench.sh",
+          "scripts/heliodor-revision",
           "scripts/setup-arm64-backend-dev.sh",
           "scripts/tests/run-heliodor-bench-gate.sh",
         ].includes(path),

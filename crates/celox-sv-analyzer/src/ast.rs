@@ -104,7 +104,7 @@ use functions::{
 };
 use inlining::{
     expand_assignment_calls, expand_expr_calls, expand_ff_process_calls, expand_process_calls,
-    expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
+    expr_signedness_with_return_types, substitute_expr_idents,
 };
 use instances::{
     connection_references_net, expr_ident_name, identifier_text, instances_from_module_node,

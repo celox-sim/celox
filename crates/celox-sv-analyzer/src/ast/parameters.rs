@@ -805,7 +805,7 @@ pub(super) fn infer_const_expr_type(
                 width: 32,
                 signed: true,
             }),
-            "$onehot" | "$onehot0" => Some(ExprType {
+            "$onehot" | "$onehot0" | "$isunknown" => Some(ExprType {
                 width: 1,
                 signed: false,
             }),

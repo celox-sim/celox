@@ -33,7 +33,7 @@ begin before design analysis; source-file loading and building the benchmark
 executables with Cargo are excluded.
 The TSV retains `compile_elapsed_ns` for tiered startup, not the total background
 compiler time. Each synchronous and tiered Veryl-CC run uses its own empty AOT-C
-cache. Historical synchronous Veryl-CC measurements keep their original series.
+cache.
 A partial boot, projected completion time, or compile-only result is not a
 successful execution result.
 
@@ -68,7 +68,9 @@ HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.
 
 The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
 `veryl-cc-tiered` on x86-64. The nightly AArch64 job measures the same four
-backends. Publishing requires both tiered results for each architecture.
+backends. All pinned jobs use `scripts/heliodor-revision`. Each successful
+suite backend publishes immediately, without waiting for other backends,
+workloads, or architectures. Failed runs remain failures in CI.
 
 The first run needs network access to obtain the pinned Heliodor checkout. The
 script prints the selected revisions, build configuration, completion status,
@@ -104,11 +106,10 @@ Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours 
 AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
 execution modes preserves useful same-CPU comparisons with time for builds.
 Different groups may use different CPUs. CPU and host identity are retained in
-each artifact, and publication requires every group's complete successful results.
+each artifact. Each successful backend publishes independently.
 Each runner has a one-hour timeout for 1/2 harts,
 three hours for 4 harts, and five and a half hours for 8 harts;
 timeouts and incomplete runs fail the job and are not published as timings.
-The nightly publisher requires the complete suite on both architectures.
 The suite applies testbench adjustment `8hart-100m-v1`: the 8-hart Veryl test
 gets the same 100-million-cycle budget as its upstream Verilator wrapper,
 replacing the stale 30-million-cycle limit. The shutdown assertion is unchanged.
@@ -128,9 +129,8 @@ The separate HEAD compatibility job skips only upstream revision
 CI records this as a known-source exclusion, not a successful simulation.
 Every other upstream HEAD remains eligible for the compatibility test.
 
-The dashboard labels each kernel and hart count separately. Expanded results
-use separate history from the older fixed gate because the design revision is
-different. Each chart retains the same compilation, execution, and tiered timing
+The dashboard shows the current suite, with each kernel and hart count labeled
+separately. Each chart uses the compilation, execution, and tiered timing
 definitions described above. These large jobs do not run on pull requests.
 
 For example, to run the Linux 6.6 four-hart workload locally:
@@ -145,7 +145,8 @@ bash scripts/run-heliodor-bench.sh run
 
 For a focused manual rerun, set `suite_test`, `suite_runner`, and/or `suite_arch`
 in the workflow dispatch inputs. Empty inputs select the complete suite. Filtered
-runs skip the historical gate and never publish dashboard history. For example:
+runs skip the gate. Successful results from manual runs on `master` publish
+individually; runs on other branches do not publish. For example:
 
 ```bash
 gh workflow run heliodor-bench.yml --ref <branch> \
@@ -169,7 +170,7 @@ Each group has a shared 5-hour-50-minute budget, including building the runners.
 This reserves 20 minutes beyond the longest per-runner timeout for checkout and
 Rust builds, with about 10 minutes left for setup, termination, and artifact upload
 before the [hosted job's six-hour limit](https://docs.github.com/en/actions/reference/limits).
-A timeout or missing backend fails the comparison, and partial results are never
-published as completed boots. The per-backend limits above also apply within
+A timeout or missing backend fails CI. Completed backends still publish;
+incomplete boots do not publish timings. The per-backend limits above also apply within
 this shared budget. Separate workflow runs, including different commits, can use different
 CPUs; their history is not a same-host comparison.
