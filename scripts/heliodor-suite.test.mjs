@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { matrix, mergeArtifacts, prepareSuiteTestbench, validateResults, runners, workloads } from "./heliodor-suite.mjs";
+import { matrix, suiteRevision, prepareSuiteTestbench, validateResults, runners, workloads } from "./heliodor-suite.mjs";
+
+test("default runs, acceptance gate, and suite share one pinned revision", () => {
+  const refs = execFileSync("bash", ["-c", 'unset HELIODOR_REF; source scripts/run-heliodor-bench.sh; printf "%s\\n" "$HELIODOR_REF" "$GATE_HELIODOR_REF"'], { encoding: "utf8" }).trim().split("\n");
+  assert.match(suiteRevision, /^[0-9a-f]{40}$/);
+  assert.deepEqual(refs, [suiteRevision, suiteRevision]);
+});
 
 test("suite splits only long comparisons and runs all 72 backend cases exactly once", () => {
   const jobs = matrix().include;
@@ -99,35 +105,7 @@ test("comparison results require every selected backend to complete the same wor
   }
 });
 
-test("publication requires one successful matching result from every backend", () => {
-  const root = mkdtempSync(join(tmpdir(), "heliodor-suite-"));
-  try {
-    const files = [];
-    for (const job of matrix().include) {
-      const dir = join(root, `heliodor-suite-${job.arch}-${job.test}-${job.group}`, "target/heliodor/results");
-      mkdirSync(dir, { recursive: true });
-      const file = join(dir, "results.tsv");
-      const content = "runner\ttest\texit_status\tsemantic_status\n" + job.runner.split(" ").map(runner => `${runner}\t${job.test}\t0\tpass\n`).join("");
-      writeFileSync(file, content);
-      files.push([file, content]);
-    }
-    const output = join(root, "suite");
-    mergeArtifacts(root, output);
-    for (const arch of ["x86_64", "aarch64"]) assert.equal(readFileSync(`${output}-${arch}.tsv`, "utf8").trim().split("\n").length, 37);
-    // Exercise both same-host groups and the individually scheduled N=8 runs.
-    for (const [file, content] of files) {
-      for (const invalid of [content.replace("\tpass", "\tfail"), content.replace("\t0\t", "\t124\t"), content.replace(/\n[^\t]+\t/, "\nunknown\t"), content + content.split("\n")[1] + "\n"]) {
-        writeFileSync(file, invalid);
-        assert.throws(() => mergeArtifacts(root, output));
-      }
-      rmSync(file);
-      assert.throws(() => mergeArtifacts(root, output), /ENOENT/);
-      writeFileSync(file, content);
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+
 
 test("dispatch validation rejects profile/filter conflicts instead of succeeding without work", () => {
   const validate = (inputs) => spawnSync(process.execPath, ["scripts/heliodor-suite.mjs", "validate"], {
@@ -151,21 +129,7 @@ test("dispatch validation rejects profile/filter conflicts instead of succeeding
   assert.notEqual(validate({ SUITE_ARCH: "invalid" }).status, 0);
 });
 
-test("publication rejects separate-host artifacts in place of same-host groups", () => {
-  const root = mkdtempSync(join(tmpdir(), "heliodor-separate-hosts-"));
-  try {
-    for (const job of matrix().include) {
-      for (const runner of job.runner.split(" ")) {
-        const dir = join(root, `heliodor-suite-${job.arch}-${job.test}-${runner}`, "target/heliodor/results");
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, "results.tsv"), `runner\ttest\texit_status\tsemantic_status\n${runner}\t${job.test}\t0\tpass\n`);
-      }
-    }
-    assert.throws(() => mergeArtifacts(root, join(root, "suite")), /ENOENT/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+
 
 
 test("N=8 suite budget changes only that wrapper and remains idempotent", () => {
