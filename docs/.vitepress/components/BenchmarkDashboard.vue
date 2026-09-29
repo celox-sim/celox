@@ -299,7 +299,8 @@ function stripPrefix(name: string): string {
 }
 
 function isRetiredBenchmark(name: string): boolean {
-  return name.startsWith("heliodor-cranelift-x86_64/")
+  return /\/heliodor_linux_boot_/.test(name)
+    || name.startsWith("heliodor-cranelift-x86_64/")
     || name.startsWith("heliodor-cranelift-aarch64/");
 }
 

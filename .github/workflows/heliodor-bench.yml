@@ -12,6 +12,9 @@ on:
       - "crates/**"
       - "!crates/celox-napi/package.json"
       - "scripts/convert-heliodor-bench.mjs"
+      - "scripts/heliodor-revision"
+      - "scripts/publish-heliodor-bench.mjs"
+      - "scripts/publish-heliodor-bench.test.mjs"
       - "scripts/heliodor-suite.mjs"
       - "scripts/heliodor-suite.test.mjs"
       - "scripts/ci-changes.mjs"
@@ -120,15 +123,15 @@ jobs:
       - name: Test benchmark conversion fixtures
         shell: bash
         run: |
-          node --test scripts/heliodor-suite.test.mjs
+          node --test scripts/heliodor-suite.test.mjs scripts/publish-heliodor-bench.test.mjs
           bash scripts/tests/convert-heliodor-bench.sh
           bash scripts/tests/run-heliodor-bench-results.sh
           bash scripts/tests/run-heliodor-bench-gate.sh
 
   heliodor:
-    if: ${{ !inputs.arm64_profile && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch }}
-    # Keep the x86_64 gate on every workflow trigger. Only the ARM64 PR lane is
-    # change-gated by arm64-changes below.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    # Nightly and manual suite jobs already measure this workload. PRs and
+    # master pushes exercise the acceptance gate without running the full suite.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -211,6 +214,20 @@ jobs:
           node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json --require-tiered
           node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-jit.json --jit-only
 
+      - name: Select matching JIT history
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          git fetch --depth=1 origin gh-pages
+          git show FETCH_HEAD:dev/bench/data.js > heliodor-history.js
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            import { comparisonHistory } from "./scripts/publish-heliodor-bench.mjs";
+            const metrics = JSON.parse(readFileSync("heliodor-jit.json", "utf8"));
+            const history = comparisonHistory(readFileSync("heliodor-history.js", "utf8"), metrics);
+            writeFileSync("heliodor-jit-history.json", JSON.stringify(history));
+          '
+
       - name: Compare generated-JIT benchmark
         if: github.event_name == 'pull_request'
         uses: benchmark-action/github-action-benchmark@v1
@@ -218,6 +235,7 @@ jobs:
           name: Heliodor Benchmarks
           tool: customSmallerIsBetter
           output-file-path: heliodor-jit.json
+          external-data-json-path: heliodor-jit-history.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
           auto-push: false
@@ -290,8 +308,8 @@ jobs:
             target/heliodor-arm64/results/*.log
 
   arm64-linux-boot-full:
-    name: Nightly ARM64 Linux boot
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch)
+    name: ARM64 Linux boot profiling
+    if: github.event_name == 'workflow_dispatch' && inputs.arm64_profile
     permissions:
       contents: read
       actions: read
@@ -473,7 +491,7 @@ jobs:
     name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }}, ${{ matrix.group }})
     needs: linux-suite-matrix
     permissions:
-      contents: read
+      contents: write
     strategy:
       fail-fast: false
       # The full suite has 26 long-running jobs per branch. Leave runner
@@ -483,9 +501,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     env:
-      # Keep expanded workloads separate from the historical fixed gate.
-      HELIODOR_REF: 6285682fa0a514077da9d17fee385c7841160025
       HELIODOR_SUITE: "1"
+      # Each successful backend publishes before the next backend starts.
+      HELIODOR_PUBLISH_ARCH: ${{ github.ref == 'refs/heads/master' && matrix.arch || '' }}
       HELIODOR_TESTS: ${{ matrix.test }}
       HELIODOR_RUNNERS: ${{ matrix.runner }}
       HELIODOR_TIMEOUT_SEC: ${{ matrix.timeout_sec }}
@@ -559,81 +577,6 @@ jobs:
             heliodor-suite-output.txt
             target/heliodor/results/results.tsv
             target/heliodor/results/*.log
-
-  publish-linux-boot:
-    name: Publish Linux boot benchmarks
-    if: >-
-      !cancelled() &&
-      needs.heliodor.result == 'success' &&
-      needs.arm64-linux-boot-full.result == 'success' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
-      !inputs.arm64_profile &&
-      github.ref == 'refs/heads/master'
-    needs: [heliodor, arm64-linux-boot-full, linux-suite]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: heliodor-benchmark
-          path: artifacts/x86_64
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: heliodor-arm64-linux-boot-full
-          path: artifacts/native-aarch64
-
-      - name: Convert backend and CPU architecture results
-        shell: bash
-        run: |
-          native_results="$(find artifacts/x86_64 -path '*/gate_*/results.tsv' -type f -print -quit)"
-          arm64_results="$(find artifacts/native-aarch64 -name results.tsv -type f -print -quit)"
-          if [[ -z "$native_results" || -z "$arm64_results" ]]; then
-            echo "Could not find every Linux boot results.tsv artifact" >&2
-            exit 1
-          fi
-          node scripts/convert-heliodor-bench.mjs \
-            "$native_results" heliodor-published.json \
-            --arm64-results "$arm64_results" --require-tiered
-
-      - uses: actions/download-artifact@v8
-        if: needs.linux-suite.result == 'success' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
-        with:
-          pattern: heliodor-suite-*
-          path: artifacts/suite
-
-      - name: Convert expanded Linux suite
-        if: needs.linux-suite.result == 'success' && !inputs.suite_test && !inputs.suite_runner && !inputs.suite_arch
-        shell: bash
-        run: |
-          node scripts/heliodor-suite.mjs merge artifacts/suite suite
-          node scripts/convert-heliodor-bench.mjs suite-x86_64.tsv heliodor-suite.json --arm64-results suite-aarch64.tsv --require-tiered --suite
-          node --input-type=module -e '
-            import { readFileSync, writeFileSync } from "node:fs";
-            const read = (path) => JSON.parse(readFileSync(path, "utf8"));
-            writeFileSync("heliodor-published.json", JSON.stringify([...read("heliodor-published.json"), ...read("heliodor-suite.json")]));
-          '
-
-      - name: Store Heliodor benchmark history
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: Heliodor Benchmarks
-          tool: customSmallerIsBetter
-          output-file-path: heliodor-published.json
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench
-          auto-push: true
-          alert-threshold: "110%"
-          fail-on-alert: false
-          comment-on-alert: false
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   heliodor-head:
     name: Heliodor HEAD compatibility

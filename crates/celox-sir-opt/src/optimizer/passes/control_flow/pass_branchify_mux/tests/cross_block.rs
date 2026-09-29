@@ -659,6 +659,87 @@ fn moves_pure_arm_dags_from_dominating_blocks() {
 }
 
 #[test]
+fn grouped_muxes_preserve_boolean_alias_polarity() {
+    for inversions in 0..=2 {
+        let mut instructions = vec![
+            imm(3, 3),
+            SIRInstruction::Unary(RegisterId(18), crate::ir::UnaryOp::LogicNot, RegisterId(0)),
+            SIRInstruction::Unary(RegisterId(19), crate::ir::UnaryOp::LogicNot, RegisterId(18)),
+        ];
+        append_mul_chain(&mut instructions, 1, 3, &[4, 5, 6, 7, 8, 9]);
+        append_mul_chain(&mut instructions, 2, 3, &[10, 11, 12, 13, 14, 15]);
+        let condition = RegisterId([0, 18, 19][inversions]);
+        let mut eu = cfg_unit(
+            20,
+            &[0, 18, 19],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions,
+                    terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Mux(
+                            RegisterId(16),
+                            condition,
+                            RegisterId(9),
+                            RegisterId(15),
+                        ),
+                        SIRInstruction::Mux(
+                            RegisterId(17),
+                            condition,
+                            RegisterId(9),
+                            RegisterId(15),
+                        ),
+                        store(0, 16),
+                        store(1, 17),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        eu.verify_result().unwrap();
+        let plan = find_cross_block_group_branchify_plan(&eu)
+            .expect("shared expensive arms should form one branch group");
+        let mut next_block = 2;
+        let mut next_register = 19;
+        apply_cross_block_group_branchify(&mut eu, plan, &mut next_block, &mut next_register);
+        eu.verify_result().unwrap();
+
+        let SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &eu.blocks[&BlockId(1)].terminator
+        else {
+            panic!("group should branch on the resolved condition");
+        };
+        assert_eq!(*cond, RegisterId(0));
+        for (root_truth, target) in [(true, true_block.0), (false, false_block.0)] {
+            let selected = RegisterId(if root_truth ^ (inversions == 1) {
+                9
+            } else {
+                15
+            });
+            let arm = &eu.blocks[&target];
+            assert!(
+                arm.instructions
+                    .iter()
+                    .any(|inst| def_reg(inst) == Some(selected))
+            );
+            assert!(matches!(
+                &arm.terminator,
+                SIRTerminator::Jump(_, args) if args == &[selected, selected]
+            ));
+        }
+    }
+}
+
+#[test]
 fn branches_once_for_multiple_muxes_sharing_an_arm_dag() {
     let mut register_map = HashMap::default();
     for reg in 0..26 {

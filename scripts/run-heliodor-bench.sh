@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HELIODOR_REPO="${HELIODOR_REPO:-https://github.com/dalance/heliodor.git}"
-HELIODOR_REF="${HELIODOR_REF:-a78d04730cf2b37c616e039b4a5bd437c1cfd355}"
+readonly PINNED_HELIODOR_REF="$(cat "$SCRIPT_DIR/heliodor-revision")"
+HELIODOR_REF="${HELIODOR_REF:-$PINNED_HELIODOR_REF}"
 HELIODOR_DIR="${HELIODOR_DIR:-$CELOX_ROOT/target/heliodor/source}"
 # Runners chdir into the checkout before resolving --project and source paths.
 HELIODOR_DIR="$(realpath -m "$HELIODOR_DIR")"
@@ -61,11 +62,11 @@ if [[ -n "$HELIODOR_CELOX_EXECUTION_PREFIX" ]]; then
     read -r -a CELOX_EXECUTION_PREFIX <<<"$HELIODOR_CELOX_EXECUTION_PREFIX"
 fi
 
-readonly GATE_HELIODOR_REF=a78d04730cf2b37c616e039b4a5bd437c1cfd355
+readonly GATE_HELIODOR_REF="$PINNED_HELIODOR_REF"
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=420
 # The Heliodor testbench observes `pass` after 10,000-cycle chunks.
-readonly GATE_EXPECTED_CYCLE=87cda0
+readonly GATE_EXPECTED_CYCLE=d83790
 readonly GATE_EXPECTED_X3=aa
 
 # Populated only while `gate` owns detached Heliodor worktrees. Keeping these
@@ -1634,6 +1635,12 @@ run_one() {
                 result_valid=0
                 echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
             fi
+            if [[ "$runner" == celox-tiered && "$semantic_status" == pass && -n "${HELIODOR_PUBLISH_ARCH:-}" ]]; then
+                if ! validate_gate_tiered_stats "$log" "$test"; then
+                    semantic_status=invalid
+                    result_valid=0
+                fi
+            fi
             ;;
         veryl-cc-sync|veryl-cc-tiered)
             if classify_timed_veryl_result "$log" "$test" "$process_status" "$HELIODOR_COMPILE_ONLY"; then
@@ -1685,6 +1692,12 @@ run_one() {
     fi
 }
 
+publish_result() {
+    [[ -n "${HELIODOR_PUBLISH_ARCH:-}" ]] || return 0
+    node "$SCRIPT_DIR/publish-heliodor-bench.mjs" \
+        "$HELIODOR_RESULTS_DIR/results.tsv" "$HELIODOR_PUBLISH_ARCH"
+}
+
 run_all() {
     validate_compile_only_runners || return "$?"
     validate_native_image_mode || return "$?"
@@ -1708,7 +1721,13 @@ run_all() {
     local overall=0
     for test in $HELIODOR_TESTS; do
         for runner in $HELIODOR_RUNNERS; do
-            run_one "$runner" "$test" || overall="$?"
+            if run_one "$runner" "$test"; then
+                # Publish before starting the next backend. A failed backend
+                # must not hold back completed measurements from this host.
+                publish_result || overall="$?"
+            else
+                overall="$?"
+            fi
         done
     done
     return "$overall"
@@ -2060,6 +2079,7 @@ run_gate() {
     # cannot silently weaken this contract.
     HELIODOR_REPO=https://github.com/dalance/heliodor.git
     HELIODOR_REF="$GATE_HELIODOR_REF"
+    HELIODOR_SUITE=0
     HELIODOR_DIR="$CELOX_ROOT/target/heliodor/source"
     HELIODOR_RESULTS_DIR="$base_results_dir"
     HELIODOR_TOOLS_DIR="$CELOX_ROOT/target/heliodor/tools"
