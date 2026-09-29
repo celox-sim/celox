@@ -298,8 +298,8 @@ fn child_output_driver_ranges(
                 }
                 continue;
             };
-            for (actual_id, access) in accesses {
-                if actual_id == signal_id {
+            for OutputLvalueAccess { signal, access, .. } in accesses {
+                if signal == signal_id {
                     drivers.push((
                         drivers.len(),
                         Some((access.lsb as i128, access.msb as i128)),
@@ -314,9 +314,12 @@ fn child_output_driver_ranges(
 fn output_connection_targets_signal(expr: &sv::ir::Expr, signal_name: &str) -> bool {
     match expr {
         sv::ir::Expr::Ident(name) => name == signal_name,
-        sv::ir::Expr::Select { expr, .. } | sv::ir::Expr::Resize { expr, .. } => {
-            output_connection_targets_signal(expr, signal_name)
-        }
+        sv::ir::Expr::Select { expr, .. }
+        | sv::ir::Expr::Resize { expr, .. }
+        | sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::ToTwoState,
+            expr,
+        } => output_connection_targets_signal(expr, signal_name),
         sv::ir::Expr::Concat(parts) => parts
             .iter()
             .any(|part| output_connection_targets_signal(part, signal_name)),
@@ -1600,7 +1603,8 @@ fn build_instance_glue(
                         None,
                     ));
                 };
-                let target_width = accesses.iter().try_fold(0usize, |width, (_, access)| {
+                let target_width = accesses.iter().try_fold(0usize, |width, target| {
+                    let access = &target.access;
                     width.checked_add(access.msb - access.lsb + 1)
                 });
                 let Some(target_width) = target_width.filter(|target_width| *target_width != 0)
@@ -1626,7 +1630,12 @@ fn build_instance_glue(
                     child_var.signed,
                 )?;
                 let mut child_lsb = target_width;
-                for (parent_signal_id, access) in accesses {
+                for OutputLvalueAccess {
+                    signal: parent_signal_id,
+                    access,
+                    is_2state,
+                } in accesses
+                {
                     let parent_var = &parent_variables[&parent_signal_id];
                     let part_width = access.msb - access.lsb + 1;
                     child_lsb -= part_width;
@@ -1644,7 +1653,7 @@ fn build_instance_glue(
                         Some(part_width),
                         child_var.signed,
                     )?;
-                    if !parent_var.is_4state {
+                    if is_2state || !parent_var.is_4state {
                         expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                     }
                     let mut sources = HashSet::default();
@@ -1724,13 +1733,19 @@ fn output_lvalue_access(
     }
 }
 
+struct OutputLvalueAccess {
+    signal: SourceVarId,
+    access: BitAccess,
+    is_2state: bool,
+}
+
 fn output_lvalue_accesses(
     expr: &sv::ir::Expr,
     variables: &HashMap<SourceVarId, SvVariable>,
     name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<Vec<(SourceVarId, BitAccess)>> {
+) -> Option<Vec<OutputLvalueAccess>> {
     match expr {
         sv::ir::Expr::Concat(parts) if !parts.is_empty() => {
             let mut accesses = Vec::new();
@@ -1748,8 +1763,29 @@ fn output_lvalue_accesses(
         sv::ir::Expr::Resize { expr, .. } => {
             output_lvalue_accesses(expr, variables, name_to_id, constants, parameter_types)
         }
-        _ => output_lvalue_access(expr, variables, name_to_id, constants, parameter_types)
-            .map(|access| vec![access]),
+        sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::ToTwoState,
+            expr,
+        } => {
+            // A bit member carries a read conversion in the analyzed expression.
+            // For an output connection, retain its target and apply that conversion
+            // to the incoming value, even when the enclosing struct is four-state.
+            let mut accesses =
+                output_lvalue_accesses(expr, variables, name_to_id, constants, parameter_types)?;
+            for access in &mut accesses {
+                access.is_2state = true;
+            }
+            Some(accesses)
+        }
+        _ => output_lvalue_access(expr, variables, name_to_id, constants, parameter_types).map(
+            |(signal, access)| {
+                vec![OutputLvalueAccess {
+                    signal,
+                    access,
+                    is_2state: false,
+                }]
+            },
+        ),
     }
 }
 

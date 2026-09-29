@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "packed_structs/port_connections.rs"]
+mod port_connections;
+
 sv_backends! {
     fn packed_struct_layout_and_nested_fields(sim) {
         @setup {
