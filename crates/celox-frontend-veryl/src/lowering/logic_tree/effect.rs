@@ -136,7 +136,7 @@ fn collect_system_function_effect(
             return Ok(boundaries);
         }
         SystemFunctionKind::Bits(_)
-        | SystemFunctionKind::Size(_)
+        | SystemFunctionKind::Size(..)
         | SystemFunctionKind::Readmemh(_, _)
         | SystemFunctionKind::Finish => return Ok(BoundaryMap::default()),
         SystemFunctionKind::Display(_)
@@ -574,7 +574,7 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
                 expression_contains_runtime_effect(module, &input.0)
             }
             SystemFunctionKind::Bits(_)
-            | SystemFunctionKind::Size(_)
+            | SystemFunctionKind::Size(..)
             | SystemFunctionKind::Readmemh(_, _)
             | SystemFunctionKind::Finish => false,
         },
@@ -695,7 +695,7 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                     expression_contains_runtime_effect(module, &input.0)
                 }
                 SystemFunctionKind::Bits(_)
-                | SystemFunctionKind::Size(_)
+                | SystemFunctionKind::Size(..)
                 | SystemFunctionKind::Display(_)
                 | SystemFunctionKind::Write(_)
                 | SystemFunctionKind::Assert { .. }
@@ -1119,7 +1119,7 @@ fn collect_factor_effects(
             collect_function_call_effects(module, store, call, arena, collector)
         }
         Factor::SystemFunctionCall(call) => match &call.kind {
-            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => Ok(()),
+            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => Ok(()),
             SystemFunctionKind::Clog2(input)
             | SystemFunctionKind::Onehot(input)
             | SystemFunctionKind::Signed(input)

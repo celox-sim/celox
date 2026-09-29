@@ -209,7 +209,7 @@ impl Checker<'_, '_> {
     fn system_call(&mut self, call: &SystemFunctionCall) {
         match &call.kind {
             SystemFunctionKind::Bits(x)
-            | SystemFunctionKind::Size(x)
+            | SystemFunctionKind::Size(x, _)
             | SystemFunctionKind::Clog2(x)
             | SystemFunctionKind::Onehot(x)
             | SystemFunctionKind::Signed(x)

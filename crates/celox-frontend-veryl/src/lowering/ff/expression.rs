@@ -1,6 +1,7 @@
 use super::{Domain, FfParser, FunctionArrayLiteralItemCache, FunctionArrayView};
 use crate::context_width::{
     ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
+    system_function_dimension, system_function_type_size,
 };
 use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
@@ -43,7 +44,7 @@ pub(super) fn expression_has_side_effect(expr: &Expression) -> bool {
                 !call.outputs.is_empty() || call.inputs.values().any(expression_has_side_effect)
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
-                SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => false,
                 SystemFunctionKind::Clog2(input)
                 | SystemFunctionKind::Onehot(input)
                 | SystemFunctionKind::Signed(input)
@@ -1077,7 +1078,7 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Factor::SystemFunctionCall(call) => match &call.kind {
-                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => {}
                     SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
@@ -1238,7 +1239,7 @@ impl<'a> FfParser<'a> {
                 Factor::SystemFunctionCall(call) => match &call.kind {
                     // Reflection queries are compile-time constants and do
                     // not evaluate their operand during expression lowering.
-                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => {}
                     SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
@@ -3135,18 +3136,6 @@ impl<'a> FfParser<'a> {
             .map(|width| width * ty.total_array().unwrap_or(1))
     }
 
-    fn system_function_type_size(ty: &Type) -> Option<usize> {
-        if let Some(size) = ty.array.first() {
-            *size
-        } else if let Some(size) = ty.width_expr().first().and_then(|expr| expr.numeric()) {
-            Some(size)
-        } else if let Some(size) = ty.width().first() {
-            *size
-        } else {
-            ty.total_width()
-        }
-    }
-
     fn system_function_input_bits_width(
         &self,
         input: &veryl_analyzer::ir::SystemFunctionInput,
@@ -3159,12 +3148,23 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn system_function_input_size(&self, input: &veryl_analyzer::ir::SystemFunctionInput) -> usize {
+    fn system_function_input_size(
+        &self,
+        input: &veryl_analyzer::ir::SystemFunctionInput,
+        dimension: usize,
+    ) -> usize {
         let comptime = input.0.comptime();
         match &comptime.value {
-            ValueVariant::Type(ty) => Self::system_function_type_size(ty).unwrap_or(0),
-            _ => Self::system_function_type_size(&comptime.r#type)
-                .unwrap_or_else(|| self.get_expression_width(&input.0)),
+            ValueVariant::Type(ty) => system_function_type_size(ty, dimension).unwrap_or(0),
+            _ => system_function_type_size(&comptime.r#type, dimension).unwrap_or_else(|| {
+                // Only the leading dimension can fall back to the evaluated
+                // expression's own width.
+                if dimension == 1 {
+                    self.get_expression_width(&input.0)
+                } else {
+                    0
+                }
+            }),
         }
     }
 
@@ -3183,8 +3183,15 @@ impl<'a> FfParser<'a> {
                 self.op_constant(SIRValue::new(width as u64), 32, ir_builder);
                 Ok(())
             }
-            SystemFunctionKind::Size(input) => {
-                let size = self.system_function_input_size(input);
+            SystemFunctionKind::Size(input, dimension) => {
+                let dimension = system_function_dimension(dimension.as_ref()).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "$size dimension",
+                        "the dimension must be a compile-time value",
+                        Some(&call.comptime.token),
+                    )
+                })?;
+                let size = self.system_function_input_size(input, dimension);
                 self.op_constant(SIRValue::new(size as u64), 32, ir_builder);
                 Ok(())
             }
