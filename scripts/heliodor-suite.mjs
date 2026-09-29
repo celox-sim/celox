@@ -88,7 +88,7 @@ export function validateResults(file, test, expectedRunners) {
   return lines;
 }
 
-export const suiteRevision = "6285682fa0a514077da9d17fee385c7841160025";
+export const suiteRevision = readFileSync(new URL("./heliodor-revision", import.meta.url), "utf8").trim();
 export const suiteTestbench = "8hart-100m-v1";
 
 // The pinned Veryl N=8 wrapper still budgets 30M cycles, while its Verilator
@@ -135,24 +135,6 @@ function restoreSuiteTestbench(directory) {
   writeFileSync(path, original);
 }
 
-// Require every planned group, including the explicitly split long runs.
-// Do not accept separate-host artifacts in place of a same-host group.
-// A partial manual rerun must never be accepted as a full nightly result.
-export function mergeArtifacts(root, outputPrefix) {
-  const output = new Map();
-  let header;
-  for (const job of matrix().include) {
-    const name = `heliodor-suite-${job.arch}-${job.test}-${job.group}`;
-    const file = join(root, name, "target/heliodor/results/results.tsv");
-    const lines = validateResults(file, job.test, job.runner.split(" "));
-    header ??= lines[0];
-    if (lines[0] !== header) throw new Error(`${name}: inconsistent TSV header`);
-    if (!output.has(job.arch)) output.set(job.arch, []);
-    output.get(job.arch).push(...lines.slice(1));
-  }
-  for (const [arch, rows] of output) writeFileSync(`${outputPrefix}-${arch}.tsv`, [header, ...rows, ""].join("\n"));
-}
-
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (process.argv[2] === "matrix" || process.argv[2] === "validate") {
     const result = matrix({ test: process.env.SUITE_TEST, runner: process.env.SUITE_RUNNER, arch: process.env.SUITE_ARCH, profile: process.env.ARM64_PROFILE === "true" });
@@ -161,11 +143,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     prepareSuite(process.argv[3]);
   } else if (process.argv[2] === "restore" && process.argv.length === 4) {
     restoreSuiteTestbench(process.argv[3]);
-  } else if (process.argv[2] === "merge" && process.argv.length === 5) {
-    mergeArtifacts(process.argv[3], process.argv[4]);
   } else if (process.argv[2] === "validate-results" && process.argv.length === 6) {
     validateResults(process.argv[3], process.argv[4], process.argv[5].trim().split(/\s+/));
   } else {
-    throw new Error("Usage: heliodor-suite.mjs validate | matrix | prepare <source-dir> | restore <source-dir> | merge <artifact-dir> <output-prefix> | validate-results <tsv> <test> <runners>");
+    throw new Error("Usage: heliodor-suite.mjs validate | matrix | prepare <source-dir> | restore <source-dir> | validate-results <tsv> <test> <runners>");
   }
 }

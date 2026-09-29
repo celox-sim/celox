@@ -544,6 +544,21 @@ fi
 # A selected comparison must wait for each backend on this host and retain
 # failures while still attempting the other selected backend for diagnostics.
 (
+    HELIODOR_PUBLISH_ARCH=x86_64
+    HELIODOR_COMPILE_ONLY=0
+    HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
+    FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=publish_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=publish_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=publish_tiered status=pass elapsed_ns=48'
+    run_one celox-tiered publish_tiered >/dev/null \
+        || fail "publishing rejected a completed tiered run"
+    FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/compiled_evaluations=20/compiled_evaluations=0}"
+    if run_one celox-tiered publish_tiered >/dev/null 2>&1; then
+        fail "publishing accepted tiering without compiled execution"
+    fi
+    assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 6)" invalid \
+        "tiered run without compiled execution must not be publishable"
+)
+
+(
     HELIODOR_COMPILE_ONLY=0
     HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered"
     HELIODOR_TESTS="comparison"
@@ -553,6 +568,11 @@ fi
     build_timed_veryl_runner() { :; }
     comparison_calls=()
     comparison_failed=0
+    publication_failed=0
+    publish_result() {
+        comparison_calls+=(publish)
+        return "$publication_failed"
+    }
     run_one() {
         comparison_calls+=("$1:$2")
         if [[ "$1" == celox-tiered ]]; then
@@ -560,15 +580,23 @@ fi
         fi
     }
     run_all || fail "selected comparison failed"
-    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison" \
-        "comparison runs serially in the requested order"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison publish veryl-cc-tiered:comparison publish" \
+        "each backend publishes before the next backend starts"
     comparison_calls=()
     comparison_failed=124
     comparison_status=0
     run_all || comparison_status=$?
     assert_eq "$comparison_status" 124 "comparison preserves timeout failure"
-    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison" \
-        "comparison attempts both backends after a failure"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison veryl-cc-tiered:comparison publish" \
+        "a failed backend does not prevent the next success from publishing"
+    comparison_calls=()
+    comparison_failed=0
+    publication_failed=1
+    comparison_status=0
+    run_all || comparison_status=$?
+    assert_eq "$comparison_status" 1 "publication failure fails CI"
+    assert_eq "${comparison_calls[*]}" "celox-tiered:comparison publish veryl-cc-tiered:comparison publish" \
+        "publication failure does not suppress the next measurement"
 )
 
 echo "run-heliodor-bench result fixture tests: PASS"

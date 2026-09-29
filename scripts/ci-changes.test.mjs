@@ -116,6 +116,7 @@ test("ARM64 Heliodor changes include backend and harness integration", () => {
     "crates/celox/src/backend.rs",
     "crates/celox-bench/src/bin/celox-heliodor.rs",
     "scripts/run-heliodor-bench.sh",
+    "scripts/heliodor-revision",
     ".github/actions/setup-rust/action.yml",
     ".github/workflows/heliodor-bench.yml",
     "scripts/ci-changes.mjs",
