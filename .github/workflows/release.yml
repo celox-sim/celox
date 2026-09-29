@@ -36,33 +36,27 @@ jobs:
           permission-workflows: write
 
       - name: Create release or update release pull request
+        id: release
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - name: Check out the processed commit
-        if: github.event_name == 'push'
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-          ref: ${{ github.sha }}
-          token: ${{ steps.release-token.outputs.token }}
-
+      # A merge queue can push several merged PRs together. The release tag
+      # then points at an earlier commit than github.sha. Publish the tag that
+      # release-please actually created, including on scheduled/manual runs.
       - name: Queue package publication for this release
-        if: github.event_name == 'push'
+        if: steps.release.outputs.release_created == 'true'
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
         shell: bash
         run: |
-          release_tag="v$(tr -d '\r\n' < VERSION)"
-          tag_sha="$(git rev-list -n 1 "$release_tag" 2>/dev/null || true)"
-
-          if [ "$tag_sha" != "$GITHUB_SHA" ]; then
-            echo "No release tag points at this workflow commit; publication is not needed."
-            exit 0
+          release_tag="$RELEASE_TAG"
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a v-prefixed stable release tag, got $release_tag." >&2
+            exit 1
           fi
 
           published_tag="$(
