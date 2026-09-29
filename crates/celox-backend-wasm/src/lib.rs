@@ -1095,7 +1095,9 @@ fn emit_slice_chunks(
             instrs.push(Instruction::I64ShrU);
         }
 
-        if bits_in_chunk < remaining {
+        // Only join the next source chunk when this destination chunk crosses
+        // a boundary. Shifting by 64 would wrap to zero in Wasm.
+        if bits_in_chunk < chunk_width {
             emit_wide_get_chunk(instrs, src, chunk_idx + 1);
             instrs.push(Instruction::I64Const(bits_in_chunk as i64));
             instrs.push(Instruction::I64Shl);

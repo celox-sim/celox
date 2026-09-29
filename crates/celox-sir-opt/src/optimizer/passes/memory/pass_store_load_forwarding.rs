@@ -265,13 +265,20 @@ fn forward_and_simplify(
                             aliases.insert(*dst, *lhs);
                         }
                     }
-                    // or/add with 0 → identity
-                    (BinaryOp::Or | BinaryOp::Add | BinaryOp::Xor, _, Some(0)) => {
+                    // These operations normalize Z to X (and arithmetic
+                    // propagates unknowns), so only two-state inputs are identities.
+                    (BinaryOp::Or | BinaryOp::Add | BinaryOp::Xor, _, Some(0))
+                        if !four_state
+                            || matches!(register_map.get(lhs), Some(RegisterType::Bit { .. })) =>
+                    {
                         if register_map.get(dst) == register_map.get(lhs) {
                             aliases.insert(*dst, *lhs);
                         }
                     }
-                    (BinaryOp::Or | BinaryOp::Add | BinaryOp::Xor, Some(0), _) => {
+                    (BinaryOp::Or | BinaryOp::Add | BinaryOp::Xor, Some(0), _)
+                        if !four_state
+                            || matches!(register_map.get(rhs), Some(RegisterType::Bit { .. })) =>
+                    {
                         if register_map.get(dst) == register_map.get(rhs) {
                             aliases.insert(*dst, *rhs);
                         }
@@ -298,12 +305,15 @@ fn forward_and_simplify(
                 }
             }
             SIRInstruction::Unary(dst, UnaryOp::And | UnaryOp::Or | UnaryOp::Xor, src) => {
-                // A reduction over one bit is the bit itself, including an
-                // unknown four-state bit. Require the exact register type so
+                // A reduction over one known bit is the bit itself. A Z bit
+                // becomes X, so retain reductions on four-state inputs.
+                // Require the exact register type so
                 // replacing the unsigned reduction result cannot expose the
                 // signedness of a one-bit source to later width extension.
                 if register_map.get(src).is_some_and(|ty| ty.width() == 1)
                     && register_map.get(dst) == register_map.get(src)
+                    && (!four_state
+                        || matches!(register_map.get(src), Some(RegisterType::Bit { .. })))
                 {
                     aliases.insert(*dst, *src);
                 }
@@ -753,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn folds_one_bit_reductions_in_four_state_mode() {
+    fn preserves_four_state_one_bit_reductions() {
         for operation in [UnaryOp::And, UnaryOp::Or, UnaryOp::Xor] {
             let mut instructions = vec![
                 SIRInstruction::Unary(RegisterId(1), operation, RegisterId(0)),
@@ -771,7 +781,7 @@ mod tests {
 
             assert_eq!(
                 instructions[1],
-                SIRInstruction::Unary(RegisterId(2), UnaryOp::ToTwoState, RegisterId(0),)
+                SIRInstruction::Unary(RegisterId(2), UnaryOp::ToTwoState, RegisterId(1),)
             );
         }
     }

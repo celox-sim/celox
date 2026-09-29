@@ -294,10 +294,12 @@ fn algebraic_replacement(
     let identity = |source| {
         same_type(*dst, source).then_some(SIRInstruction::Unary(*dst, UnaryOp::Ident, source))
     };
+    let two_state =
+        |source| !four_state || matches!(types.get(&source), Some(RegisterType::Bit { .. }));
 
     if lhs == rhs {
         match op {
-            BinaryOp::And | BinaryOp::Or => return identity(*lhs),
+            BinaryOp::And | BinaryOp::Or if two_state(*lhs) => return identity(*lhs),
             BinaryOp::Sub | BinaryOp::Xor if !four_state => {
                 return Some(SIRInstruction::Imm(*dst, SIRValue::new(0u8)));
             }
@@ -310,15 +312,20 @@ fn algebraic_replacement(
         BinaryOp::LogicAnd if is_one(*rhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *lhs)),
         BinaryOp::LogicOr if is_zero(*lhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *rhs)),
         BinaryOp::LogicOr if is_zero(*rhs) => Some(SIRInstruction::Unary(*dst, UnaryOp::Or, *lhs)),
-        BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor if is_zero(*lhs) => identity(*rhs),
-        BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor if is_zero(*rhs) => identity(*lhs),
-        BinaryOp::Mul if is_one(*lhs) => identity(*rhs),
-        BinaryOp::Mul if is_one(*rhs) => identity(*lhs),
+        BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor if is_zero(*lhs) && two_state(*rhs) => {
+            identity(*rhs)
+        }
+        BinaryOp::Add | BinaryOp::Or | BinaryOp::Xor if is_zero(*rhs) && two_state(*lhs) => {
+            identity(*lhs)
+        }
+        BinaryOp::Mul if is_one(*lhs) && two_state(*rhs) => identity(*rhs),
+        BinaryOp::Mul if is_one(*rhs) && two_state(*lhs) => identity(*lhs),
         BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar if is_zero(*rhs) => identity(*lhs),
         BinaryOp::And => {
             let all_ones = |constant: RegisterId, value: RegisterId| {
                 let width = types.get(dst)?.width();
-                (same_type(*dst, constant)
+                (two_state(value)
+                    && same_type(*dst, constant)
                     && same_type(*dst, value)
                     && exact(constant)?.payload == width_mask(width))
                 .then_some(SIRInstruction::Unary(*dst, UnaryOp::Ident, value))

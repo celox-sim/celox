@@ -4325,55 +4325,14 @@ impl<'a> FfParser<'a> {
             } else {
                 1
             };
-            evaluated.push((part_reg, part_width, rep_count));
-        }
-
-        let mut total_width = 0;
-
-        // Create accumulator with initial value 0
-        let mut acc_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(SIRInstruction::Imm(acc_reg, SIRValue::new(0u32)));
-
-        // Pack from the least-significant source element after evaluating all
-        // elements in source order.
-        for (part_reg, part_width, rep_count) in evaluated.into_iter().rev() {
             for _ in 0..rep_count {
-                let next_total_width = total_width + part_width;
-
-                // Generate left shift amount
-
-                let shift_amt_reg = ir_builder.alloc_bit(64, false);
-                ir_builder.emit(SIRInstruction::Imm(
-                    shift_amt_reg,
-                    SIRValue::new(total_width),
-                ));
-
-                // Shift target to current position
-                let shifted_part_reg = ir_builder.alloc_logic(next_total_width);
-                ir_builder.emit(SIRInstruction::Binary(
-                    shifted_part_reg,
-                    part_reg,
-                    BinaryOp::Shl,
-                    shift_amt_reg,
-                ));
-
-                // Integrate into accumulator
-                let next_acc_reg = ir_builder.alloc_logic(next_total_width);
-                ir_builder.emit(SIRInstruction::Binary(
-                    next_acc_reg,
-                    acc_reg,
-                    BinaryOp::Or,
-                    shifted_part_reg,
-                ));
-
-                // Update state
-                acc_reg = next_acc_reg;
-                total_width = next_total_width;
+                evaluated.push((part_reg, part_width));
             }
         }
 
-        // Push final result to stack
-        self.stack.push_back(acc_reg);
+        // Concat transports the value and mask planes without normalizing Z.
+        let result = self.emit_concat_registers(&evaluated, ir_builder);
+        self.stack.push_back(result);
         Ok(())
     }
 
@@ -4387,44 +4346,17 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Imm(reg, SIRValue::new(0u32)));
             return reg;
         }
-        if parts.len() == 1 {
-            return parts[0].0;
+        let registers = parts
+            .iter()
+            .map(|(reg, width)| self.cast_reg_width_ext(ir_builder, *reg, *width, false))
+            .collect::<Vec<_>>();
+        if registers.len() == 1 {
+            return registers[0];
         }
-
-        let mut total_width = 0usize;
-        let mut acc_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(SIRInstruction::Imm(acc_reg, SIRValue::new(0u32)));
-
-        for (part_reg, part_width) in parts.iter().rev() {
-            let next_total_width = total_width + *part_width;
-
-            let shift_amt_reg = ir_builder.alloc_bit(64, false);
-            ir_builder.emit(SIRInstruction::Imm(
-                shift_amt_reg,
-                SIRValue::new(total_width),
-            ));
-
-            let shifted_part_reg = ir_builder.alloc_logic(next_total_width);
-            ir_builder.emit(SIRInstruction::Binary(
-                shifted_part_reg,
-                *part_reg,
-                BinaryOp::Shl,
-                shift_amt_reg,
-            ));
-
-            let next_acc_reg = ir_builder.alloc_logic(next_total_width);
-            ir_builder.emit(SIRInstruction::Binary(
-                next_acc_reg,
-                acc_reg,
-                BinaryOp::Or,
-                shifted_part_reg,
-            ));
-
-            acc_reg = next_acc_reg;
-            total_width = next_total_width;
-        }
-
-        acc_reg
+        let total_width = parts.iter().map(|(_, width)| width).sum();
+        let result = ir_builder.alloc_logic(total_width);
+        ir_builder.emit(SIRInstruction::Concat(result, registers));
+        result
     }
 
     pub(super) fn parse_struct_constructor<A>(
