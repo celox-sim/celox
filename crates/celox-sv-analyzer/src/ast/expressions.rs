@@ -153,6 +153,19 @@ fn expr_from_primary_with_types(
             primary_literal_text(RefNode::Primary(primary), syntax_tree).map(Expr::Literal)
         }
         sv_parser::Primary::Hierarchical(hierarchical) => {
+            let node = RefNode::HierarchicalIdentifier(&hierarchical.nodes.1);
+            if packed_structs::has_member_access(
+                node.clone(),
+                RefNode::Select(&hierarchical.nodes.2),
+            ) {
+                let value = packed_structs::variable_member(
+                    node,
+                    &hierarchical.nodes.2,
+                    syntax_tree,
+                    packed_dimensions,
+                )?;
+                return Some(expr_from_lvalue(&value, packed_dimensions));
+            }
             let name = identifier_text(
                 RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
                 syntax_tree,

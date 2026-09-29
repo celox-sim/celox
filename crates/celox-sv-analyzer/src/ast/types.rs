@@ -146,6 +146,7 @@ fn add_type_alias_from_data_declaration(
             const_env,
             aliases,
         )
+        .or_else(|| type_alias_from_data_type(&declaration.nodes.1, syntax_tree, aliases))
     };
     let Some(r#type) = r#type else {
         return Ok(());
@@ -295,6 +296,9 @@ pub(super) fn type_from_ref_node_with_env(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
+    if let Some(data) = packed_structs::declaration(node.clone()) {
+        return packed_structs::parse_type(data, syntax_tree, const_env, type_aliases);
+    }
     if let Some(atom) = integer_atom_expr_type(node.clone()) {
         let kind = if integer_atom_is_2state(node.clone()) {
             TypeKind::Bit
@@ -435,6 +439,9 @@ pub(super) fn type_with_fallback_ranges_with_env(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Type {
+    if packed_structs::declaration(node.clone()).is_some() {
+        return r#type;
+    }
     let direct_ranges =
         packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, const_env, type_aliases);
     if type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases).is_some() {
@@ -445,7 +452,7 @@ pub(super) fn type_with_fallback_ranges_with_env(
     } else if r#type.packed_ranges.is_empty() {
         r#type.packed_ranges = direct_ranges;
     }
-    if !r#type.is_signed {
+    if !r#type.is_signed && r#type.members.is_empty() {
         r#type.is_signed = is_signed_from_ref_node(node).unwrap_or(false);
     }
     r#type

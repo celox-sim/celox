@@ -9,6 +9,18 @@ pub(super) fn net_lvalue_from_node(
 ) -> Option<LValue> {
     match node {
         sv_parser::NetLvalue::Identifier(identifier) => {
+            let node = RefNode::PsOrHierarchicalNetIdentifier(&identifier.nodes.0);
+            if packed_structs::has_member_access(
+                node.clone(),
+                RefNode::ConstantSelect(&identifier.nodes.1),
+            ) {
+                return packed_structs::net_member(
+                    node,
+                    &identifier.nodes.1,
+                    syntax_tree,
+                    packed_dimensions,
+                );
+            }
             let name = identifier_text(
                 RefNode::PsOrHierarchicalNetIdentifier(&identifier.nodes.0),
                 syntax_tree,
@@ -26,6 +38,16 @@ pub(super) fn variable_lvalue_from_node(
 ) -> Option<LValue> {
     match node {
         sv_parser::VariableLvalue::Identifier(identifier) => {
+            let node = RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1);
+            if packed_structs::has_member_access(node.clone(), RefNode::Select(&identifier.nodes.2))
+            {
+                return packed_structs::variable_member(
+                    node,
+                    &identifier.nodes.2,
+                    syntax_tree,
+                    packed_dimensions,
+                );
+            }
             let name = identifier_text(
                 RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
                 syntax_tree,
@@ -36,7 +58,7 @@ pub(super) fn variable_lvalue_from_node(
     }
 }
 
-fn lvalue_from_select(
+pub(super) fn lvalue_from_select(
     name: String,
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
@@ -79,6 +101,7 @@ fn lvalue_from_select(
             signed: false,
             array_slice_width,
             array_slice_reversed,
+            is_2state: false,
         });
     }
 
@@ -96,6 +119,7 @@ fn lvalue_from_select(
                     signed: false,
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    is_2state: false,
                 });
             }
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -123,6 +147,7 @@ fn lvalue_from_select(
                 signed: dimensions.signed,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                is_2state: false,
             });
         } else if let Some(dimensions) = packed_dimensions.get(&name)
             && !dimensions.unpacked.is_empty()
@@ -144,6 +169,7 @@ fn lvalue_from_select(
                 signed: dimensions.signed,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                is_2state: false,
             });
         }
     }
@@ -163,13 +189,14 @@ fn lvalue_from_select(
             signed: false,
             array_slice_width: None,
             array_slice_reversed: false,
+            is_2state: false,
         });
     }
 
     Some(LValue::Ident(name))
 }
 
-fn lvalue_from_constant_select(
+pub(super) fn lvalue_from_constant_select(
     name: String,
     select: &sv_parser::ConstantSelect,
     syntax_tree: &SyntaxTree,
@@ -204,6 +231,7 @@ fn lvalue_from_constant_select(
             signed: false,
             array_slice_width,
             array_slice_reversed,
+            is_2state: false,
         });
     }
 
@@ -221,6 +249,7 @@ fn lvalue_from_constant_select(
                     signed: false,
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    is_2state: false,
                 });
             }
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -248,6 +277,7 @@ fn lvalue_from_constant_select(
                 signed: dimensions.signed,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                is_2state: false,
             });
         } else if let Some(dimensions) = packed_dimensions.get(&name)
             && !dimensions.unpacked.is_empty()
@@ -269,6 +299,7 @@ fn lvalue_from_constant_select(
                 signed: dimensions.signed,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                is_2state: false,
             });
         }
     }
@@ -288,6 +319,7 @@ fn lvalue_from_constant_select(
             signed: false,
             array_slice_width: None,
             array_slice_reversed: false,
+            is_2state: false,
         });
     }
 

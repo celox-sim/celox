@@ -71,6 +71,23 @@ labels, preserving X/Z according to IEEE 1800-2023 section 12.5. Inactive
 branches are not lowered. Generate-local typedefs and function declarations
 inside loop-generate remain unsupported.
 
+Packed structure layout and member selection live in the analyzer's dedicated
+`ast::packed_structs` module. Supported declarations include anonymous and
+typedef-based `struct packed` types, nested structures, integral members, and
+parameterized member widths. Member reads and writes become typed selections
+of a single packed vector, allowing continuous assignments, combinational and
+clocked processes, whole-structure port connections, and `$bits`/`$size` queries
+to use the existing lowering pipeline. Declaration order, structure/member
+signedness, and mixed two-state/four-state member conversions follow IEEE
+1800-2023 section 7.2.1, "Packed structures".
+
+This first structure extension supports constant in-range member selections.
+Arrays of structures with member access, dynamic or out-of-range member
+selections, struct-valued parameter member evaluation, assignment patterns,
+unpacked structures, and unions remain unsupported. Member access on function
+formals is also deferred. These forms must be diagnosed rather than silently
+lowered as accesses to the entire structure.
+
 The SystemVerilog frontend supports `$countones` in constant expressions,
 continuous assignments, combinational and clocked processes, and module port
 connections. Its argument keeps its own expression width, and its result is a

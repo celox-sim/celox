@@ -461,6 +461,7 @@ pub(super) fn function_from_declaration(
                         unpacked: Vec::new(),
                         signed: param.signed,
                         is_2state: param.is_2state,
+                        members: Vec::new(),
                     },
                 )
             }));
@@ -527,6 +528,7 @@ pub(super) fn function_from_declaration(
                         unpacked: Vec::new(),
                         signed: param.signed,
                         is_2state: param.is_2state,
+                        members: Vec::new(),
                     },
                 )
             }));
@@ -639,6 +641,7 @@ pub(super) fn function_local_packed_dimensions_from_block_item_iter<'a>(
                     unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                     signed: signal.r#type().is_signed(),
                     is_2state: signal.r#type().kind() == TypeKind::Bit,
+                    members: signal.r#type().members.clone(),
                 },
             )
         }));
