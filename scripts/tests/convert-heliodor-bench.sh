@@ -37,18 +37,18 @@ node "$ROOT/scripts/convert-heliodor-bench.mjs" \
 node -e '
 const fs = require("fs");
 const values = Object.fromEntries(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).map((x) => [x.name, x.value]));
-if (values["heliodor-celox-jit/heliodor_linux_boot_execution"] !== 2) process.exit(1);
-if (values["heliodor-celox-total/heliodor_linux_boot_execution"] !== 2.5) process.exit(1);
-if (values["heliodor-veryl/heliodor_linux_boot_execution"] !== 4) process.exit(1);
-if (values["heliodor-celox-tiered/heliodor_linux_boot_end_to_end"] !== 5.5) process.exit(1);
-if (values["heliodor-celox-tiered/heliodor_linux_boot_startup"] !== 0.5) process.exit(1);
-if (values["heliodor-celox-tiered/heliodor_linux_boot_execution"] !== 5) process.exit(1);
+if (values["heliodor-celox-jit/heliodor_suite_linux_boot_execution"] !== 2) process.exit(1);
+if (values["heliodor-celox-total/heliodor_suite_linux_boot_execution"] !== 2.5) process.exit(1);
+if (values["heliodor-veryl/heliodor_suite_linux_boot_execution"] !== 4) process.exit(1);
+if (values["heliodor-celox-tiered/heliodor_suite_linux_boot_end_to_end"] !== 5.5) process.exit(1);
+if (values["heliodor-celox-tiered/heliodor_suite_linux_boot_startup"] !== 0.5) process.exit(1);
+if (values["heliodor-celox-tiered/heliodor_suite_linux_boot_execution"] !== 5) process.exit(1);
 ' "$TMP/results.json"
 
 node -e '
 const fs = require("fs");
 const values = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-if (values.length !== 1 || values[0].name !== "heliodor-celox-jit/heliodor_linux_boot_execution") process.exit(1);
+if (values.length !== 1 || values[0].name !== "heliodor-celox-jit/heliodor_suite_linux_boot_execution") process.exit(1);
 ' "$TMP/jit.json"
 
 node -e '
@@ -63,23 +63,23 @@ const fs = require("fs");
 const values = Object.fromEntries(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).map((x) => [x.name, x.value]));
 if (Object.keys(values).length !== 25) process.exit(1);
 const expected = {
-  "heliodor-veryl-tiered-x86_64/heliodor_linux_boot_startup": 1.5,
-  "heliodor-veryl-tiered-x86_64/heliodor_linux_boot_execution": 8,
-  "heliodor-veryl-tiered-x86_64/heliodor_linux_boot_end_to_end": 9.5,
-  "heliodor-celox-tiered-aarch64/heliodor_linux_boot_startup": 3.5,
-  "heliodor-celox-tiered-aarch64/heliodor_linux_boot_execution": 13,
-  "heliodor-celox-tiered-aarch64/heliodor_linux_boot_end_to_end": 16.5,
-  "heliodor-veryl-tiered-aarch64/heliodor_linux_boot_startup": 4.5,
-  "heliodor-veryl-tiered-aarch64/heliodor_linux_boot_execution": 16,
-  "heliodor-veryl-tiered-aarch64/heliodor_linux_boot_end_to_end": 20.5,
-  "heliodor-native-x86_64/heliodor_linux_boot_compilation": 1,
-  "heliodor-native-x86_64/heliodor_linux_boot_execution": 2.5,
-  "heliodor-veryl-cc-x86_64/heliodor_linux_boot_compilation": 3,
-  "heliodor-veryl-cc-x86_64/heliodor_linux_boot_execution": 4,
-  "heliodor-native-aarch64/heliodor_linux_boot_compilation": 7,
-  "heliodor-native-aarch64/heliodor_linux_boot_execution": 8,
-  "heliodor-veryl-cc-aarch64/heliodor_linux_boot_compilation": 11,
-  "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution": 12,
+  "heliodor-veryl-tiered-x86_64/heliodor_suite_linux_boot_startup": 1.5,
+  "heliodor-veryl-tiered-x86_64/heliodor_suite_linux_boot_execution": 8,
+  "heliodor-veryl-tiered-x86_64/heliodor_suite_linux_boot_end_to_end": 9.5,
+  "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_startup": 3.5,
+  "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_execution": 13,
+  "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_end_to_end": 16.5,
+  "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_startup": 4.5,
+  "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_execution": 16,
+  "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_end_to_end": 20.5,
+  "heliodor-native-x86_64/heliodor_suite_linux_boot_compilation": 1,
+  "heliodor-native-x86_64/heliodor_suite_linux_boot_execution": 2.5,
+  "heliodor-veryl-cc-x86_64/heliodor_suite_linux_boot_compilation": 3,
+  "heliodor-veryl-cc-x86_64/heliodor_suite_linux_boot_execution": 4,
+  "heliodor-native-aarch64/heliodor_suite_linux_boot_compilation": 7,
+  "heliodor-native-aarch64/heliodor_suite_linux_boot_execution": 8,
+  "heliodor-veryl-cc-aarch64/heliodor_suite_linux_boot_compilation": 11,
+  "heliodor-veryl-cc-aarch64/heliodor_suite_linux_boot_execution": 12,
 };
 for (const [name, value] of Object.entries(expected)) {
   if (values[name] !== value) process.exit(1);
