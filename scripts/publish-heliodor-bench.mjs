@@ -17,9 +17,13 @@ function readData(source) {
 // Keep PR comparisons pointed at the latest matching successful measurement.
 export function comparisonHistory(source, metrics) {
   const data = readData(source);
-  data.entries["Heliodor Benchmarks"] = (data.entries["Heliodor Benchmarks"] ?? []).filter(
-    (entry) => metrics.every((metric) => entry.benches.some((bench) => bench.name === metric.name)),
-  );
+  data.entries["Heliodor Benchmarks"] = (data.entries["Heliodor Benchmarks"] ?? [])
+    .filter((entry) =>
+      metrics.every((metric) => entry.benches.some((bench) => bench.name === metric.name)),
+    )
+    // A retried push can append an older measurement after a newer one.
+    // The comparison action searches backward, so keep sample time order.
+    .sort((a, b) => a.date - b.date);
   return data;
 }
 
