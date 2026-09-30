@@ -261,7 +261,7 @@ module Top (
                         sim.modify(|io| {
                             io.set_wide(value, payload.clone());
                             io.set(signed_value, 0x85u8);
-                            io.set_four_state(amount, (&low & ((BigUint::from(1u8) << 70usize) - 1u8 ^ &mask)) | unknown_payload.clone(), mask.clone());
+                            io.set_four_state(amount, (&low & (((BigUint::from(1u8) << 70usize) - 1u8) ^ &mask)) | unknown_payload.clone(), mask.clone());
                         }).unwrap();
                         for (output, unknown) in [(left, all.clone()), (right, all.clone()), (arithmetic, BigUint::from(255u8))] {
                             assert_eq!(sim.get_four_state(output), (unknown.clone(), unknown), "unknown count bit={unknown_bit}, low={low}, output={output:?}");
