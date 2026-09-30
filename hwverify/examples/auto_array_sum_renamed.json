@@ -23,10 +23,10 @@
   "reset_input": "rst",
   "spec": {
     "state": {
-      "pc": {
+      "location": {
         "bv": 8
       },
-      "acc": {
+      "aggregate": {
         "bv": 8
       },
       "mem": {
@@ -42,17 +42,17 @@
         ]
       },
       "halted": "bool",
-      "idx": {
+      "cursor": {
         "bv": 8
       }
     },
     "reset": {
-      "pc": [
+      "location": [
         "bv",
         8,
         0
       ],
-      "acc": [
+      "aggregate": [
         "bv",
         8,
         0
@@ -60,13 +60,13 @@
       "mem": "i.data",
       "program": "i.program",
       "halted": false,
-      "idx": "i.start_index"
+      "cursor": "i.start_index"
     },
     "wires": {
       "instruction": [
         "read",
         "s.program",
-        "s.pc"
+        "s.location"
       ],
       "op": [
         "extract",
@@ -82,7 +82,7 @@
       ]
     },
     "next": {
-      "pc": [
+      "location": [
         "ite",
         [
           "eq",
@@ -99,7 +99,7 @@
             "ne",
             [
               "add",
-              "s.idx",
+              "s.cursor",
               [
                 "bv",
                 8,
@@ -115,7 +115,7 @@
           "w.imm",
           [
             "add",
-            "s.pc",
+            "s.location",
             [
               "bv",
               8,
@@ -142,7 +142,7 @@
             ],
             [
               "eq",
-              "s.acc",
+              "s.aggregate",
               [
                 "bv",
                 8,
@@ -153,7 +153,7 @@
           "w.imm",
           [
             "add",
-            "s.pc",
+            "s.location",
             [
               "bv",
               8,
@@ -162,7 +162,7 @@
           ]
         ]
       ],
-      "acc": [
+      "aggregate": [
         "ite",
         [
           "eq",
@@ -175,11 +175,11 @@
         ],
         [
           "add",
-          "s.acc",
+          "s.aggregate",
           [
             "read",
             "s.mem",
-            "s.idx"
+            "s.cursor"
           ]
         ],
         [
@@ -195,7 +195,7 @@
           ],
           [
             "add",
-            "s.acc",
+            "s.aggregate",
             "w.imm"
           ],
           [
@@ -227,10 +227,10 @@
               ],
               [
                 "bxor",
-                "s.acc",
+                "s.aggregate",
                 "w.imm"
               ],
-              "s.acc"
+              "s.aggregate"
             ]
           ]
         ]
@@ -250,7 +250,7 @@
           "write",
           "s.mem",
           "w.imm",
-          "s.acc"
+          "s.aggregate"
         ],
         "s.mem"
       ],
@@ -268,7 +268,7 @@
         ]
       ],
       "program": "s.program",
-      "idx": [
+      "cursor": [
         "ite",
         [
           "eq",
@@ -281,14 +281,14 @@
         ],
         [
           "add",
-          "s.idx",
+          "s.cursor",
           [
             "bv",
             8,
             1
           ]
         ],
-        "s.idx"
+        "s.cursor"
       ]
     },
     "outputs": {
@@ -300,10 +300,10 @@
   },
   "impl": {
     "state": {
-      "pc": {
+      "location": {
         "bv": 8
       },
-      "acc": {
+      "aggregate": {
         "bv": 8
       },
       "mem": {
@@ -325,17 +325,17 @@
       "ir": {
         "bv": 16
       },
-      "idx": {
+      "cursor": {
         "bv": 8
       }
     },
     "reset": {
-      "pc": [
+      "location": [
         "bv",
         8,
         0
       ],
-      "acc": [
+      "aggregate": [
         "bv",
         8,
         0
@@ -353,7 +353,7 @@
         16,
         0
       ],
-      "idx": "i.start_index"
+      "cursor": "i.start_index"
     },
     "wires": {
       "op": [
@@ -403,7 +403,7 @@
       ]
     },
     "next": {
-      "pc": [
+      "location": [
         "ite",
         "w.commit",
         [
@@ -423,7 +423,7 @@
               "ne",
               [
                 "add",
-                "s.idx",
+                "s.cursor",
                 [
                   "bv",
                   8,
@@ -439,7 +439,7 @@
             "w.imm",
             [
               "add",
-              "s.pc",
+              "s.location",
               [
                 "bv",
                 8,
@@ -466,7 +466,7 @@
               ],
               [
                 "eq",
-                "s.acc",
+                "s.aggregate",
                 [
                   "bv",
                   8,
@@ -477,7 +477,7 @@
             "w.imm",
             [
               "add",
-              "s.pc",
+              "s.location",
               [
                 "bv",
                 8,
@@ -486,9 +486,9 @@
             ]
           ]
         ],
-        "s.pc"
+        "s.location"
       ],
-      "acc": [
+      "aggregate": [
         "ite",
         "w.commit",
         [
@@ -504,11 +504,11 @@
           ],
           [
             "add",
-            "s.acc",
+            "s.aggregate",
             [
               "read",
               "s.mem",
-              "s.idx"
+              "s.cursor"
             ]
           ],
           [
@@ -524,7 +524,7 @@
             ],
             [
               "add",
-              "s.acc",
+              "s.aggregate",
               "w.imm"
             ],
             [
@@ -556,15 +556,15 @@
                 ],
                 [
                   "bxor",
-                  "s.acc",
+                  "s.aggregate",
                   "w.imm"
                 ],
-                "s.acc"
+                "s.aggregate"
               ]
             ]
           ]
         ],
-        "s.acc"
+        "s.aggregate"
       ],
       "mem": [
         "ite",
@@ -584,7 +584,7 @@
             "write",
             "s.mem",
             "w.imm",
-            "s.acc"
+            "s.aggregate"
           ],
           "s.mem"
         ],
@@ -650,11 +650,11 @@
         [
           "read",
           "s.program",
-          "s.pc"
+          "s.location"
         ],
         "s.ir"
       ],
-      "idx": [
+      "cursor": [
         "ite",
         "w.commit",
         [
@@ -670,16 +670,16 @@
           ],
           [
             "add",
-            "s.idx",
+            "s.cursor",
             [
               "bv",
               8,
               1
             ]
           ],
-          "s.idx"
+          "s.cursor"
         ],
-        "s.idx"
+        "s.cursor"
       ]
     },
     "outputs": {
@@ -706,14 +706,14 @@
                   true,
                   [
                     "eq",
-                    "spec.pc",
-                    "impl.pc"
+                    "spec.location",
+                    "impl.location"
                   ]
                 ],
                 [
                   "eq",
-                  "spec.acc",
-                  "impl.acc"
+                  "spec.aggregate",
+                  "impl.aggregate"
                 ]
               ],
               [
@@ -751,7 +751,7 @@
             [
               "read",
               "impl.program",
-              "impl.pc"
+              "impl.location"
             ]
           ]
         ]
@@ -759,8 +759,8 @@
     ],
     [
       "eq",
-      "spec.idx",
-      "impl.idx"
+      "spec.cursor",
+      "impl.cursor"
     ]
   ],
   "commit": "commit",
@@ -986,12 +986,12 @@
                         8,
                         240
                       ],
-                      "s.idx"
+                      "s.cursor"
                     ]
                   ],
                   [
                     "eq",
-                    "s.pc",
+                    "s.location",
                     [
                       "bv",
                       8,
@@ -1001,7 +1001,7 @@
                 ],
                 [
                   "eq",
-                  "s.acc",
+                  "s.aggregate",
                   [
                     "add",
                     [
@@ -1048,7 +1048,7 @@
                                                         8,
                                                         240
                                                       ],
-                                                      "s.idx"
+                                                      "s.cursor"
                                                     ],
                                                     [
                                                       "read",
@@ -1075,7 +1075,7 @@
                                                       8,
                                                       241
                                                     ],
-                                                    "s.idx"
+                                                    "s.cursor"
                                                   ],
                                                   [
                                                     "read",
@@ -1102,7 +1102,7 @@
                                                     8,
                                                     242
                                                   ],
-                                                  "s.idx"
+                                                  "s.cursor"
                                                 ],
                                                 [
                                                   "read",
@@ -1129,7 +1129,7 @@
                                                   8,
                                                   243
                                                 ],
-                                                "s.idx"
+                                                "s.cursor"
                                               ],
                                               [
                                                 "read",
@@ -1156,7 +1156,7 @@
                                                 8,
                                                 244
                                               ],
-                                              "s.idx"
+                                              "s.cursor"
                                             ],
                                             [
                                               "read",
@@ -1183,7 +1183,7 @@
                                               8,
                                               245
                                             ],
-                                            "s.idx"
+                                            "s.cursor"
                                           ],
                                           [
                                             "read",
@@ -1210,7 +1210,7 @@
                                             8,
                                             246
                                           ],
-                                          "s.idx"
+                                          "s.cursor"
                                         ],
                                         [
                                           "read",
@@ -1237,7 +1237,7 @@
                                           8,
                                           247
                                         ],
-                                        "s.idx"
+                                        "s.cursor"
                                       ],
                                       [
                                         "read",
@@ -1264,7 +1264,7 @@
                                         8,
                                         248
                                       ],
-                                      "s.idx"
+                                      "s.cursor"
                                     ],
                                     [
                                       "read",
@@ -1291,7 +1291,7 @@
                                       8,
                                       249
                                     ],
-                                    "s.idx"
+                                    "s.cursor"
                                   ],
                                   [
                                     "read",
@@ -1318,7 +1318,7 @@
                                     8,
                                     250
                                   ],
-                                  "s.idx"
+                                  "s.cursor"
                                 ],
                                 [
                                   "read",
@@ -1345,7 +1345,7 @@
                                   8,
                                   251
                                 ],
-                                "s.idx"
+                                "s.cursor"
                               ],
                               [
                                 "read",
@@ -1372,7 +1372,7 @@
                                 8,
                                 252
                               ],
-                              "s.idx"
+                              "s.cursor"
                             ],
                             [
                               "read",
@@ -1399,7 +1399,7 @@
                               8,
                               253
                             ],
-                            "s.idx"
+                            "s.cursor"
                           ],
                           [
                             "read",
@@ -1426,7 +1426,7 @@
                             8,
                             254
                           ],
-                          "s.idx"
+                          "s.cursor"
                         ],
                         [
                           "read",
@@ -1453,7 +1453,7 @@
                           8,
                           255
                         ],
-                        "s.idx"
+                        "s.cursor"
                       ],
                       [
                         "read",
@@ -1495,12 +1495,12 @@
                       8,
                       240
                     ],
-                    "s.idx"
+                    "s.cursor"
                   ]
                 ],
                 [
                   "eq",
-                  "s.pc",
+                  "s.location",
                   [
                     "bv",
                     8,
@@ -1510,7 +1510,7 @@
               ],
               [
                 "eq",
-                "s.acc",
+                "s.aggregate",
                 [
                   "add",
                   [
@@ -1559,7 +1559,7 @@
                                                         8,
                                                         240
                                                       ],
-                                                      "s.idx"
+                                                      "s.cursor"
                                                     ],
                                                     [
                                                       "read",
@@ -1586,7 +1586,7 @@
                                                       8,
                                                       241
                                                     ],
-                                                    "s.idx"
+                                                    "s.cursor"
                                                   ],
                                                   [
                                                     "read",
@@ -1613,7 +1613,7 @@
                                                     8,
                                                     242
                                                   ],
-                                                  "s.idx"
+                                                  "s.cursor"
                                                 ],
                                                 [
                                                   "read",
@@ -1640,7 +1640,7 @@
                                                   8,
                                                   243
                                                 ],
-                                                "s.idx"
+                                                "s.cursor"
                                               ],
                                               [
                                                 "read",
@@ -1667,7 +1667,7 @@
                                                 8,
                                                 244
                                               ],
-                                              "s.idx"
+                                              "s.cursor"
                                             ],
                                             [
                                               "read",
@@ -1694,7 +1694,7 @@
                                               8,
                                               245
                                             ],
-                                            "s.idx"
+                                            "s.cursor"
                                           ],
                                           [
                                             "read",
@@ -1721,7 +1721,7 @@
                                             8,
                                             246
                                           ],
-                                          "s.idx"
+                                          "s.cursor"
                                         ],
                                         [
                                           "read",
@@ -1748,7 +1748,7 @@
                                           8,
                                           247
                                         ],
-                                        "s.idx"
+                                        "s.cursor"
                                       ],
                                       [
                                         "read",
@@ -1775,7 +1775,7 @@
                                         8,
                                         248
                                       ],
-                                      "s.idx"
+                                      "s.cursor"
                                     ],
                                     [
                                       "read",
@@ -1802,7 +1802,7 @@
                                       8,
                                       249
                                     ],
-                                    "s.idx"
+                                    "s.cursor"
                                   ],
                                   [
                                     "read",
@@ -1829,7 +1829,7 @@
                                     8,
                                     250
                                   ],
-                                  "s.idx"
+                                  "s.cursor"
                                 ],
                                 [
                                   "read",
@@ -1856,7 +1856,7 @@
                                   8,
                                   251
                                 ],
-                                "s.idx"
+                                "s.cursor"
                               ],
                               [
                                 "read",
@@ -1883,7 +1883,7 @@
                                 8,
                                 252
                               ],
-                              "s.idx"
+                              "s.cursor"
                             ],
                             [
                               "read",
@@ -1910,7 +1910,7 @@
                               8,
                               253
                             ],
-                            "s.idx"
+                            "s.cursor"
                           ],
                           [
                             "read",
@@ -1937,7 +1937,7 @@
                             8,
                             254
                           ],
-                          "s.idx"
+                          "s.cursor"
                         ],
                         [
                           "read",
@@ -1964,7 +1964,7 @@
                           8,
                           255
                         ],
-                        "s.idx"
+                        "s.cursor"
                       ],
                       [
                         "read",
@@ -1985,7 +1985,7 @@
                   [
                     "read",
                     "p.data",
-                    "s.idx"
+                    "s.cursor"
                   ]
                 ]
               ]
@@ -2007,7 +2007,7 @@
                 ],
                 [
                   "eq",
-                  "s.pc",
+                  "s.location",
                   [
                     "bv",
                     8,
@@ -2017,7 +2017,7 @@
               ],
               [
                 "eq",
-                "s.idx",
+                "s.cursor",
                 [
                   "bv",
                   8,
@@ -2027,7 +2027,7 @@
             ],
             [
               "eq",
-              "s.acc",
+              "s.aggregate",
               [
                 "add",
                 [
@@ -2241,7 +2241,7 @@
               ],
               [
                 "eq",
-                "s.pc",
+                "s.location",
                 [
                   "bv",
                   8,
@@ -2251,7 +2251,7 @@
             ],
             [
               "eq",
-              "s.idx",
+              "s.cursor",
               [
                 "bv",
                 8,
@@ -2261,7 +2261,7 @@
           ],
           [
             "eq",
-            "s.acc",
+            "s.aggregate",
             [
               "add",
               [
@@ -2471,7 +2471,7 @@
         true,
         [
           "eq",
-          "s.acc",
+          "s.aggregate",
           [
             "add",
             [
@@ -2689,7 +2689,7 @@
         "ite",
         [
           "eq",
-          "s.pc",
+          "s.location",
           [
             "bv",
             8,
@@ -2715,7 +2715,7 @@
               [
                 "zext",
                 2,
-                "s.idx"
+                "s.cursor"
               ]
             ]
           ],
@@ -2729,7 +2729,7 @@
           "ite",
           [
             "eq",
-            "s.pc",
+            "s.location",
             [
               "bv",
               8,
@@ -2753,7 +2753,7 @@
               [
                 "zext",
                 2,
-                "s.idx"
+                "s.cursor"
               ]
             ]
           ],
@@ -2764,7 +2764,6 @@
           ]
         ]
       ]
-    ],
-    "partitioning": "none"
+    ]
   }
 }

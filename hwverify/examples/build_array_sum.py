@@ -79,7 +79,7 @@ x=copy.deepcopy(d);x['impl']['next']['acc'][2][2]=['add','s.acc',['read','s.mem'
 x=copy.deepcopy(d);x['program_contract'].pop('split');x['program_contract']['cases']={'only_exit':at(2)};save('array_sum_missing_case',x)
 
 # Same contract without hints, retained for a reproducible solver-cost comparison.
-x=copy.deepcopy(d);x['program_contract'].pop('split');save('array_sum_baseline_unsplit',x)
+x=copy.deepcopy(d);x['program_contract'].pop('split');x['program_contract']['partitioning']='none';save('array_sum_baseline_unsplit',x)
 x=copy.deepcopy(d);x['program_contract']['terminal']=True;save('array_sum_bad_terminal',x)
 x=copy.deepcopy(d);x['spec']['outputs']['can_step']=False;save('array_sum_unavailable_step',x)
 x=copy.deepcopy(d);x['program_contract']['split']['index']={'expr':'s.idx','min':240,'max':240}

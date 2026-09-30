@@ -1,0 +1,628 @@
+[
+  {
+    "name": "auto_array_sum",
+    "status": "unknown",
+    "exit_code": 3,
+    "wall_seconds": 2.6947427519990015,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_other_auto_pc_1",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_renamed",
+    "status": "unknown",
+    "exit_code": 3,
+    "wall_seconds": 3.6727608069995767,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "program_invariant_preserved_auto_aggregate_0_auto_location_0",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_aggregate_0_auto_location_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_aggregate_other_auto_location_1",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "aggregate",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "location",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "cursor",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_reordered",
+    "status": "unknown",
+    "exit_code": 3,
+    "wall_seconds": 3.5891389610005717,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_0",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_other_auto_pc_1",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_unsplit",
+    "status": "unknown",
+    "exit_code": 3,
+    "wall_seconds": 10.271946755998215,
+    "queries": 16,
+    "failures": [
+      {
+        "name": "program_invariant_preserved",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "partition_count": 1,
+      "strategy": "none"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_bad_program",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 0.8688045000017155,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_1",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_other_auto_pc_1",
+        "status": "counterexample"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_false_invariant",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 0.24258263999945484,
+    "queries": 18,
+    "failures": [
+      {
+        "name": "program_initialization",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_active_nonempty",
+        "status": "failed_nonvacuity"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 2,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 1,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_false_pre",
+    "status": "unknown",
+    "exit_code": 3,
+    "wall_seconds": 2.6609144220019516,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "program_pre_nonempty",
+        "status": "failed_nonvacuity"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_other_auto_pc_1",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_bad_rank",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 2.6889343910006573,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_other_auto_pc_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_rank_decreases",
+        "status": "counterexample"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_input_invariant",
+    "status": "invalid_or_tool_error",
+    "exit_code": 2,
+    "wall_seconds": 0.11465244999999413,
+    "queries": 0,
+    "failures": [],
+    "plan": null,
+    "error": "unknown reference i.stall"
+  },
+  {
+    "name": "auto_array_sum_wrong_indexed_load",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 2.6806155079975724,
+    "queries": 26,
+    "failures": [
+      {
+        "name": "microstep_refinement",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_0_auto_pc_1",
+        "status": "unknown"
+      },
+      {
+        "name": "program_invariant_preserved_auto_acc_other_auto_pc_1",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "direct state versus literal comparison in invariant or next-state model",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "ascending distinct value count, then state name",
+      "partition_count": 10,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v1"
+    },
+    "error": null
+  },
+  {
+    "name": "array_sum",
+    "status": "program_and_refinement_verified",
+    "exit_code": 0,
+    "wall_seconds": 1.9233151670014195,
+    "queries": 84,
+    "failures": [],
+    "plan": {
+      "partition_count": 68,
+      "strategy": "manual_split"
+    },
+    "error": null
+  }
+]

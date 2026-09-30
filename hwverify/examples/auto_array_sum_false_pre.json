@@ -814,82 +814,7 @@
         ]
       }
     },
-    "precondition": [
-      "and",
-      [
-        "and",
-        [
-          "and",
-          true,
-          [
-            "eq",
-            "i.program",
-            [
-              "write",
-              [
-                "write",
-                [
-                  "write",
-                  [
-                    "const_mem",
-                    8,
-                    [
-                      "bv",
-                      16,
-                      32768
-                    ]
-                  ],
-                  [
-                    "bv",
-                    8,
-                    0
-                  ],
-                  [
-                    "bv",
-                    16,
-                    49152
-                  ]
-                ],
-                [
-                  "bv",
-                  8,
-                  1
-                ],
-                [
-                  "bv",
-                  16,
-                  57344
-                ]
-              ],
-              [
-                "bv",
-                8,
-                2
-              ],
-              [
-                "bv",
-                16,
-                32768
-              ]
-            ]
-          ]
-        ],
-        [
-          "eq",
-          "i.data",
-          "p.data"
-        ]
-      ],
-      [
-        "eq",
-        "i.start_index",
-        [
-          "bv",
-          8,
-          240
-        ]
-      ]
-    ],
+    "precondition": false,
     "invariant": [
       "and",
       [
@@ -2764,7 +2689,6 @@
           ]
         ]
       ]
-    ],
-    "partitioning": "none"
+    ]
   }
 }

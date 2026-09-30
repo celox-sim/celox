@@ -1,0 +1,396 @@
+{
+  "version": 2,
+  "name": "Repeated-add multiplier, two-phase implementation",
+  "inputs": {
+    "reset": "bool",
+    "wait": "bool",
+    "factor": {
+      "bv": 8
+    },
+    "iterations": {
+      "bv": 4
+    }
+  },
+  "reset_input": "reset",
+  "spec": {
+    "state": {
+      "remaining": {
+        "bv": 4
+      },
+      "accumulator": {
+        "bv": 8
+      },
+      "factor": {
+        "bv": 8
+      }
+    },
+    "reset": {
+      "remaining": "i.iterations",
+      "accumulator": [
+        "bv",
+        8,
+        0
+      ],
+      "factor": "i.factor"
+    },
+    "next": {
+      "remaining": [
+        "sub",
+        "s.remaining",
+        [
+          "bv",
+          4,
+          1
+        ]
+      ],
+      "accumulator": [
+        "add",
+        "s.accumulator",
+        "s.factor"
+      ],
+      "factor": "s.factor"
+    },
+    "outputs": {
+      "can_run": [
+        "ne",
+        "s.remaining",
+        [
+          "bv",
+          4,
+          0
+        ]
+      ]
+    }
+  },
+  "impl": {
+    "state": {
+      "remaining": {
+        "bv": 4
+      },
+      "accumulator": {
+        "bv": 8
+      },
+      "factor": {
+        "bv": 8
+      },
+      "phase": {
+        "bv": 1
+      },
+      "pending": {
+        "bv": 8
+      }
+    },
+    "reset": {
+      "remaining": "i.iterations",
+      "accumulator": [
+        "bv",
+        8,
+        0
+      ],
+      "factor": "i.factor",
+      "phase": [
+        "bv",
+        1,
+        0
+      ],
+      "pending": [
+        "bv",
+        8,
+        0
+      ]
+    },
+    "wires": {
+      "execute": [
+        "eq",
+        "s.phase",
+        [
+          "bv",
+          1,
+          1
+        ]
+      ],
+      "running": [
+        "and",
+        [
+          "and",
+          true,
+          [
+            "ne",
+            "s.remaining",
+            [
+              "bv",
+              4,
+              0
+            ]
+          ]
+        ],
+        [
+          "not",
+          "i.wait"
+        ]
+      ],
+      "commit": [
+        "and",
+        [
+          "and",
+          true,
+          "w.execute"
+        ],
+        "w.running"
+      ]
+    },
+    "next": {
+      "remaining": [
+        "ite",
+        "w.commit",
+        [
+          "sub",
+          "s.remaining",
+          [
+            "bv",
+            4,
+            1
+          ]
+        ],
+        "s.remaining"
+      ],
+      "accumulator": [
+        "ite",
+        "w.commit",
+        "s.pending",
+        "s.accumulator"
+      ],
+      "factor": "s.factor",
+      "pending": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            true,
+            "w.running"
+          ],
+          [
+            "not",
+            "w.execute"
+          ]
+        ],
+        [
+          "add",
+          "s.accumulator",
+          "s.factor"
+        ],
+        "s.pending"
+      ],
+      "phase": [
+        "ite",
+        "w.running",
+        [
+          "ite",
+          "w.execute",
+          [
+            "bv",
+            1,
+            0
+          ],
+          [
+            "bv",
+            1,
+            0
+          ]
+        ],
+        "s.phase"
+      ]
+    },
+    "outputs": {
+      "retired": "w.commit"
+    }
+  },
+  "binding": [
+    "and",
+    [
+      "and",
+      [
+        "and",
+        [
+          "and",
+          true,
+          [
+            "eq",
+            "spec.remaining",
+            "impl.remaining"
+          ]
+        ],
+        [
+          "eq",
+          "spec.accumulator",
+          "impl.accumulator"
+        ]
+      ],
+      [
+        "eq",
+        "spec.factor",
+        "impl.factor"
+      ]
+    ],
+    [
+      "implies",
+      [
+        "eq",
+        "impl.phase",
+        [
+          "bv",
+          1,
+          1
+        ]
+      ],
+      [
+        "eq",
+        "impl.pending",
+        [
+          "add",
+          "impl.accumulator",
+          "impl.factor"
+        ]
+      ]
+    ]
+  ],
+  "commit": "retired",
+  "can_step": "can_run",
+  "hold_when": "i.wait",
+  "progress": {
+    "enabled": [
+      "and",
+      [
+        "and",
+        true,
+        [
+          "ne",
+          "spec.remaining",
+          [
+            "bv",
+            4,
+            0
+          ]
+        ]
+      ],
+      [
+        "not",
+        "i.wait"
+      ]
+    ],
+    "rank": [
+      "ite",
+      [
+        "eq",
+        "impl.phase",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      [
+        "bv",
+        2,
+        1
+      ],
+      [
+        "bv",
+        2,
+        0
+      ]
+    ]
+  },
+  "program_contract": {
+    "parameters": {
+      "factor": {
+        "bv": 8
+      },
+      "iterations": {
+        "bv": 4
+      }
+    },
+    "precondition": [
+      "and",
+      [
+        "and",
+        true,
+        [
+          "eq",
+          "i.factor",
+          "p.factor"
+        ]
+      ],
+      [
+        "eq",
+        "i.iterations",
+        "p.iterations"
+      ]
+    ],
+    "invariant": [
+      "and",
+      [
+        "and",
+        [
+          "and",
+          true,
+          [
+            "eq",
+            "s.factor",
+            "p.factor"
+          ]
+        ],
+        [
+          "ule",
+          "s.remaining",
+          "p.iterations"
+        ]
+      ],
+      [
+        "eq",
+        "s.accumulator",
+        [
+          "mul",
+          [
+            "sub",
+            [
+              "zext",
+              4,
+              "p.iterations"
+            ],
+            [
+              "zext",
+              4,
+              "s.remaining"
+            ]
+          ],
+          "p.factor"
+        ]
+      ]
+    ],
+    "terminal": [
+      "eq",
+      "s.remaining",
+      [
+        "bv",
+        4,
+        0
+      ]
+    ],
+    "postcondition": [
+      "eq",
+      "s.accumulator",
+      [
+        "mul",
+        [
+          "zext",
+          4,
+          "p.iterations"
+        ],
+        "p.factor"
+      ]
+    ],
+    "rank": "s.remaining"
+  }
+}

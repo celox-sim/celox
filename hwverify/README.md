@@ -1,4 +1,4 @@
-# hwverify-rs 0.3
+# hwverify-rs 0.4
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
@@ -6,7 +6,16 @@ Rust＋Z3による、ハードウェア向け状態対応チェッカー。小�
 
 現状は **Z3のUNSAT結果とRust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
 
-## 0.3の追加
+## 0.4の追加
+
+- 手動splitなしで、invariant/modelの比較定数から完全な保存partitionを自動選択
+- 候補・採否・予算をreportに記録し、未実行/UNKNOWNを成功にしない
+- 同じ配列和、rename/式の並べ替え、別プログラムと対抗例で検査
+- 最初の選択戦略のUNKNOWNも保存。manualより高速・万能という主張ではない
+
+選択規則・全実測・制限は[自動分割](PARTITIONING-ja.md)。
+
+## 0.3時点の追加
 
 - ISA上で固定16要素のmod256配列和を帰納的に検証し、同じCPUのfetch/execute refinementへ接続
 - 再利用可能な`program_contract`でpre/invariant/post/terminationと停止後のquiescenceを検査
