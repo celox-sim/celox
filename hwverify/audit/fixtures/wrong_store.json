@@ -1,0 +1,628 @@
+{
+  "version": 2,
+  "name": "CPU ISA vs two-microcycle implementation",
+  "inputs": {
+    "rst": "bool",
+    "stall": "bool",
+    "program": {
+      "mem": [
+        8,
+        16
+      ]
+    }
+  },
+  "reset_input": "rst",
+  "spec": {
+    "state": {
+      "pc": {
+        "bv": 8
+      },
+      "acc": {
+        "bv": 8
+      },
+      "mem": {
+        "mem": [
+          8,
+          8
+        ]
+      },
+      "program": {
+        "mem": [
+          8,
+          16
+        ]
+      },
+      "halted": "bool"
+    },
+    "reset": {
+      "pc": [
+        "bv",
+        8,
+        0
+      ],
+      "acc": [
+        "bv",
+        8,
+        0
+      ],
+      "mem": [
+        "const_mem",
+        8,
+        [
+          "bv",
+          8,
+          0
+        ]
+      ],
+      "program": "i.program",
+      "halted": false
+    },
+    "wires": {
+      "instruction": [
+        "read",
+        "s.program",
+        "s.pc"
+      ],
+      "op": [
+        "extract",
+        15,
+        13,
+        "w.instruction"
+      ],
+      "imm": [
+        "extract",
+        7,
+        0,
+        "w.instruction"
+      ]
+    },
+    "next": {
+      "pc": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            true,
+            [
+              "eq",
+              "w.op",
+              [
+                "bv",
+                3,
+                3
+              ]
+            ]
+          ],
+          [
+            "eq",
+            "s.acc",
+            [
+              "bv",
+              8,
+              0
+            ]
+          ]
+        ],
+        "w.imm",
+        [
+          "add",
+          "s.pc",
+          [
+            "bv",
+            8,
+            1
+          ]
+        ]
+      ],
+      "acc": [
+        "ite",
+        [
+          "eq",
+          "w.op",
+          [
+            "bv",
+            3,
+            0
+          ]
+        ],
+        [
+          "add",
+          "s.acc",
+          "w.imm"
+        ],
+        [
+          "ite",
+          [
+            "eq",
+            "w.op",
+            [
+              "bv",
+              3,
+              1
+            ]
+          ],
+          [
+            "read",
+            "s.mem",
+            "w.imm"
+          ],
+          [
+            "ite",
+            [
+              "eq",
+              "w.op",
+              [
+                "bv",
+                3,
+                5
+              ]
+            ],
+            [
+              "bxor",
+              "s.acc",
+              "w.imm"
+            ],
+            "s.acc"
+          ]
+        ]
+      ],
+      "mem": [
+        "ite",
+        [
+          "eq",
+          "w.op",
+          [
+            "bv",
+            3,
+            2
+          ]
+        ],
+        [
+          "write",
+          "s.mem",
+          "w.imm",
+          "s.acc"
+        ],
+        "s.mem"
+      ],
+      "halted": [
+        "or",
+        "s.halted",
+        [
+          "eq",
+          "w.op",
+          [
+            "bv",
+            3,
+            4
+          ]
+        ]
+      ],
+      "program": "s.program"
+    },
+    "outputs": {
+      "can_step": [
+        "not",
+        "s.halted"
+      ]
+    }
+  },
+  "impl": {
+    "state": {
+      "pc": {
+        "bv": 8
+      },
+      "acc": {
+        "bv": 8
+      },
+      "mem": {
+        "mem": [
+          8,
+          8
+        ]
+      },
+      "program": {
+        "mem": [
+          8,
+          16
+        ]
+      },
+      "halted": "bool",
+      "phase": {
+        "bv": 1
+      },
+      "ir": {
+        "bv": 16
+      }
+    },
+    "reset": {
+      "pc": [
+        "bv",
+        8,
+        0
+      ],
+      "acc": [
+        "bv",
+        8,
+        0
+      ],
+      "mem": [
+        "const_mem",
+        8,
+        [
+          "bv",
+          8,
+          0
+        ]
+      ],
+      "program": "i.program",
+      "halted": false,
+      "phase": [
+        "bv",
+        1,
+        0
+      ],
+      "ir": [
+        "bv",
+        16,
+        0
+      ]
+    },
+    "wires": {
+      "op": [
+        "extract",
+        15,
+        13,
+        "s.ir"
+      ],
+      "imm": [
+        "extract",
+        7,
+        0,
+        "s.ir"
+      ],
+      "run": [
+        "and",
+        [
+          "and",
+          true,
+          [
+            "not",
+            "i.stall"
+          ]
+        ],
+        [
+          "not",
+          "s.halted"
+        ]
+      ],
+      "execute": [
+        "eq",
+        "s.phase",
+        [
+          "bv",
+          1,
+          1
+        ]
+      ],
+      "commit": [
+        "and",
+        [
+          "and",
+          true,
+          "w.run"
+        ],
+        "w.execute"
+      ]
+    },
+    "next": {
+      "pc": [
+        "ite",
+        "w.commit",
+        [
+          "ite",
+          [
+            "and",
+            [
+              "and",
+              true,
+              [
+                "eq",
+                "w.op",
+                [
+                  "bv",
+                  3,
+                  3
+                ]
+              ]
+            ],
+            [
+              "eq",
+              "s.acc",
+              [
+                "bv",
+                8,
+                0
+              ]
+            ]
+          ],
+          "w.imm",
+          [
+            "add",
+            "s.pc",
+            [
+              "bv",
+              8,
+              1
+            ]
+          ]
+        ],
+        "s.pc"
+      ],
+      "acc": [
+        "ite",
+        "w.commit",
+        [
+          "ite",
+          [
+            "eq",
+            "w.op",
+            [
+              "bv",
+              3,
+              0
+            ]
+          ],
+          [
+            "add",
+            "s.acc",
+            "w.imm"
+          ],
+          [
+            "ite",
+            [
+              "eq",
+              "w.op",
+              [
+                "bv",
+                3,
+                1
+              ]
+            ],
+            [
+              "read",
+              "s.mem",
+              "w.imm"
+            ],
+            [
+              "ite",
+              [
+                "eq",
+                "w.op",
+                [
+                  "bv",
+                  3,
+                  5
+                ]
+              ],
+              [
+                "bxor",
+                "s.acc",
+                "w.imm"
+              ],
+              "s.acc"
+            ]
+          ]
+        ],
+        "s.acc"
+      ],
+      "mem": [
+        "ite",
+        "w.commit",
+        [
+          "ite",
+          [
+            "eq",
+            "w.op",
+            [
+              "bv",
+              3,
+              2
+            ]
+          ],
+          [
+            "write",
+            "s.mem",
+            [
+              "add",
+              "w.imm",
+              [
+                "bv",
+                8,
+                1
+              ]
+            ],
+            "s.acc"
+          ],
+          "s.mem"
+        ],
+        "s.mem"
+      ],
+      "halted": [
+        "ite",
+        "w.commit",
+        [
+          "or",
+          "s.halted",
+          [
+            "eq",
+            "w.op",
+            [
+              "bv",
+              3,
+              4
+            ]
+          ]
+        ],
+        "s.halted"
+      ],
+      "program": [
+        "ite",
+        "w.commit",
+        "s.program",
+        "s.program"
+      ],
+      "phase": [
+        "ite",
+        "w.run",
+        [
+          "ite",
+          "w.execute",
+          [
+            "bv",
+            1,
+            0
+          ],
+          [
+            "bv",
+            1,
+            1
+          ]
+        ],
+        "s.phase"
+      ],
+      "ir": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            true,
+            "w.run"
+          ],
+          [
+            "not",
+            "w.execute"
+          ]
+        ],
+        [
+          "read",
+          "s.program",
+          "s.pc"
+        ],
+        "s.ir"
+      ]
+    },
+    "outputs": {
+      "commit": "w.commit"
+    }
+  },
+  "binding": [
+    "and",
+    [
+      "and",
+      [
+        "and",
+        [
+          "and",
+          [
+            "and",
+            [
+              "and",
+              true,
+              [
+                "eq",
+                "spec.pc",
+                "impl.pc"
+              ]
+            ],
+            [
+              "eq",
+              "spec.acc",
+              "impl.acc"
+            ]
+          ],
+          [
+            "eq",
+            "spec.mem",
+            "impl.mem"
+          ]
+        ],
+        [
+          "eq",
+          "spec.program",
+          "impl.program"
+        ]
+      ],
+      [
+        "eq",
+        "spec.halted",
+        "impl.halted"
+      ]
+    ],
+    [
+      "implies",
+      [
+        "eq",
+        "impl.phase",
+        [
+          "bv",
+          1,
+          1
+        ]
+      ],
+      [
+        "eq",
+        "impl.ir",
+        [
+          "read",
+          "impl.program",
+          "impl.pc"
+        ]
+      ]
+    ]
+  ],
+  "commit": "commit",
+  "can_step": "can_step",
+  "hold_when": "i.stall",
+  "progress": {
+    "enabled": [
+      "and",
+      [
+        "and",
+        true,
+        [
+          "not",
+          "spec.halted"
+        ]
+      ],
+      [
+        "not",
+        "i.stall"
+      ]
+    ],
+    "rank": [
+      "ite",
+      [
+        "eq",
+        "impl.phase",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      [
+        "bv",
+        2,
+        1
+      ],
+      [
+        "bv",
+        2,
+        0
+      ]
+    ]
+  }
+}

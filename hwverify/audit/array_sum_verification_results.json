@@ -1,0 +1,236 @@
+[
+  {
+    "example": "array_sum",
+    "status": "program_and_refinement_verified",
+    "obligations": 84,
+    "solver_seconds": 0.944919035,
+    "nonpassed": []
+  },
+  {
+    "example": "array_sum_bad_post",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 0.969908663,
+    "nonpassed": [
+      [
+        "program_postcondition",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_bad_program",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 2.145496961,
+    "nonpassed": [
+      [
+        "program_invariant_preserved_index_240_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_241_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_242_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_243_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_244_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_245_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_246_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_247_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_248_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_249_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_250_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_251_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_252_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_253_pc_1",
+        "counterexample"
+      ],
+      [
+        "program_invariant_preserved_index_254_pc_1",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_bad_rank",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 1.005080015,
+    "nonpassed": [
+      [
+        "program_rank_decreases",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_bad_terminal",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 1.039042998,
+    "nonpassed": [
+      [
+        "program_active_nonempty",
+        "failed_nonvacuity"
+      ],
+      [
+        "program_postcondition",
+        "counterexample"
+      ],
+      [
+        "program_terminal_quiescent",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_baseline_unsplit",
+    "status": "unknown",
+    "obligations": 16,
+    "solver_seconds": 10.202188186,
+    "nonpassed": [
+      [
+        "program_invariant_preserved",
+        "unknown"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_false_invariant",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 0.830855914,
+    "nonpassed": [
+      [
+        "program_initialization",
+        "counterexample"
+      ],
+      [
+        "program_active_nonempty",
+        "failed_nonvacuity"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_false_pre",
+    "status": "inadequate_contract",
+    "obligations": 84,
+    "solver_seconds": 0.963177351,
+    "nonpassed": [
+      [
+        "program_pre_nonempty",
+        "failed_nonvacuity"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_input_invariant",
+    "status": "invalid_or_tool_error",
+    "obligations": 0,
+    "solver_seconds": 0,
+    "nonpassed": []
+  },
+  {
+    "example": "array_sum_missing_case",
+    "status": "counterexample",
+    "obligations": 17,
+    "solver_seconds": 0.256374228,
+    "nonpassed": [
+      [
+        "program_cases_cover",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_split_other_bad_post",
+    "status": "counterexample",
+    "obligations": 24,
+    "solver_seconds": 10.346235122,
+    "nonpassed": [
+      [
+        "program_invariant_preserved_index_other_pc_1",
+        "unknown"
+      ],
+      [
+        "program_postcondition",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_split_other_bad_program",
+    "status": "counterexample",
+    "obligations": 24,
+    "solver_seconds": 0.422691936,
+    "nonpassed": [
+      [
+        "program_invariant_preserved_index_other_pc_1",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_unavailable_step",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 1.074561137,
+    "nonpassed": [
+      [
+        "commit_eligible",
+        "counterexample"
+      ],
+      [
+        "program_step_available",
+        "counterexample"
+      ]
+    ]
+  },
+  {
+    "example": "array_sum_wrong_indexed_load",
+    "status": "counterexample",
+    "obligations": 84,
+    "solver_seconds": 1.026895681,
+    "nonpassed": [
+      [
+        "microstep_refinement",
+        "counterexample"
+      ]
+    ]
+  }
+]
