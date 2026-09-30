@@ -1,17 +1,11 @@
-specification "Counter arithmetic composed with a spending budget"
+specification "Scoped counter arithmetic with a spending budget"
 
-input rst: bool;
-input go: bool;
-input amount: bv<4>;
-observation count: bv<4>;
-observation remaining: bv<4>;
-operation add {}
-
-component Counter {
+spec Counter(input amount: bv<4>, output count: bv<4>) {
   state value: bv<4>;
   init s.value == 0u4;
-  invariant o.count == s.value;
-  steps { add = n.value == s.value + i.amount; }
+  invariant count == s.value;
+  operation add = n.value == s.value + amount;
+
   example add_two {
     expect positive;
     initial { count = 0u4; }
@@ -24,11 +18,12 @@ component Counter {
   }
 }
 
-component Budget {
+spec Budget(input amount: bv<4>, output remaining: bv<4>) {
   state credits: bv<4>;
   init s.credits == 3u4;
-  invariant o.remaining == s.credits;
-  steps { add = i.amount <= s.credits && n.credits == s.credits - i.amount; }
+  invariant remaining == s.credits;
+  operation add = amount <= s.credits && n.credits == s.credits - amount;
+
   example spend_two {
     expect positive;
     initial { remaining = 3u4; }
@@ -36,22 +31,15 @@ component Budget {
   }
   example cannot_overspend {
     expect negative;
-    initial { }
-    trace { add { inputs { amount = 4u4; } observe { } } }
+    initial {}
+    trace { add { inputs { amount = 4u4; } observe {} } }
   }
 }
 
-composition Arithmetic {
-  members compose(Counter);
-  example arithmetic_allows_four {
-    expect positive;
-    initial { }
-    trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
-  }
-}
+composition Budgeted(input amount: bv<4>, output count: bv<4>, output remaining: bv<4>) {
+  use Counter(amount: amount, count: count);
+  use Budget(amount: amount, remaining: remaining);
 
-composition Budgeted {
-  members compose(Arithmetic, Budget);
   example spend_all {
     expect positive;
     initial { count = 0u4; remaining = 3u4; }
@@ -62,13 +50,16 @@ composition Budgeted {
   }
   example exclude_overspend {
     expect negative;
-    initial { }
+    initial {}
     trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
   }
 }
 
 implementation {
   composition Budgeted;
+  input rst: bool;
+  input go: bool;
+  input amount: bv<4>;
   reset_input rst;
   state count: bv<4>;
   state remaining: bv<4>;
@@ -82,7 +73,7 @@ implementation {
   binding {
     bind Counter { value = s.count; }
     bind Budget { credits = s.remaining; }
-    observation count = s.count;
-    observation remaining = s.remaining;
+    output count = s.count;
+    output remaining = s.remaining;
   }
 }

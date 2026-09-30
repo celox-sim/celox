@@ -1,10 +1,14 @@
 //! Parol grammar -> source-located surface syntax -> canonical IR document.
 //! The generated grammar AST never crosses into the solver.
 use serde_json::{json, Map, Value};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 include!(concat!(env!("OUT_DIR"), "/modules.rs"));
 use hwv_grammar_trait as g;
 mod json_input;
+mod scoped;
 pub use json_input::parse as parse_json;
 mod hwv_grammar {
     pub use super::HwvGrammar;
@@ -53,6 +57,12 @@ pub struct ParsedDocument {
     pub filename: String,
 }
 impl ParsedDocument {
+    pub fn validate_scoped_specification(
+        &self,
+    ) -> Result<hwverify_ir::ScopedSpecification, SyntaxError> {
+        hwverify_ir::ScopedSpecification::from_json(&self.canonical)
+            .map_err(|e| self.diagnostic(&self.filename, &e))
+    }
     pub fn validate_specification(&self) -> Result<hwverify_ir::Specification, SyntaxError> {
         hwverify_ir::Specification::from_json(&self.canonical)
             .map_err(|e| self.diagnostic(&self.filename, &e))
@@ -126,14 +136,198 @@ impl E {
 type Res<T> = Result<T, SyntaxError>;
 fn id_token<'a, 't>(id: &'a g::Id<'t>) -> &'a parol_runtime::Token<'t> {
     match id {
-        g::Id::Ident(x) => &x.ident.ident,
-        g::Id::Bv(x) => &x.bv,
-        g::Id::Mem(x) => &x.mem,
-        g::Id::Bool(x) => &x.bool,
-        g::Id::DocKind(x) => &x.doc_kind.doc_kind,
+        g::Id::PropertyId(x) => property_token(&x.property_id),
+        g::Id::Use(x) => &x.r#use,
+        g::Id::Actions(x) => &x.actions,
+    }
+}
+fn property_token<'a, 't>(id: &'a g::PropertyId<'t>) -> &'a parol_runtime::Token<'t> {
+    match id {
+        g::PropertyId::Ident(x) => &x.ident.ident,
+        g::PropertyId::Bv(x) => &x.bv,
+        g::PropertyId::Mem(x) => &x.mem,
+        g::PropertyId::Bool(x) => &x.bool,
+        g::PropertyId::DocKind(x) => &x.doc_kind.doc_kind,
     }
 }
 impl Lower<'_> {
+    /// Collections that have declaration-style spellings in this scope.
+    /// Empty collections are explicit in canonical JSON, even when the source
+    /// has no corresponding declarations.
+    fn collections(context: &str) -> &'static [&'static str] {
+        match context {
+            "root" => &["inputs"],
+            "specroot" => &[
+                "inputs",
+                "observations",
+                "operations",
+                "components",
+                "compositions",
+            ],
+            "machine" | "rel_impl" => &["state"],
+            "contract" => &["parameters"],
+            "component" => &["state", "examples"],
+            "composition" => &["examples"],
+            "rel_binding" => &["states", "observations"],
+            "scoped_root" => &["specs", "compositions"],
+            "scoped_spec" => &["state", "operations", "examples"],
+            "scoped_composition" => &["instances", "examples"],
+            "scoped_impl" => &["inputs", "state"],
+            "scoped_binding" => &["states", "outputs"],
+            _ => &[],
+        }
+    }
+
+    fn named_entry(
+        &mut self,
+        entry: &g::NamedEntry<'_>,
+        context: &str,
+        path: &str,
+        result: &mut Map<String, Value>,
+    ) -> Res<()> {
+        let keyword = property_token(&entry.property_id);
+        let name = id_token(&entry.id);
+        if let g::NamedBody::SignatureBody(signature) = &*entry.named_body {
+            return self.scoped_signature(
+                keyword,
+                name,
+                &signature.signature_body,
+                context,
+                path,
+                result,
+            );
+        }
+        let span = self.span(name);
+        let unexpected = || {
+            self.error(
+                &self.span(keyword),
+                format!(
+                    "unexpected named declaration {} in {context}",
+                    keyword.text()
+                ),
+            )
+        };
+        let (collection, subcontext) = match (&*entry.named_body, context, keyword.text()) {
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "specroot", "operation") => {
+                ("operations", "operation")
+            }
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "specroot", "component") => {
+                ("components", "component")
+            }
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "specroot", "composition") => {
+                ("compositions", "composition")
+            }
+            (
+                g::NamedBody::LBraceNamedBodyListRBrace(_),
+                "component" | "composition",
+                "example",
+            ) => ("examples", "example"),
+            (
+                g::NamedBody::LBraceNamedBodyListRBrace(_),
+                "scoped_spec" | "scoped_composition",
+                "example",
+            ) => ("examples", "scoped_example"),
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "rel_binding", "bind") => {
+                ("states", "assignments")
+            }
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "scoped_binding", "bind") => {
+                ("states", "assignments")
+            }
+            (g::NamedBody::ColonTypeSemicolon(_), "root" | "specroot", "input") => {
+                ("inputs", "declarations")
+            }
+            (g::NamedBody::ColonTypeSemicolon(_), "specroot", "observation") => {
+                ("observations", "declarations")
+            }
+            (
+                g::NamedBody::ColonTypeSemicolon(_),
+                "component" | "machine" | "rel_impl" | "scoped_spec" | "scoped_impl",
+                "state",
+            ) => ("state", "declarations"),
+            (g::NamedBody::ColonTypeSemicolon(_), "contract", "parameter") => {
+                ("parameters", "declarations")
+            }
+            (g::NamedBody::EquExprSemicolon(_), "rel_binding", "observation") => {
+                ("observations", "assignments")
+            }
+            (g::NamedBody::ColonTypeSemicolon(_), "scoped_impl", "input") => {
+                ("inputs", "declarations")
+            }
+            (g::NamedBody::EquExprSemicolon(_), "scoped_spec", "operation") => {
+                ("operations", "assignments")
+            }
+            (g::NamedBody::EquExprSemicolon(_), "scoped_composition", "operation") => {
+                ("operations", "action_groups")
+            }
+            (g::NamedBody::EquExprSemicolon(_), "scoped_binding", "output") => {
+                ("outputs", "assignments")
+            }
+            _ => return Err(unexpected()),
+        };
+        if name.text().contains('.') && !(context == "scoped_binding" && keyword.text() == "bind") {
+            return Err(self.error(&span, "declaration names must not contain dots"));
+        }
+        if result
+            .get(collection)
+            .and_then(|group| group.get(name.text()))
+            .is_some()
+        {
+            return Err(self.error(&span, format!("duplicate {} in {collection}", name.text())));
+        }
+        let group_path = format!("{path}/{collection}");
+        self.spans
+            .entry(group_path.clone())
+            .or_insert_with(|| span.clone());
+        let child = format!("{group_path}/{}", name.text());
+        self.spans.insert(child.clone(), span.clone());
+        let value = match &*entry.named_body {
+            g::NamedBody::LBraceNamedBodyListRBrace(x) => self.entries(
+                x.named_body_list.iter().map(|e| &*e.entry).collect(),
+                subcontext,
+                &child,
+            )?,
+            g::NamedBody::ColonTypeSemicolon(x) => self.ty(&x.r#type)?,
+            g::NamedBody::EquExprSemicolon(x) => {
+                let expr = self.expr(&x.expr)?;
+                self.record(&child, &expr);
+                if subcontext == "action_groups" {
+                    let args = expr
+                        .value
+                        .as_array()
+                        .filter(|args| args.first() == Some(&json!("actions")))
+                        .ok_or_else(|| {
+                            self.error(
+                                &expr.span,
+                                "composition operation requires actions(instance.operation, ...)",
+                            )
+                        })?;
+                    if args[1..].iter().any(|arg| !arg.is_string()) {
+                        return Err(self.error(
+                            &expr.span,
+                            "action group members must be instance.operation names",
+                        ));
+                    }
+                    for index in 0..args.len() - 1 {
+                        if let Some(span) = expr.descendants.get(&format!("/{}", index + 1)) {
+                            self.spans.insert(format!("{child}/{index}"), span.clone());
+                        }
+                    }
+                    Value::Array(args[1..].to_vec())
+                } else {
+                    expr.value
+                }
+            }
+            g::NamedBody::SignatureBody(_) => unreachable!("signatures are handled above"),
+        };
+        result
+            .entry(collection)
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("declaration collections are objects")
+            .insert(name.text().into(), value);
+        Ok(())
+    }
+
     fn span(&self, t: &parol_runtime::Token<'_>) -> Span {
         let start = t.location.start as usize;
         let end = t.location.end as usize;
@@ -294,12 +488,9 @@ impl Lower<'_> {
                 let t = id_token(&n.id);
                 let span = self.span(t);
                 if let Some(call) = &n.named_opt {
-                    let mut args = vec![];
-                    if let Some(arg) = &call.named_opt0 {
-                        args.push(self.expr(&arg.args.expr)?);
-                        for arg in &arg.args.args_list {
-                            args.push(self.expr(&arg.expr)?)
-                        }
+                    let mut args = vec![self.expr(&call.args.expr)?];
+                    for arg in &call.args.args_list {
+                        args.push(self.expr(&arg.expr)?)
                     }
                     let op = t.text();
                     if ![
@@ -334,6 +525,7 @@ impl Lower<'_> {
                         "concat",
                         "range",
                         "compose",
+                        "actions",
                     ]
                     .contains(&op)
                     {
@@ -364,27 +556,43 @@ impl Lower<'_> {
     where
         't: 'a,
     {
-        if context == "trace" {
+        if context == "trace" || context == "scoped_trace" {
             let mut frames = vec![];
             for (index, entry) in entries.into_iter().enumerate() {
-                let g::Entry::Block(x) = entry else {
-                    return Err(SyntaxError {
-                        filename: self.filename.into(),
-                        message: "trace requires operation blocks".into(),
-                        span: self.spans.get(path).cloned(),
-                    });
-                };
-                let token = id_token(&x.block.id);
                 let child = format!("{path}/{index}");
+                let (token, entries, selection, field) = match entry {
+                    g::Entry::Block(x) => (id_token(&x.block.id), x.block.block_list.iter().map(|e| &*e.entry).collect(), json!(id_token(&x.block.id).text()), "operation"),
+                    g::Entry::ActionFrame(x) if context == "scoped_trace" => {
+                        let token = &x.action_frame.actions;
+                        let mut actions = Vec::new();
+                        let mut seen = BTreeSet::new();
+                        if let Some(args) = &x.action_frame.action_frame_opt {
+                            for expr in std::iter::once(&*args.args.expr).chain(args.args.args_list.iter().map(|a| &*a.expr)) {
+                                let value = self.expr(expr)?;
+                                let name = value.value.as_str().ok_or_else(|| self.error(&value.span, "trace actions must be operation names"))?;
+                                if name.contains('.') {
+                                    return Err(self.error(&value.span, "trace actions must be exported local operation names"));
+                                }
+                                if !seen.insert(name.to_owned()) {
+                                    return Err(self.error(&value.span, format!("duplicate trace action {name}")));
+                                }
+                                self.spans.insert(format!("{child}/actions/{}", actions.len()), value.span);
+                                actions.push(value.value);
+                            }
+                        }
+                        (token, x.action_frame.action_frame_list.iter().map(|e| &*e.entry).collect(), Value::Array(actions), "actions")
+                    }
+                    _ => return Err(SyntaxError {
+                        filename: self.filename.into(),
+                        message: "trace requires operation blocks (or actions(...) blocks in scoped specifications)".into(),
+                        span: self.spans.get(path).cloned(),
+                    }),
+                };
                 self.spans.insert(child.clone(), self.span(token));
                 self.spans
-                    .insert(format!("{child}/operation"), self.span(token));
-                let mut frame = self.entries(
-                    x.block.block_list.iter().map(|e| &*e.entry).collect(),
-                    "trace_frame",
-                    &child,
-                )?;
-                frame["operation"] = json!(token.text());
+                    .insert(format!("{child}/{field}"), self.span(token));
+                let mut frame = self.entries(entries, "trace_frame", &child)?;
+                frame[field] = selection;
                 for key in ["inputs", "observe"] {
                     if frame.get(key).is_none() {
                         frame[key] = json!({});
@@ -395,14 +603,28 @@ impl Lower<'_> {
             return Ok(Value::Array(frames));
         }
         let mut result = Map::new();
+        let mut explicit_entries = BTreeSet::new();
         for entry in entries {
-            let (id, kind) = match entry {
-                g::Entry::Block(x) => (&*x.block.id, "block"),
-                g::Entry::Declaration(x) => (&*x.declaration.id, "declaration"),
-                g::Entry::Assignment(x) => (&*x.assignment.id, "assignment"),
-                g::Entry::Property(x) => (&*x.property.id, "property"),
+            let token = match entry {
+                g::Entry::ActionFrame(x) => {
+                    return Err(self.error(
+                        &self.span(&x.action_frame.actions),
+                        "actions(...) blocks are only valid inside scoped traces",
+                    ))
+                }
+                g::Entry::Use(x) => {
+                    self.scoped_use(&x.r#use, context, path, &mut result)?;
+                    continue;
+                }
+                g::Entry::NamedEntry(x) => {
+                    self.named_entry(&x.named_entry, context, path, &mut result)?;
+                    continue;
+                }
+                g::Entry::Block(x) => id_token(&x.block.id),
+                g::Entry::Declaration(x) => id_token(&x.declaration.id),
+                g::Entry::Assignment(x) => id_token(&x.assignment.id),
+                g::Entry::Property(x) => property_token(&x.property.property_id),
             };
-            let token = id_token(id);
             let raw = token.text();
             let span = self.span(token);
             let key = match (context, raw) {
@@ -412,12 +634,15 @@ impl Lower<'_> {
                 ("contract", "partition") => "partitioning",
                 _ => raw,
             };
-            if result.contains_key(key) {
+            if !explicit_entries.insert(key) {
                 return Err(self.error(&span, format!("duplicate {raw} in {context}")));
             }
             let child = format!("{path}/{key}");
             self.spans.insert(child.clone(), span.clone());
             let value = match entry {
+                g::Entry::NamedEntry(_) | g::Entry::Use(_) | g::Entry::ActionFrame(_) => {
+                    unreachable!("named entries are handled above")
+                }
                 g::Entry::Block(x) => {
                     let subcontext = match (context, raw) {
                         ("root", "inputs") | ("specroot", "inputs" | "observations") => {
@@ -425,6 +650,14 @@ impl Lower<'_> {
                         }
                         ("specroot", "operations") => "operations",
                         ("specroot", "implementation") => "rel_impl",
+                        ("scoped_root", "implementation") => "scoped_impl",
+                        ("scoped_impl", "inputs" | "state") | ("scoped_spec", "state") => {
+                            "declarations"
+                        }
+                        ("scoped_impl", "reset" | "next" | "wires" | "operations") => "assignments",
+                        ("scoped_impl", "binding") => "scoped_binding",
+                        ("scoped_binding", "states") => "state_maps",
+                        ("scoped_binding", "outputs") => "assignments",
                         ("rel_impl", "state") => "declarations",
                         ("rel_impl", "reset" | "next" | "wires" | "operations") => "assignments",
                         ("rel_impl", "binding") => "rel_binding",
@@ -440,8 +673,9 @@ impl Lower<'_> {
                         ("component", "steps") => "assignments",
                         ("component" | "composition", "examples") => "example_group",
                         ("example_group", _) => "example",
-                        ("example", "initial") => "assignments",
+                        ("example" | "scoped_example", "initial") => "assignments",
                         ("example", "trace") => "trace",
+                        ("scoped_example", "trace") => "scoped_trace",
                         ("trace_frame", "inputs" | "observe") => "assignments",
                         ("root", "spec" | "impl") => "machine",
                         ("root", "progress") => "progress",
@@ -509,10 +743,10 @@ impl Lower<'_> {
                         "root" => {
                             ["reset_input", "binding", "commit", "can_step", "hold_when"].as_slice()
                         }
-                        "rel_impl" => ["composition", "reset_input"].as_slice(),
-                        "component" => ["init", "invariant"].as_slice(),
+                        "rel_impl" | "scoped_impl" => ["composition", "reset_input"].as_slice(),
+                        "component" | "scoped_spec" => ["init", "invariant"].as_slice(),
                         "composition" => ["members"].as_slice(),
-                        "example" => ["expect"].as_slice(),
+                        "example" | "scoped_example" => ["expect"].as_slice(),
                         "progress" => ["enabled", "rank"].as_slice(),
                         "contract" => [
                             "pre",
@@ -560,8 +794,29 @@ impl Lower<'_> {
                     }
                 }
             };
-            let _ = kind;
-            result.insert(key.into(), value);
+            if Self::collections(context).contains(&key) {
+                let group = result
+                    .entry(key)
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("declaration collections are objects");
+                for (name, value) in value
+                    .as_object()
+                    .expect("collection blocks lower to objects")
+                {
+                    if group.contains_key(name) {
+                        let member_span =
+                            self.spans.get(&format!("{child}/{name}")).unwrap_or(&span);
+                        return Err(self.error(member_span, format!("duplicate {name} in {raw}")));
+                    }
+                    group.insert(name.clone(), value.clone());
+                }
+            } else {
+                result.insert(key.into(), value);
+            }
+        }
+        for collection in Self::collections(context) {
+            result.entry(*collection).or_insert_with(|| json!({}));
         }
         Ok(Value::Object(result))
     }
@@ -644,17 +899,34 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
     lower
         .spans
         .insert("".into(), lower.span(&root.string.string));
+    let entries: Vec<&g::Entry<'_>> = match &*root.document_body {
+        g::DocumentBody::LBraceDocumentBodyListRBrace(x) => {
+            x.document_body_list.iter().map(|e| &*e.entry).collect()
+        }
+        g::DocumentBody::DocumentBodyList0(x) => {
+            x.document_body_list0.iter().map(|e| &*e.entry).collect()
+        }
+    };
+    let relational = root.doc_kind.doc_kind.text() == "specification";
+    let scoped = relational && entries.iter().any(|entry| matches!(entry, g::Entry::NamedEntry(x) if matches!(&*x.named_entry.named_body, g::NamedBody::SignatureBody(_))));
     let mut canonical = lower.entries(
-        root.document_list.iter().map(|e| &*e.entry).collect(),
-        if root.doc_kind.doc_kind.text() == "specification" {
+        entries,
+        if scoped {
+            "scoped_root"
+        } else if relational {
             "specroot"
         } else {
             "root"
         },
         "",
     )?;
-    let relational = root.doc_kind.doc_kind.text() == "specification";
-    canonical["version"] = json!(if relational { 3 } else { 2 });
+    canonical["version"] = json!(if scoped {
+        4
+    } else if relational {
+        3
+    } else {
+        2
+    });
     if relational {
         canonical["kind"] = json!("specification");
     }

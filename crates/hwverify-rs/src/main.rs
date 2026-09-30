@@ -20,12 +20,14 @@ use std::{env, fs, path::PathBuf};
 enum Input {
     Design(ir::Design),
     Specification(ir::Specification),
+    ScopedSpecification(ir::ScopedSpecification),
 }
 impl Input {
     fn document(&self) -> &Value {
         match self {
             Self::Design(d) => d.document(),
             Self::Specification(s) => s.document(),
+            Self::ScopedSpecification(s) => s.document(),
         }
     }
 }
@@ -85,14 +87,25 @@ fn run() -> Res<i32> {
                 .map_err(|e| format!("{}: invalid UTF-8 source: {e}", args[0]))?;
             let parsed =
                 hwverify_syntax::parse_document(source, &args[0]).map_err(|e| e.to_string())?;
-            if parsed.canonical["kind"] == "specification" {
+            if parsed.canonical["version"] == 4 {
+                Input::ScopedSpecification(
+                    parsed
+                        .validate_scoped_specification()
+                        .map_err(|e| e.to_string())?,
+                )
+            } else if parsed.canonical["kind"] == "specification" {
                 Input::Specification(parsed.validate_specification().map_err(|e| e.to_string())?)
             } else {
                 Input::Design(parsed.validate().map_err(|e| e.to_string())?)
             }
         } else {
             let doc = hwverify_syntax::parse_json(&bytes)?;
-            if doc["kind"] == "specification" {
+            if doc["version"] == 4 {
+                Input::ScopedSpecification(
+                    ir::ScopedSpecification::from_json(&doc)
+                        .map_err(|e| format!("{}: {e}", args[0]))?,
+                )
+            } else if doc["kind"] == "specification" {
                 Input::Specification(
                     ir::Specification::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?,
                 )
@@ -118,6 +131,9 @@ fn run() -> Res<i32> {
             match &design {
                 Input::Design(d) => checker::check_design(d, z3, out.clone()),
                 Input::Specification(s) => checker::check_specification(s, z3, out.clone()),
+                Input::ScopedSpecification(s) => {
+                    checker::check_scoped_specification(s, z3, out.clone())
+                }
             }
         }
     })();

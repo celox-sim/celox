@@ -1,76 +1,84 @@
 // Three increments of one location; the implementation can stall.
 // All assignments in a next block read the old state.
-design "memory increment with irrelevant invariant scalars" {
-  inputs {
-    rst: bool; stall: bool; address: bv<2>; mem: mem<2, 8>;
-    distract0: bv<8>; distract1: bv<8>; distract2: bv<8>;
+design "memory increment with irrelevant invariant scalars"
+
+input rst: bool;
+input stall: bool;
+input address: bv<2>;
+input mem: mem<2, 8>;
+input distract0: bv<8>;
+input distract1: bv<8>;
+input distract2: bv<8>;
+reset_input rst;
+spec {
+  state count: bv<4>;
+  state address: bv<2>;
+  state mem: mem<2, 8>;
+  state shadow: bv<8>;
+  state distract0: bv<8>;
+  state distract1: bv<8>;
+  state distract2: bv<8>;
+  reset {
+    count = 3u4; address = i.address; mem = i.mem; shadow = i.mem[i.address];
+    distract0 = i.distract0; distract1 = i.distract1; distract2 = i.distract2;
   }
-  reset_input rst;
-  spec {
-    state {
-      count: bv<4>; address: bv<2>; mem: mem<2, 8>; shadow: bv<8>;
-      distract0: bv<8>; distract1: bv<8>; distract2: bv<8>;
-    }
-    reset {
-      count = 3u4; address = i.address; mem = i.mem; shadow = i.mem[i.address];
-      distract0 = i.distract0; distract1 = i.distract1; distract2 = i.distract2;
-    }
-    next {
-      count = if s.count != 0u4 { s.count - 1u4 } else { s.count };
-      address = s.address;
-      mem = if s.count != 0u4 {
-        write(s.mem, s.address, s.mem[s.address] + 1u8)
-      } else { s.mem };
-      shadow = if s.count != 0u4 { s.shadow + 1u8 } else { s.shadow };
-      distract0 = s.distract0; distract1 = s.distract1; distract2 = s.distract2;
-    }
-    outputs { can_step = s.count != 0u4; }
+  next {
+    count = if s.count != 0u4 { s.count - 1u4 } else { s.count };
+    address = s.address;
+    mem = if s.count != 0u4 {
+      write(s.mem, s.address, s.mem[s.address] + 1u8)
+    } else { s.mem };
+    shadow = if s.count != 0u4 { s.shadow + 1u8 } else { s.shadow };
+    distract0 = s.distract0; distract1 = s.distract1; distract2 = s.distract2;
   }
-  impl {
-    state {
-      count: bv<4>; address: bv<2>; mem: mem<2, 8>; shadow: bv<8>;
-      distract0: bv<8>; distract1: bv<8>; distract2: bv<8>;
-    }
-    reset {
-      count = 3u4; address = i.address; mem = i.mem; shadow = i.mem[i.address];
-      distract0 = i.distract0; distract1 = i.distract1; distract2 = i.distract2;
-    }
-    next {
-      count = if i.stall { s.count } else {
-        if s.count != 0u4 { s.count - 1u4 } else { s.count }
-      };
-      address = if i.stall { s.address } else { s.address };
-      mem = if i.stall { s.mem } else {
-        if s.count != 0u4 {
-          // The temporary write must disappear under last-write-wins.
-          write(write(s.mem, s.address, 199u8), s.address, s.mem[s.address] + 1u8)
-        } else { s.mem }
-      };
-      shadow = if i.stall { s.shadow } else {
-        if s.count != 0u4 { s.shadow + 1u8 } else { s.shadow }
-      };
-      distract0 = if i.stall { s.distract0 } else { s.distract0 };
-      distract1 = if i.stall { s.distract1 } else { s.distract1 };
-      distract2 = if i.stall { s.distract2 } else { s.distract2 };
-    }
-    outputs { commit = true && !i.rst && !i.stall && s.count != 0u4; }
+  outputs { can_step = s.count != 0u4; }
+}
+impl {
+  state count: bv<4>;
+  state address: bv<2>;
+  state mem: mem<2, 8>;
+  state shadow: bv<8>;
+  state distract0: bv<8>;
+  state distract1: bv<8>;
+  state distract2: bv<8>;
+  reset {
+    count = 3u4; address = i.address; mem = i.mem; shadow = i.mem[i.address];
+    distract0 = i.distract0; distract1 = i.distract1; distract2 = i.distract2;
   }
-  binding true
-    && spec.count == impl.count && spec.address == impl.address
-    && spec.mem == impl.mem && spec.shadow == impl.shadow
-    && spec.distract0 == impl.distract0 && spec.distract1 == impl.distract1
-    && spec.distract2 == impl.distract2;
-  commit commit;
-  can_step can_step;
-  hold_when true && !i.rst && i.stall;
-  progress { enabled true && !i.stall && impl.count != 0u4; rank 0u1; }
-  contract {
-    parameters {}
-    pre true;
-    invariant true && s.count <= 3u4 && s.shadow == s.mem[s.address]
-      && s.distract0 <= 255u8 && s.distract1 <= 255u8 && s.distract2 <= 255u8;
-    terminal s.count == 0u4;
-    post s.shadow == s.mem[s.address];
-    rank s.count;
+  next {
+    count = if i.stall { s.count } else {
+      if s.count != 0u4 { s.count - 1u4 } else { s.count }
+    };
+    address = if i.stall { s.address } else { s.address };
+    mem = if i.stall { s.mem } else {
+      if s.count != 0u4 {
+        // The temporary write must disappear under last-write-wins.
+        write(write(s.mem, s.address, 199u8), s.address, s.mem[s.address] + 1u8)
+      } else { s.mem }
+    };
+    shadow = if i.stall { s.shadow } else {
+      if s.count != 0u4 { s.shadow + 1u8 } else { s.shadow }
+    };
+    distract0 = if i.stall { s.distract0 } else { s.distract0 };
+    distract1 = if i.stall { s.distract1 } else { s.distract1 };
+    distract2 = if i.stall { s.distract2 } else { s.distract2 };
   }
+  outputs { commit = true && !i.rst && !i.stall && s.count != 0u4; }
+}
+binding true
+  && spec.count == impl.count && spec.address == impl.address
+  && spec.mem == impl.mem && spec.shadow == impl.shadow
+  && spec.distract0 == impl.distract0 && spec.distract1 == impl.distract1
+  && spec.distract2 == impl.distract2;
+commit commit;
+can_step can_step;
+hold_when true && !i.rst && i.stall;
+progress { enabled true && !i.stall && impl.count != 0u4; rank 0u1; }
+contract {
+  pre true;
+  invariant true && s.count <= 3u4 && s.shadow == s.mem[s.address]
+    && s.distract0 <= 255u8 && s.distract1 <= 255u8 && s.distract2 <= 255u8;
+  terminal s.count == 0u4;
+  post s.shadow == s.mem[s.address];
+  rank s.count;
 }

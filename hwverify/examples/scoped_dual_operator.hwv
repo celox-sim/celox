@@ -1,0 +1,86 @@
+specification "Two independently selected counter operations"
+
+spec Counter(input amount: bv<4>, output count: bv<4>) {
+  state value: bv<4>;
+  init s.value == 0u4;
+  invariant count == s.value;
+  operation add = n.value == s.value + amount;
+
+  example add_two {
+    expect positive;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 2u4; } } }
+  }
+  example wrong_arithmetic {
+    expect negative;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 3u4; } } }
+  }
+}
+
+composition Pair(input left_amount: bv<4>, input right_amount: bv<4>, output left_count: bv<4>, output right_count: bv<4>) {
+  use left: Counter(amount: left_amount, count: left_count);
+  use right: Counter(amount: right_amount, count: right_count);
+  operation left = actions(left.add);
+  operation right = actions(right.add);
+
+  example left_right_both_neither {
+    expect positive;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace {
+      // The inactive leaf holds its private state even when its input changes.
+      left { inputs { left_amount = 2u4; right_amount = 7u4; } observe { left_count = 2u4; right_count = 0u4; } }
+      actions(right) { inputs { left_amount = 9u4; right_amount = 3u4; } observe { left_count = 2u4; right_count = 3u4; } }
+      actions(left, right) { inputs { left_amount = 4u4; right_amount = 5u4; } observe { left_count = 6u4; right_count = 8u4; } }
+      actions() { inputs { left_amount = 1u4; right_amount = 1u4; } observe { left_count = 6u4; right_count = 8u4; } }
+    }
+  }
+  example modular_simultaneous_add {
+    expect positive;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace {
+      actions(left, right) { inputs { left_amount = 15u4; right_amount = 14u4; } observe { left_count = 15u4; right_count = 14u4; } }
+      actions(left, right) { inputs { left_amount = 2u4; right_amount = 3u4; } observe { left_count = 1u4; right_count = 1u4; } }
+    }
+  }
+  example inactive_right_cannot_change {
+    expect negative;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace { actions(left) { inputs { left_amount = 2u4; right_amount = 7u4; } observe { left_count = 2u4; right_count = 7u4; } } }
+  }
+  example idle_state_cannot_change {
+    expect negative;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace { actions() { inputs { left_amount = 2u4; right_amount = 7u4; } observe { left_count = 2u4; right_count = 0u4; } } }
+  }
+  example both_must_obey_arithmetic {
+    expect negative;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace { actions(left, right) { inputs { left_amount = 2u4; right_amount = 7u4; } observe { left_count = 2u4; right_count = 6u4; } } }
+  }
+}
+
+implementation {
+  composition Pair;
+  input rst: bool;
+  input go_left: bool;
+  input go_right: bool;
+  input left_amount: bv<4>;
+  input right_amount: bv<4>;
+  reset_input rst;
+  state left: bv<4>;
+  state right: bv<4>;
+  reset { left = 0u4; right = 0u4; }
+  next {
+    left = if i.go_left { s.left + i.left_amount } else { s.left };
+    right = if i.go_right { s.right + i.right_amount } else { s.right };
+  }
+  // Both selectors may be true: they affect different leaf instances.
+  operations { left = i.go_left; right = i.go_right; }
+  binding {
+    bind left { value = s.left; }
+    bind right { value = s.right; }
+    output left_count = s.left;
+    output right_count = s.right;
+  }
+}

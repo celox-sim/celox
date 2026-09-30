@@ -1,0 +1,26 @@
+{
+  "status": "pass",
+  "instances": 16,
+  "Boolean_selectors": 16,
+  "possible_action_subsets": 65536,
+  "proof_obligations": 3,
+  "report_status": "binding_verified_no_examples",
+  "obligations": [
+    {
+      "name": "binding_reset_nonempty",
+      "status": "passed",
+      "backend": "z3"
+    },
+    {
+      "name": "binding_reset_establishes_product",
+      "status": "passed",
+      "backend": "structural_kernel"
+    },
+    {
+      "name": "binding_product_preservation",
+      "status": "passed",
+      "backend": "z3"
+    }
+  ],
+  "final_release_sha256": "ae83d45c84e99551e5eb37abe42fade8afdc89434512e077dd795f36a0058491"
+}

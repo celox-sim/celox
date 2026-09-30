@@ -1,6 +1,8 @@
 //! Shared typed expressions and completely validated state-transition designs.
 mod design;
+mod scoped_specification;
 mod specification;
+pub use scoped_specification::*;
 pub use specification::*;
 pub mod lower;
 mod term;

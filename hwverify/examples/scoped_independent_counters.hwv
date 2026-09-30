@@ -1,0 +1,79 @@
+specification "Independent repeated counters with nested port remapping"
+
+spec Counter(input amount: bv<4>, output count: bv<4>) {
+  state value: bv<4>;
+  init s.value == 0u4;
+  invariant count == s.value;
+  operation add = n.value == s.value + amount;
+
+  example add_two {
+    expect positive;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 2u4; } } }
+  }
+  example wrong_arithmetic {
+    expect negative;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 3u4; } } }
+  }
+}
+
+composition Pair(input left_amount: bv<4>, input right_amount: bv<4>, output left_count: bv<4>, output right_count: bv<4>) {
+  // Both instances use Counter, but have independent private state.
+  use left: Counter(amount: left_amount, count: left_count);
+  use right: Counter(amount: right_amount, count: right_count);
+
+  example independent_values {
+    expect positive;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace {
+      add { inputs { left_amount = 1u4; right_amount = 2u4; } observe { left_count = 1u4; right_count = 2u4; } }
+    }
+  }
+  example reject_coupled_values {
+    expect negative;
+    initial { left_count = 0u4; right_count = 0u4; }
+    trace {
+      add { inputs { left_amount = 1u4; right_amount = 2u4; } observe { left_count = 1u4; right_count = 1u4; } }
+    }
+  }
+}
+
+composition Nested(input first: bv<4>, input second: bv<4>, output first_total: bv<4>, output second_total: bv<4>) {
+  use pair: Pair(left_amount: first, right_amount: second, left_count: first_total, right_count: second_total);
+
+  example two_independent_steps {
+    expect positive;
+    initial { first_total = 0u4; second_total = 0u4; }
+    trace {
+      add { inputs { first = 1u4; second = 2u4; } observe { first_total = 1u4; second_total = 2u4; } }
+      add { inputs { first = 3u4; second = 1u4; } observe { first_total = 4u4; second_total = 3u4; } }
+    }
+  }
+  example reject_swapped_outputs {
+    expect negative;
+    initial { first_total = 0u4; second_total = 0u4; }
+    trace {
+      add { inputs { first = 1u4; second = 2u4; } observe { first_total = 2u4; second_total = 1u4; } }
+    }
+  }
+}
+
+implementation {
+  composition Nested;
+  input rst: bool;
+  input first: bv<4>;
+  input second: bv<4>;
+  reset_input rst;
+  state left: bv<4>;
+  state right: bv<4>;
+  reset { left = 0u4; right = 0u4; }
+  next { left = s.left + i.first; right = s.right + i.second; }
+  operations { add = true; }
+  binding {
+    bind pair.left { value = s.left; }
+    bind pair.right { value = s.right; }
+    output first_total = s.left;
+    output second_total = s.right;
+  }
+}

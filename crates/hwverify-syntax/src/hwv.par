@@ -1,15 +1,26 @@
 %start Document
+%grammar_type 'lalr(1)'
 %title "hwverify language"
 %line_comment "//"
 %block_comment "/\*" "\*/"
 %%
-Document: DocKind String "\{"^ { Entry } "\}"^;
+Document: DocKind String DocumentBody;
+DocumentBody: "\{"^ { Entry } "\}"^ | { Entry };
 DocKind: "design|specification";
-Entry: Block | Declaration | Assignment | Property;
+Entry: Use | ActionFrame | NamedEntry | Block | Declaration | Assignment | Property;
+ActionFrame: "actions" "\("^ [ Args ] "\)"^ "\{"^ { Entry } "\}"^;
+NamedEntry: PropertyId Id NamedBody;
+NamedBody: "\{"^ { Entry } "\}"^ | ":"^ Type ";"^ | "="^ Expr ";"^ | SignatureBody;
+SignatureBody: "\("^ [ Ports ] "\)"^ "\{"^ { Entry } "\}"^;
+Ports: Port { ","^ Port };
+Port: Id Id ":"^ Type;
+Use: "use" Id [ ":"^ Id ] "\("^ [ Connections ] "\)"^ ";"^;
+Connections: Connection { ","^ Connection };
+Connection: Id ":"^ Id;
 Block: Id "\{"^ { Entry } "\}"^;
 Declaration: Id ":"^ Type ";"^;
 Assignment: Id "="^ Expr ";"^;
-Property: Id Expr ";"^;
+Property: PropertyId Expr ";"^;
 Type: "bool" | "bv" Lt^ UInt Gt^ | "mem" Lt^ UInt ","^ UInt Gt^;
 Expr: Or;
 Or: And { OrOp And };
@@ -46,10 +57,11 @@ Postfix: Primary { "\["^ Expr "\]"^ };
 Primary: Word | UInt | Boolean | IfExpr | Named | "\("^ Expr "\)"^;
 Boolean: "true|false";
 IfExpr: "if"^ Expr "\{"^ Expr "\}"^ "else"^ "\{"^ Expr "\}"^;
-Named: Id [ "\("^ [ Args ] "\)"^ ];
+Named: Id [ "\("^ Args "\)"^ ];
 Args: Expr { ","^ Expr };
 Word: "[0-9]+u[0-9]+";
 UInt: "[0-9]+";
 String: /"([^"\\]|\\.)*"/;
-Id: Ident | "bv" | "mem" | "bool" | DocKind;
+Id: PropertyId | "use" | "actions";
+PropertyId: Ident | "bv" | "mem" | "bool" | DocKind;
 Ident: "[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*";

@@ -1,10 +1,30 @@
-# hwverify-rs 0.7
+# hwverify-rs 0.8
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
-この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成と独立監査にだけ使う。
+この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.8の追加: 直接宣言、局所ポート、独立操作
+
+- `design "名前"` / `specification "名前"` ヘッダの後に宣言を並べる。文書全体の波括弧とヘッダ末尾のセミコロンは不要
+- version 2/3の互換表記も `input amount: bv<4>;`、`observation count: bv<4>;`、`state value: bv<4>;`、`parameter limit: bv<4>;` で個別に型を宣言
+- version 3では `operation add {}`、`component Counter { ... }`、`composition Budgeted { ... }` をルートに、`example overspend { ... }` を部品・合成に直接置く
+- version 3のbindingでは `bind Counter { value = s.count; }` と `observation count = s.count;` で写像を指定
+- 旧コンテナ・外側の波括弧は互換表記として受理。既存JSON schema version 2 / 3と検証の意味を維持
+- 新しいversion 4では `spec Counter(input amount: bv<4>, output count: bv<4>)` に局所ポートを宣言し、`use left: Counter(amount: a, count: x);` で明示配線。繰り返し利用と入れ子でも非公開状態を分離
+- `operation left = actions(left.add);` で子操作を公開。traceの `actions(left, right)` は同時実行、`actions()` は全て非選択。非選択の葉の非公開状態は保持するが、公開出力を一律には固定しない
+- 実装の独立したselectorは同時にtrueでよい。同じ葉の異なる操作だけに排他性を証明し、selectorの全ての部分集合を列挙しない
+
+空の宣言群はDSLで省略でき、対応するJSON mapには `{}` を補う。
+意味検査は従来通りで、操作・部品の非空要件や必須の代入・述語ブロックは変わらない。
+既存version 2/3の `reset` / `next` / `steps`、実装の操作selector `operations`、trace内の操作・値指定も従来通り。
+旧形式の移行方法と正確な省略範囲は [LANGUAGE.md](LANGUAGE.md) と
+[SPECIFICATION-LANGUAGE.md](SPECIFICATION-LANGUAGE.md) を参照。
+新しい局所ポート・操作集合の意味は [SCOPED-SPECIFICATION.md](SCOPED-SPECIFICATION.md)、
+片方ずつ・両方同時・両方停止の実例は [scoped_dual_operator.hwv](examples/scoped_dual_operator.hwv) を参照。
+操作は論理的な関係であり、RTLの `always_ff` やクロックイベントではない。
 
 ## 0.7の追加: 合成仕様と正例・負例
 
@@ -132,8 +152,8 @@ bindingとrankは **状態だけ**に依存させる。現在の入力に依存�
 - `crates/verify`：stutter/commit、reset、stall、rank、program契約の義務
 - `crates/syntax`：parol文法／生成AST、source spanと診断、JSONへの互換lowering
 - `crates/cli`：従来の`hwverify-rs`実行ファイルとCLI回帰テスト
-- `examples/*.hwv`：配列和・memory incrementの言語版。対応JSONから式木を保持して移行
-- `scripts/json_to_hwv.py`：既存v2 JSONの移行printer
+- `examples/*.hwv`：配列和・memory increment・関係仕様の言語版。既存の式木・trace順序を保持した個別宣言表記
+- `scripts/json_to_hwv.py`：v2/v3/v4 JSONをschema versionを保ったまま個別宣言表記にするprinter
 - `audit/`：独立した具体実行・式評価・反例の再生
 
 形式は `SCHEMA.md`、言語と将来の検証方法は `VERIFICATION-ja.md`。
