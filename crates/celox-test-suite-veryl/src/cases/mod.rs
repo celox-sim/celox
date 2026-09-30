@@ -70,6 +70,7 @@ mod enum_type;
 mod expression_semantics;
 mod false_loop;
 mod ff_event_snapshot;
+mod ff_narrow_arrays;
 mod fifo_issue5;
 mod flip_flop;
 mod for_loop_unroll;
@@ -87,6 +88,7 @@ mod nba_cross_block;
 mod nba_cross_block_empty;
 mod nba_dynamic_array;
 mod operators;
+mod packed_scatter_store;
 mod param_override;
 mod proto_package;
 mod recovered_unrolled_fold;
@@ -109,6 +111,8 @@ mod struct_constructor;
 mod synth_dynamic_loop;
 mod system_function;
 mod test_unimplemented_paths;
+mod veryl_language;
+mod veryl_regressions;
 mod wide_context_width;
 mod wide_data;
 mod wide_operators;
@@ -131,6 +135,7 @@ pub(super) const GROUPS: &[&[crate::TestCase]] = &[
     expression_semantics::CASES,
     false_loop::CASES,
     ff_event_snapshot::CASES,
+    ff_narrow_arrays::CASES,
     fifo_issue5::CASES,
     flip_flop::CASES,
     for_loop_unroll::CASES,
@@ -148,6 +153,7 @@ pub(super) const GROUPS: &[&[crate::TestCase]] = &[
     nba_cross_block_empty::CASES,
     nba_dynamic_array::CASES,
     operators::CASES,
+    packed_scatter_store::CASES,
     param_override::CASES,
     proto_package::CASES,
     recovered_unrolled_fold::CASES,
@@ -170,6 +176,8 @@ pub(super) const GROUPS: &[&[crate::TestCase]] = &[
     synth_dynamic_loop::CASES,
     system_function::CASES,
     test_unimplemented_paths::CASES,
+    veryl_language::CASES,
+    veryl_regressions::CASES,
     wide_context_width::CASES,
     wide_data::CASES,
     wide_operators::CASES,

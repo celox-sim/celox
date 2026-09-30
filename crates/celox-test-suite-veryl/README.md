@@ -1,6 +1,6 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 649 Veryl language tests for compiler and simulator
+A reusable corpus of 663 Veryl language tests for compiler and simulator
 implementations. Sources, input sequences, and assertions live together in this
 crate. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.
@@ -130,6 +130,16 @@ specific optimization, diagnostics, tracing, runtime-event, and API tests in
 the implementing project. Celox retains its original test names, backend matrix,
 and known exclusions in `crates/celox/tests`; those tests now call this corpus.
 
+The `ff_narrow_arrays` and `packed_scatter_store` groups copy the portable
+source, stimulus, and assertions from Celox's storage regressions. Their
+original tests remain in Celox to exercise explicit optimization settings;
+`portable_storage.rs` also runs the shared cases through the backend adapters.
+
+The `veryl_regressions` and `veryl_language` groups reconstruct upstream Veryl
+simulator regressions and compiler fixtures as behavioral cases. See
+[the source mapping and observed Celox failures](UPSTREAM_CASES.md) for the
+pinned revision, oracle rationale, adaptations, and license attribution.
+
 ## Independent verification
 
 The optional `verilator` and `icarus` features provide reusable process adapters
@@ -159,8 +169,11 @@ cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator 
 cargo test -p celox-test-suite-veryl --all-features --test oracles -- --ignored
 ```
 
-Normal verification excludes the reviewed limitations and succeeds for the
-retained tool versions. New failures still produce a nonzero exit. Run the two
+Normal verification excludes the reviewed limitations. The newly reconstructed
+upstream cases retain two Icarus compilation failures (`inside` expressions and
+unpacked array parameters), so a full Icarus run currently exits nonzero.
+See [the upstream case notes](UPSTREAM_CASES.md) for details. New failures still
+produce a nonzero exit. Run the two
 commands independently so a failure in one does not prevent the other running.
 
 Both require a C++ compiler and GNU `timeout` on `PATH`. Verilator additionally

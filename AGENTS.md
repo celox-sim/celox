@@ -25,6 +25,17 @@ or when the next action needs additional authority, is destructive, or affects
 systems outside the requested scope. Autonomy does not permit broadening the task,
 bypassing safety checks, or committing, pushing, or publishing unless requested.
 
+## Adding tests
+
+When adding tests, consider adding them to `crates/celox-test-suite-veryl` so
+other compiler and simulator implementations can reuse the Veryl source,
+stimulus, and assertions. Prefer the shared suite for implementation-independent
+language behavior and portable regressions. Keep tests of Celox-specific APIs,
+IR, diagnostics, tracing, performance, and optimization settings in their
+owning crate. Wire shared cases into Celox's backend test harness, preserve
+relevant backend exclusions, and validate the new cases with the available
+external simulator adapters as well.
+
 ## Pull request titles
 
 Pull request titles must use Conventional Commits because release automation uses

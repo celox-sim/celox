@@ -2031,6 +2031,22 @@
       "status": "passed"
     },
     {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "ff_narrow_arrays::ff_captures_every_one_bit_array_element",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "ff_narrow_arrays::ff_captures_padded_elements_and_unknown_masks",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
       "category": "StandardLibrary",
       "detail": "Icarus 13.0 rejects the emitted keyed default/struct assignment-pattern syntax. These same fixtures pass Verilator; that agreement is evidence of a tool limitation, not by itself a conformance verdict.",
       "expectation": "Simulation",
@@ -5693,6 +5709,14 @@
       "status": "passed"
     },
     {
+      "category": "Arrays",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "packed_scatter_store::packed_scatter_last_lane_does_not_touch_adjacent_storage",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
@@ -7016,6 +7040,94 @@
     },
     {
       "category": "Types",
+      "detail": "compile veryl_language::inside_outside_range_endpoints: Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:7: sorry: \"inside\" expressions not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_language::inside_outside_range_endpoints",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_language::packed_union_members_alias",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_language::parameter_expression_type_cast_widths",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::inst_port_default_value_connected_not_folded",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "compile veryl_regressions::nested_array_index_const_array: Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: sorry: unpacked array parameters are not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::nested_array_index_const_array",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::struct_bit_field_rhs_no_spill",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::unary_minus_as_shift_amount",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_shift_amount_out_of_range",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_struct_bit_field_rhs_no_spill",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_ternary_narrow_branch_no_spill",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "wide_context_width::test_wide_context_addition_carry",
@@ -7480,11 +7592,11 @@
     }
   ],
   "counts": {
-    "compile_error": 0,
+    "compile_error": 2,
     "emission_error": 0,
     "ignored": 185,
     "mismatch": 0,
-    "passed": 456,
+    "passed": 468,
     "rejected": 8,
     "runtime_error": 0,
     "unexpected_accept": 0,
@@ -7495,13 +7607,43 @@
   "suite_version": "0.7.1",
   "tool": "icarus",
   "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "partial_refresh_history": [
+    {
+      "date": "2026-09-27",
+      "suite_version": "0.8.0",
+      "cases": [
+        "operators::test_ff_comb_constant_folding_consistency",
+        "operators::test_ff_constant_two_state_initialization"
+      ],
+      "note": "Only these cases were rerun; all other observations are retained from the earlier report."
+    },
+    {
+      "date": "2026-09-30",
+      "suite_version": "0.8.2",
+      "cases": [
+        "ff_narrow_arrays::ff_captures_every_one_bit_array_element",
+        "ff_narrow_arrays::ff_captures_padded_elements_and_unknown_masks",
+        "packed_scatter_store::packed_scatter_last_lane_does_not_touch_adjacent_storage"
+      ],
+      "note": "Only these newly copied storage cases were run; all other observations are retained from earlier reports."
+    }
+  ],
   "partial_refresh": {
-    "date": "2026-09-27",
-    "suite_version": "0.8.0",
+    "date": "2026-09-30",
+    "suite_version": "0.8.2",
     "cases": [
-      "operators::test_ff_comb_constant_folding_consistency",
-      "operators::test_ff_constant_two_state_initialization"
+      "veryl_language::inside_outside_range_endpoints",
+      "veryl_language::packed_union_members_alias",
+      "veryl_language::parameter_expression_type_cast_widths",
+      "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign",
+      "veryl_regressions::inst_port_default_value_connected_not_folded",
+      "veryl_regressions::nested_array_index_const_array",
+      "veryl_regressions::struct_bit_field_rhs_no_spill",
+      "veryl_regressions::unary_minus_as_shift_amount",
+      "veryl_regressions::wide_shift_amount_out_of_range",
+      "veryl_regressions::wide_struct_bit_field_rhs_no_spill",
+      "veryl_regressions::wide_ternary_narrow_branch_no_spill"
     ],
-    "note": "Only these cases were rerun; all other observations are retained from the earlier report."
+    "note": "Only these newly reconstructed upstream Veryl cases were run; all other observations are retained from earlier reports. Icarus compile failures are preserved without exclusions."
   }
 }
