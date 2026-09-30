@@ -5401,10 +5401,10 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "packed struct or union type",
+            "unpacked struct, union, or unsupported packed struct member",
             r#"
             module Top(output logic [7:0] y);
-                struct packed { logic [3:0] a; logic [3:0] b; } value;
+                union packed { logic [7:0] a; logic [7:0] b; } value;
                 assign y = value;
             endmodule
         "#,

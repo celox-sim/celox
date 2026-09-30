@@ -257,6 +257,17 @@ fn selected_expression_first_dimension_width(
     let sv_parser::Primary::Hierarchical(hierarchical) = &**primary else {
         return None;
     };
+    if packed_structs::has_member_access(
+        RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+        RefNode::Select(&hierarchical.nodes.2),
+    ) {
+        return packed_structs::member_first_dimension_width(
+            RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+            &hierarchical.nodes.2,
+            syntax_tree,
+            packed_dimensions,
+        );
+    }
     let name = identifier_text(
         RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
         syntax_tree,
@@ -403,6 +414,7 @@ fn containing_function_dimensions(
                     unpacked: Vec::new(),
                     signed: param.signed,
                     is_2state: param.is_2state,
+                    members: Vec::new(),
                 },
             )
         }));
@@ -567,6 +579,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                 signed: port.r#type().is_signed(),
                 is_2state: port.r#type().kind() == TypeKind::Bit,
+                members: port.r#type().members.clone(),
             },
         );
     }
@@ -578,6 +591,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                 signed: signal.r#type().is_signed(),
                 is_2state: signal.r#type().kind() == TypeKind::Bit,
+                members: signal.r#type().members.clone(),
             },
         );
     }

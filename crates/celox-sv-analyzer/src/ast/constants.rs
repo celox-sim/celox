@@ -165,6 +165,7 @@ pub(super) fn substitute_lvalue_constants(
             signed,
             array_slice_width,
             array_slice_reversed,
+            is_2state,
         } => LValue::Select {
             name,
             msb: substitute_const_expr_constants(msb, const_env),
@@ -173,6 +174,7 @@ pub(super) fn substitute_lvalue_constants(
             array_slice_width: array_slice_width
                 .map(|width| substitute_const_expr_constants(width, const_env)),
             array_slice_reversed,
+            is_2state,
         },
     }
 }
@@ -490,11 +492,19 @@ fn const_expr_from_primary(
         sv_parser::Primary::PrimaryLiteral(_) => {
             primary_literal_text(RefNode::Primary(primary), syntax_tree).map(ConstExpr::Literal)
         }
-        sv_parser::Primary::Hierarchical(hierarchical) => identifier_text(
-            RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-            syntax_tree,
-        )
-        .map(ConstExpr::Ident),
+        sv_parser::Primary::Hierarchical(hierarchical) => {
+            if packed_structs::has_member_access(
+                RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+                RefNode::Select(&hierarchical.nodes.2),
+            ) {
+                return None;
+            }
+            identifier_text(
+                RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
+                syntax_tree,
+            )
+            .map(ConstExpr::Ident)
+        }
         sv_parser::Primary::FunctionSubroutineCall(call) => {
             const_expr_from_function_subroutine_call(call, syntax_tree)
         }
@@ -808,6 +818,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                 primary_literal_text(node, syntax_tree).map(ConstExpr::Literal)
             }
             sv_parser::ConstantPrimary::PsParameter(parameter) => {
+                if parameter.nodes.1.nodes.0.is_some() {
+                    // Struct-valued parameters need typed member evaluation;
+                    // never replace a member by the entire parameter value.
+                    return None;
+                }
                 let identifier = unwrap_node!(
                     RefNode::ConstantPrimaryPsParameter(parameter),
                     SimpleIdentifier,

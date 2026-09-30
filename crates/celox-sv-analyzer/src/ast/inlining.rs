@@ -99,6 +99,7 @@ fn expand_lvalue_calls(
             signed,
             array_slice_width,
             array_slice_reversed,
+            is_2state,
         } => LValue::Select {
             name,
             msb: expand_bound(msb),
@@ -106,6 +107,7 @@ fn expand_lvalue_calls(
             signed,
             array_slice_width: array_slice_width.map(expand_bound),
             array_slice_reversed,
+            is_2state,
         },
     }
 }

@@ -34,6 +34,7 @@ mod functions;
 mod generate;
 mod inlining;
 mod instances;
+mod packed_structs;
 mod parameters;
 mod selects;
 mod statements;
@@ -466,6 +467,7 @@ impl Module {
                         unpacked: Vec::new(),
                         signed: parameter.declared_signed.unwrap_or(false),
                         is_2state: parameter.declared_is_2state,
+                        members: Vec::new(),
                     },
                 );
             }
@@ -942,6 +944,7 @@ pub struct Type {
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
+    members: Vec<packed_structs::PackedMember>,
 }
 
 impl Type {
@@ -951,6 +954,7 @@ impl Type {
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
+            members: Vec::new(),
         }
     }
 
@@ -960,6 +964,7 @@ impl Type {
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
+            members: Vec::new(),
         }
     }
 
@@ -1150,6 +1155,8 @@ pub enum LValue {
         signed: bool,
         array_slice_width: Option<ConstExpr>,
         array_slice_reversed: bool,
+        /// Whether this selection names a two-state packed struct member.
+        is_2state: bool,
     },
 }
 
@@ -1386,6 +1393,7 @@ struct VariableDimensions {
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
     is_2state: bool,
+    members: Vec<packed_structs::PackedMember>,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;

@@ -157,6 +157,17 @@ fn assignments_from_continuous_assign(
                 .ok_or_else(|| {
                     AnalyzerError::Unsupported("continuous assignment expression".to_string())
                 })?;
+                let rhs = if matches!(
+                    lhs,
+                    LValue::Select {
+                        is_2state: true,
+                        ..
+                    }
+                ) {
+                    coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+                } else {
+                    rhs
+                };
                 Ok(Assignment::new(lhs, rhs))
             })
             .collect(),
@@ -181,6 +192,17 @@ fn assignments_from_continuous_assign(
                 .ok_or_else(|| {
                     AnalyzerError::Unsupported("continuous assignment expression".to_string())
                 })?;
+                let rhs = if matches!(
+                    lhs,
+                    LValue::Select {
+                        is_2state: true,
+                        ..
+                    }
+                ) {
+                    coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+                } else {
+                    rhs
+                };
                 Ok(Assignment::new(lhs, rhs))
             })
             .collect(),

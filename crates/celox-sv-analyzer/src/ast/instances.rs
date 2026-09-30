@@ -277,9 +277,12 @@ fn port_connections_from_hierarchical_instance(
 pub(super) fn connection_references_net(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Ident(actual) => actual == name,
-        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => {
-            connection_references_net(expr, name)
-        }
+        Expr::Select { expr, .. }
+        | Expr::Resize { expr, .. }
+        | Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr,
+        } => connection_references_net(expr, name),
         Expr::Concat(parts) => parts
             .iter()
             .any(|part| connection_references_net(part, name)),
