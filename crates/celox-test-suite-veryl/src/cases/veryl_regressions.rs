@@ -211,4 +211,106 @@ cases! { Regression, "veryl_regressions";
             assert_eq!(sim.get(o), expected.into());
         }
     }
+
+    fn wide_shift_count_preserves_unknowns_and_sign_fill(sim) {
+        @build Design::new(r#"
+module Top (
+    value: input logic<130>,
+    signed_value: input signed logic<8>,
+    amount: input logic<70>,
+    left: output logic<130>,
+    right: output logic<130>,
+    arithmetic: output signed logic<8>,
+) {
+    assign left = value << amount;
+    assign right = value >> amount;
+    assign arithmetic = signed_value >>> amount;
+}
+"#, "Top").four_state(true);
+        let value = sim.signal("value");
+        let signed_value = sim.signal("signed_value");
+        let amount = sim.signal("amount");
+        let left = sim.signal("left");
+        let right = sim.signal("right");
+        let arithmetic = sim.signal("arithmetic");
+        let all = (BigUint::from(1u8) << 130usize) - 1u8;
+        let high = BigUint::from(1u8) << 129usize;
+        for payload in [BigUint::from(0x55u8), &high | BigUint::from(0x55u8)] {
+            for count in [BigUint::from(0u8), 1u8.into(), 129u8.into(), 130u8.into(),
+                          256u16.into(), (BigUint::from(1u8) << 64usize) + 1u8] {
+                sim.modify(|io| { io.set_wide(value, payload.clone());
+                    io.set(signed_value, 0x85u8); io.set_wide(amount, count.clone()); }).unwrap();
+                let shift = count.to_u32_digits();
+                let shift = shift.first().copied().unwrap_or(0) as usize;
+                let oversized = count >= BigUint::from(130u8);
+                let (expected_left, expected_right) = if oversized {
+                    (BigUint::default(), BigUint::default())
+                } else {
+                    ((&payload << shift) & &all, &payload >> shift)
+                };
+                let arithmetic_shift = if count >= BigUint::from(8u8) { 7 } else { shift };
+                let expected_arithmetic = BigUint::from(((-123i8) >> arithmetic_shift) as u8);
+                for (output, expected) in [(left, expected_left), (right, expected_right), (arithmetic, expected_arithmetic)] {
+                    assert_eq!(sim.get_four_state(output), (expected, BigUint::default()), "count={count}");
+                }
+            }
+            for low in [BigUint::default(), BigUint::from(u64::MAX)] {
+                for unknown_bit in [2usize, 64, 69] {
+                    let mask = BigUint::from(1u8) << unknown_bit;
+                    for unknown_payload in [BigUint::default(), mask.clone()] {
+                        sim.modify(|io| {
+                            io.set_wide(value, payload.clone());
+                            io.set(signed_value, 0x85u8);
+                            io.set_four_state(amount, (&low & (((BigUint::from(1u8) << 70usize) - 1u8) ^ &mask)) | unknown_payload.clone(), mask.clone());
+                        }).unwrap();
+                        for (output, unknown) in [(left, all.clone()), (right, all.clone()), (arithmetic, BigUint::from(255u8))] {
+                            assert_eq!(sim.get_four_state(output), (unknown.clone(), unknown), "unknown count bit={unknown_bit}, low={low}, output={output:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn constant_arrays_initialize_comb_and_ff_reads(sim) {
+        @build Design::new(r#"
+module Top (
+    clk: input clock,
+    index: input logic<2>,
+    comb: output logic<3>,
+    registered: output logic<3>,
+    repeated: output logic<3>,
+    nested: output logic<3>,
+    known: output bit<3>,
+) {
+    const TABLE: logic<3> [4] = '{3'b111, 3'b010, 3'bx01, 3'bz10};
+    const REPEATED: logic<3> [4] = '{default: 3'b101};
+    const NESTED: logic<3> [2, 2] = '{'{1, 2}, '{3, 4}};
+    const KNOWN: bit<3> [4] = '{0, 1, 2, 7};
+    assign comb = TABLE[index];
+    assign repeated = REPEATED[index];
+    assign nested = NESTED[index[1]][index[0]];
+    assign known = KNOWN[index];
+    always_ff (clk) { registered = TABLE[index]; }
+}
+"#, "Top").four_state(true);
+        let index = sim.signal("index");
+        let comb = sim.signal("comb");
+        let registered = sim.signal("registered");
+        let repeated = sim.signal("repeated");
+        let nested = sim.signal("nested");
+        let known = sim.signal("known");
+        let clk = sim.event("clk");
+        for idx in [3u8, 0, 2, 1, 3, 2, 0] {
+            sim.modify(|io| io.set(index, idx)).unwrap();
+            let (payload, mask) = [(7u8, 0u8), (2, 0), (5, 4), (2, 4)][idx as usize];
+            let expected = (BigUint::from(payload), BigUint::from(mask));
+            assert_eq!(sim.get_four_state(comb), expected);
+            assert_eq!(sim.get_four_state(repeated), (5u8.into(), 0u8.into()));
+            assert_eq!(sim.get_four_state(nested), ((idx + 1).into(), 0u8.into()));
+            assert_eq!(sim.get_four_state(known), ([0u8, 1, 2, 7][idx as usize].into(), 0u8.into()));
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get_four_state(registered), expected);
+        }
+    }
 }

@@ -1,6 +1,6 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 663 Veryl language tests for compiler and simulator
+A reusable corpus of 665 Veryl language tests for compiler and simulator
 implementations. Sources, input sequences, and assertions live together in this
 crate. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.
@@ -170,7 +170,7 @@ cargo test -p celox-test-suite-veryl --all-features --test oracles -- --ignored
 ```
 
 Normal verification excludes the reviewed limitations. The newly reconstructed
-upstream cases retain two Icarus compilation failures (`inside` expressions and
+upstream cases retain three Icarus compilation failures (`inside` expressions and
 unpacked array parameters), so a full Icarus run currently exits nonzero.
 See [the upstream case notes](UPSTREAM_CASES.md) for details. New failures still
 produce a nonzero exit. Run the two

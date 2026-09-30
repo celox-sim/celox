@@ -40,18 +40,19 @@ The expected values are calculated from those operations and the designs;
 simulator agreement is additional evidence rather than the definition of
 correctness.
 
-## Celox failures exposed by the new cases
+## Celox failures exposed at introduction
 
 The first run used Celox 0.8.2 with Veryl 0.21.0. These are existing implementation
-failures uncovered by adding the cases; this test-suite change does not alter
-compiler or runtime implementation. The shared assertions remain strict.
-`crates/celox/tests/veryl_upstream.rs` marks only the failing backend variants
-as ignored. Run the matching test with `--ignored` to reproduce a failure:
+failures uncovered by adding the cases. The stacked implementation fix now
+initializes constant-array storage, saturates complete wide shift counts before
+backend lowering, and preserves the final partial byte of Wasm stores (payload
+and mask). The original shared assertions remain unchanged and the affected
+correctness tests are enabled again. Run them normally to verify the repair:
 
 ```sh
-cargo test -p celox --test veryl_upstream wide_shift_amount_out_of_range -- --ignored
-cargo test -p celox --test veryl_upstream nested_array_index_const_array -- --ignored
-cargo test -p celox --test veryl_upstream wide_struct_bit_field_rhs_no_spill -- --ignored
+cargo test -p celox --test veryl_upstream wide_shift_amount_out_of_range
+cargo test -p celox --test veryl_upstream nested_array_index_const_array
+cargo test -p celox --test veryl_upstream wide_struct_bit_field_rhs_no_spill
 ```
 
 | Case | Affected Celox backends | First observed disagreement |
@@ -60,21 +61,37 @@ cargo test -p celox --test veryl_upstream wide_struct_bit_field_rhs_no_spill -- 
 | `nested_array_index_const_array` | native, Cranelift, Wasm, interpreter | `A[1]` returns `0`; expected `3` (and the outer read must return `33`) |
 | `wide_struct_bit_field_rhs_no_spill` | Wasm | Bits 100..103 of the first member are cleared: actual `0xffffffffffffffffffffffff07ffffffffffffffffffffffff`, expected `0xfffffffffffffffffffffffff7ffffffffffffffffffffffff` |
 
-The SV frontend has eight failing variants: set-membership assignment
+The SV frontend retains seven unsupported variants: set-membership assignment
 expressions (`inside_outside_range_endpoints`), cast expressions
 (`parameter_expression_type_cast_widths`,
 `inlined_function_per_callsite_scratch_in_continuous_assign`), packed struct/union
 types (`packed_union_members_alias`, `struct_bit_field_rhs_no_spill`,
 `wide_struct_bit_field_rhs_no_spill`), and a constant-array assignment expression
-(`nested_array_index_const_array`) are unsupported under tracking issue #64;
-`wide_shift_amount_out_of_range` reaches the same runtime disagreement as the
-other Celox backends. These SV variants are also explicitly ignored. The unary
-shift, ternary, and default-port cases continue to run through the SV frontend.
+(`nested_array_index_const_array`) are unsupported under tracking issue #64.
+These variants remain explicitly ignored. The wide-count, unary shift, ternary,
+and default-port cases run through the SV frontend. The new four-state constant
+array/FF case is also excluded there because that frontend does not support its
+constant-array expressions or four-state FF event signals.
 
 The Veryl reference backend passes these three cases. External verification
 results are retained in `verification/icarus.json` and `verification/verilator.json`.
-These Celox exclusions are not exclusions in the shared corpus or external
-runners, and must be removed when their implementations are corrected.
+The remaining SV feature exclusions do not change expectations in the shared
+corpus or external runners and should be removed as those features are implemented.
+
+The stacked fix adds two further portable regressions:
+
+- `wide_shift_count_preserves_unknowns_and_sign_fill`: 70-bit counts applied to
+  130-bit logical shifts and an 8-bit arithmetic shift, including X/Z in low and
+  high count words. IEEE 1800-2023 11.4.10 requires an unknown shift result for
+  any unknown bit in the count.
+- `constant_arrays_initialize_comb_and_ff_reads`: dynamic reads from explicit,
+  default-filled, multidimensional, and two-state constant arrays, with exact
+  X/Z payload/mask transport in combinational and clocked outputs.
+
+Both pass the four Celox execution backends and the Veryl reference backend.
+The shift case also passes the SV frontend. The expanded Wasm backend test
+checks partial stores of 65, 98, and 127 bits, payload/mask preservation, and
+both two-state and four-state source registers.
 
 ## External verification of the reconstructed cases
 
@@ -85,8 +102,12 @@ diagnostics in its JSON report:
 - `veryl_language::inside_outside_range_endpoints`: `"inside" expressions not supported yet`.
 - `veryl_regressions::nested_array_index_const_array`: `unpacked array parameters are not supported yet`.
 
-These are compilation blockers rather than assertion disagreements. The Icarus
-runner continues to return a failure for these cases; no new external-runner
+These are compilation blockers rather than assertion disagreements.
+The new `constant_arrays_initialize_comb_and_ff_reads` case hits the same
+unpacked-array parameter compilation blocker in Icarus; the new four-state
+shift-count case passes Icarus. Verilator reports both additional four-state
+cases unsupported. Thus three retained Icarus cases currently have compilation
+failures. The Icarus runner continues to return a failure for these cases; no new external-runner
 exclusion was added. Emitted SV and expected values were not changed to accommodate
 the tool. The retained reports were incrementally extended with actual results;
 the earlier corpus was not rerun.

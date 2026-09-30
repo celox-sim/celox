@@ -204,6 +204,7 @@ fn execute_fold_group_sir_with_memory(
                                     BigUint::from(lhs.payload == rhs.payload)
                                 }
                                 BinaryOp::Ne => BigUint::from(lhs.payload != rhs.payload),
+                                BinaryOp::GtU => BigUint::from(lhs.payload > rhs.payload),
                                 BinaryOp::GeU => BigUint::from(lhs.payload >= rhs.payload),
                                 other => {
                                     panic!("unexpected grouped-fold binary op {other:?}")
