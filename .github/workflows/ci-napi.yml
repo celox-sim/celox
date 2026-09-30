@@ -37,9 +37,10 @@ permissions:
 cache-mode: read
 
 jobs:
-  validate-release:
-    name: Validate release version
+  resolve-source:
+    name: Resolve publication source
     runs-on: ubuntu-latest
+    cache-mode: none
     outputs:
       build_sha: ${{ steps.revision.outputs.sha }}
     steps:
@@ -84,14 +85,25 @@ jobs:
           ref: ${{ steps.source.outputs.ref }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
       - name: Resolve immutable build revision
         id: revision
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  validate-release:
+    name: Validate release version
+    needs: resolve-source
+    runs-on: ubuntu-latest
+    outputs:
+      build_sha: ${{ needs.resolve-source.outputs.build_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-source.outputs.build_sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
 
       - if: env.NIGHTLY == 'true'
         uses: ./.github/actions/set-nightly-version
