@@ -1193,14 +1193,9 @@ fn alu_binary(
     )
 }
 
-/// Interpret a shift amount register value as `usize`.
-///
-/// The compiled wide lowerings consume only the low 64-bit chunk of the
-/// count register, so upper chunks are ignored here as well. Returns `None`
-/// when even the low chunk is unrepresentable (overshift).
+/// Interpret the complete unsigned shift count; unrepresentable counts overshift.
 fn shift_amount(value: &BigUint) -> Option<usize> {
-    let low = value.to_u64_digits().first().copied().unwrap_or(0);
-    usize::try_from(low).ok()
+    value.to_usize()
 }
 
 /// Extend a value across the common width the way the compiled multi-word
