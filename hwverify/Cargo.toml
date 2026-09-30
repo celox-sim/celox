@@ -4,7 +4,7 @@ default-members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 
 [workspace.dependencies]

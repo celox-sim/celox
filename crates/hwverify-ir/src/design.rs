@@ -29,19 +29,19 @@ impl fmt::Display for ValidationError {
 }
 impl std::error::Error for ValidationError {}
 type VResult<T> = Result<T, ValidationError>;
-fn at<T>(path: &str, result: Res<T>) -> VResult<T> {
+pub(crate) fn at<T>(path: &str, result: Res<T>) -> VResult<T> {
     result.map_err(|message| ValidationError {
         path: path.into(),
         message,
     })
 }
-fn fail<T>(path: &str, message: impl Into<String>) -> VResult<T> {
+pub(crate) fn fail<T>(path: &str, message: impl Into<String>) -> VResult<T> {
     Err(ValidationError {
         path: path.into(),
         message: message.into(),
     })
 }
-fn child(path: &str, key: &str) -> String {
+pub(crate) fn child(path: &str, key: &str) -> String {
     format!("{}/{}", path, key.replace('~', "~0").replace('/', "~1"))
 }
 
@@ -231,7 +231,7 @@ impl Design {
         })
     }
 }
-fn declarations(doc: &Value, prefix: &str, path: &str) -> VResult<Env> {
+pub(crate) fn declarations(doc: &Value, prefix: &str, path: &str) -> VResult<Env> {
     at(path, named(doc))?
         .iter()
         .map(|(name, value)| {
@@ -249,7 +249,7 @@ fn declarations(doc: &Value, prefix: &str, path: &str) -> VResult<Env> {
 /// Validate in expression order before performing the production lowering.
 /// A separate scratch lowerer only diagnoses the failing subtree; it contributes
 /// no normalization counts and cannot create accepted semantic nodes.
-fn expression(value: &Value, env: &Env, path: &str, lower: &mut Lower) -> VResult<Term> {
+pub(crate) fn expression(value: &Value, env: &Env, path: &str, lower: &mut Lower) -> VResult<Term> {
     match lower.expr(value, env) {
         Ok(term) => Ok(term),
         Err(message) => {
@@ -273,11 +273,11 @@ fn expression(value: &Value, env: &Env, path: &str, lower: &mut Lower) -> VResul
         }
     }
 }
-fn boolean(value: &Value, env: &Env, path: &str, lower: &mut Lower) -> VResult<Term> {
+pub(crate) fn boolean(value: &Value, env: &Env, path: &str, lower: &mut Lower) -> VResult<Term> {
     let term = expression(value, env, path, lower)?;
     at(path, require_bool(term))
 }
-fn model_wires(
+pub(crate) fn model_wires(
     model: &Value,
     name: &str,
     state: &Env,
@@ -340,7 +340,7 @@ fn model_wires(
     }
     Ok(env)
 }
-fn assignment(
+pub(crate) fn assignment(
     model: &Value,
     name: &str,
     field: &str,

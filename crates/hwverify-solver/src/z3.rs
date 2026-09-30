@@ -73,6 +73,16 @@ impl Check {
     pub fn query(&mut self, name: &str, bad: Term, expect_sat: bool, context: &Env) -> Res<()> {
         self.query_with_timeout(name, bad, expect_sat, context, 10000)
     }
+    /// Capture a SAT witness even when SAT is the expected outcome (for finite examples).
+    pub fn query_with_witness(
+        &mut self,
+        name: &str,
+        formula: Term,
+        expect_sat: bool,
+        context: &Env,
+    ) -> Res<()> {
+        self.query_options(name, formula, expect_sat, context, 10000, true)
+    }
     pub fn query_with_timeout(
         &mut self,
         name: &str,
@@ -80,6 +90,17 @@ impl Check {
         expect_sat: bool,
         context: &Env,
         timeout_ms: u64,
+    ) -> Res<()> {
+        self.query_options(name, bad, expect_sat, context, timeout_ms, false)
+    }
+    fn query_options(
+        &mut self,
+        name: &str,
+        bad: Term,
+        expect_sat: bool,
+        context: &Env,
+        timeout_ms: u64,
+        capture_sat: bool,
     ) -> Res<()> {
         let start = Instant::now();
         let mut e = Emitter::default();
@@ -154,7 +175,7 @@ impl Check {
             _ => return Err(format!("unexpected Z3 output {raw}")),
         };
         let mut script = base;
-        if verdict == "sat" && !expect_sat {
+        if verdict == "sat" && (!expect_sat || capture_sat) {
             script.push_str("(get-model)\n");
             if !ctx.is_empty() {
                 script.push_str(&format!(
@@ -167,7 +188,7 @@ impl Check {
             z3_seconds += witness_start.elapsed().as_secs_f64();
             if raw.lines().next().map(str::trim) != Some("sat") {
                 return Err(
-                    "SAT witness recheck did not return sat; no counterexample certified".into(),
+                    "SAT witness recheck did not return sat; no SAT result certified".into(),
                 );
             }
         }

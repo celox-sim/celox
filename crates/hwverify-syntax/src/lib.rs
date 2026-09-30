@@ -53,6 +53,10 @@ pub struct ParsedDocument {
     pub filename: String,
 }
 impl ParsedDocument {
+    pub fn validate_specification(&self) -> Result<hwverify_ir::Specification, SyntaxError> {
+        hwverify_ir::Specification::from_json(&self.canonical)
+            .map_err(|e| self.diagnostic(&self.filename, &e))
+    }
     pub fn validate(&self) -> Result<hwverify_ir::Design, SyntaxError> {
         hwverify_ir::Design::from_json(&self.canonical)
             .map_err(|e| self.diagnostic(&self.filename, &e))
@@ -126,6 +130,7 @@ fn id_token<'a, 't>(id: &'a g::Id<'t>) -> &'a parol_runtime::Token<'t> {
         g::Id::Bv(x) => &x.bv,
         g::Id::Mem(x) => &x.mem,
         g::Id::Bool(x) => &x.bool,
+        g::Id::DocKind(x) => &x.doc_kind.doc_kind,
     }
 }
 impl Lower<'_> {
@@ -328,6 +333,7 @@ impl Lower<'_> {
                         "write",
                         "concat",
                         "range",
+                        "compose",
                     ]
                     .contains(&op)
                     {
@@ -358,6 +364,36 @@ impl Lower<'_> {
     where
         't: 'a,
     {
+        if context == "trace" {
+            let mut frames = vec![];
+            for (index, entry) in entries.into_iter().enumerate() {
+                let g::Entry::Block(x) = entry else {
+                    return Err(SyntaxError {
+                        filename: self.filename.into(),
+                        message: "trace requires operation blocks".into(),
+                        span: self.spans.get(path).cloned(),
+                    });
+                };
+                let token = id_token(&x.block.id);
+                let child = format!("{path}/{index}");
+                self.spans.insert(child.clone(), self.span(token));
+                self.spans
+                    .insert(format!("{child}/operation"), self.span(token));
+                let mut frame = self.entries(
+                    x.block.block_list.iter().map(|e| &*e.entry).collect(),
+                    "trace_frame",
+                    &child,
+                )?;
+                frame["operation"] = json!(token.text());
+                for key in ["inputs", "observe"] {
+                    if frame.get(key).is_none() {
+                        frame[key] = json!({});
+                    }
+                }
+                frames.push(frame);
+            }
+            return Ok(Value::Array(frames));
+        }
         let mut result = Map::new();
         for entry in entries {
             let (id, kind) = match entry {
@@ -384,7 +420,29 @@ impl Lower<'_> {
             let value = match entry {
                 g::Entry::Block(x) => {
                     let subcontext = match (context, raw) {
-                        ("root", "inputs") => "declarations",
+                        ("root", "inputs") | ("specroot", "inputs" | "observations") => {
+                            "declarations"
+                        }
+                        ("specroot", "operations") => "operations",
+                        ("specroot", "implementation") => "rel_impl",
+                        ("rel_impl", "state") => "declarations",
+                        ("rel_impl", "reset" | "next" | "wires" | "operations") => "assignments",
+                        ("rel_impl", "binding") => "rel_binding",
+                        ("rel_binding", "states") => "state_maps",
+                        ("state_maps", _) => "assignments",
+                        ("rel_binding", "observations") => "assignments",
+                        ("specroot", "components") => "component_group",
+                        ("specroot", "compositions") => "composition_group",
+                        ("operations", _) => "operation",
+                        ("component_group", _) => "component",
+                        ("composition_group", _) => "composition",
+                        ("component", "state") => "declarations",
+                        ("component", "steps") => "assignments",
+                        ("component" | "composition", "examples") => "example_group",
+                        ("example_group", _) => "example",
+                        ("example", "initial") => "assignments",
+                        ("example", "trace") => "trace",
+                        ("trace_frame", "inputs" | "observe") => "assignments",
                         ("root", "spec" | "impl") => "machine",
                         ("root", "progress") => "progress",
                         ("root", "contract") => "contract",
@@ -451,6 +509,10 @@ impl Lower<'_> {
                         "root" => {
                             ["reset_input", "binding", "commit", "can_step", "hold_when"].as_slice()
                         }
+                        "rel_impl" => ["composition", "reset_input"].as_slice(),
+                        "component" => ["init", "invariant"].as_slice(),
+                        "composition" => ["members"].as_slice(),
+                        "example" => ["expect"].as_slice(),
                         "progress" => ["enabled", "rank"].as_slice(),
                         "contract" => [
                             "pre",
@@ -473,7 +535,29 @@ impl Lower<'_> {
                     }
                     let expr = self.expr(&x.property.expr)?;
                     self.record(&child, &expr);
-                    expr.value
+                    if context == "composition" && raw == "members" {
+                        let a = expr
+                            .value
+                            .as_array()
+                            .filter(|a| a.first() == Some(&json!("compose")))
+                            .ok_or_else(|| {
+                                self.error(
+                                    &span,
+                                    "members requires compose(Component, OtherComposition, ...)",
+                                )
+                            })?;
+                        if a[1..].iter().any(|x| !x.is_string()) {
+                            return Err(self.error(&span, "composition members must be names"));
+                        }
+                        for (index, _) in a[1..].iter().enumerate() {
+                            if let Some(s) = expr.descendants.get(&format!("/{}", index + 1)) {
+                                self.spans.insert(format!("{child}/{index}"), s.clone());
+                            }
+                        }
+                        Value::Array(a[1..].to_vec())
+                    } else {
+                        expr.value
+                    }
                 }
             };
             let _ = kind;
@@ -562,10 +646,18 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
         .insert("".into(), lower.span(&root.string.string));
     let mut canonical = lower.entries(
         root.document_list.iter().map(|e| &*e.entry).collect(),
-        "root",
+        if root.doc_kind.doc_kind.text() == "specification" {
+            "specroot"
+        } else {
+            "root"
+        },
         "",
     )?;
-    canonical["version"] = json!(2);
+    let relational = root.doc_kind.doc_kind.text() == "specification";
+    canonical["version"] = json!(if relational { 3 } else { 2 });
+    if relational {
+        canonical["kind"] = json!("specification");
+    }
     canonical["name"] = serde_json::from_str(root.string.string.text()).map_err(|e| {
         lower.error(
             &lower.span(&root.string.string),
@@ -724,5 +816,59 @@ mod tests {
             assert_eq!(p.canonical, j, "{dsl}");
             p.validate().unwrap();
         }
+    }
+}
+#[cfg(test)]
+mod specification_surface_tests {
+    use super::*;
+    #[test]
+    fn relational_components_and_ordered_repeated_operations_lower() {
+        let source = r#"specification "views" {
+          inputs { b: bool; } observations { value: bv<2>; }
+          operations { tick {} }
+          components {
+            Counter {
+              state { x: bv<2>; }
+              init s.x == 0u2;
+              invariant o.value == s.x;
+              steps { tick = n.x == s.x + 1u2; }
+              examples {
+                rises {
+                  expect positive; initial { value = 0u2; }
+                  trace {
+                    tick { inputs { b = true; } observe { value = 1u2; } }
+                    tick { observe { value = 2u2; } }
+                  }
+                }
+              }
+            }
+          }
+          compositions { Wrapped { members compose(Counter); examples {} } }
+        }"#;
+        let p = parse_document(source, "views.hwv").unwrap();
+        assert_eq!(p.canonical["version"], 3);
+        assert_eq!(p.canonical["kind"], "specification");
+        assert_eq!(
+            p.canonical["compositions"]["Wrapped"]["members"],
+            json!(["Counter"])
+        );
+        let trace = &p.canonical["components"]["Counter"]["examples"]["rises"]["trace"];
+        assert_eq!(trace.as_array().unwrap().len(), 2);
+        assert_eq!(trace[0]["inputs"]["b"], true);
+        assert_eq!(trace[1]["inputs"], json!({}));
+        assert_eq!(trace[0]["observe"]["value"], json!(["bv", 2, 1]));
+        assert_eq!(trace[1]["observe"]["value"], json!(["bv", 2, 2]));
+        let span = p
+            .span_for("/components/Counter/examples/rises/trace/1/observe/value")
+            .unwrap();
+        assert_eq!(&source[span.start..span.end], "2u2");
+    }
+    #[test]
+    fn invalid_member_expressions_and_malformed_traces_rejected() {
+        for source in [
+          "specification \"x\" { compositions { P {members compose(1u8);}}}",
+          "specification \"x\" { components { C { examples { p {expect positive;trace {x=1u8;}}}}}}",
+          "specification \"x\" { components { C {state {} state {}}}}",
+        ] { assert!(parse_document(source,"bad.hwv").is_err()); }
     }
 }

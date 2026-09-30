@@ -1,0 +1,92 @@
+specification "Intent bug: weakened budget permits overspending" {
+  inputs { rst: bool; go: bool; amount: bv<4>; }
+  observations { count: bv<4>; remaining: bv<4>; }
+  operations { add {} }
+  components {
+    Counter {
+      state { value: bv<4>; }
+      init s.value == 0u4;
+      invariant o.count == s.value;
+      steps { add = n.value == s.value + i.amount; }
+      examples {
+        add_two {
+          expect positive;
+          initial { count = 0u4; }
+          trace { add { inputs { amount = 2u4; } observe { count = 2u4; } } }
+        }
+        wrong_arithmetic {
+          expect negative;
+          initial { count = 0u4; }
+          trace { add { inputs { amount = 2u4; } observe { count = 3u4; } } }
+        }
+      }
+    }
+    Budget {
+      state { credits: bv<4>; }
+      init s.credits == 3u4;
+      invariant o.remaining == s.credits;
+      steps { add = n.credits == s.credits - i.amount; }
+      examples {
+        spend_two {
+          expect positive;
+          initial { remaining = 3u4; }
+          trace { add { inputs { amount = 2u4; } observe { remaining = 1u4; } } }
+        }
+        cannot_overspend {
+          expect negative;
+          initial { }
+          trace { add { inputs { amount = 4u4; } observe { } } }
+        }
+      }
+    }
+  }
+  compositions {
+    Arithmetic {
+      members compose(Counter);
+      examples {
+        arithmetic_allows_four {
+          expect positive;
+          initial { }
+          trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
+        }
+      }
+    }
+    Budgeted {
+      members compose(Arithmetic, Budget);
+      examples {
+        spend_all {
+          expect positive;
+          initial { count = 0u4; remaining = 3u4; }
+          trace {
+            add { inputs { amount = 2u4; } observe { count = 2u4; remaining = 1u4; } }
+            add { inputs { amount = 1u4; } observe { count = 3u4; remaining = 0u4; } }
+          }
+        }
+        exclude_overspend {
+          expect negative;
+          initial { }
+          trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
+        }
+      }
+    }
+  }
+  implementation {
+    composition Budgeted;
+    reset_input rst;
+    state { count: bv<4>; remaining: bv<4>; }
+    reset { count = 0u4; remaining = 3u4; }
+    wires { accept = i.go && i.amount <= s.remaining; }
+    next {
+      count = if w.accept { s.count + i.amount } else { s.count };
+      remaining = if w.accept { s.remaining - i.amount } else { s.remaining };
+    }
+    operations { add = w.accept; }
+    binding {
+      states {
+        Counter { value = s.count; }
+        Budget { credits = s.remaining; }
+      }
+      observations { count = s.count; remaining = s.remaining; }
+    }
+  }
+}

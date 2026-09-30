@@ -1,0 +1,115 @@
+{
+  "status": "pass",
+  "case_count": 140,
+  "positive": 81,
+  "negative": 59,
+  "oracle": [
+    {
+      "target": "Counter",
+      "members": [
+        "Counter"
+      ],
+      "enumerated_product_states": 16,
+      "invariant_states": 4,
+      "initial_states": 1,
+      "transition_predicates_evaluated": 32
+    },
+    {
+      "target": "Limit",
+      "members": [
+        "Limit"
+      ],
+      "enumerated_product_states": 8,
+      "invariant_states": 6,
+      "initial_states": 3,
+      "transition_predicates_evaluated": 60
+    },
+    {
+      "target": "PrivateZero",
+      "members": [
+        "PrivateZero"
+      ],
+      "enumerated_product_states": 8,
+      "invariant_states": 8,
+      "initial_states": 4,
+      "transition_predicates_evaluated": 80
+    },
+    {
+      "target": "PrivateOne",
+      "members": [
+        "PrivateOne"
+      ],
+      "enumerated_product_states": 8,
+      "invariant_states": 8,
+      "initial_states": 4,
+      "transition_predicates_evaluated": 80
+    },
+    {
+      "target": "ObsZero",
+      "members": [
+        "ObsZero"
+      ],
+      "enumerated_product_states": 4,
+      "invariant_states": 1,
+      "initial_states": 1,
+      "transition_predicates_evaluated": 4
+    },
+    {
+      "target": "ObsOne",
+      "members": [
+        "ObsOne"
+      ],
+      "enumerated_product_states": 4,
+      "invariant_states": 1,
+      "initial_states": 1,
+      "transition_predicates_evaluated": 2
+    },
+    {
+      "target": "Bounded",
+      "members": [
+        "Counter",
+        "Limit"
+      ],
+      "enumerated_product_states": 32,
+      "invariant_states": 6,
+      "initial_states": 1,
+      "transition_predicates_evaluated": 62
+    },
+    {
+      "target": "PrivatePair",
+      "members": [
+        "PrivateOne",
+        "PrivateZero"
+      ],
+      "enumerated_product_states": 16,
+      "invariant_states": 16,
+      "initial_states": 4,
+      "transition_predicates_evaluated": 240
+    },
+    {
+      "target": "Nested",
+      "members": [
+        "Counter",
+        "Limit",
+        "PrivateOne",
+        "PrivateZero"
+      ],
+      "enumerated_product_states": 128,
+      "invariant_states": 24,
+      "initial_states": 1,
+      "transition_predicates_evaluated": 290
+    },
+    {
+      "target": "Impossible",
+      "members": [
+        "ObsOne",
+        "ObsZero"
+      ],
+      "enumerated_product_states": 4,
+      "invariant_states": 0,
+      "initial_states": 0,
+      "transition_predicates_evaluated": 0
+    }
+  ],
+  "solver_wall_seconds": 2.4624505699976
+}

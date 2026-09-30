@@ -17,6 +17,18 @@ use crate::checker::check;
 use crate::ir::Res;
 use serde_json::{json, Value};
 use std::{env, fs, path::PathBuf};
+enum Input {
+    Design(ir::Design),
+    Specification(ir::Specification),
+}
+impl Input {
+    fn document(&self) -> &Value {
+        match self {
+            Self::Design(d) => d.document(),
+            Self::Specification(s) => s.document(),
+        }
+    }
+}
 fn run() -> Res<i32> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
@@ -71,12 +83,22 @@ fn run() -> Res<i32> {
         let design = if format == "hwv" {
             let source = std::str::from_utf8(&bytes)
                 .map_err(|e| format!("{}: invalid UTF-8 source: {e}", args[0]))?;
-            hwverify_syntax::parse_document(source, &args[0])
-                .and_then(|parsed| parsed.validate())
-                .map_err(|e| e.to_string())?
+            let parsed =
+                hwverify_syntax::parse_document(source, &args[0]).map_err(|e| e.to_string())?;
+            if parsed.canonical["kind"] == "specification" {
+                Input::Specification(parsed.validate_specification().map_err(|e| e.to_string())?)
+            } else {
+                Input::Design(parsed.validate().map_err(|e| e.to_string())?)
+            }
         } else {
             let doc = hwverify_syntax::parse_json(&bytes)?;
-            ir::Design::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?
+            if doc["kind"] == "specification" {
+                Input::Specification(
+                    ir::Specification::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?,
+                )
+            } else {
+                Input::Design(ir::Design::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?)
+            }
         };
         if let Some(destination) = emit_json {
             fs::write(
@@ -93,7 +115,10 @@ fn run() -> Res<i32> {
                 json!({"status":"validated", "name":design.document().get("name"), "input_format":format, "claim":"Syntax, names and types validated; no proof obligations executed"}),
             )
         } else {
-            checker::check_design(&design, z3, out.clone())
+            match &design {
+                Input::Design(d) => checker::check_design(d, z3, out.clone()),
+                Input::Specification(s) => checker::check_specification(s, z3, out.clone()),
+            }
         }
     })();
     let result = match outcome {
@@ -110,9 +135,15 @@ fn run() -> Res<i32> {
         if result["status"] == "stuttering_refinement_verified"
             || result["status"] == "program_and_refinement_verified"
             || result["status"] == "validated"
+            || result["status"] == "spec_examples_passed"
+            || result["status"] == "spec_examples_and_binding_verified"
+            || result["status"] == "binding_verified_no_examples"
         {
             0
-        } else if result["status"] == "counterexample" {
+        } else if result["status"] == "counterexample"
+            || result["status"] == "spec_examples_failed"
+            || result["status"] == "implementation_binding_failed"
+        {
             1
         } else if result["status"] == "invalid_or_tool_error" {
             2

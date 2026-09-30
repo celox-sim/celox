@@ -3,7 +3,8 @@
 %line_comment "//"
 %block_comment "/\*" "\*/"
 %%
-Document: "design"^ String "\{"^ { Entry } "\}"^;
+Document: DocKind String "\{"^ { Entry } "\}"^;
+DocKind: "design|specification";
 Entry: Block | Declaration | Assignment | Property;
 Block: Id "\{"^ { Entry } "\}"^;
 Declaration: Id ":"^ Type ";"^;
@@ -50,5 +51,5 @@ Args: Expr { ","^ Expr };
 Word: "[0-9]+u[0-9]+";
 UInt: "[0-9]+";
 String: /"([^"\\]|\\.)*"/;
-Id: Ident | "bv" | "mem" | "bool";
+Id: Ident | "bv" | "mem" | "bool" | DocKind;
 Ident: "[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*";

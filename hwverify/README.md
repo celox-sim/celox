@@ -1,10 +1,33 @@
-# hwverify-rs 0.6
+# hwverify-rs 0.7
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.7の追加: 合成仕様と正例・負例
+
+- `specification`文書で、共有する観測・入力と、各部品の非公開状態を分離
+- 複数の関係仕様を同じ名前付き操作で同期し、条件の論理積として合成。合成の入れ子にも対応
+- 部品・合成仕様に有限トレースの正例（SAT）・負例（UNSAT）を添付。省略した観測・入力・内部状態は存在量化し、0等で補わない
+- 正例のSATにも完全な状態・観測・入力のwitnessを保存。UNKNOWNやwitness再確認の失敗を成功にしない
+- 任意の状態専用bindingを与え、実装のreset・操作・stutterが合成関係仕様に従うことを別途検証する限定的bridge
+
+[合成仕様の言語・意味論](SPECIFICATION-LANGUAGE.md)を参照。
+[budgeted_counter.hwv](examples/budgeted_counter.hwv)は算術仕様と予算仕様の合成とbindingが通る例。
+[contradictory_composition.hwv](examples/contradictory_composition.hwv)は単体で満たせる2仕様が合成後の正例を拒否する例、
+[weakened_budget.hwv](examples/weakened_budget.hwv)は弱すぎる仕様が負例を受け入れる例で、後者2つは意図的に失敗する。
+
+**有限例が通っても、仕様の完全性・普遍的正しさ・deadlock freedom・実装の進行を証明したことにはならない。**
+bridgeは与えた決定的抽象化によるsafety/stuttering refinementであり、永遠にstutterする実装も通り得る。
+正例を実装が実現できるという主張もしない。旧version 2の単一仕様・進行・全正当性検査は従来通り別に利用できる。
+
+```sh
+cargo run --locked -- examples/budgeted_counter.hwv --out /tmp/budgeted --z3 /path/to/z3
+cargo run --locked -- examples/contradictory_composition.hwv --out /tmp/contradiction --z3 /path/to/z3 # exit 1
+cargo run --locked -- examples/weakened_budget.hwv --out /tmp/weak --z3 /path/to/z3 # exit 1
+```
 
 ## 0.6の追加
 
