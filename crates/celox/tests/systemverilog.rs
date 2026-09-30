@@ -55,6 +55,8 @@ mod literals;
 mod mixed;
 #[path = "frontends/systemverilog/operators.rs"]
 mod operators;
+#[path = "frontends/systemverilog/packed_structs.rs"]
+mod packed_structs;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
 #[path = "frontends/systemverilog/system_functions.rs"]
