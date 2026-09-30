@@ -14,6 +14,7 @@ env:
 concurrency:
   group: bench
   cancel-in-progress: false
+  queue: max
 
 jobs:
   # Keep all compared backends on the same VM. Separate jobs with the same
