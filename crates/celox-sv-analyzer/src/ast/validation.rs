@@ -583,9 +583,10 @@ pub(super) fn reject_silently_ignored_constructs(
                     "indexed part-select".to_string(),
                 ));
             }
-            RefNode::DataTypeStructUnion(_) => {
+            RefNode::DataTypeStructUnion(data)
+                if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
                 return Err(AnalyzerError::Unsupported(
-                    "packed struct or union type".to_string(),
+                    "unpacked struct, union, or unsupported packed struct member".to_string(),
                 ));
             }
             RefNode::ConstantFunctionCall(call)

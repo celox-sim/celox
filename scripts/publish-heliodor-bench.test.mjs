@@ -94,7 +94,7 @@ test("history preserves unrelated results and the global latest update", () => {
   assert.throws(() => appendResult("unexpected", { date: 150 }));
 });
 
-test("concurrent publishers retry without losing another backend or unrelated files", () => {
+test("concurrent publishers preserve results and compare by measurement time", () => {
   const directory = mkdtempSync(join(tmpdir(), "heliodor-publish-test-"));
   const remote = join(directory, "remote.git");
   const seed = join(directory, "seed");
@@ -114,8 +114,18 @@ test("concurrent publishers retry without losing another backend or unrelated fi
     git("-C", seed, "add", ".");
     git("-C", seed, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "seed");
     git("-C", seed, "push", "--quiet", remote, "HEAD:gh-pages");
-    const first = { date: 10, benches: [{ name: "first", value: 1, unit: "ms" }] };
-    const second = { date: 20, benches: [{ name: "second", value: 2, unit: "ms" }] };
+    // The older measurement loses its first push to a newer measurement of
+    // the same workload, then appends last when its retry succeeds.
+    const first = {
+      commit: { id: "newer" },
+      date: 20,
+      benches: [{ name: "jit-linux-boot", value: 1, unit: "ms" }],
+    };
+    const second = {
+      commit: { id: "older" },
+      date: 10,
+      benches: [{ name: "jit-linux-boot", value: 2, unit: "ms" }],
+    };
     let attempts = 0;
     publishResult(remote, second, {
       beforePush(attempt) {
@@ -128,6 +138,10 @@ test("concurrent publishers retry without losing another backend or unrelated fi
     const data = git("-C", seed, "show", "FETCH_HEAD:dev/bench/data.js");
     const parsed = JSON.parse(data.slice("window.BENCHMARK_DATA = ".length));
     assert.deepEqual(parsed.entries["Heliodor Benchmarks"], [first, second]);
+    assert.deepEqual(
+      comparisonHistory(data, [{ name: "jit-linux-boot" }]).entries["Heliodor Benchmarks"],
+      [second, first],
+    );
     assert.deepEqual(parsed.entries["Rust Benchmarks"], original.entries["Rust Benchmarks"]);
     assert.equal(git("-C", seed, "show", "FETCH_HEAD:index.html"), "docs stay intact");
     publishResult("nonexistent-remote", { benches: [] });

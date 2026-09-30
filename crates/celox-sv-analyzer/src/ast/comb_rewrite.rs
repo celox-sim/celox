@@ -266,6 +266,7 @@ fn substitute_comb_lvalue_reads(
         signed,
         array_slice_width,
         array_slice_reversed,
+        is_2state,
     } = lvalue
     else {
         return lvalue;
@@ -288,6 +289,7 @@ fn substitute_comb_lvalue_reads(
         signed,
         array_slice_width,
         array_slice_reversed,
+        is_2state,
     }
 }
 
@@ -661,6 +663,7 @@ pub(super) fn whole_packed_lvalue(
         signed: dimensions.signed,
         array_slice_width: None,
         array_slice_reversed: false,
+        is_2state: false,
     })
 }
 
@@ -845,6 +848,7 @@ fn dynamic_selected_value_after_write(
             signed: *signed,
             array_slice_width: None,
             array_slice_reversed: false,
+            is_2state: false,
         };
         let Some((updated, _)) =
             selected_value_after_write(current, target, &candidate, write_value, packed_dimensions)

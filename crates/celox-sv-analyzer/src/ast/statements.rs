@@ -76,7 +76,14 @@ pub(super) fn conditional_assignments_from_statement(
                     "always_comb assignment expression".to_string(),
                 ));
             };
-            let rhs = if condition.is_some() {
+            let rhs = if condition.is_some()
+                || matches!(
+                    lhs,
+                    LValue::Select {
+                        is_2state: true,
+                        ..
+                    }
+                ) {
                 coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
             } else {
                 rhs
@@ -100,7 +107,14 @@ pub(super) fn conditional_assignments_from_statement(
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
             })?;
-            let rhs = if condition.is_some() {
+            let rhs = if condition.is_some()
+                || matches!(
+                    lhs,
+                    LValue::Select {
+                        is_2state: true,
+                        ..
+                    }
+                ) {
                 coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
             } else {
                 rhs
@@ -263,7 +277,13 @@ pub(super) fn coerce_procedural_assignment_rhs(
     let name = match lhs {
         LValue::Ident(name) | LValue::Select { name, .. } => name,
     };
-    if packed_dimensions
+    if matches!(
+        lhs,
+        LValue::Select {
+            is_2state: true,
+            ..
+        }
+    ) || packed_dimensions
         .get(name)
         .is_some_and(|dimensions| dimensions.is_2state)
     {
@@ -551,6 +571,7 @@ pub(super) fn expr_from_lvalue(lhs: &LValue, packed_dimensions: &PackedDimension
             signed,
             array_slice_width,
             array_slice_reversed,
+            ..
         } => (
             Expr::Select {
                 expr: Box::new(Expr::Ident(name.clone())),
@@ -562,6 +583,27 @@ pub(super) fn expr_from_lvalue(lhs: &LValue, packed_dimensions: &PackedDimension
             *array_slice_reversed,
             *signed,
         ),
+    };
+    let base = if matches!(
+        lhs,
+        LValue::Select {
+            is_2state: true,
+            ..
+        }
+    ) {
+        let Some(r#type) = lvalue_expr_type(lhs, packed_dimensions) else {
+            return base;
+        };
+        Expr::Resize {
+            expr: Box::new(Expr::Unary {
+                op: UnaryOp::ToTwoState,
+                expr: Box::new(base),
+            }),
+            width: r#type.width,
+            signed: r#type.signed,
+        }
+    } else {
+        base
     };
     if !array_slice_reversed {
         return base;
