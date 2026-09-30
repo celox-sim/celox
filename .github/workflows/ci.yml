@@ -134,8 +134,47 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.scripts == 'true'
         run: node --test scripts/*.test.mjs
 
-  rust:
-    name: Rust Test & NAPI Build
+  rust-tests:
+    name: Rust Tests
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install cocotb
+        run: python -m pip install cocotb==2.1.0
+
+      # Enable the frontend and suite features together so common integration
+      # tests run once, rather than once per Cargo feature combination.
+      - name: Run workspace tests with CI features
+        run: >-
+          cargo test --locked --workspace
+          --features celox/systemverilog,celox-test-suite-veryl/verilator,celox-test-suite-veryl/icarus
+
+      - name: Verify default-feature library and documentation tests
+        run: |
+          cargo test --locked -p celox --lib
+          cargo test --locked -p celox --doc
+
+      - name: Run cocotb VPI end-to-end test
+        run: |
+          CELOX_COCOTB_PYTHON="$(command -v python)" \
+            cargo test --locked -p celox-vpi --test cocotb_e2e \
+            cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
+
+  napi-linux:
+    name: NAPI Build (Linux x64)
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
@@ -145,38 +184,10 @@ jobs:
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
-        with:
-          targets: wasm32-wasip1-threads
 
       - uses: Swatinem/rust-cache@v2
-
-      - uses: actions/setup-python@v7
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         with:
-          python-version: "3.14"
-
-      - name: Install cocotb
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: python -m pip install cocotb==2.1.0
-
-      - name: Run tests
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo test --locked
-
-      - name: Run reusable Veryl suite tests
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo test --locked -p celox-test-suite-veryl --all-features
-
-      - name: Run SystemVerilog frontend tests
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo test --locked -p celox --features systemverilog --tests
-
-      - name: Run cocotb VPI end-to-end test
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: |
-          CELOX_COCOTB_PYTHON="$(command -v python)" \
-            cargo test --locked -p celox-vpi --test cocotb_e2e \
-            cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
+          shared-key: ci-napi-linux
 
       - uses: pnpm/action-setup@v6
 
@@ -202,6 +213,35 @@ jobs:
             crates/celox-napi/celox.linux-x64-gnu.node
             crates/celox-napi/index.js
             crates/celox-napi/index.d.ts
+          if-no-files-found: error
+
+  napi-wasm:
+    name: NAPI WASM Build & Test
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-wasip1-threads
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-napi-wasm
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install WASI SDK
         run: |
@@ -227,6 +267,30 @@ jobs:
             crates/celox-napi/celox.wasm32-wasi.wasm
             crates/celox-napi/wasi-worker-browser.mjs
           if-no-files-found: error
+
+  # Preserve the existing required check while allowing artifact consumers to
+  # start as soon as their build finishes. Failures/cancellations must not turn
+  # into a successful check merely because a downstream job was skipped.
+  rust:
+    name: Rust Test & NAPI Build
+    needs: [changes, rust-tests, napi-linux, napi-wasm]
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    runs-on: ubuntu-latest
+    env:
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
+      RUST_RESULT: ${{ needs.rust-tests.result }}
+      NATIVE_RESULT: ${{ needs.napi-linux.result }}
+      WASM_RESULT: ${{ needs.napi-wasm.result }}
+    steps:
+      - name: Check tests and builds
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$RUST_REQUIRED" != false ] || [ "$RUST_RESULT" != skipped ]; then
+            test "$RUST_RESULT" = success
+          fi
+          test "$NATIVE_RESULT" = success
+          test "$WASM_RESULT" = success
 
   arm64-backend:
     name: ARM64 Backend Test
@@ -344,7 +408,7 @@ jobs:
 
   js-ubuntu:
     name: JS Test (Ubuntu)
-    needs: [changes, rust]
+    needs: [changes, napi-linux]
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: ubuntu-latest
     steps:
@@ -419,9 +483,10 @@ jobs:
 
   playground-browser:
     name: Playground Browser Test
-    needs: [changes, rust]
+    needs: [changes, napi-wasm]
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -449,5 +514,12 @@ jobs:
       - name: Install Chromium
         run: pnpm --filter @celox-sim/playground exec playwright install --with-deps chromium
 
+      # Bound both phases: a hung build or browser process can otherwise hold
+      # a runner for the default six hours, even with per-test timeouts.
+      - name: Build Playground
+        timeout-minutes: 5
+        run: pnpm --filter @celox-sim/playground build
+
       - name: Run Playground browser tests
-        run: pnpm --filter @celox-sim/playground test:e2e
+        timeout-minutes: 5
+        run: pnpm --filter @celox-sim/playground exec playwright test
