@@ -1,0 +1,36 @@
+{
+  "status": "pass",
+  "runs": 92,
+  "cases": 23,
+  "mode_status_counts": {
+    "v0.4": {
+      "program_and_refinement_verified": 7,
+      "unknown": 1,
+      "counterexample": 13,
+      "inadequate_contract": 1,
+      "invalid_or_tool_error": 1
+    },
+    "v0.4_cached_hash": {
+      "program_and_refinement_verified": 7,
+      "unknown": 1,
+      "counterexample": 13,
+      "inadequate_contract": 1,
+      "invalid_or_tool_error": 1
+    },
+    "v0.5": {
+      "program_and_refinement_verified": 7,
+      "unknown": 1,
+      "counterexample": 13,
+      "inadequate_contract": 1,
+      "invalid_or_tool_error": 1
+    },
+    "v0.5_no_closure": {
+      "program_and_refinement_verified": 7,
+      "unknown": 1,
+      "counterexample": 13,
+      "inadequate_contract": 1,
+      "invalid_or_tool_error": 1
+    }
+  },
+  "custom_closures": 716
+}

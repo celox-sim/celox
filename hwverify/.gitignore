@@ -1,3 +1,6 @@
 /target/
 /.rustup/
 /.cargo/
+
+__pycache__/
+*.pyc

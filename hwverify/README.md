@@ -1,10 +1,21 @@
-# hwverify-rs 0.4
+# hwverify-rs 0.5
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
-この版はRustで型付きIR・正規化・証明義務を構築し、SMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成と独立監査にだけ使う。
+この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成と独立監査にだけ使う。
 
-現状は **Z3のUNSAT結果とRust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.5の追加
+
+- 候補を実際に代入・簡約し、case増加に対する限界利益で自動分割を選ぶ
+- Bool/BV/memoryの小さなUNSAT-onlyカーネル。閉じない義務は元の式をZ3へ渡す
+- 元のSMT義務、backend、カーネル/選択時間を保存し、外部再検査ができる
+- SAT/UNKNOWNは推測しない。Leanで新規則が認証済みという主張もしない
+
+方法、制限、成功と回帰の全実測は[構造的solver](STRUCTURAL-SOLVER-ja.md)。
+最初の版は配列和で遅くなったが、hash再計算を除いた最終版では同条件の0.4より高速。
+失敗した初期実装の実測も保存しており、一般的な速度改善の保証はしない。
 
 ## 0.4の追加
 
@@ -83,7 +94,8 @@ bindingとrankは **状態だけ**に依存させる。現在の入力に依存�
 - `src/ir.rs`：型付きの共有式、メモリの局所的な正規化
 - `src/frontend.rs`：型・名前・wire DAGの確認
 - `src/checker.rs`：stutter/commit、reset、stall、rankの義務
-- `src/solver.rs`：SMT-LIB生成、Z3プロセスとの入出力
+- `src/kernel.rs`：有界な構造的UNSATカーネル
+- `src/solver.rs`：カーネル試行、元のSMT-LIB保存、Z3 fallback
 - `src/json_input.rs`：重複キーを拒否するJSON読込み
 - `examples/`：CPU・分割counterと負例
 - `audit/`：独立した具体実行と反例の再生
@@ -105,6 +117,6 @@ Z3_BIN=/path/to/z3 python audit/replay_counterexamples.py
 - 0.1のPython版に対する全面的な互換移植ではなく、commit/stutterに焦点を当てたversion 2のIR
 - word/address幅は1〜64ビット。CPUは単一クロックの抽象モデル
 - パイプライン、OOO、割込み、例外、自己書換えコード、BRAMマクロは未実装
-- Z3問い合わせの制限は各check-satの10秒。全工程のwall-clock上限ではない
+- Z3は通常各check-sat10秒、自動保存partitionは1秒。保存loopは30秒で次の問い合わせを停止し、未実行をUNKNOWNにする。試行選択・カーネル・既に走るquery・証跡I/Oを含めたhard wall-clock上限ではない
 - 仕様が意図を十分に表すこと、Rustの義務生成・正規化、SMT変換自体の正しさは形式的には未検証
 - 帰納条件の反例は、resetから到達するとは限らない。実装の誤りと、与えた関係の不足を区別する必要がある
