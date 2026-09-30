@@ -1,6 +1,6 @@
 # メモリ簡約の正しさ
 
-対象は `src/ir.rs` の `memory_read` / `memory_write`。Lean 4.34.1 + Std のみを使用する。
+対象は `crates/ir/src/term.rs` の `memory_read` / `memory_write`。Lean 4.34.1 + Std のみを使用する。
 
 ## 証明したもの
 
@@ -32,7 +32,7 @@ Rustは文字列op・Vec引数・実行時Sortを持つ。Leanの型付きASTに
 
 ## 実装との照合と負例
 
-`check_rust_rules.rs` は実物の `../src/ir.rs` を直接importし、Z3を使わない独立評価器と比較する。
+`check_rust_rules.rs` は実物の `../crates/ir/src/term.rs` を直接importし、Z3を使わない独立評価器と比較する。
 
 - 2-bitアドレス・2-bitワードの全256メモリ
 - アドレス変数3個の全64代入。同じ構文・異なる構文での実アドレス衝突を含む

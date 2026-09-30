@@ -1,7 +1,16 @@
-[package]
-name = "hwverify-rs"
-version = "0.5.0"
+[workspace]
+members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli"]
+default-members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.6.0"
 edition = "2021"
-[dependencies]
-serde_json = "1"
+
+[workspace.dependencies]
 serde = "1"
+serde_json = "1"
+hwverify-ir = { path = "crates/ir" }
+hwverify-solver = { path = "crates/solver" }
+hwverify-verify = { path = "crates/verify" }
+hwverify-syntax = { path = "crates/syntax" }

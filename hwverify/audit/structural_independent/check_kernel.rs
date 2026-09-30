@@ -1,7 +1,8 @@
 #![allow(dead_code)]
-#[path="../../src/ir.rs"] mod ir;
-#[path="../../src/kernel.rs"] mod kernel;
-use ir::*;
+#[path="../../crates/ir/src/term.rs"] mod ir;
+#[path="../../crates/solver/src/kernel.rs"] mod kernel;
+extern crate self as hwverify_ir;
+pub use ir::*;
 #[derive(Clone,Debug,PartialEq,Eq)] enum V { B(bool), W(u64), M(Vec<u64>) }
 fn w(v:V)->u64 {if let V::W(x)=v{x}else{panic!("word")}}
 fn b(v:V)->bool {if let V::B(x)=v{x}else{panic!("bool")}}

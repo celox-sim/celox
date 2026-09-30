@@ -1,10 +1,20 @@
-# hwverify-rs 0.5
+# hwverify-rs 0.6
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.6の追加
+
+- Cargo workspaceを`ir` / `solver` / `verify` / `syntax` / `cli`へ分離。solverはparolに依存しない
+- parolで生成したparserによる`.hwv`言語。state、reset/next、binding、progress、pre/invariant/postを直接記述する
+- parserのASTと型付きIRを分離し、全宣言・未使用wire・契約を検証してからsolverを起動する
+- filename・行・列・source span付きの構文／名前／型エラー。生成されたASTも検証を省略できない
+- 既存のJSON形式・CLI・証明義務を維持。`--check`と`--emit-json`はsolverなしで検証／移行確認ができる
+
+言語は[LANGUAGE.md](LANGUAGE.md)、crate境界・再現手順は[WORKSPACE.md](WORKSPACE.md)。既存の結果・監査archiveは過去版の証跡として変更しない。
 
 ## 0.5の追加
 
@@ -41,11 +51,14 @@ Rust＋Z3による、ハードウェア向け状態対応チェッカー。小�
 Rust/CargoとZ3実行ファイルを用意する。今回の検証環境はRust 1.98.1、Z3 5.1.0。
 
 ```sh
-cargo test --locked
-cargo run --locked -- examples/cpu.json --out results/cpu --z3 /path/to/z3
+cargo test --workspace --locked
+cargo run --locked -- examples/cpu.json --out results/new-cpu --z3 /path/to/z3
+cargo run --locked -- examples/array_sum.hwv --out results/new-array-sum --z3 /path/to/z3
+cargo run --locked -- examples/memory_increment.hwv --check
+cargo run --locked -- examples/array_sum.hwv --emit-json /tmp/array-sum.json
 ```
 
-`Z3_BIN`でもZ3の場所を指定できる。Cargo依存はlock済み。処理系の入力は宣言的JSONで、仕様・実装・binding・commit・進行条件を与える。利用者に補題名や書換え順序を要求しない。
+`Z3_BIN`でもZ3の場所を指定できる。Cargo依存はlock済み。処理系の入力は`.hwv`言語または従来の宣言的JSONで、仕様・実装・binding・commit・進行条件を与える。利用者に補題名や書換え順序を要求しない。
 
 ## CPUサンプル
 
@@ -91,14 +104,14 @@ bindingとrankは **状態だけ**に依存させる。現在の入力に依存�
 
 ## 構成
 
-- `src/ir.rs`：型付きの共有式、メモリの局所的な正規化
-- `src/frontend.rs`：型・名前・wire DAGの確認
-- `src/checker.rs`：stutter/commit、reset、stall、rankの義務
-- `src/kernel.rs`：有界な構造的UNSATカーネル
-- `src/solver.rs`：カーネル試行、元のSMT-LIB保存、Z3 fallback
-- `src/json_input.rs`：重複キーを拒否するJSON読込み
-- `examples/`：CPU・分割counterと負例
-- `audit/`：独立した具体実行と反例の再生
+- `crates/ir`：型付きの共有式、状態・遷移・契約、全入力に共通する意味検証
+- `crates/solver`：構造的UNSAT、partitionの試行選択、SMT-LIB保存とZ3
+- `crates/verify`：stutter/commit、reset、stall、rank、program契約の義務
+- `crates/syntax`：parol文法／生成AST、source spanと診断、JSONへの互換lowering
+- `crates/cli`：従来の`hwverify-rs`実行ファイルとCLI回帰テスト
+- `examples/*.hwv`：配列和・memory incrementの言語版。対応JSONから式木を保持して移行
+- `scripts/json_to_hwv.py`：既存v2 JSONの移行printer
+- `audit/`：独立した具体実行・式評価・反例の再生
 
 形式は `SCHEMA.md`、言語と将来の検証方法は `VERIFICATION-ja.md`。
 
