@@ -28,11 +28,13 @@ env:
   RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
   NIGHTLY: ${{ startsWith(inputs.channel, 'nightly-') }}
   NIGHTLY_CHANNEL: ${{ inputs.channel == 'nightly-stable' && 'stable' || inputs.channel == 'nightly-head' && 'head' || '' }}
-  BUILD_REF: ${{ startsWith(inputs.channel, 'nightly-') && github.sha || (github.event.client_payload.tag || inputs.tag) }}
   NPM_TAG: ${{ inputs.channel == 'nightly-stable' && 'nightly-stable' || inputs.channel == 'nightly-head' && 'nightly-head' || 'latest' }}
 
 permissions:
   contents: read
+
+# Only the build job may populate caches, after validating its source revision.
+cache-mode: read
 
 jobs:
   validate-release:
@@ -41,9 +43,45 @@ jobs:
     outputs:
       build_sha: ${{ steps.revision.outputs.sha }}
     steps:
+      - name: Validate source before checkout
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ "$NIGHTLY" = true ]; then
+            case "$NIGHTLY_CHANNEL" in
+              stable) expected_ref="refs/heads/master" ;;
+              head) expected_ref="refs/heads/develop" ;;
+              *) echo "Unknown nightly channel." >&2; exit 1 ;;
+            esac
+            if [ "$GITHUB_REF" != "$expected_ref" ]; then
+              echo "$NPM_TAG must be dispatched from $expected_ref." >&2
+              exit 1
+            fi
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "A stable publication requires a v-prefixed stable SemVer tag." >&2
+              exit 1
+            fi
+            published_tag="$(
+              gh release view "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json tagName,isDraft,isPrerelease \
+                --jq 'select(.isDraft == false and .isPrerelease == false) | .tagName'
+            )"
+            if [ "$published_tag" != "$RELEASE_TAG" ]; then
+              echo "Published GitHub Release $RELEASE_TAG was not found." >&2
+              exit 1
+            fi
+            # A branch named like a release must never shadow its tag.
+            echo "ref=refs/tags/$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.BUILD_REF }}
+          ref: ${{ steps.source.outputs.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v7
@@ -54,20 +92,6 @@ jobs:
         id: revision
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Check nightly source branch
-        if: env.NIGHTLY == 'true'
-        shell: bash
-        run: |
-          case "$NIGHTLY_CHANNEL" in
-            stable) expected_ref="refs/heads/master" ;;
-            head) expected_ref="refs/heads/develop" ;;
-            *) echo "Unknown nightly channel $NIGHTLY_CHANNEL." >&2; exit 1 ;;
-          esac
-          if [ "$GITHUB_REF" != "$expected_ref" ]; then
-            echo "$NPM_TAG must be dispatched from $expected_ref, got $GITHUB_REF." >&2
-            exit 1
-          fi
 
       - if: env.NIGHTLY == 'true'
         uses: ./.github/actions/set-nightly-version
@@ -93,29 +117,13 @@ jobs:
             exit 1
           fi
 
-      - name: Check published GitHub release
-        if: env.NIGHTLY != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          published_tag="$(
-            gh release view "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json tagName,isDraft,isPrerelease \
-              --jq 'select(.isDraft == false and .isPrerelease == false) | .tagName'
-          )"
-          if [ "$published_tag" != "$RELEASE_TAG" ]; then
-            echo "Published GitHub Release $RELEASE_TAG was not found." >&2
-            exit 1
-          fi
-
       - name: Check synchronized versions and stable dependencies
         if: env.NIGHTLY != 'true'
         run: node scripts/check-release-version.mjs
 
   build:
     needs: validate-release
+    cache-mode: write
     strategy:
       fail-fast: false
       matrix:
@@ -165,7 +173,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Keep compiled dependencies, but start a separate publication cache.
+          prefix-key: celox-napi-release-v1
           shared-key: napi-${{ matrix.target }}
+          # Reinstall Cargo tools instead of restoring executable binaries.
+          cache-bin: false
+          # Tag/ad-hoc branch runs may restore, but only release lanes populate it.
+          save-if: ${{ (github.event_name == 'repository_dispatch' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop')) }}
 
       - name: Install ziglang (musl targets)
         if: matrix.zigbuild
