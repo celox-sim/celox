@@ -2,7 +2,7 @@
 
 The earlier full run used Veryl 0.21.0, Verilator 5.052, and Icarus Verilog
 13.0 on x86_64 Linux on 2026-09-26; the incremental refresh is described below.
-The current corpus has **649 cases: 641 simulation cases
+The current corpus has **663 cases: 655 simulation cases
 and 8 compilation-rejection cases**. The original 646-case reports remain in
 [verification/baseline](verification/baseline/README.md).
 The [expectation review](MISMATCH_REVIEW.md) records the specification clauses,
@@ -12,20 +12,20 @@ and both JSON reports are retained in the crate.
 
 | Outcome | Verilator | Icarus |
 | --- | ---: | ---: |
-| Simulation assertions passed | 457 | 456 |
+| Simulation assertions passed | 470 | 468 |
 | Expected compilation rejection | 1 | 8 |
 | Invalid design unexpectedly accepted | 0 | 0 |
 | Assertion disagreement | 0 | 0 |
 | Reviewed discrepancy / limitation ignored | 82 | 185 |
 | Veryl emission blocked | 0 | 0 |
-| SystemVerilog compilation blocked | 0 | 0 |
+| SystemVerilog compilation blocked | 0 | 2 |
 | Execution error / unrepresentable result | 0 | 0 |
-| Unsupported four-state design | 109 | 0 |
-| Total | 649 | 649 |
+| Unsupported four-state design | 110 | 0 |
+| Total | 663 | 663 |
 
-351 simulation cases pass both tools and 562 pass at least one. This does not
+362 simulation cases pass both tools and 576 pass at least one. This does not
 certify portability: a pass in one tool can coexist with a disagreement in the
-other. Icarus validates 101 of the 109 four-state cases that Verilator cannot
+other. Icarus validates 102 of the 110 four-state cases that Verilator cannot
 execute; the remaining eight have five emission and three compilation errors.
 
 On 2026-09-27, `operators::test_ff_comb_constant_folding_consistency` and the
@@ -37,6 +37,23 @@ this incremental refresh in `partial_refresh`; its top-level `suite_version`
 still identifies the earlier full run. The matrix and counts were regenerated.
 The zero-start assertion is now in the dedicated initialization case; the shared
 two-state initialization contract remains unchanged.
+
+On 2026-09-30, the two `ff_narrow_arrays` cases and the
+`packed_scatter_store` case copied from Celox were checked using suite 0.8.2
+and the same external tool versions. Icarus passed all three. Verilator passed
+the two-state cases and reported the four-state case as unsupported. These
+three rows were added to both retained reports and their counts and matrix
+were regenerated. `partial_refresh_history` preserves the earlier incremental
+refresh metadata; other cases were not rerun.
+
+A second incremental check on 2026-09-30 reconstructed 11 cases from upstream
+Veryl (see [source mapping](UPSTREAM_CASES.md)). Verilator passed all 11; Icarus
+passed nine. The other two retain `compile_error`: Icarus 13.0 explicitly rejects
+`inside` expressions (`veryl_language::inside_outside_range_endpoints`) and
+unpacked array parameters (`veryl_regressions::nested_array_index_const_array`).
+No assertion disagreement was observed. These new compiler failures are not
+excluded: the Icarus runner exits nonzero for them, including on a full run.
+Both reports preserve the diagnostics and the earlier refresh metadata.
 
 ## Corrections since the baseline
 

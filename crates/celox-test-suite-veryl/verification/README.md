@@ -8,18 +8,18 @@ See [investigation notes](../VERIFICATION_REPORT.md) for limitations and unresol
 
 | Result | Verilator | Icarus |
 | --- | ---: | ---: |
-| `passed` | 457 | 456 |
+| `passed` | 470 | 468 |
 | `rejected` | 1 | 8 |
 | `unexpected_accept` | 0 | 0 |
 | `mismatch` | 0 | 0 |
 | `emission_error` | 0 | 0 |
-| `compile_error` | 0 | 0 |
+| `compile_error` | 0 | 2 |
 | `runtime_error` | 0 | 0 |
-| `unsupported` | 109 | 0 |
+| `unsupported` | 110 | 0 |
 | `ignored` | 82 | 185 |
-| Total | 649 | 649 |
+| Total | 663 | 663 |
 
-351 cases pass both simulators; 562 pass at least one. A pass in one tool does not resolve a disagreement with the other.
+362 cases pass both simulators; 576 pass at least one. A pass in one tool does not resolve a disagreement with the other.
 
 ## Assertion disagreements and execution errors
 
