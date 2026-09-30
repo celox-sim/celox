@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "veryl_revision": "d1f7025898b90dc5a8200e0b619b4b8f7bda357a",
+  "command": "cargo test -p celox --features systemverilog --test function_arguments inout -- --include-ignored",
+  "counts": {
+    "passed": 10,
+    "failed": 3,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "case": "test_comb_inout_statement_copies_input_before_mutating_formal",
+      "backend": "native",
+      "status": "passed"
+    },
+    {
+      "case": "test_comb_inout_statement_copies_input_before_mutating_formal",
+      "backend": "cranelift",
+      "status": "passed"
+    },
+    {
+      "case": "test_comb_inout_statement_copies_input_before_mutating_formal",
+      "backend": "wasm",
+      "status": "passed"
+    },
+    {
+      "case": "test_comb_inout_statement_copies_input_before_mutating_formal",
+      "backend": "interp",
+      "status": "passed"
+    },
+    {
+      "case": "test_comb_inout_statement_copies_input_before_mutating_formal",
+      "backend": "veryl",
+      "status": "passed"
+    },
+    {
+      "case": "test_comb_inout_statement_copies_input_before_mutating_formal",
+      "backend": "sv",
+      "status": "failed",
+      "detail": "Unsupported SystemVerilog construct: output or inout function argument"
+    },
+    {
+      "case": "test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "backend": "native",
+      "status": "passed"
+    },
+    {
+      "case": "test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "backend": "cranelift",
+      "status": "passed"
+    },
+    {
+      "case": "test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "backend": "wasm",
+      "status": "passed"
+    },
+    {
+      "case": "test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "backend": "interp",
+      "status": "passed"
+    },
+    {
+      "case": "test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "backend": "veryl",
+      "status": "failed",
+      "detail": "First tick: state was 0, expected 7"
+    },
+    {
+      "case": "test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "backend": "sv",
+      "status": "failed",
+      "detail": "Unsupported SystemVerilog construct: output or inout function argument"
+    },
+    {
+      "case": "test_ff_inout_copyout_directly_to_register_is_rejected",
+      "status": "passed",
+      "diagnostic": "SideEffectFunctionCallInAlwaysFf"
+    }
+  ]
+}

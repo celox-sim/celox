@@ -3,14 +3,13 @@ use crate::Design;
 cases! { Functions, "function_arguments";
 
 
-// Keep direct-syntax regressions ready for an upstream fix: Veryl 0.21.0's
-// conv_function matches only Input/Output for scalar formals and panics on Inout.
+// Function inout arguments are variables, so they must not use the tri modifier.
 
 fn test_comb_inout_statement_copies_input_before_mutating_formal(sim) {
     @build Design::new(r#"
         module Top (d: input logic<8>, q: output logic<8>, original: output logic<8>) {
             function update (
-                value: inout tri logic<8>,
+                value: inout logic<8>,
                 snapshot: input logic<8>,
                 observed: output logic<8>,
             ) {
@@ -48,14 +47,23 @@ fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
             returned: output logic<8>,
             sampled: output logic<8>,
         ) {
-            function advance (value: inout tri logic<8>, delta: input logic<8>) -> logic<8> {
+            function advance (value: inout logic<8>, delta: input logic<8>) -> logic<8> {
                 let previous: logic<8> = value;
                 value += delta;
                 return previous;
             }
 
+            // Veryl rejects effectful function calls in always_ff. Compute the
+            // copyout in always_comb, then commit the next state on the clock.
+            var next: logic<8>;
+            var previous: logic<8>;
+            always_comb {
+                next = state;
+                previous = advance(next, increment);
+            }
             always_ff (clk) {
-                returned = advance(state, increment);
+                returned = previous;
+                state = next;
                 sampled = state;
             }
         }

@@ -2,7 +2,7 @@
 
 The earlier full run used Veryl 0.21.0, Verilator 5.052, and Icarus Verilog
 13.0 on x86_64 Linux on 2026-09-26; the incremental refresh is described below.
-The current corpus has **663 cases: 655 simulation cases
+The current corpus has **662 cases: 654 simulation cases
 and 8 compilation-rejection cases**. The original 646-case reports remain in
 [verification/baseline](verification/baseline/README.md).
 The [expectation review](MISMATCH_REVIEW.md) records the specification clauses,
@@ -16,12 +16,12 @@ and both JSON reports are retained in the crate.
 | Expected compilation rejection | 1 | 8 |
 | Invalid design unexpectedly accepted | 0 | 0 |
 | Assertion disagreement | 0 | 0 |
-| Reviewed discrepancy / limitation ignored | 82 | 185 |
+| Reviewed discrepancy / limitation ignored | 81 | 184 |
 | Veryl emission blocked | 0 | 0 |
 | SystemVerilog compilation blocked | 0 | 2 |
 | Execution error / unrepresentable result | 0 | 0 |
 | Unsupported four-state design | 110 | 0 |
-| Total | 663 | 663 |
+| Total | 662 | 662 |
 
 362 simulation cases pass both tools and 576 pass at least one. This does not
 certify portability: a pass in one tool can coexist with a disagreement in the
@@ -37,6 +37,13 @@ this incremental refresh in `partial_refresh`; its top-level `suite_version`
 still identifies the earlier full run. The matrix and counts were regenerated.
 The zero-start assertion is now in the dedicated initialization case; the shared
 two-state initialization contract remains unchanged.
+
+On 2026-09-28, `flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal`
+was removed from the corpus and its row was dropped from both retained reports.
+Upstream Veryl now rejects a select on a scalar logic or bit (`invalid_select`),
+so the construct the case relied on is not valid Veryl and the `sv_scalar_select`
+exclusion is resolved and dropped. Nothing else was rerun; the matrix and counts
+were regenerated from the updated reports.
 
 On 2026-09-30, the two `ff_narrow_arrays` cases and the
 `packed_scatter_store` case copied from Celox were checked using suite 0.8.2

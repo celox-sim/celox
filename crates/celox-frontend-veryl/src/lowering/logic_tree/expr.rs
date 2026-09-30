@@ -4,7 +4,7 @@ use crate::{
     bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
-        resolve_binary_op,
+        resolve_binary_op, system_function_dimension, system_function_type_size,
     },
 };
 use num_traits::ToPrimitive as _;
@@ -465,16 +465,6 @@ pub(super) fn eval_function_body_return(
         }
     }
 
-    fn for_range_is_dynamic(range: &ForRange) -> bool {
-        match range {
-            ForRange::Forward { start, end, .. }
-            | ForRange::Reverse { start, end, .. }
-            | ForRange::Stepped { start, end, .. } => {
-                matches!(start, ForBound::Expression(_)) || matches!(end, ForBound::Expression(_))
-            }
-        }
-    }
-
     fn validate_function_body_expression(
         module: &Module,
         expr: &Expression,
@@ -541,7 +531,7 @@ pub(super) fn eval_function_body_return(
     ) -> Result<(), ParserError> {
         match &call.kind {
             SystemFunctionKind::Bits(input)
-            | SystemFunctionKind::Size(input)
+            | SystemFunctionKind::Size(input, _)
             | SystemFunctionKind::Clog2(input)
             | SystemFunctionKind::Onehot(input)
             | SystemFunctionKind::Signed(input)
@@ -625,18 +615,8 @@ pub(super) fn eval_function_body_return(
                 Ok(())
             }
             Statement::For(for_stmt) => {
-                if for_range_is_dynamic(&for_stmt.range)
-                    && for_stmt.body.iter().any(statement_contains_break)
-                {
-                    return Err(ParserError::unsupported(
-                        57,
-                        LoweringPhase::CombLowering,
-                        "break in dynamic function-local for",
-                        format!("module `{}`", module.name),
-                        Some(&for_stmt.token),
-                    ));
-                }
-
+                // The analyzer preserves loop ownership for source breaks;
+                // eval_function_for tracks loop exits separately from returns.
                 match &for_stmt.range {
                     ForRange::Forward { start, end, .. }
                     | ForRange::Reverse { start, end, .. }
@@ -2219,6 +2199,7 @@ pub(super) fn eval_function_body_return(
         }
     }
 
+    let body = crate::lowering::function_return::implicit_return_body(body);
     let mut local_store = caller_store.fork();
     let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
@@ -3648,8 +3629,16 @@ fn eval_system_function_call(
             )?;
             Ok(((result, HashSet::default()), HashMap::default()))
         }
-        SystemFunctionKind::Size(input) => {
-            let size = system_function_input_size(module, store.current(), &input.0, arena)?;
+        SystemFunctionKind::Size(input, dimension) => {
+            let dimension = system_function_dimension(dimension.as_ref()).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "$size dimension",
+                    "the dimension must be a compile-time value",
+                    Some(&call.comptime.token),
+                )
+            })?;
+            let size =
+                system_function_input_size(module, store.current(), &input.0, arena, dimension)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(size),
                 BigUint::from(0u8),
@@ -3763,18 +3752,6 @@ fn system_function_type_bits_width(ty: &Type) -> Option<usize> {
         .map(|width| width * ty.total_array().unwrap_or(1))
 }
 
-fn system_function_type_size(ty: &Type) -> Option<usize> {
-    if let Some(size) = ty.array.first() {
-        *size
-    } else if let Some(size) = ty.width_expr().first().and_then(|expr| expr.numeric()) {
-        Some(size)
-    } else if let Some(size) = ty.width().first() {
-        *size
-    } else {
-        ty.total_width()
-    }
-}
-
 fn system_function_input_bits_width(
     module: &Module,
     store: &SymbolicStore<VarId>,
@@ -3797,14 +3774,18 @@ fn system_function_input_size(
     store: &SymbolicStore<VarId>,
     expr: &Expression,
     arena: &mut SLTNodeArena<VarId>,
+    dimension: usize,
 ) -> Result<usize, ParserError> {
     let comptime = expr.comptime();
     match &comptime.value {
-        ValueVariant::Type(ty) => Ok(system_function_type_size(ty).unwrap_or(0)),
-        _ => match system_function_type_size(&comptime.r#type) {
+        ValueVariant::Type(ty) => Ok(system_function_type_size(ty, dimension).unwrap_or(0)),
+        _ => match system_function_type_size(&comptime.r#type, dimension) {
             Some(size) => Ok(size),
-            None => eval_expression(module, store, expr, arena, None)
+            // Only the leading dimension can fall back to the evaluated
+            // expression's own width.
+            None if dimension == 1 => eval_expression(module, store, expr, arena, None)
                 .map(|((node, _), _)| get_width(node, arena)),
+            None => Ok(0),
         },
     }
 }
