@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     cache-mode: none
     outputs:
-      build_sha: ${{ steps.revision.outputs.sha }}
+      revision: ${{ steps.revision.outputs.revision }}
     steps:
       - name: Validate source before checkout
         id: source
@@ -88,18 +88,18 @@ jobs:
       - name: Resolve immutable build revision
         id: revision
         shell: bash
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   validate-release:
     name: Validate release version
     needs: resolve-source
     runs-on: ubuntu-latest
     outputs:
-      build_sha: ${{ needs.resolve-source.outputs.build_sha }}
+      build_sha: ${{ needs.resolve-source.outputs.revision }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve-source.outputs.build_sha }}
+          ref: ${{ needs.resolve-source.outputs.revision }}
 
       - uses: actions/setup-node@v7
         with:
