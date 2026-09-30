@@ -1,10 +1,23 @@
-# hwverify-rs 0.8
+# hwverify-rs 0.9
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.9の追加: 期待する関係と量化を明示したtrace
+
+- scoped specでは `value` は現在値、`value'` は次状態。出力も同じ規則で、入力にはprimeを付けない
+- `operation add { expect value' == value + amount; }` で関係を記述。名前付き `expectation` と入れ子の `all` / `any` でAND/ORを合成
+- `forall a: bv<4>; execution forall;` のように入力と有限実行を別々に量化。入力prefixの順序を維持し、実行不能なforallを成功にしない
+- `add(amount: q.a) => count == q.a;` で一回の操作の入力と、操作後の検査条件を並べる。期待出力を操作の前提に混ぜない
+- 旧prefix・操作関係・positive/negative trace・JSON version 2/3/4は互換性を維持。新しい量化情報はversion 3/4の任意フィールドとして扱う
+
+構文・量化順序・可実行性・有限長の制限は [期待と量化trace](EXPECTATIONS-AND-TRACES.md) を参照。
+[quantified_counter.hwv](examples/quantified_counter.hwv) は全入力の加算と入力ごとの補正値、
+[expectation_counter.hwv](examples/expectation_counter.hwv) は名前付きAND/OR関係の実例。
+入力量化prefixの後に一つの実行量化を置く範囲であり、任意の量化交互配置やlivenessではない。
 
 ## 0.8の追加: 直接宣言、局所ポート、独立操作
 

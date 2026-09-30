@@ -3,6 +3,11 @@
 
 The hwverify parser/validator, not this printer, is the authority for acceptance.
 Call syntax deliberately preserves each legacy expression tree and literal value.
+Scoped specs use bare current state and primed next state/output references when
+unambiguous. Explicit input/output prefixes retain their canonical spelling.
+The only reference-normalization exception is a legacy bare port sharing its name
+with private state: it needs an explicit i./o. prefix in source, preserving its
+meaning but changing that reference's spelling in the canonical JSON.
 """
 import argparse
 import json
@@ -30,6 +35,37 @@ def expression(value, indent=0, infix=False):
         return short
     pad = ' ' * (indent + 2)
     return f"{op}(\n" + pad + (',\n' + pad).join(rendered) + '\n' + ' ' * indent + ')'
+
+
+def scoped_expression(value, spec, indent=0, infix=False):
+    """Use scoped source sugar without regrouping the canonical expression AST."""
+    state, inputs, outputs = (spec[name] for name in ('state', 'inputs', 'outputs'))
+
+    def rewrite(value):
+        if isinstance(value, str):
+            if value in state:
+                if value in inputs:
+                    return f'i.{value}'
+                if value in outputs:
+                    return f'o.{value}'
+            scope, dot, name = value.partition('.')
+            unique = sum(name in names for names in (state, inputs, outputs)) == 1
+            if dot and unique:
+                if scope == 's' and name in state:
+                    return name
+                if ((scope == 'n' and name in state)
+                        or (scope == 'no' and name in outputs)):
+                    return name + "'"
+            return value
+        if isinstance(value, list) and value and isinstance(value[0], str):
+            # Match the IR's expression positions. Operators, widths, extraction
+            # bounds and literal payloads are never treated as references.
+            start = {'bv': len(value), 'const_mem': 2, 'zext': 2,
+                     'sext': 2, 'extract': 3}.get(value[0], 1)
+            return value[:start] + [rewrite(arg) for arg in value[start:]]
+        return value
+
+    return expression(rewrite(value), indent, infix)
 
 
 def type_name(value):
@@ -62,14 +98,35 @@ def print_document(doc, infix=False):
         lines.extend(f'{pad}  {n} = {expression(v, level + 2, infix)};' for n, v in values.items())
         lines.append(f'{pad}}}')
 
-    def field(name, value, level=0):
-        lines.append(' ' * level + name + ' ' + expression(value, level, infix) + ';')
+    def field(name, value, level=0, scope=None):
+        rendered = (expression(value, level, infix) if scope is None
+                    else scoped_expression(value, scope, level, infix))
+        lines.append(' ' * level + name + ' ' + rendered + ';')
 
     def examples(values, level):
         pad = ' ' * level
         for name, example in values.items():
             lines.append(f'{pad}example {name} {{')
-            field('expect', example['expect'], level + 2)
+            quantifiers = example.get('quantifiers', [])
+            if not isinstance(quantifiers, list):
+                raise ValueError('quantifiers must be an ordered array')
+            if 'quantifiers' in example and not quantifiers:
+                lines.append(f'{pad}  quantifiers {{}}')
+            for quantifier in quantifiers:
+                kind, variables = quantifier['kind'], quantifier['variables']
+                if not variables:
+                    raise ValueError('a quantifier must declare at least one variable')
+                if len(variables) == 1:
+                    variable, sort = next(iter(variables.items()))
+                    lines.append(f'{pad}  {kind} {variable}: {type_name(sort)};')
+                else:
+                    lines.append(f'{pad}  {kind} {{')
+                    lines.extend(f'{pad}    {variable}: {type_name(sort)};'
+                                 for variable, sort in variables.items())
+                    lines.append(f'{pad}  }}')
+            expectation = ('execution' if example['expect'] in ('exists', 'not_exists', 'forall')
+                           else 'expect')
+            field(expectation, example['expect'], level + 2)
             assignments('initial', example['initial'], level + 2)
             lines.append(f'{pad}  trace {{')
             for step in example['trace']:
@@ -84,9 +141,20 @@ def print_document(doc, infix=False):
                         action = step['operation']
                 else:
                     action = step['operation']
+                # `actions(...)` starts an action-set frame in the grammar, so
+                # a contextual operation named `actions` keeps the block form.
+                if ('operation' in step and step['operation'] != 'actions'
+                        and 'ensure' in step and not step['observe']):
+                    arguments = ', '.join(f'{name}: {expression(value, level + 4, infix)}'
+                                          for name, value in step['inputs'].items())
+                    predicate = expression(step['ensure'], level + 4, infix)
+                    lines.append(f'{pad}    {action}({arguments}) => {predicate};')
+                    continue
                 lines.append(f'{pad}    {action} {{')
                 assignments('inputs', step['inputs'], level + 6)
                 assignments('observe', step['observe'], level + 6)
+                if 'ensure' in step:
+                    field('ensure', step['ensure'], level + 6)
                 lines.append(f'{pad}    }}')
             lines.extend([f'{pad}  }}', f'{pad}}}'])
 
@@ -100,10 +168,12 @@ def print_document(doc, infix=False):
         for name, spec in doc['specs'].items():
             signature('spec', name, spec)
             declarations('state', spec['state'], 2)
-            field('init', spec['init'], 2)
-            field('invariant', spec['invariant'], 2)
+            field('init', spec['init'], 2, scope=spec)
+            field('invariant', spec['invariant'], 2, scope=spec)
             for operation, relation in spec['operations'].items():
-                lines.append(f'  operation {operation} = {expression(relation, 2, infix)};')
+                lines.append(f'  operation {operation} {{')
+                field('expect', relation, 4, scope=spec)
+                lines.append('  }')
             examples(spec['examples'], 2)
             lines.extend(['}', ''])
         for name, composition in doc['compositions'].items():

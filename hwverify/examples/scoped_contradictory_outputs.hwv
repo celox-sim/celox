@@ -2,9 +2,9 @@ specification "Intent bug: shared output admits no synchronized advance"
 
 spec One(output count: bv<4>) {
   state value: bv<4>;
-  init s.value == 0u4;
-  invariant count == s.value;
-  operation advance = n.value == s.value + 1u4;
+  init value == 0u4;
+  invariant count == value;
+  operation advance { expect value' == value + 1u4; }
   example one_step {
     expect positive;
     initial { count = 0u4; }
@@ -14,9 +14,9 @@ spec One(output count: bv<4>) {
 
 spec Two(output count: bv<4>) {
   state value: bv<4>;
-  init s.value == 0u4;
-  invariant count == s.value;
-  operation advance = n.value == s.value + 2u4;
+  init value == 0u4;
+  invariant count == value;
+  operation advance { expect value' == value + 2u4; }
   example one_step {
     expect positive;
     initial { count = 0u4; }

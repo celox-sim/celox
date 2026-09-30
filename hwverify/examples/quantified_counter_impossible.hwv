@@ -1,0 +1,17 @@
+specification "Universal execution assertions must be feasible"
+
+spec Counter(input enabled: bool, output count: bv<2>) {
+  state value: bv<2>;
+  init value == 0u2;
+  invariant count == value;
+  operation add { expect enabled; expect value' == value + 1u2; }
+
+  // Intentionally fails even though the tested result is true:
+  // enabled=false has no matching execution, so forall cannot pass vacuously.
+  example cannot_prove_an_impossible_execution {
+    forall flag: bool;
+    execution forall;
+    initial { count = 0u2; }
+    trace { add(enabled: q.flag) => true; }
+  }
+}

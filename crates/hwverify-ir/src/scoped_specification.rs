@@ -256,6 +256,7 @@ impl ScopedSpecification {
                 &definition.value["examples"],
                 &child(&definition.path, "examples"),
                 &definition.inputs,
+                &definition.outputs,
                 &action_inputs,
                 &tick,
             )?;
@@ -543,13 +544,17 @@ fn rewrite_examples(
     value: &Value,
     path: &str,
     public_inputs: &Ports,
+    public_outputs: &Ports,
     action_inputs: &BTreeMap<String, String>,
     tick: &str,
 ) -> Result<Value> {
     let mut examples = Map::new();
     for (name, example) in at(path, named(value))? {
         let path = child(path, name);
-        at(&path, keys(example, &["expect", "initial", "trace"], &[]))?;
+        at(
+            &path,
+            keys(example, &["expect", "initial", "trace"], &["quantifiers"]),
+        )?;
         let trace_path = child(&path, "trace");
         let trace = example["trace"].as_array().ok_or_else(|| ValidationError {
             path: trace_path.clone(),
@@ -563,7 +568,11 @@ fn rewrite_examples(
             let path = child(&trace_path, &index.to_string());
             at(
                 &path,
-                keys(frame, &["inputs", "observe"], &["operation", "actions"]),
+                keys(
+                    frame,
+                    &["inputs", "observe"],
+                    &["operation", "actions", "ensure"],
+                ),
             )?;
             if frame.get("operation").is_some() == frame.get("actions").is_some() {
                 return fail(
@@ -611,14 +620,52 @@ fn rewrite_examples(
                     .iter()
                     .map(|(action, input)| (input.clone(), json!(actions.contains(action)))),
             );
-            rewritten
-                .push(json!({"operation": tick, "inputs": inputs, "observe": frame["observe"]}));
+            let mut lowered =
+                json!({"operation": tick, "inputs": inputs, "observe": frame["observe"]});
+            if let Some(ensure) = frame.get("ensure") {
+                lowered["ensure"] = rewrite_postcondition(ensure, public_outputs);
+            }
+            rewritten.push(lowered);
         }
         let mut example = example.clone();
         example["trace"] = Value::Array(rewritten);
         examples.insert(name.clone(), example);
     }
     Ok(Value::Object(examples))
+}
+
+// Only post-frame public outputs are added to scope. The legacy validator
+// rejects input, private-state, future-frame and unbound q.* references.
+fn rewrite_postcondition(value: &Value, outputs: &Ports) -> Value {
+    if let Some(name) = value.as_str() {
+        return if outputs.contains_key(name) {
+            json!(format!("o.{name}"))
+        } else {
+            value.clone()
+        };
+    }
+    if let Some(values) = value.as_array() {
+        let start = match values.first().and_then(Value::as_str) {
+            Some("bv") => values.len(),
+            Some("const_mem" | "zext" | "sext") => 2,
+            Some("extract") => 3,
+            _ => 1,
+        };
+        return Value::Array(
+            values
+                .iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    if i < start {
+                        value.clone()
+                    } else {
+                        rewrite_postcondition(value, outputs)
+                    }
+                })
+                .collect(),
+        );
+    }
+    value.clone()
 }
 
 fn ports(value: &Value, path: &str) -> Result<Ports> {

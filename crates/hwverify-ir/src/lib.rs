@@ -12,3 +12,6 @@ pub use term::*;
 
 #[cfg(test)]
 mod validation_tests;
+
+mod quantified_examples;
+pub use quantified_examples::*;

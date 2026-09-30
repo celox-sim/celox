@@ -2,9 +2,9 @@ specification "Independent repeated counters with nested port remapping"
 
 spec Counter(input amount: bv<4>, output count: bv<4>) {
   state value: bv<4>;
-  init s.value == 0u4;
-  invariant count == s.value;
-  operation add = n.value == s.value + amount;
+  init value == 0u4;
+  invariant count == value;
+  operation add { expect value' == value + amount; }
 
   example add_two {
     expect positive;

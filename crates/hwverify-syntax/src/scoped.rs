@@ -83,6 +83,9 @@ impl Lower<'_> {
         )?;
         value["inputs"] = Value::Object(inputs);
         value["outputs"] = Value::Object(outputs);
+        if body_context == "scoped_spec" {
+            self.scoped_relations(&mut value, name.text(), &child)?;
+        }
         result
             .entry(group)
             .or_insert_with(|| json!({}))

@@ -207,6 +207,10 @@ fn signature_and_instance_words_remain_identifiers() {
         "input",
         "output",
         "operation",
+        "expectation",
+        "expect",
+        "all",
+        "any",
         "actions",
         "composition",
         "bv",
@@ -216,7 +220,7 @@ fn signature_and_instance_words_remain_identifiers() {
             r#"specification "names"
           spec {name}(input {name}: bool, output visible: bool) {{
             state {name}: bool; init s.{name}; invariant visible == s.{name};
-            operation {name} = n.{name} == {name};
+            operation {name} = n.{name} == i.{name};
           }}
           composition Top(input {name}: bool, output visible: bool) {{
             use {name}({name}: {name}, visible: visible);

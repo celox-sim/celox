@@ -1,0 +1,34 @@
+specification "Every chosen input, every admitted counter execution"
+
+spec Counter(input amount: bv<4>, output count: bv<4>) {
+  state value: bv<4>;
+  init value == 0u4;
+  invariant count == value;
+  expectation increments { expect value' == value + amount; }
+  operation add { expect increments; }
+
+  example every_input_including_wraparound {
+    forall a: bv<4>;
+    execution forall;
+    initial { count = 0u4; }
+    trace {
+      add(amount: q.a) => count == q.a;
+      add(amount: 1u4) => count == q.a + 1u4;
+    }
+  }
+}
+
+spec Corrected(input amount: bv<2>, input correction: bv<2>, output count: bv<2>) {
+  state value: bv<2>;
+  init value == 0u2;
+  invariant count == value;
+  operation add { expect value' == value + amount - correction; }
+
+  example correction_can_depend_on_amount {
+    forall a: bv<2>;
+    exists b: bv<2>;
+    execution forall;
+    initial { count = 0u2; }
+    trace { add(amount: q.a, correction: q.b) => count == 0u2; }
+  }
+}

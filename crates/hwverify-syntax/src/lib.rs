@@ -7,6 +7,8 @@ use std::{
 };
 include!(concat!(env!("OUT_DIR"), "/modules.rs"));
 use hwv_grammar_trait as g;
+mod examples;
+mod expectations;
 mod json_input;
 mod scoped;
 pub use json_input::parse as parse_json;
@@ -55,11 +57,17 @@ pub struct ParsedDocument {
     pub canonical: Value,
     pub spans: BTreeMap<String, Span>,
     pub filename: String,
+    // Source-only declarations are validated without changing the canonical schema.
+    expectation_checks: Vec<ParsedDocument>,
 }
 impl ParsedDocument {
     pub fn validate_scoped_specification(
         &self,
     ) -> Result<hwverify_ir::ScopedSpecification, SyntaxError> {
+        for check in &self.expectation_checks {
+            hwverify_ir::ScopedSpecification::from_json(&check.canonical)
+                .map_err(|e| check.diagnostic(&self.filename, &e))?;
+        }
         hwverify_ir::ScopedSpecification::from_json(&self.canonical)
             .map_err(|e| self.diagnostic(&self.filename, &e))
     }
@@ -96,6 +104,7 @@ struct Lower<'s> {
     source: &'s str,
     filename: &'s str,
     spans: BTreeMap<String, Span>,
+    expectation_checks: Vec<ParsedDocument>,
 }
 #[derive(Clone)]
 struct E {
@@ -185,8 +194,8 @@ impl Lower<'_> {
         path: &str,
         result: &mut Map<String, Value>,
     ) -> Res<()> {
-        let keyword = property_token(&entry.property_id);
-        let name = id_token(&entry.id);
+        let keyword = id_token(&entry.id);
+        let name = id_token(&entry.id0);
         if let g::NamedBody::SignatureBody(signature) = &*entry.named_body {
             return self.scoped_signature(
                 keyword,
@@ -252,6 +261,12 @@ impl Lower<'_> {
             }
             (g::NamedBody::ColonTypeSemicolon(_), "scoped_impl", "input") => {
                 ("inputs", "declarations")
+            }
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "scoped_spec", "operation") => {
+                ("operations", "expectation_block")
+            }
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "scoped_spec", "expectation") => {
+                ("expectations", "expectation_block")
             }
             (g::NamedBody::EquExprSemicolon(_), "scoped_spec", "operation") => {
                 ("operations", "assignments")
@@ -450,6 +465,22 @@ impl Lower<'_> {
     }
     fn primary(&self, e: &g::Primary<'_>) -> Res<E> {
         match e {
+            g::Primary::Primed(x) => {
+                let token = id_token(&x.primed.id);
+                let mut span = self.span(token);
+                span.end = self.span(&x.primed.prime.prime).end;
+                if let Some(extra) = x.primed.primed_list.last() {
+                    span.end = self.span(&extra.prime.prime).end;
+                    return Err(self.error(
+                        &span,
+                        "only one prime is allowed on a local state or output name",
+                    ));
+                }
+                if token.text().contains('.') {
+                    return Err(self.error(&span, "prime requires an unqualified local state or output name; use n. or no. without a prime"));
+                }
+                Ok(E::leaf(json!(format!("{}'", token.text())), span))
+            }
             g::Primary::Word(x) => {
                 let t = &x.word.word;
                 let (v, w) = t.text().split_once('u').unwrap();
@@ -556,10 +587,19 @@ impl Lower<'_> {
     where
         't: 'a,
     {
+        if context == "expectation_block" {
+            let relation = self.expectation_block(entries, "and", path)?;
+            self.record(path, &relation);
+            return Ok(relation.value);
+        }
         if context == "trace" || context == "scoped_trace" {
             let mut frames = vec![];
             for (index, entry) in entries.into_iter().enumerate() {
                 let child = format!("{path}/{index}");
+                if let g::Entry::Invocation(x) = entry {
+                    frames.push(self.invocation(&x.invocation, &child)?);
+                    continue;
+                }
                 let (token, entries, selection, field) = match entry {
                     g::Entry::Block(x) => (id_token(&x.block.id), x.block.block_list.iter().map(|e| &*e.entry).collect(), json!(id_token(&x.block.id).text()), "operation"),
                     g::Entry::ActionFrame(x) if context == "scoped_trace" => {
@@ -605,7 +645,16 @@ impl Lower<'_> {
         let mut result = Map::new();
         let mut explicit_entries = BTreeSet::new();
         for entry in entries {
+            if self.quantifier(entry, context, path, &mut result)? {
+                continue;
+            }
             let token = match entry {
+                g::Entry::Invocation(x) => {
+                    return Err(self.error(
+                        &self.span(id_token(&x.invocation.id)),
+                        "operation invocations are only valid inside traces",
+                    ));
+                }
                 g::Entry::ActionFrame(x) => {
                     return Err(self.error(
                         &self.span(&x.action_frame.actions),
@@ -623,7 +672,7 @@ impl Lower<'_> {
                 g::Entry::Block(x) => id_token(&x.block.id),
                 g::Entry::Declaration(x) => id_token(&x.declaration.id),
                 g::Entry::Assignment(x) => id_token(&x.assignment.id),
-                g::Entry::Property(x) => property_token(&x.property.property_id),
+                g::Entry::Property(x) => id_token(&x.property.id),
             };
             let raw = token.text();
             let span = self.span(token);
@@ -632,6 +681,7 @@ impl Lower<'_> {
                 ("contract", "pre") => "precondition",
                 ("contract", "post") => "postcondition",
                 ("contract", "partition") => "partitioning",
+                ("example" | "scoped_example", "execution") => "expect",
                 _ => raw,
             };
             if !explicit_entries.insert(key) {
@@ -640,7 +690,10 @@ impl Lower<'_> {
             let child = format!("{path}/{key}");
             self.spans.insert(child.clone(), span.clone());
             let value = match entry {
-                g::Entry::NamedEntry(_) | g::Entry::Use(_) | g::Entry::ActionFrame(_) => {
+                g::Entry::NamedEntry(_)
+                | g::Entry::Use(_)
+                | g::Entry::ActionFrame(_)
+                | g::Entry::Invocation(_) => {
                     unreachable!("named entries are handled above")
                 }
                 g::Entry::Block(x) => {
@@ -746,7 +799,8 @@ impl Lower<'_> {
                         "rel_impl" | "scoped_impl" => ["composition", "reset_input"].as_slice(),
                         "component" | "scoped_spec" => ["init", "invariant"].as_slice(),
                         "composition" => ["members"].as_slice(),
-                        "example" | "scoped_example" => ["expect"].as_slice(),
+                        "example" | "scoped_example" => ["expect", "execution"].as_slice(),
+                        "trace_frame" => ["ensure"].as_slice(),
                         "progress" => ["enabled", "rank"].as_slice(),
                         "contract" => [
                             "pre",
@@ -768,6 +822,15 @@ impl Lower<'_> {
                         );
                     }
                     let expr = self.expr(&x.property.expr)?;
+                    if matches!(context, "example" | "scoped_example")
+                        && raw == "execution"
+                        && !matches!(
+                            expr.value.as_str(),
+                            Some("exists" | "not_exists" | "forall")
+                        )
+                    {
+                        return Err(self.error(&expr.span, "execution requires exists, not_exists, or forall; legacy positive/negative use expect"));
+                    }
                     self.record(&child, &expr);
                     if context == "composition" && raw == "members" {
                         let a = expr
@@ -895,6 +958,7 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
         source,
         filename,
         spans: BTreeMap::new(),
+        expectation_checks: Vec::new(),
     };
     lower
         .spans
@@ -940,6 +1004,7 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
         canonical,
         spans: lower.spans,
         filename: filename.into(),
+        expectation_checks: lower.expectation_checks,
     })
 }
 

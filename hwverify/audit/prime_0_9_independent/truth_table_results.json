@@ -1,0 +1,8 @@
+{
+  "status": "pass",
+  "cases": 256,
+  "positive": 74,
+  "negative": 182,
+  "report_status": "spec_examples_passed",
+  "final_release_sha256": "ae5aed7cbb1cc0745f4748e9dc421b49d6169fe14bda61363947d64d5d0e6a97"
+}

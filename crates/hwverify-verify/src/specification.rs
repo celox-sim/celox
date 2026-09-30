@@ -32,13 +32,32 @@ fn conjunction(terms: &[Term]) -> Term {
         n => and(conjunction(&terms[..n / 2]), conjunction(&terms[n / 2..])),
     }
 }
-/// Constructs the conjunction whose free variables are existentially quantified
-/// by SAT. In particular, no private-state or omitted-observation guess is made.
+/// Separate execution assumptions from every expected result for quantified use.
+pub(crate) fn trace_relations(
+    spec: &Specification,
+    members: &[String],
+    example: &TraceExample,
+) -> Res<(Term, Term, Env)> {
+    trace_constraints(spec, members, example, true)
+}
+
+/// Keep legacy admission's constraint order and AST exactly unchanged when no
+/// ensure is present. Existing emitted SMT and structural diagnostics are stable.
 fn trace_admission(
     spec: &Specification,
     members: &[String],
     example: &TraceExample,
 ) -> Res<(Term, Env)> {
+    let (formula, _, context) = trace_constraints(spec, members, example, false)?;
+    Ok((formula, context))
+}
+
+fn trace_constraints(
+    spec: &Specification,
+    members: &[String],
+    example: &TraceExample,
+    separate_expected: bool,
+) -> Res<(Term, Term, Env)> {
     if members.is_empty() {
         return Err("empty product".into());
     }
@@ -49,6 +68,7 @@ fn trace_admission(
         }
     }
     let mut constraints = vec![];
+    let mut expected = vec![];
     let mut context = Env::new();
     let observations = (0..=example.trace.len())
         .map(|time| frame(spec.observations(), "obs", time))
@@ -69,7 +89,17 @@ fn trace_admission(
                 context.insert(format!("step{time}.i.{name}"), value.clone());
             }
             restrict(&mut constraints, &input, &step.inputs);
-            restrict(&mut constraints, &observations[time + 1], &step.observe);
+            let postconditions = if separate_expected {
+                &mut expected
+            } else {
+                &mut constraints
+            };
+            restrict(postconditions, &observations[time + 1], &step.observe);
+            if let Some(ensure) = &step.ensure {
+                let mut post = BTreeMap::new();
+                replace(&mut post, spec.observations(), &observations[time + 1]);
+                postconditions.push(substitute(ensure, &post));
+            }
             input
         })
         .collect::<Vec<_>>();
@@ -101,7 +131,7 @@ fn trace_admission(
             }
         }
     }
-    Ok((conjunction(&constraints), context))
+    Ok((conjunction(&constraints), conjunction(&expected), context))
 }
 
 pub fn check_specification(spec: &Specification, z3: String, out: PathBuf) -> Res<Value> {
@@ -123,19 +153,41 @@ pub fn check_specification(spec: &Specification, z3: String, out: PathBuf) -> Re
                 .map(|(n, p)| ("composition", n, p.members.clone(), &p.examples)),
         )
     {
-        let positive_count = cases.values().filter(|e| e.positive).count();
-        let negative_count = cases.len() - positive_count;
+        let positive_count = cases
+            .values()
+            .filter(|e| e.quantification.is_none() && e.positive)
+            .count();
+        let negative_count = cases
+            .values()
+            .filter(|e| e.quantification.is_none() && !e.positive)
+            .count();
+        let quantified_count = cases.len() - positive_count - negative_count;
         let mut warnings = vec![];
-        if positive_count == 0 {
+        if positive_count == 0 && quantified_count == 0 {
             warnings.push("No positive examples: passing negative examples does not establish that this target admits any behavior");
         }
-        if negative_count == 0 {
+        if negative_count == 0 && quantified_count == 0 {
             warnings
                 .push("No negative examples: no unwanted behavior has been tested for exclusion");
         }
-        coverage.push(json!({"target_kind":kind,"target":name,"members":members,"positive_examples":positive_count,"negative_examples":negative_count,"warnings":warnings}));
+        let mut target_coverage = json!({"target_kind":kind,"target":name,"members":members,"positive_examples":positive_count,"negative_examples":negative_count,"warnings":warnings});
+        if quantified_count != 0 {
+            target_coverage["quantified_examples"] = json!(quantified_count);
+        }
+        coverage.push(target_coverage);
         for (case, example) in cases {
             let id = format!("example_{}", examples.len());
+            if example.quantification.is_some() {
+                let mut result = crate::quantified_examples::check_example(
+                    spec, &members, example, &id, &mut query,
+                )?;
+                result["target_kind"] = json!(kind);
+                result["target"] = json!(name);
+                result["members"] = json!(members);
+                result["example"] = json!(case);
+                examples.push(result);
+                continue;
+            }
             let (formula, context) = trace_admission(spec, &members, example)?;
             query.query_with_witness(&id, formula, example.positive, &context)?;
             let evidence = query.reports.last().unwrap();
@@ -172,7 +224,15 @@ pub fn check_specification(spec: &Specification, z3: String, out: PathBuf) -> Re
     } else {
         "spec_examples_passed"
     };
+    let projection = if examples
+        .iter()
+        .any(|example| example.get("quantification").is_some())
+    {
+        "legacy positive/negative examples existentially project hidden state and omitted inputs/observations; explicit quantified examples use an ordered input prefix and an innermost exists/not_exists/nonvacuous forall execution binder"
+    } else {
+        "all hidden private state and omitted inputs/observations are existential; negative examples require UNSAT for every hidden completion"
+    };
     Ok(
-        json!({"status":status,"name":spec.document().get("name"),"examples":examples,"coverage":coverage,"implementation_binding":binding,"claim":"Example results concern only the supplied finite observational traces; any separate universal safety/stuttering binding result is reported under implementation_binding", "semantics":{"composition":"conjunction with private component state and shared observations/inputs; all members synchronize on every named operation","initial":"component init and invariant at frame 0; no implicit reset operation","timing":"step k consumes inputs k and relates observations/state at frames k and k+1; observe constrains frame k+1","projection":"all hidden private state and omitted inputs/observations are existential; negative examples require UNSAT for every hidden completion"},"limitations":["Passing examples alone is not universal verification, specification adequacy, deadlock freedom, liveness, or implementation refinement; any separate binding proof is reported under implementation_binding","Initial predicates define example starting states; no reset reachability or arbitrary future extension is inferred","Rust lowering, the structural kernel and Z3 are trusted; emitted SMT obligations are replayable"]}),
+        json!({"status":status,"name":spec.document().get("name"),"examples":examples,"coverage":coverage,"implementation_binding":binding,"claim":"Example results concern only the supplied finite observational traces; any separate universal safety/stuttering binding result is reported under implementation_binding", "semantics":{"composition":"conjunction with private component state and shared observations/inputs; all members synchronize on every named operation","initial":"component init and invariant at frame 0; no implicit reset operation","timing":"step k consumes inputs k and relates observations/state at frames k and k+1; observe constrains frame k+1","projection":projection},"limitations":["Passing examples alone is not universal verification, specification adequacy, deadlock freedom, liveness, or implementation refinement; any separate binding proof is reported under implementation_binding","Initial predicates define example starting states; no reset reachability or arbitrary future extension is inferred","Rust lowering, the structural kernel and Z3 are trusted; emitted SMT obligations are replayable"]}),
     )
 }

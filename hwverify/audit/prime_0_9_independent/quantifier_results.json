@@ -1,0 +1,9 @@
+{
+  "status": "pass",
+  "cases": 219,
+  "expected_valid": 98,
+  "expected_invalid": 121,
+  "exit_code": 1,
+  "report_status": "spec_examples_failed",
+  "final_release_sha256": "ae5aed7cbb1cc0745f4748e9dc421b49d6169fe14bda61363947d64d5d0e6a97"
+}

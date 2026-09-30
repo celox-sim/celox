@@ -28,10 +28,14 @@ pub struct TraceStep {
     pub operation: String,
     pub inputs: Env,
     pub observe: Env,
+    /// Predicate over this step's post-frame observations and example-bound inputs.
+    pub ensure: Option<Term>,
 }
 #[derive(Clone, Debug)]
 pub struct TraceExample {
     pub positive: bool,
+    /// Explicit opt-in; legacy positive/negative admission remains unchanged.
+    pub quantification: Option<TraceQuantification>,
     pub initial: Env,
     pub trace: Vec<TraceStep>,
 }
@@ -284,7 +288,7 @@ fn extend_scope(env: &mut Env, prefix: &str, vars: &Env) {
             .map(|(name, term)| (format!("{prefix}.{name}"), term.clone())),
     );
 }
-fn observations(value: &Value, path: &str, schema: &Env) -> Result<Env> {
+fn observations(value: &Value, path: &str, schema: &Env, bound: &Env) -> Result<Env> {
     at(path, named(value))?
         .iter()
         .map(|(name, expr)| {
@@ -293,8 +297,8 @@ fn observations(value: &Value, path: &str, schema: &Env) -> Result<Env> {
                 path: p.clone(),
                 message: format!("unknown observable/input {name}"),
             })?;
-            // Closed expressions only: traces can never bind or refer to hidden state.
-            let term = expression(expr, &Env::new(), &p, &mut Lower::default())?;
+            // Only typed example-bound inputs are in scope; private state is inaccessible.
+            let term = expression(expr, bound, &p, &mut Lower::default())?;
             if term.0.sort != declaration.0.sort {
                 return fail(&p, "example assignment type mismatch");
             }
@@ -313,18 +317,24 @@ fn examples(
         .iter()
         .map(|(name, example)| {
             let path = child(path, name);
-            at(&path, keys(example, &["expect", "initial", "trace"], &[]))?;
+            at(
+                &path,
+                keys(example, &["expect", "initial", "trace"], &["quantifiers"]),
+            )?;
+            let (quantification, bound) = crate::quantified_examples::parse(example, &path)?;
             let positive = match at(&child(&path, "expect"), text(&example["expect"]))? {
-                "positive" => true,
-                "negative" => false,
+                "positive" | "exists" | "forall" => true,
+                "negative" | "not_exists" => false,
                 _ => {
                     return fail(
                         &child(&path, "expect"),
-                        "expect must be positive or negative",
+                        "expect must be positive, negative, exists, not_exists, or forall",
                     )
                 }
             };
-            let initial = observations(&example["initial"], &child(&path, "initial"), obs)?;
+            let initial = observations(&example["initial"], &child(&path, "initial"), obs, &bound)?;
+            let mut post_env = bound.clone();
+            extend_scope(&mut post_env, "o", obs);
             let steps = example["trace"].as_array().ok_or_else(|| ValidationError {
                 path: child(&path, "trace"),
                 message: "trace must be an array".into(),
@@ -340,7 +350,10 @@ fn examples(
                 .enumerate()
                 .map(|(index, step)| {
                     let path = format!("{path}/trace/{index}");
-                    at(&path, keys(step, &["operation", "inputs", "observe"], &[]))?;
+                    at(
+                        &path,
+                        keys(step, &["operation", "inputs", "observe"], &["ensure"]),
+                    )?;
                     let operation = at(&child(&path, "operation"), text(&step["operation"]))?;
                     if !operations.contains(operation) {
                         return fail(
@@ -348,12 +361,26 @@ fn examples(
                             format!("unknown operation {operation}"),
                         );
                     }
-                    let values = observations(&step["inputs"], &child(&path, "inputs"), inputs)?;
-                    let observe = observations(&step["observe"], &child(&path, "observe"), obs)?;
+                    let values =
+                        observations(&step["inputs"], &child(&path, "inputs"), inputs, &bound)?;
+                    let observe =
+                        observations(&step["observe"], &child(&path, "observe"), obs, &bound)?;
+                    let ensure = step
+                        .get("ensure")
+                        .map(|value| {
+                            boolean(
+                                value,
+                                &post_env,
+                                &child(&path, "ensure"),
+                                &mut Lower::default(),
+                            )
+                        })
+                        .transpose()?;
                     Ok(TraceStep {
                         operation: operation.into(),
                         inputs: values,
                         observe,
+                        ensure,
                     })
                 })
                 .collect::<Result<_>>()?;
@@ -361,6 +388,7 @@ fn examples(
                 name.clone(),
                 TraceExample {
                     positive,
+                    quantification,
                     initial,
                     trace,
                 },

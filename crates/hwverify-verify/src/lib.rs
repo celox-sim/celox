@@ -10,3 +10,5 @@ mod spec_binding;
 mod scoped_specification;
 pub use scoped_specification::check_scoped_specification;
 mod scoped_binding;
+
+mod quantified_examples;

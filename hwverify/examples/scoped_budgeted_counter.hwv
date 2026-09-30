@@ -2,9 +2,9 @@ specification "Scoped counter arithmetic with a spending budget"
 
 spec Counter(input amount: bv<4>, output count: bv<4>) {
   state value: bv<4>;
-  init s.value == 0u4;
-  invariant count == s.value;
-  operation add = n.value == s.value + amount;
+  init value == 0u4;
+  invariant count == value;
+  operation add { expect value' == value + amount; }
 
   example add_two {
     expect positive;
@@ -20,9 +20,9 @@ spec Counter(input amount: bv<4>, output count: bv<4>) {
 
 spec Budget(input amount: bv<4>, output remaining: bv<4>) {
   state credits: bv<4>;
-  init s.credits == 3u4;
-  invariant remaining == s.credits;
-  operation add = amount <= s.credits && n.credits == s.credits - amount;
+  init credits == 3u4;
+  invariant remaining == credits;
+  operation add { expect amount <= credits && credits' == credits - amount; }
 
   example spend_two {
     expect positive;

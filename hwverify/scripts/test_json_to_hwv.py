@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from json_to_hwv import expression, print_document
+from json_to_hwv import expression, print_document, scoped_expression
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +48,76 @@ def minimal_scoped_specification():
         },
         'compositions': {},
     }
+
+
+def scoped_reference_specification():
+    doc = minimal_scoped_specification()
+    doc['specs']['spec'].update({
+        'inputs': {'enable': 'bool'}, 'outputs': {'visible': 'bool'},
+        'state': {'hidden': 'bool'}, 'init': ['not', 's.hidden'],
+        'invariant': ['and', ['eq', 'o.visible', 's.hidden'],
+                      ['eq', 'visible', 'o.visible']],
+        'operations': {'advance': ['and', ['eq', 'n.hidden', 'enable'],
+                                  ['and', ['eq', 'no.visible', 'n.hidden'],
+                                   ['and', ['eq', 'i.enable', 'enable'], True]]]},
+    })
+    return doc
+
+
+def scoped_shared_name_specification():
+    doc = minimal_scoped_specification()
+    doc['specs']['spec'].update({
+        'inputs': {'shared_in': 'bool'}, 'outputs': {'shared_out': 'bool'},
+        'state': {'shared_in': 'bool', 'shared_out': 'bool'},
+        'init': ['and', ['not', 's.shared_in'], ['not', 's.shared_out']],
+        'invariant': ['eq', 'shared_out', 's.shared_out'],
+        'operations': {'advance': ['and', ['eq', 'n.shared_in', 'shared_in'],
+                                  ['and', ['eq', 'n.shared_out', 'i.shared_in'],
+                                   ['and', ['eq', 'no.shared_out', 'n.shared_out'],
+                                    ['eq', 'o.shared_out', 's.shared_out']]]]},
+    })
+    return doc
+
+
+def quantified_specification(version):
+    if version == 3:
+        doc = minimal_specification()
+        doc['inputs'] = {'amount': {'bv': 4}}
+        doc['observations'] = {'count': {'bv': 4}}
+        doc['operations'] = {'advance': {}}
+        target = doc['components']['component']
+        target['steps'] = {'advance': ['eq', 'no.count', 'i.amount']}
+        output = 'o.count'
+    else:
+        doc = minimal_scoped_specification()
+        target = doc['specs']['spec']
+        target['inputs'] = {'amount': {'bv': 4}}
+        target['outputs'] = {'count': {'bv': 4}}
+        target['operations'] = {'advance': ['eq', 'no.count', 'i.amount']}
+        output = 'count'
+    target['examples'] = {
+        'quantified': {
+            'expect': 'forall',
+            'quantifiers': [
+                {'kind': 'forall', 'variables': {'a': {'bv': 4}}},
+                {'kind': 'exists', 'variables': {'b': {'bv': 4}, 'flag': 'bool'}},
+                {'kind': 'forall', 'variables': {'c': {'bv': 4}}},
+            ],
+            'initial': {'count': ['bv', 4, 0]},
+            'trace': [
+                {'operation': 'advance', 'inputs': {'amount': 'q.a'}, 'observe': {},
+                 'ensure': ['eq', output, 'q.a']},
+                {'operation': 'advance', 'inputs': {'amount': ['add', 'q.a', 'q.b']},
+                 'observe': {'count': 'q.c'},
+                 'ensure': ['or', ['not', 'q.flag'], ['eq', 'o.count', 'q.c']]},
+            ],
+        },
+    }
+    if version == 4:
+        target['examples']['quantified']['trace'].append({
+            'actions': ['advance'], 'inputs': {}, 'observe': {}, 'ensure': True,
+        })
+    return doc
 
 
 class PrinterTests(unittest.TestCase):
@@ -115,7 +185,7 @@ class PrinterTests(unittest.TestCase):
         source = print_document(doc)
         for text in (
             'spec Counter(input amount: bv<4>, output count: bv<4>) {',
-            '  operation add = eq(n.value, add(s.value, amount));',
+            "  operation add {\n    expect eq(value', add(value, amount));\n  }",
             '  use left: Counter(amount: left_amount, count: left_count);',
             '  operation left = actions(left.add);',
             '  operation right = actions(right.add);',
@@ -137,8 +207,137 @@ class PrinterTests(unittest.TestCase):
     def test_scoped_empty_signature(self):
         source = print_document(minimal_scoped_specification())
         self.assertIn('spec spec() {', source)
-        self.assertIn('  operation actions = true;', source)
+        self.assertIn('  operation actions {\n    expect true;\n  }', source)
         self.assertNotIn('state ', source)
+
+    def test_scoped_prime_references_and_single_expect_preserve_tree(self):
+        doc = scoped_reference_specification()
+        original = copy.deepcopy(doc)
+        for infix in (False, True):
+            with self.subTest(infix=infix):
+                source = print_document(doc, infix)
+                self.assertIn('  operation advance {\n    expect ', source)
+                self.assertEqual(source.count('    expect '), 1)
+                for reference in ("hidden'", "visible'", 'o.visible', 'i.enable'):
+                    self.assertIn(reference, source)
+                for reference in ('s.hidden', 'n.hidden', 'no.visible'):
+                    self.assertNotIn(reference, source)
+        self.assertEqual(doc, original)
+
+    def test_scoped_shared_names_keep_explicit_references(self):
+        doc = scoped_shared_name_specification()
+        original = copy.deepcopy(doc)
+        source = print_document(doc)
+        self.assertIn('  invariant eq(o.shared_out, s.shared_out);', source)
+        self.assertIn('eq(n.shared_in, i.shared_in)', source)
+        self.assertIn('eq(n.shared_out, i.shared_in)', source)
+        self.assertIn('eq(no.shared_out, n.shared_out)', source)
+        self.assertIn('eq(o.shared_out, s.shared_out)', source)
+        self.assertNotIn("'", source)
+        self.assertEqual(doc, original)
+
+    def test_scoped_expression_rewrites_only_expression_positions(self):
+        scope = {'state': {'add': {'bv': 8}}, 'inputs': {}, 'outputs': {}}
+        value = ['eq', 'n.add', ['add', 's.add', ['bv', 8, -1]]]
+        self.assertEqual(scoped_expression(value, scope),
+                         "eq(add', add(add, bv(8, -1)))")
+        # The printer leaves non-expression positions for the validator, even
+        # when their invalid string values happen to look like references.
+        for value, expected in (
+            (['bv', 's.add', 'n.add'], 'bv(s.add, n.add)'),
+            (['zext', 's.add', 'n.add'], "zext(s.add, add')"),
+            (['sext', 's.add', 'n.add'], "sext(s.add, add')"),
+            (['extract', 's.add', 'n.add', 's.add'], 'extract(s.add, n.add, add)'),
+            (['const_mem', 's.add', 'n.add'], "const_mem(s.add, add')"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(scoped_expression(value, scope), expected)
+
+    def test_scoped_sugar_does_not_change_legacy_documents(self):
+        doc = minimal_specification()
+        component = doc['components']['component']
+        component['state'] = {'hidden': 'bool'}
+        component['init'] = ['not', 's.hidden']
+        component['steps']['operation'] = ['eq', 'n.hidden', 's.hidden']
+        source = print_document(doc)
+        self.assertIn('  init not(s.hidden);', source)
+        self.assertIn('    operation = eq(n.hidden, s.hidden);', source)
+        self.assertNotIn("hidden'", source)
+        self.assertNotIn('expect ', source)
+
+    def test_quantified_example_clauses_and_invocations(self):
+        for version in (3, 4):
+            with self.subTest(version=version):
+                doc = quantified_specification(version)
+                original = copy.deepcopy(doc)
+                source = print_document(doc)
+                self.assertIn('    forall a: bv<4>;\n    exists {\n'
+                              '      b: bv<4>;\n      flag: bool;\n    }\n'
+                              '    forall c: bv<4>;\n    execution forall;', source)
+                output = 'o.count' if version == 3 else 'count'
+                self.assertIn(f'      advance(amount: q.a) => eq({output}, q.a);', source)
+                self.assertIn('      advance {\n        inputs {\n'
+                              '          amount = add(q.a, q.b);', source)
+                self.assertIn('        observe {\n          count = q.c;\n        }\n'
+                              '        ensure or(not(q.flag), eq(o.count, q.c));', source)
+                if version == 4:
+                    self.assertIn('      actions(advance) {\n        inputs {\n        }\n'
+                                  '        observe {\n        }\n        ensure true;', source)
+                self.assertEqual(doc, original)
+
+    def test_new_execution_modes_and_legacy_expectations(self):
+        doc = minimal_specification()
+        target = doc['components']['component']
+        for mode in ('exists', 'not_exists', 'forall', 'positive', 'negative'):
+            target['examples'] = {'empty': {'expect': mode, 'initial': {}, 'trace': []}}
+            keyword = 'execution' if mode in ('exists', 'not_exists', 'forall') else 'expect'
+            with self.subTest(mode=mode):
+                self.assertIn(f'    {keyword} {mode};', print_document(doc))
+
+    def test_optional_ensure_preserves_false_and_legacy_frame_shapes(self):
+        doc = minimal_specification()
+        target = doc['components']['component']
+        target['examples'] = {'frames': {
+            'expect': 'positive', 'initial': {}, 'trace': [
+                {'operation': 'operation', 'inputs': {}, 'observe': {}, 'ensure': False},
+                {'operation': 'operation', 'inputs': {}, 'observe': {}},
+            ],
+        }}
+        source = print_document(doc)
+        self.assertIn('      operation() => false;', source)
+        self.assertIn('      operation {\n        inputs {\n        }\n'
+                      '        observe {\n        }\n      }', source)
+        self.assertEqual(source.count('=>'), 1)
+        self.assertNotIn('execution ', source)
+
+    def test_empty_quantifier_array_has_explicit_marker(self):
+        doc = minimal_specification()
+        doc['components']['component']['examples'] = {'empty': {
+            'expect': 'exists', 'quantifiers': [],
+            'initial': {}, 'trace': [],
+        }}
+        self.assertIn('    quantifiers {}\n    execution exists;', print_document(doc))
+
+    def test_operation_named_actions_uses_unambiguous_block(self):
+        doc = minimal_scoped_specification()
+        doc['specs']['spec']['examples'] = {'contextual': {
+            'expect': 'exists', 'initial': {}, 'trace': [{
+                'operation': 'actions', 'inputs': {}, 'observe': {}, 'ensure': True,
+            }],
+        }}
+        source = print_document(doc)
+        self.assertIn('      actions {\n        inputs {\n        }\n'
+                      '        observe {\n        }\n        ensure true;', source)
+        self.assertNotIn('actions() =>', source)
+
+    def test_invalid_quantifier_array_or_empty_group_rejected(self):
+        for invalid in ({}, 'forall', [{'kind': 'forall', 'variables': {}}]):
+            doc = minimal_specification()
+            doc['components']['component']['examples'] = {'empty': {
+                'expect': 'exists', 'quantifiers': invalid, 'initial': {}, 'trace': [],
+            }}
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'quantifier'):
+                print_document(doc)
 
     def test_scoped_frame_choice_must_be_unambiguous(self):
         for selectors in ({}, {'operation': 'left', 'actions': ['left']}):
@@ -216,6 +415,88 @@ class ParserRoundTripTests(unittest.TestCase):
             for infix in (False, True):
                 with self.subTest(name=name, infix=infix):
                     self.assert_round_trip(fixture(name), infix)
+
+    def test_v4_prime_state_output_and_nested_single_expect_round_trip(self):
+        for infix in (False, True):
+            with self.subTest(infix=infix):
+                self.assert_round_trip(scoped_reference_specification(), infix)
+
+    def test_v4_shared_names_qualify_legacy_bare_ports(self):
+        doc = scoped_shared_name_specification()
+        qualified = copy.deepcopy(doc)
+        spec = qualified['specs']['spec']
+        spec['invariant'][1] = 'o.shared_out'
+        spec['operations']['advance'][1][2] = 'i.shared_in'
+        # Bare JSON ports and explicit i./o. ports elaborate identically, but
+        # ambiguous source names require qualification. Only these two strings
+        # change in the canonical AST; every relation and state reference stays.
+        for infix in (False, True):
+            with self.subTest(infix=infix):
+                self.assert_source_document(print_document(doc, infix), qualified)
+                self.assert_round_trip(qualified, infix)
+
+    def test_quantified_v3_v4_ordered_groups_and_trace_predicates(self):
+        for version in (3, 4):
+            for mode in ('exists', 'not_exists', 'forall'):
+                for infix in (False, True):
+                    with self.subTest(version=version, mode=mode, infix=infix):
+                        doc = quantified_specification(version)
+                        target = (doc['components']['component'] if version == 3
+                                  else doc['specs']['spec'])
+                        target['examples']['quantified']['expect'] = mode
+                        self.assert_round_trip(doc, infix)
+
+    def test_execution_modes_without_quantifiers_and_optional_ensure(self):
+        for version in (3, 4):
+            for mode in ('exists', 'not_exists', 'forall', 'positive', 'negative'):
+                for ensure in (False, True):
+                    with self.subTest(version=version, mode=mode, ensure=ensure):
+                        doc = (minimal_specification() if version == 3
+                               else minimal_scoped_specification())
+                        target = (doc['components']['component'] if version == 3
+                                  else doc['specs']['spec'])
+                        target['examples'] = {'frames': {
+                            'expect': mode, 'initial': {}, 'trace': [{
+                                'operation': 'operation' if version == 3 else 'actions',
+                                'inputs': {}, 'observe': {}, 'ensure': ensure,
+                            }],
+                        }}
+                        self.assert_round_trip(doc)
+
+    def test_empty_quantifier_array_round_trip(self):
+        for version in (3, 4):
+            for mode in ('exists', 'not_exists', 'forall'):
+                with self.subTest(version=version, mode=mode):
+                    doc = (minimal_specification() if version == 3
+                           else minimal_scoped_specification())
+                    target = (doc['components']['component'] if version == 3
+                              else doc['specs']['spec'])
+                    target['examples'] = {'empty': {
+                        'expect': mode, 'quantifiers': [], 'initial': {}, 'trace': [],
+                    }}
+                    self.assert_round_trip(doc)
+
+    def test_contextual_trace_operation_names_round_trip(self):
+        for version in (3, 4):
+            for operation in ('use', 'actions', 'bool', 'bv', 'mem', 'design',
+                              'specification', 'forall', 'exists', 'expect',
+                              'ensure', 'execution', 'any', 'all'):
+                with self.subTest(version=version, operation=operation):
+                    doc = (minimal_specification() if version == 3
+                           else minimal_scoped_specification())
+                    target = (doc['components']['component'] if version == 3
+                              else doc['specs']['spec'])
+                    if version == 3:
+                        doc['operations'] = {operation: {}}
+                        target['steps'] = {operation: True}
+                    else:
+                        target['operations'] = {operation: True}
+                    target['examples'] = {'contextual': {
+                        'expect': 'exists', 'initial': {}, 'trace': [{
+                            'operation': operation, 'inputs': {}, 'observe': {}, 'ensure': True,
+                        }],
+                    }}
+                    self.assert_round_trip(doc)
 
     def test_v4_handwritten_sources_match_json(self):
         for name in ('scoped_budgeted_counter', 'scoped_independent_counters',

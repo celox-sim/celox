@@ -57,6 +57,14 @@ pub fn check_scoped_specification(
         }
     }
     let status = aggregate_status(&examples, binding.as_ref());
+    let projection = if examples
+        .iter()
+        .any(|example| example.get("quantification").is_some())
+    {
+        "Legacy positive/negative examples existentially project hidden state and omitted inputs/outputs; explicit quantified examples use an ordered input prefix and an innermost exists/not_exists/nonvacuous forall execution binder"
+    } else {
+        "Private state and omitted inputs/outputs are existential; negative examples require UNSAT for every hidden completion"
+    };
     Ok(json!({
         "schema_version": 4,
         "status": status,
@@ -70,7 +78,7 @@ pub fn check_scoped_specification(
             "composition": "Exported actions activate sets of local leaf operations; active relations are conjoined, inactive leaves preserve private state, and distinct local operations of one leaf are incompatible. Omitted composition operation groups retain same-name synchronous shorthand",
             "initial": "Each instance's init and invariant hold at frame 0; no implicit reset operation",
             "timing": "Step k consumes inputs k and a singleton operation or simultaneous action set, relating outputs/state at frames k and k+1; observe constrains frame k+1",
-            "projection": "Private state and omitted inputs/outputs are existential; negative examples require UNSAT for every hidden completion",
+            "projection": projection,
             "reporting": "File paths are relative to this report's output directory; private labels use private.<instance>.<field> (private_next for binding next state), optionally preceded by frameN; symbolic activation controls use stepN.action.<exported-action>; context symbol values retain the emitted SMT identifiers"
         },
         "limitations": [
