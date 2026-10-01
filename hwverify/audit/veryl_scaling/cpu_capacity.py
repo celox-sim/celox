@@ -34,6 +34,19 @@ def model(n,axis='both'):
             for machine in ['spec','impl']:
                 doc[machine]['state'][k]={'bv':w};doc[machine]['reset'][k]='i.'+k;doc[machine]['next'][k]='s.'+k
             doc['binding']=['and',doc['binding'],['eq','spec.'+k,'impl.'+k]]
+    # Conjunction associativity only: avoid JSON nesting becoming the limiting
+    # factor for larger capacity fixtures. The leaf predicates are unchanged.
+    if max(rn,dn)>=64:
+        leaves=[]
+        def flatten(value):
+            if isinstance(value,list) and len(value)==3 and value[0]=='and':
+                flatten(value[1]);flatten(value[2])
+            else:leaves.append(value)
+        def balanced(items):
+            if len(items)==1:return items[0]
+            middle=len(items)//2
+            return ['and',balanced(items[:middle]),balanced(items[middle:])]
+        flatten(doc['binding']);doc['binding']=balanced(leaves)
     return doc
 
 def source(n,axis='both'):

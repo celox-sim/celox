@@ -219,6 +219,8 @@ fn merge_stats(out: &mut Stats, child: &Stats) {
     out.peak_live_clauses = out.peak_live_clauses.max(child.peak_live_clauses);
     out.base_cnf_reused |= child.base_cnf_reused;
     out.asserted_definitions += child.asserted_definitions;
+    out.lookup_rewrites += child.lookup_rewrites;
+    out.lookup_expansion_nodes += child.lookup_expansion_nodes;
     out.decisions += child.decisions;
     out.conflicts += child.conflicts;
     out.split_alternatives += child.split_alternatives;
@@ -315,7 +317,7 @@ pub(super) fn route(original: &Term, context: &Env, limits: Limits, hint: Search
                 Verdict::Unknown => {
                     return Err(child
                         .reason
-                        .unwrap_or_else(|| "unresolved control case".into()))
+                        .unwrap_or_else(|| "unresolved control case".into()));
                 }
                 Verdict::Unsat => out.stats.control_cases_closed += 1,
                 Verdict::Sat => {

@@ -12,6 +12,7 @@ use std::{
 };
 
 mod control;
+mod lookup;
 
 type Lit = i32;
 const TRUE: Lit = 1;
@@ -133,6 +134,8 @@ pub struct Stats {
     pub control_case_work: Vec<u64>,
     pub control_preprocess_work: u64,
     pub asserted_definitions: usize,
+    pub lookup_rewrites: usize,
+    pub lookup_expansion_nodes: usize,
     pub base_cnf_reused: bool,
     pub terms: usize,
     pub variables: usize,
@@ -171,6 +174,7 @@ impl Outcome {
             "assignments":self.assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "context_values":self.context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "terms":self.stats.terms,"variables":self.stats.variables,"clauses":self.stats.clauses,
+            "lookup_rewrites":self.stats.lookup_rewrites,"lookup_expansion_nodes":self.stats.lookup_expansion_nodes,
             "asserted_definitions":self.stats.asserted_definitions,"base_cnf_reused":self.stats.base_cnf_reused,"base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
             "split_alternatives":self.stats.split_alternatives,"split_completed":self.stats.split_completed,
             "split_unsat":self.stats.split_unsat,
@@ -505,6 +509,7 @@ impl Aliases {
     }
 }
 struct Blast {
+    lookup: lookup::Rewrite,
     aliases: Aliases,
     memo: HashMap<Term, Bits>,
     gates: HashMap<(u8, Lit, Lit), Lit>,
@@ -516,6 +521,7 @@ struct Blast {
 impl Blast {
     fn new() -> Self {
         Self {
+            lookup: lookup::Rewrite::default(),
             aliases: Aliases::default(),
             memo: HashMap::new(),
             gates: HashMap::new(),
@@ -685,6 +691,13 @@ impl Blast {
             return Err("finite solver term budget exhausted".into());
         }
         let op = operation(t)?;
+        if matches!(op, Op::Ite) && matches!(t.0.sort, Sort::Bv(_)) {
+            if let Some(rewritten) = self.lookup.distribute(t, b)? {
+                let value = self.term(&rewritten, b, depth + 1)?;
+                self.memo.insert(t.clone(), value.clone());
+                return Ok(value);
+            }
+        }
         let args =
             t.0.args
                 .iter()
@@ -1419,6 +1432,9 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         if formula.0.sort != Sort::Bool {
             return Err("finite formula must have Bool sort".into());
         }
+        // Rewriting can bypass source nodes. Validate every original formula
+        // and context signature first, including dead branches and Sat hints.
+        blast.lookup.source_nodes = lookup::validate_source(formula, context, &mut budget)?;
         blast.aliases.collect(formula, &mut budget)?;
         let root = blast.term(formula, &mut budget, 0)?;
         for term in context.values() {
@@ -1428,6 +1444,8 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         Ok(())
     })();
     outcome.stats.asserted_definitions = blast.aliases.definitions.len();
+    outcome.stats.lookup_rewrites = blast.lookup.rewrites;
+    outcome.stats.lookup_expansion_nodes = blast.lookup.created;
     outcome.stats.terms = blast.memo.len();
     outcome.stats.variables = blast.vars;
     outcome.stats.clauses = blast.clauses.len();
@@ -1641,7 +1659,7 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
                         }
                         Search::Pending => outcome.stats.search_yields += 1,
                         Search::Complete(Verdict::Unknown) => {
-                            return Err("finite solver unresolved split branch".into())
+                            return Err("finite solver unresolved split branch".into());
                         }
                     }
                 }

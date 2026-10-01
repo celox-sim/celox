@@ -24,3 +24,19 @@ class CpuCapacityGateTests(unittest.TestCase):
             result=json.loads((out/'summary.json').read_text())[0]
             self.assertEqual(result['status'],'counterexample')
             self.assertFalse(result['correct_outcome'])
+
+    def test_large_binding_keeps_every_memory_cell_without_deep_json(self):
+        doc=module.model(64)
+        def leaves(value):
+            if isinstance(value,list) and len(value)==3 and value[0]=='and':
+                return leaves(value[1])+leaves(value[2])
+            return [value]
+        predicates=leaves(doc['binding'])
+        for kind in ('rom','data'):
+            for index in range(64):
+                self.assertEqual(predicates.count(['eq',f'spec.{kind}{index}',f'impl.{kind}{index}']),1)
+        def depth(value):
+            if isinstance(value,dict):return 1+max(map(depth,value.values()),default=0)
+            if isinstance(value,list):return 1+max(map(depth,value),default=0)
+            return 0
+        self.assertLess(depth(doc),128)

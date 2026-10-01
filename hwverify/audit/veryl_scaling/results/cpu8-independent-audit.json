@@ -1,0 +1,83 @@
+{
+  "status": "pass",
+  "commit": "3907f867dfb617d2494d6245135605e4e3e1f24f",
+  "checks": {
+    "api_checks": 3530,
+    "asserted_definitions": 3597,
+    "cofactored_queries": 528,
+    "context_replays": 7854,
+    "deadline_after_completed_cofactor": 12,
+    "enumerated_truth_rows": 324704,
+    "guard_changed_terms": 500,
+    "guard_fallback_checks": 2,
+    "guard_normalization_terms": 500,
+    "guard_normalization_truth_rows": 61152,
+    "hint_Sat_sat": 1418,
+    "hint_Sat_unknown": 34,
+    "hint_Sat_unsat": 234,
+    "hint_Unsat_sat": 1539,
+    "hint_Unsat_unknown": 50,
+    "hint_Unsat_unsat": 255,
+    "nonzero_deadline_checks": 27,
+    "original_sat_replays": 2957,
+    "sat": 2957,
+    "unknown": 84,
+    "unsat": 489
+  },
+  "source_sha256": {
+    "crates/solver/src/finite.rs": "e481b5e9db79b83c58ebeab785fc157ad08ea5a8cca0a8d7ddfb8af6aec37aa6",
+    "crates/solver/src/finite/control.rs": "beddc1120b78c8d4d05dc453a12d09b4d3f673cf1ad9bffde5e07184d91f4e05",
+    "crates/sir/src/guard.rs": "448196749dbfbcd485d46545ca1996853f62e47d1f9064f10f5f4513756fb34d",
+    "crates/sir/src/lib.rs": "c34d644da07f2dcf726bde9c25ad8eb82dc758ced6341f1e450c372c6501c54f",
+    "crates/ir/src/term.rs": "10a709ce657add3a875535b6a9b1ca076327a29a2250dcfbd6cbe2a49bb3e3b3"
+  },
+  "harness_sha256": "af56164ca47d3350bd6a2bab951d6fddfbbc87a6b255b4972fddfb9235fdbdd3",
+  "independent_semantics_sha256": "0edf7d5fb9993e8941e94acd5c3cfa07b8d84dd08b5d361de8ad231b783b03c0",
+  "compiled_audit_sha256": "1f99af712d04b037493176a50bd0d0d28626ed74efb6aff86ccdc4a94f3c8a7c",
+  "source_identity_verified": true,
+  "external_solver_invocations": 0,
+  "oracle": "Audit-owned integer/Boolean evaluator. Every selected small formula was evaluated under every input assignment, including after finding a witness. No Z3 was run. Saved SMT examples are unexecuted optional reference artifacts.",
+  "scope": [
+    "Asserted definition orientation, variable aliases established before definition cycle checks, direct/mutual cycles, nonmandatory disjunction/implication equalities, definition count 63/64/65/96, original word/context replay",
+    "All 120 possible single successful Boolean-cofactor positions across 3/4/5/6 controls plus all-UNSAT cases; 240 randomized guarded small-word constraints; original unsupported operations/contexts before rewriting",
+    "Exact whole-query work and cumulative clauses at successful limit and one below, zero resource limits, original-term-count bounds, 27 nonzero deadlines with 12 observed after completed cofactors, eligibility fallback for 2/7 controls and small original query",
+    "500 changed guard/mux normalization trees with shared Normalizer state, correlated equality predicates and exhaustive 61152 input assignments, budget-abort identity fallback"
+  ],
+  "findings": [],
+  "residual_limits": [
+    "Testing and source review are not a formal proof or independent UNSAT certificate",
+    "Finite malformed-input controls were tested directly. The private guard Normalizer assumes valid IR from the SIR lifter; it is not itself a public malformed-Term validator",
+    "Control-case node/variable statistics aggregate maxima for sequential children; global work and aggregate materialized clauses were checked independently",
+    "The full CPU8/CPU16 workload and existing236-test suite were not rerun by this bounded audit; those are separate parent evidence"
+  ],
+  "repo_mutation": "None; all new source copies, harness and results are outside the repo. Preexisting results/report.json untouched.",
+  "row_count_interpretation": {
+    "fresh_formula_instances_with_full_truth_tables": 1624,
+    "formula_truth_rows": 324704,
+    "same_oracle_reused_for_both_hints": true,
+    "api_checks": 3530,
+    "additional_checks": "API count also includes known mathematical controls, exact resource-cap reruns, malformed/unsupported cases, strategy readback, and deadline probes. It is not 3530 newly enumerated formulas.",
+    "normalization_formula_instances": 500,
+    "normalization_truth_rows": 61152,
+    "global_uniqueness": "Rows count evaluations per formula instance; repeated assignments across distinct or repeated generated formulas are counted again.",
+    "context": "Context-only 64-bit inputs are not exhaustively enumerated; returned assignments/context values are checked by the independent interpreter."
+  },
+  "api_phase_counts": {
+    "definitions_cycles_aliases_conditional": 2400,
+    "union_before_definition_cycles": 120,
+    "definition_capacity": 8,
+    "each_control_case_position": 248,
+    "control_strategy_readback": 124,
+    "budget_reference": 16,
+    "exact_global_work": 32,
+    "exact_global_clauses": 32,
+    "random_guarded_words": 480,
+    "malformed_hidden_context": 12,
+    "malformed_dead_branch": 12,
+    "zero_budgets": 12,
+    "control_eligibility_count_fallback": 2,
+    "control_eligibility_size_fallback": 1,
+    "original_terms_global_support_budget": 4,
+    "cumulative_nonzero_deadline": 27
+  }
+}
