@@ -381,6 +381,10 @@ fn analyze(
     } else {
         let mut diagnostics = celox_frontend_veryl::check_dynamic_for_bounds(&ir);
         diagnostics.extend(celox_frontend_veryl::check_function_output_aliases(&ir));
+        diagnostics.extend(celox_frontend_veryl::check_array_literal_side_effects(
+            &ir,
+            parsers.iter().map(|x| &x.veryl),
+        ));
         diagnostics
     };
     // Force-capable native images reapply an override after each static store.

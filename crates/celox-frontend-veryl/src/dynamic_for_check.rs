@@ -1426,6 +1426,18 @@ fn collect_statement_effects(
     effects
 }
 
+/// Proven observable effects, including effects in called function bodies.
+/// Assignments to a callee's local variables do not make a pure call effectful.
+pub(crate) fn expression_has_observable_effect(expression: &Expression, module: &Module) -> bool {
+    // An output call is effectful even when its dynamic destination range
+    // cannot be resolved by the access-range analysis below.
+    if crate::ff::expression_has_side_effect(expression) {
+        return true;
+    }
+    let effects = collect_expression_effects(expression, module, &mut HashSet::default());
+    effects.observable || !effects.writes.is_empty() || !effects.state_changes.is_empty()
+}
+
 fn collect_expression_effects(
     expression: &Expression,
     module: &Module,

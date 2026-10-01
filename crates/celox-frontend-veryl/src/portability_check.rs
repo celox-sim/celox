@@ -1,4 +1,4 @@
-//! Warn about statically overlapping destinations of distinct output arguments.
+//! Portability warnings for expressions with unspecified side-effect ordering.
 //!
 //! Copy-out consists of blocking assignments (IEEE 1800-2023 4.9.7), but 13.5
 //! does not order those assignments between formals. This is a portability
@@ -10,12 +10,101 @@ use veryl_analyzer::ir::{
     SystemFunctionKind, TbMethod, VarIndex, VarSelect,
 };
 
+use veryl_parser::{
+    token_range::TokenRange,
+    veryl_grammar_trait::{self as ast, Veryl},
+    veryl_walker::VerylWalker,
+};
+
 use crate::{
     FrontendDiagnostic, HashSet,
     bitaccess::{eval_var_select, is_static_access},
 };
 
 pub fn check_function_output_aliases(ir: &Ir) -> Vec<FrontendDiagnostic> {
+    check(ir, Check::OutputAliases, &[])
+}
+
+/// IEEE 1800-2023 10.9.1 leaves evaluation counts undefined for effectful
+/// default/type keys and array assignment pattern replications. Veryl exposes
+/// default and repeat items; ordinary concatenation repeats are not covered.
+pub fn check_array_literal_side_effects<'a>(
+    ir: &Ir,
+    asts: impl IntoIterator<Item = &'a Veryl>,
+) -> Vec<FrontendDiagnostic> {
+    // Pass 2 expands assignment literals into individual element assignments.
+    // Retain their syntax provenance so expanded default/repeat items remain
+    // distinguishable from explicit elements and concatenations.
+    let mut sources = ArrayItemSources::default();
+    for ast in asts {
+        sources.veryl(ast);
+    }
+    check(ir, Check::ArrayLiteralSideEffects, &sources.0)
+}
+
+struct ArrayItemSource {
+    token: TokenRange,
+    value: TokenRange,
+    kind: &'static str,
+}
+
+#[derive(Default)]
+struct ArrayItemSources(Vec<ArrayItemSource>);
+
+impl VerylWalker for ArrayItemSources {
+    fn array_literal_item(&mut self, item: &ast::ArrayLiteralItem) {
+        let (value, repeat, kind) = match item.array_literal_item_group.as_ref() {
+            ast::ArrayLiteralItemGroup::ExpressionArrayLiteralItemOpt(x) => (
+                x.expression.as_ref(),
+                x.array_literal_item_opt
+                    .as_ref()
+                    .map(|x| x.expression.as_ref()),
+                x.array_literal_item_opt.as_ref().map(|_| "repeat"),
+            ),
+            ast::ArrayLiteralItemGroup::DefaulColonExpression(x) => {
+                (x.expression.as_ref(), None, Some("default"))
+            }
+        };
+        if let Some(kind) = kind {
+            // The parser's Expression -> TokenRange conversion can stop at
+            // a function name, excluding arguments. Walk the tokens to retain
+            // the complete expression span used by analyzed function calls.
+            let mut range = ExpressionRange(value.into());
+            range.expression(value);
+            let mut token: TokenRange = item.into();
+            if token.end.pos < range.0.end.pos {
+                token.end = range.0.end;
+            }
+            self.0.push(ArrayItemSource {
+                token,
+                value: range.0,
+                kind,
+            });
+        }
+        self.expression(value);
+        if let Some(repeat) = repeat {
+            self.expression(repeat);
+        }
+    }
+}
+
+struct ExpressionRange(TokenRange);
+
+impl VerylWalker for ExpressionRange {
+    fn veryl_token(&mut self, token: &veryl_parser::veryl_token::VerylToken) {
+        if self.0.end.pos < token.token.pos {
+            self.0.end = token.token;
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    OutputAliases,
+    ArrayLiteralSideEffects,
+}
+
+fn check(ir: &Ir, kind: Check, sources: &[ArrayItemSource]) -> Vec<FrontendDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen = HashSet::default();
     let mut visited = HashSet::default();
@@ -32,6 +121,8 @@ pub fn check_function_output_aliases(ir: &Ir) -> Vec<FrontendDiagnostic> {
             continue;
         }
         let mut checker = Checker {
+            kind,
+            sources,
             module,
             diagnostics: &mut diagnostics,
             seen: &mut seen,
@@ -68,6 +159,8 @@ pub fn check_function_output_aliases(ir: &Ir) -> Vec<FrontendDiagnostic> {
 }
 
 struct Checker<'a, 'b> {
+    kind: Check,
+    sources: &'a [ArrayItemSource],
     module: &'a Module,
     diagnostics: &'b mut Vec<FrontendDiagnostic>,
     seen: &'b mut HashSet<(String, usize, usize)>,
@@ -75,7 +168,11 @@ struct Checker<'a, 'b> {
 
 impl Checker<'_, '_> {
     fn call(&mut self, call: &FunctionCall) {
-        let outputs: Vec<_> = call.outputs.iter().collect();
+        let outputs: Vec<_> = call
+            .outputs
+            .iter()
+            .filter(|_| self.kind == Check::OutputAliases)
+            .collect();
         'pairs: for (i, (left_arg, left)) in outputs.iter().enumerate() {
             for (right_arg, right) in outputs.iter().skip(i + 1) {
                 // Flattened struct members of one formal belong to a single
@@ -159,6 +256,7 @@ impl Checker<'_, '_> {
     }
 
     fn expression(&mut self, expression: &Expression) {
+        self.array_item(expression);
         match expression {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::FunctionCall(call) => self.call(call),
@@ -194,7 +292,9 @@ impl Checker<'_, '_> {
                                 self.expression(repeat);
                             }
                         }
-                        ArrayLiteralItem::Defaul(value) => self.expression(value),
+                        ArrayLiteralItem::Defaul(value) => {
+                            self.expression(value);
+                        }
                     }
                 }
             }
@@ -202,6 +302,41 @@ impl Checker<'_, '_> {
                 for (_, value) in fields {
                     self.expression(value);
                 }
+            }
+        }
+    }
+
+    fn array_item(&mut self, value: &Expression) {
+        if self.kind != Check::ArrayLiteralSideEffects {
+            return;
+        }
+        let token = &value.comptime().token;
+        let matches: Vec<_> = self
+            .sources
+            .iter()
+            .filter(|source| {
+                source.value.beg.source == token.beg.source
+                    && source.value.beg.pos <= token.beg.pos
+                    && token.end.pos <= source.value.end.pos
+            })
+            .collect();
+        if matches.is_empty()
+            || !crate::dynamic_for_check::expression_has_observable_effect(value, self.module)
+        {
+            return;
+        }
+        for source in matches {
+            let token = &source.token;
+            let key = (
+                token.beg.source.to_string(),
+                token.beg.pos as usize,
+                token.end.pos as usize,
+            );
+            if self.seen.insert(key) {
+                self.diagnostics.push(FrontendDiagnostic::undefined_array_literal_evaluation_count(
+                    token,
+                    format!("`{}` item has side effects; IEEE 1800-2023 §10.9.1 leaves its evaluation count undefined in the emitted SystemVerilog assignment pattern", source.kind),
+                ));
             }
         }
     }
