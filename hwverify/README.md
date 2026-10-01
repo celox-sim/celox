@@ -1,10 +1,20 @@
-# hwverify-rs 0.10.0
+# hwverify-rs 0.10.1
 
 Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.10.1: 同じ検証義務を高速化
+
+有限solverの変数選択をheap化し、時刻確認とwatch-listの割当てを減らした。
+同じマシンで各7回を交互測定したpipeline全体の中央値は **1.814秒→0.147秒（12.31倍）**。
+既定Z3経路は0.120秒。5負例も反例のまま14.55〜20.56倍速くなった。
+モデル・binding・元のSMT・探索のdecision/conflict数・SAT witnessは同一で、finite内のZ3呼出しは0。
+未対応・予算不足はUNKNOWNのまま。一般のCPUや任意の式に対する速度保証ではない。
+[測定方法と生証跡](audit/pipeline_solver_speed/README.md)、
+[独立正当性監査](audit/finite_speed_independent/README.md)を参照。
 
 ## 0.10の追加: 本当のpipelineとZ3なしの小さな検証経路
 

@@ -122,6 +122,7 @@ struct Budget {
     limits: Limits,
     start: Instant,
     work: u64,
+    time_check_in: u16,
 }
 impl Budget {
     fn tick(&mut self, amount: u64) -> Res<()> {
@@ -129,6 +130,18 @@ impl Budget {
         if self.work > self.limits.max_work {
             return Err("finite solver work budget exhausted".into());
         }
+        // Work limits are exact. Amortize the monotonic-clock call over at
+        // most 256 bounded work checkpoints, and always check before returning
+        // a verdict. This avoids a clock syscall/vDSO call per literal/heap step.
+        if self.time_check_in == 0 {
+            self.check_time()?;
+            self.time_check_in = 255;
+        } else {
+            self.time_check_in -= 1;
+        }
+        Ok(())
+    }
+    fn check_time(&self) -> Res<()> {
         if self.start.elapsed() >= Duration::from_millis(self.limits.timeout_ms) {
             return Err("finite solver time budget exhausted".into());
         }
@@ -685,6 +698,98 @@ fn evaluate(
     Ok(value)
 }
 
+/// Indexed activity heap. Equal scores prefer the lowest variable number, just
+/// like the original linear scan. Assigned entries may remain until popped;
+/// backtracking reinserts every newly unassigned variable if it was removed.
+struct VarOrder {
+    heap: Vec<usize>,
+    positions: Vec<usize>,
+}
+impl VarOrder {
+    const ABSENT: usize = usize::MAX;
+
+    fn new(vars: usize) -> Self {
+        Self {
+            heap: Vec::with_capacity(vars),
+            positions: vec![Self::ABSENT; vars + 1],
+        }
+    }
+    fn higher(a: usize, c: usize, activity: &[f64]) -> bool {
+        activity[a] > activity[c] || (activity[a] == activity[c] && a < c)
+    }
+    fn swap(&mut self, a: usize, c: usize) {
+        self.heap.swap(a, c);
+        self.positions[self.heap[a]] = a;
+        self.positions[self.heap[c]] = c;
+    }
+    fn promote(&mut self, v: usize, activity: &[f64], b: &mut Budget) -> Res<()> {
+        let mut pos = self.positions[v];
+        if pos == Self::ABSENT {
+            return Ok(());
+        }
+        while pos > 0 {
+            b.tick(1)?;
+            let parent = (pos - 1) / 2;
+            if !Self::higher(v, self.heap[parent], activity) {
+                break;
+            }
+            self.swap(pos, parent);
+            pos = parent;
+        }
+        Ok(())
+    }
+    fn insert(&mut self, v: usize, activity: &[f64], b: &mut Budget) -> Res<()> {
+        b.tick(1)?;
+        if self.positions[v] == Self::ABSENT {
+            self.positions[v] = self.heap.len();
+            self.heap.push(v);
+            self.promote(v, activity, b)?;
+        }
+        Ok(())
+    }
+    fn pop(&mut self, activity: &[f64], b: &mut Budget) -> Res<Option<usize>> {
+        b.tick(1)?;
+        let Some(&v) = self.heap.first() else {
+            return Ok(None);
+        };
+        let last = self.heap.pop().unwrap();
+        self.positions[v] = Self::ABSENT;
+        if !self.heap.is_empty() {
+            self.heap[0] = last;
+            self.positions[last] = 0;
+            let mut pos = 0;
+            while 2 * pos + 1 < self.heap.len() {
+                b.tick(1)?;
+                let left = 2 * pos + 1;
+                let right = left + 1;
+                let child = if right < self.heap.len()
+                    && Self::higher(self.heap[right], self.heap[left], activity)
+                {
+                    right
+                } else {
+                    left
+                };
+                if !Self::higher(self.heap[child], last, activity) {
+                    break;
+                }
+                self.swap(pos, child);
+                pos = child;
+            }
+        }
+        Ok(Some(v))
+    }
+    fn rebuild(&mut self, activity: &[f64], b: &mut Budget) -> Res<()> {
+        // Rescaling can round two nearby scores to a tie. Restore the exact
+        // activity/variable-id order even in that case.
+        let previous = std::mem::take(&mut self.heap);
+        self.positions.fill(Self::ABSENT);
+        for v in previous {
+            self.insert(v, activity, b)?;
+        }
+        Ok(())
+    }
+}
+
 /// Two-watched-literal CDCL. First-UIP learned clauses are resolution consequences
 /// of existing clauses; only a conflict at decision level zero establishes UNSAT.
 struct Sat {
@@ -697,6 +802,7 @@ struct Sat {
     starts: Vec<usize>,
     head: usize,
     activity: Vec<f64>,
+    order: VarOrder,
     increment: f64,
     phase: Vec<bool>,
     decisions: u64,
@@ -720,6 +826,7 @@ impl Sat {
             starts: vec![],
             head: 0,
             activity: vec![0.; vars + 1],
+            order: VarOrder::new(vars),
             increment: 1.,
             phase: vec![false; vars + 1],
             decisions: 0,
@@ -748,9 +855,14 @@ impl Sat {
             let p = self.trail[self.head];
             self.head += 1;
             let watch = index(-p);
-            let pending = std::mem::take(&mut self.watches[watch]);
-            for (pos, &id) in pending.iter().enumerate() {
+            // Compact retained watches in the existing allocation. Replacement
+            // watches move to other lists; no new watch can target the currently
+            // false literal because replacement literals must be non-false.
+            let mut pending = std::mem::take(&mut self.watches[watch]);
+            let mut retained = 0;
+            for pos in 0..pending.len() {
                 b.tick(1)?;
+                let id = pending[pos];
                 let c = &mut self.clauses[id];
                 if c[0] == -p {
                     c.swap(0, 1);
@@ -759,7 +871,8 @@ impl Sat {
                     return Err("finite SAT watch invariant violated".into());
                 }
                 if truth(&self.values, c[0]) > 0 {
-                    self.watches[watch].push(id);
+                    pending[retained] = id;
+                    retained += 1;
                     continue;
                 }
                 let mut replacement = None;
@@ -776,18 +889,24 @@ impl Sat {
                     continue;
                 }
                 let other = c[0];
-                self.watches[watch].push(id);
+                pending[retained] = id;
+                retained += 1;
                 if !self.enqueue(other, Some(id)) {
-                    self.watches[watch].extend_from_slice(&pending[pos + 1..]);
+                    let unprocessed = pending.len() - pos - 1;
+                    pending.copy_within(pos + 1.., retained);
+                    pending.truncate(retained + unprocessed);
+                    self.watches[watch] = pending;
                     return Ok(Some(id));
                 }
             }
+            pending.truncate(retained);
+            self.watches[watch] = pending;
         }
         Ok(None)
     }
-    fn backtrack(&mut self, level: usize) {
+    fn backtrack(&mut self, level: usize, b: &mut Budget) -> Res<()> {
         if self.starts.len() <= level {
-            return;
+            return Ok(());
         }
         let keep = self.starts[level];
         for &p in self.trail[keep..].iter().rev() {
@@ -796,10 +915,12 @@ impl Sat {
             self.values[v] = 0;
             self.reasons[v] = None;
             self.levels[v] = 0;
+            self.order.insert(v, &self.activity, b)?;
         }
         self.trail.truncate(keep);
         self.starts.truncate(level);
         self.head = self.head.min(keep);
+        Ok(())
     }
     fn analyze(&mut self, conflict: usize, b: &mut Budget) -> Res<(Vec<Lit>, usize)> {
         let mut learned = vec![0];
@@ -817,6 +938,7 @@ impl Sat {
                 }
                 seen[v] = true;
                 self.activity[v] += self.increment;
+                self.order.promote(v, &self.activity, b)?;
                 if self.levels[v] == self.starts.len() {
                     unresolved += 1;
                 } else {
@@ -864,6 +986,7 @@ impl Sat {
                 *x *= 1e-100;
             }
             self.increment *= 1e-100;
+            self.order.rebuild(&self.activity, b)?;
         }
         Ok((learned, backtrack))
     }
@@ -881,6 +1004,9 @@ impl Sat {
             }
             self.attach(id);
         }
+        for v in 1..self.values.len() {
+            self.order.insert(v, &self.activity, b)?;
+        }
         loop {
             if let Some(conflict) = self.propagate(b)? {
                 self.conflicts += 1;
@@ -888,7 +1014,7 @@ impl Sat {
                     return Ok(Verdict::Unsat);
                 }
                 let (learned, level) = self.analyze(conflict, b)?;
-                self.backtrack(level);
+                self.backtrack(level, b)?;
                 if self.clauses.len() >= b.limits.max_clauses {
                     return Err("finite SAT learned-clause budget exhausted".into());
                 }
@@ -900,18 +1026,31 @@ impl Sat {
                     return Err("finite SAT asserting clause invariant violated".into());
                 }
             } else {
-                let mut choice = None;
-                let mut score = -1.;
-                for v in 1..self.values.len() {
-                    b.tick(1)?;
-                    if self.values[v] == 0 && self.activity[v] > score {
-                        choice = Some(v);
-                        score = self.activity[v];
+                let v = loop {
+                    let Some(v) = self.order.pop(&self.activity, b)? else {
+                        #[cfg(test)]
+                        assert!(self.values.iter().skip(1).all(|&x| x != 0));
+                        return Ok(Verdict::Sat);
+                    };
+                    if self.values[v] == 0 {
+                        break v;
                     }
-                }
-                let Some(v) = choice else {
-                    return Ok(Verdict::Sat);
                 };
+                // Every SAT unit test also checks equivalence with the original
+                // linear selector, including lazy removals and backtracking.
+                #[cfg(test)]
+                {
+                    let expected = (1..self.values.len())
+                        .filter(|&x| self.values[x] == 0)
+                        .reduce(|a, c| {
+                            if VarOrder::higher(a, c, &self.activity) {
+                                a
+                            } else {
+                                c
+                            }
+                        });
+                    assert_eq!(Some(v), expected);
+                }
                 self.decisions += 1;
                 self.starts.push(self.trail.len());
                 self.enqueue(if self.phase[v] { v as Lit } else { -(v as Lit) }, None);
@@ -933,6 +1072,7 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
         limits,
         start: Instant::now(),
         work: 0,
+        time_check_in: 0,
     };
     let mut blast = Blast::new();
     let compile = (|| -> Res<()> {
@@ -961,6 +1101,7 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
     let mut sat = Sat::new(blast.vars, std::mem::take(&mut blast.clauses));
     let result = (|| -> Res<Verdict> {
         let verdict = sat.run(&mut budget)?;
+        budget.check_time()?;
         if verdict != Verdict::Sat {
             return Ok(verdict);
         }
@@ -996,6 +1137,7 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
                 evaluate(term, &assignments, &mut memo, &mut budget, 0)?,
             );
         }
+        budget.check_time()?;
         outcome.assignments = assignments;
         outcome.context_values = values;
         outcome.original_formula_validated = true;
@@ -1018,6 +1160,94 @@ mod tests {
     use hwverify_ir::{and, boolv, bv, eq, ite, node, not, var};
     fn check(t: Term) -> Outcome {
         solve(&t, &Env::new(), Limits::default())
+    }
+    fn test_budget() -> Budget {
+        Budget {
+            limits: Limits::default(),
+            start: Instant::now(),
+            work: 0,
+            time_check_in: 0,
+        }
+    }
+    #[test]
+    fn indexed_order_matches_linear_scan_after_updates_and_reinsertion() {
+        let mut b = test_budget();
+        let mut order = VarOrder::new(128);
+        let mut scores = vec![0.; 129];
+        let mut present = [false; 129];
+        // Equal (including zero) activity must keep smallest-id-first order.
+        for v in (1..129).rev() {
+            order.insert(v, &scores, &mut b).unwrap();
+            present[v] = true;
+        }
+        for (v, present) in present.iter_mut().enumerate().skip(1) {
+            assert_eq!(order.pop(&scores, &mut b).unwrap(), Some(v));
+            *present = false;
+        }
+        assert_eq!(order.pop(&scores, &mut b).unwrap(), None);
+        let mut state = 0x91aa_u64;
+        for step in 0..20_000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let v = (state >> 32) as usize % 128 + 1;
+            match state % 5 {
+                0 | 1 => {
+                    // Include duplicate insertions and reinsertion after pop.
+                    order.insert(v, &scores, &mut b).unwrap();
+                    present[v] = true;
+                }
+                2 => {
+                    scores[v] += (step % 7) as f64;
+                    order.promote(v, &scores, &mut b).unwrap();
+                }
+                3 => {
+                    let expected = (1..129).filter(|&v| present[v]).reduce(|a, c| {
+                        if VarOrder::higher(a, c, &scores) {
+                            a
+                        } else {
+                            c
+                        }
+                    });
+                    assert_eq!(order.pop(&scores, &mut b).unwrap(), expected);
+                    if let Some(v) = expected {
+                        present[v] = false;
+                    }
+                }
+                _ => {
+                    // Deliberately create rounded ties, as rescaling can do.
+                    for score in &mut scores {
+                        *score = (*score * 0.5).floor();
+                    }
+                    order.rebuild(&scores, &mut b).unwrap();
+                }
+            }
+            for (pos, &v) in order.heap.iter().enumerate() {
+                assert_eq!(order.positions[v], pos);
+                assert!(present[v]);
+                if pos > 0 {
+                    assert!(!VarOrder::higher(v, order.heap[(pos - 1) / 2], &scores));
+                }
+            }
+            assert_eq!(order.heap.len(), present.iter().filter(|&&x| x).count());
+        }
+    }
+    #[test]
+    fn exact_work_limits_and_deadline_checks_survive_amortization() {
+        let mut b = test_budget();
+        b.limits.max_work = 2;
+        b.tick(2).unwrap();
+        assert!(b.tick(1).unwrap_err().contains("work budget"));
+        let mut b = test_budget();
+        b.limits.timeout_ms = 1;
+        b.start = Instant::now() - Duration::from_millis(100);
+        b.time_check_in = 255;
+        // Clock polling may be delayed, but the mandatory verdict-boundary
+        // check must reject a completion that crossed the deadline.
+        b.tick(1).unwrap();
+        assert!(b.check_time().unwrap_err().contains("time budget"));
+        for _ in 0..254 {
+            b.tick(1).unwrap();
+        }
+        assert!(b.tick(1).unwrap_err().contains("time budget"));
     }
     #[test]
     fn sat_model_is_complete_and_replays_original_and_context() {
@@ -1212,6 +1442,7 @@ mod tests {
                     limits: Limits::default(),
                     start: Instant::now(),
                     work: 0,
+                    time_check_in: 0,
                 };
                 let verdict = sat.run(&mut budget).unwrap();
                 assert_eq!(
