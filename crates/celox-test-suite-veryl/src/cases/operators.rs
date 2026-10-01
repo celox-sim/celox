@@ -1121,6 +1121,7 @@ o_comb = 32'hffff_ffff + 1;
 
     // Keep the two-state initialization contract separate from constant folding.
     fn test_ff_constant_two_state_initialization(sim) {
+        @tags [TwoStateInitialization];
         @setup { let code = r#"
 module Top (
     clk: input clock,

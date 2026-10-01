@@ -1,7 +1,7 @@
 //! This integration test is an external consumer: it has no Celox dependency.
 use celox_test_suite_veryl::{
-    Backend, BigUint, Category, CompilationRejected, Result, Scalar, SignalPath, Simulator, case,
-    cases,
+    Backend, BigUint, Category, CompilationRejected, Result, Scalar, SignalPath, Simulator,
+    TestTag, case, cases,
 };
 use std::collections::BTreeMap;
 
@@ -99,6 +99,70 @@ fn catalogue_has_unique_stable_names_and_categories() {
         Category::Operators
     );
     assert!(case("missing::case").is_none());
+}
+
+#[test]
+fn expectation_tags_distinguish_extra_contracts_from_sv_requirements() {
+    for (name, tag) in [
+        (
+            "comb_observer::test_named_function_inputs_evaluate_in_source_order",
+            TestTag::EvaluationOrder,
+        ),
+        (
+            "comb_observer::test_comb_function_packed_array_literal_preserves_source_order",
+            TestTag::AssignmentPatternEvaluation,
+        ),
+        (
+            "function_arguments::test_ff_statement_output_copyout_freezes_all_inputs",
+            TestTag::DeferredFunctionEffects,
+        ),
+        (
+            "flip_flop::test_ff_assert_message_output_argument_is_eager",
+            TestTag::EagerAssertionMessages,
+        ),
+        (
+            "signed_divrem::signed_divrem_i128",
+            TestTag::TwoStateZeroDivision,
+        ),
+        (
+            "operators::test_ff_constant_two_state_initialization",
+            TestTag::TwoStateInitialization,
+        ),
+    ] {
+        let case = case(name).unwrap();
+        assert!(case.tags.contains(&tag), "missing tag: {name}");
+        assert!(case.has_stronger_than_sv_expectations());
+    }
+    // Names and tool exclusions alone do not imply an extra SV expectation.
+    for name in [
+        "comb_observer::test_named_function_outputs_apply_in_source_order",
+        "function_arguments::test_comb_statement_output_copyout_obeys_named_argument_order",
+        "comb_observer::test_comb_function_loop_bounds_apply_output_effects_left_to_right",
+        "basic::test_always_comb_read_before_write_uses_previous_value",
+        "signed_divrem::signed_divrem_i8",
+        "signed_divrem::signed_divrem_i64",
+        "signed_divrem::signed_divrem_four_state_zero_divisor",
+        "hierarchy::test_instance_output_concat_advances_each_destination",
+        "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs",
+    ] {
+        assert!(
+            !case(name).unwrap().has_stronger_than_sv_expectations(),
+            "{name}"
+        );
+    }
+    let multiple =
+        case("flip_flop::test_ff_pure_input_is_snapshotted_before_later_effectful_input").unwrap();
+    assert_eq!(
+        multiple.tags,
+        &[TestTag::EvaluationOrder, TestTag::DeferredFunctionEffects]
+    );
+    for case in cases() {
+        let mut tags = std::collections::BTreeSet::new();
+        for tag in case.tags {
+            assert!(tags.insert(tag.as_str()), "duplicate tag: {}", case.name);
+            assert!(!tag.reason().is_empty());
+        }
+    }
 }
 
 #[test]
