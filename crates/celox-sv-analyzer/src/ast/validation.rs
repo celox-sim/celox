@@ -628,6 +628,13 @@ pub(super) fn reject_silently_ignored_constructs(
                     "variable declaration initializer".to_string(),
                 ));
             }
+            RefNode::ParamAssignment(parameter) if parameter.nodes.2.as_ref().is_some_and(|(_, expression)| {
+                expression.into_iter().any(|child| matches!(child,
+                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)))
+                && selects::indexed_parameter_initializer(expression, syntax_tree, &indexed_dimensions, None).is_none()
+            }) => {
+                return Err(AnalyzerError::Unsupported("indexed parameter initializer".to_string()));
+            }
             RefNode::IndexedRange(range) if
                 indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
                     &indexed_dimensions)

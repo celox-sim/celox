@@ -124,34 +124,19 @@ pub(super) fn parameters_from_ref_node(
                         RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
                     )
                 }) {
-                    let expression = match expr {
-                        sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(expr) => {
-                            match &**expr {
-                                sv_parser::ConstantMintypmaxExpression::Unary(expr) => Some(expr),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
                     let dimensions = PackedDimensions::new(
                         parameter_packed_dimensions(parameters),
                         &const_env,
                         type_aliases,
                     );
-                    Some(
-                        expression
-                            .and_then(|expr| {
-                                indexed_select_base(
-                                    RefNode::ConstantExpression(expr),
-                                    syntax_tree,
-                                    &dimensions,
-                                )
-                            })
-                            .ok_or_else(|| {
-                                AnalyzerError::Unsupported(
-                                    "indexed parameter initializer".to_string(),
-                                )
-                            })?,
+                    // Enum constants are unavailable during preliminary collection.
+                    // Leave unresolved values for the subsequent lowering pass;
+                    // final validation rejects anything that still cannot be lowered.
+                    selects::indexed_parameter_initializer(
+                        expr,
+                        syntax_tree,
+                        &dimensions,
+                        parameter_width,
                     )
                 } else {
                     const_expr_from_constant_param_with_env(
@@ -382,13 +367,13 @@ pub(super) fn enum_member_constants_from_module_node(
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
     let mut resolved_type_aliases = type_aliases.clone();
+    let mut parameters = Vec::new();
     for item in module_non_port_items(node.clone()) {
         let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
             continue;
         };
         let data = match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
-                let mut parameters = Vec::new();
                 parameters_from_ref_node(
                     RefNode::LocalParameterDeclaration(&localparam.0),
                     syntax_tree,
@@ -404,7 +389,6 @@ pub(super) fn enum_member_constants_from_module_node(
                 continue;
             }
             sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                let mut parameters = Vec::new();
                 parameters_from_ref_node(
                     RefNode::ParameterDeclaration(&parameter.0),
                     syntax_tree,

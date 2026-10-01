@@ -287,6 +287,62 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("specialized_q")), 12u8.into());
     }
 
+    fn indexed_parameter_initializers_use_assignment_width(sim) {
+        @setup {
+            let source = r#"
+                module Top(output logic [7:0] sum, shifted, nested, mux,
+                    output logic [3:0] narrow, implicit_value);
+                    localparam logic [7:0] P = 8'hff;
+                    localparam logic [7:0] Q = P[0 +: 4] + 4'd1;
+                    localparam logic [7:0] R = P[0 +: 4] << 1;
+                    localparam logic [7:0] S = (P[0 +: 4] + 4'd1) + 4'd1;
+                    localparam logic [7:0] T = 1 ? P[0 +: 4] + 4'd1 : 4'd0;
+                    localparam logic [3:0] N = P[0 +: 4] + 4'd1;
+                    localparam I = P[0 +: 4] + 4'd1;
+                    assign sum = Q;
+                    assign shifted = R;
+                    assign nested = S;
+                    assign mux = T;
+                    assign narrow = N;
+                    assign implicit_value = I;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_assignment_context.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("sum")), 16u8.into());
+        assert_eq!(sim.get(sim.signal("shifted")), 30u8.into());
+        assert_eq!(sim.get(sim.signal("nested")), 17u8.into());
+        assert_eq!(sim.get(sim.signal("mux")), 16u8.into());
+        assert_eq!(sim.get(sim.signal("narrow")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("implicit_value")), 0u8.into());
+    }
+
+    fn indexed_parameter_initializers_resolve_enum_constants(sim) {
+        @setup {
+            let source = r#"
+                module Top(output logic [3:0] base, width, arithmetic, enum_dependent);
+                    localparam logic [7:0] P = 8'hab;
+                    typedef enum logic [2:0] { E = 3'd4 } idx_t;
+                    localparam logic [3:0] Q = P[E +: 4];
+                    localparam logic [3:0] R = P[4 +: E];
+                    localparam logic [3:0] S = P[E +: E] + 4'd1;
+                    assign base = Q;
+                    assign width = R;
+                    assign arithmetic = S;
+                    localparam logic [11:4] OFFSET_P = 8'hab;
+                    localparam logic [3:0] OFFSET_Q = OFFSET_P[(E + 4) +: 4];
+                    typedef enum logic [3:0] { F = OFFSET_Q } value_t;
+                    assign enum_dependent = F;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_enum_context.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("base")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("width")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("arithmetic")), 11u8.into());
+        assert_eq!(sim.get(sim.signal("enum_dependent")), 10u8.into());
+    }
+
     fn indexed_unsigned_bases_cross_zero(sim) {
         @setup {
             let source = r#"
@@ -399,4 +455,16 @@ fn rejects_indexed_selections_in_unlowered_constant_contexts() {
             .err()
             .expect("unlowered indexed constants must be rejected");
     }
+}
+
+#[test]
+fn rejects_unresolved_indexed_parameter_initializers_after_collection() {
+    let source = "module Top; localparam logic [7:0] P = 8'hab; localparam logic [3:0] Q = P[MISSING +: 4]; endmodule";
+    Simulator::from_sv_sources(
+        vec![(source, Path::new("unresolved_indexed_parameter.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .err()
+    .expect("an unused unresolved indexed initializer must be rejected");
 }

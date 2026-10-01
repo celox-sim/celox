@@ -289,7 +289,7 @@ fn eval_const_integral_expr_preserving_mask(
 
 // Fold only self-determined operands. Keep arithmetic nodes intact so the
 // constant evaluator can propagate expression widths across compound trees.
-fn constant_with_folded_selections(
+pub(super) fn constant_with_folded_selections(
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,

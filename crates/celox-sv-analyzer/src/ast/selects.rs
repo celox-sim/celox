@@ -1270,6 +1270,51 @@ pub(super) fn indexed_select_base(
     }
 }
 
+// Parameter arithmetic receives the assignment width after self-determined
+// selection operands have been folded, rather than the index expression context.
+pub(super) fn indexed_parameter_initializer(
+    initializer: &sv_parser::ConstantParamExpression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+    assignment_width: Option<usize>,
+) -> Option<ConstExpr> {
+    let sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(initializer) = initializer
+    else {
+        return None;
+    };
+    let sv_parser::ConstantMintypmaxExpression::Unary(expression) = &**initializer else {
+        return None;
+    };
+    let mut dimensions = dimensions.clone();
+    dimensions.constant_indexed_base = true;
+    let expression = indexed_constant_expression(
+        RefNode::ConstantExpression(expression),
+        syntax_tree,
+        &dimensions,
+    )?;
+    let types = parameter_types_from_const_env(&dimensions.const_env);
+    let integral_types = types
+        .iter()
+        .map(|(name, ty)| (name.clone(), (ty.width, ty.signed)))
+        .collect();
+    let constant = constant_folding::constant_with_folded_selections(
+        &expression,
+        &dimensions.const_env,
+        &integral_types,
+    )?;
+    let expression_type = infer_const_expr_type(&constant, &types)?;
+    let literal = typecheck::eval_generate_case_operand(
+        &constant.into(),
+        &dimensions.const_env,
+        &integral_types,
+        assignment_width.unwrap_or(0).max(expression_type.width),
+        expression_type.signed,
+    )?;
+    Some(ConstExpr::Literal(
+        typecheck::format_integral_literal_binary(&literal),
+    ))
+}
+
 fn indexed_constant_expression(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
