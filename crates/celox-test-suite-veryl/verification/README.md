@@ -16,8 +16,8 @@ See [investigation notes](../VERIFICATION_REPORT.md) for limitations and unresol
 | `compile_error` | 0 | 3 |
 | `runtime_error` | 0 | 0 |
 | `unsupported` | 112 | 0 |
-| `ignored` | 82 | 185 |
-| Total | 665 | 665 |
+| `ignored` | 81 | 184 |
+| Total | 664 | 664 |
 
 362 cases pass both simulators; 577 pass at least one. A pass in one tool does not resolve a disagreement with the other.
 
@@ -55,6 +55,7 @@ See [the review](../LIMITATIONS.md) and [pre-exclusion Verilator](limitations/ve
 | [icarus_array_types](../LIMITATIONS.md#icarus-array-types) | compile | 0 | 1 |
 | [icarus_assignment_patterns](../LIMITATIONS.md#icarus-assignment-patterns) | compile | 0 | 27 |
 | [icarus_case_break_crash](../LIMITATIONS.md#icarus-case-break-crash) | execute | 0 | 1 |
+| [icarus_function_inout](../LIMITATIONS.md#icarus-function-inout) | compile | 0 | 2 |
 | [icarus_function_outputs](../LIMITATIONS.md#icarus-function-outputs) | compile | 0 | 47 |
 | [icarus_interfaces](../LIMITATIONS.md#icarus-interfaces) | compile | 0 | 5 |
 | [icarus_package_types](../LIMITATIONS.md#icarus-package-types) | compile | 0 | 6 |
@@ -66,11 +67,10 @@ See [the review](../LIMITATIONS.md) and [pre-exclusion Verilator](limitations/ve
 | [sv_enum_conversion](../LIMITATIONS.md#sv-enum-conversion) | compile | 1 | 1 |
 | [sv_mixed_assignment_patterns](../LIMITATIONS.md#sv-mixed-assignment-patterns) | compile | 6 | 6 |
 | [sv_mux_port_shape](../LIMITATIONS.md#sv-mux-port-shape) | compile | 2 | 0 |
-| [sv_scalar_select](../LIMITATIONS.md#sv-scalar-select) | compile | 1 | 1 |
 | [sv_type_cast_syntax](../LIMITATIONS.md#sv-type-cast-syntax) | compile | 1 | 0 |
+| [verilator_inout_dfg_crash](../LIMITATIONS.md#verilator-inout-dfg-crash) | compile | 2 | 0 |
 | [verilator_variable_wildcard](../LIMITATIONS.md#verilator-variable-wildcard) | compile | 1 | 0 |
 | [veryl_ff_effects](../LIMITATIONS.md#veryl-ff-effects) | emission | 47 | 52 |
-| [veryl_inout_panic](../LIMITATIONS.md#veryl-inout-panic) | emission | 2 | 2 |
 | [veryl_negative_for_bounds](../LIMITATIONS.md#veryl-negative-for-bounds) | emission | 2 | 2 |
 | [veryl_runtime_system_calls](../LIMITATIONS.md#veryl-runtime-system-calls) | emission | 4 | 4 |
 

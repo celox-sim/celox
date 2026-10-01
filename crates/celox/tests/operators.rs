@@ -93,12 +93,12 @@ all_backends! {
     }
 
     fn test_signed_comparison_after_as_cast(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "operators::test_signed_comparison_after_as_cast";
     }
 
     fn test_cast_signed_to_unsigned_affects_comparison(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "operators::test_cast_signed_to_unsigned_affects_comparison";
     }
 
@@ -186,7 +186,7 @@ all_backends! {
     }
 
     fn test_mixed_signed_unsigned_comparison(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "operators::test_mixed_signed_unsigned_comparison";
     }
 }

@@ -13,6 +13,7 @@ pub mod loop_provenance;
 pub(crate) mod lowering;
 pub mod module;
 mod output_alias_check;
+mod readmem;
 mod schedule;
 mod source;
 mod testbench;

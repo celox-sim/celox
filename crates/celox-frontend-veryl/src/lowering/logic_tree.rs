@@ -676,7 +676,7 @@ fn eval_system_function_call_side_effects(
             eval_input(module, &mut store, &mut boundaries, input, arena)?;
         }
         SystemFunctionKind::Bits(_)
-        | SystemFunctionKind::Size(_)
+        | SystemFunctionKind::Size(..)
         | SystemFunctionKind::Readmemh(_, _)
         | SystemFunctionKind::Finish => {}
     }
@@ -1853,7 +1853,7 @@ fn collect_written_system_function_call(
     match &call.kind {
         // These operands are queried for shape only and are not evaluated at
         // runtime, so nested output arguments are not writes of this process.
-        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => Ok(()),
+        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => Ok(()),
         SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
