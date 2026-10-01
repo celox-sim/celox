@@ -66,6 +66,56 @@ To compare both tiered backends:
 HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.sh run
 ```
 
+For repeated local profiling of generated native code, enable the build cache:
+
+```bash
+HELIODOR_RUNNERS=celox \
+HELIODOR_CELOX_BUILD_CACHE_DIR="$PWD/target/heliodor/build-cache" \
+bash scripts/run-heliodor-bench.sh run
+```
+
+The runner also accepts `--build-cache-dir DIR` directly. A hit skips frontend
+analysis, optimization, and native code generation; each run initializes fresh
+simulation state. `CELOX_BUILD_CACHE` logs `status=hit` or `status=miss`. Source
+contents and order, project metadata and dependency mappings, test name,
+optimization/pass settings, four-state mode, native memory width, SLP settings,
+diagnostics, detected x86 CPU/OS capabilities, working directory relative to the
+project root, and the exact
+runner executable identify the compilation. Files consulted by `$readmemh`,
+including absent lookup candidates, are checked by content before reuse.
+Dependency namespaces and properties are resolved before cache lookup.
+Component Cargo metadata, manifest candidates, and
+prebuilt WASM files are also checked, including manifest modification times that
+determine which interface takes precedence. Native component library presence,
+including Cargo `[lib].name` overrides, is tracked so adding or removing a library
+refreshes the runtime library selection. Keep build inputs stable during compilation.
+
+Cache dependency paths and image library, file-base, and source-location paths
+are stored relative to the project root. On load they are bound to the current
+root. For an explicitly absolute `$readmemh` path, a hash of its physical location
+also prevents a relocated file from replacing the design's fixed reference.
+Moving a project preserves cache reuse when its inputs and relative
+working directory stay equivalent. The key also includes each source's resolved
+namespace. External paths use `..`; paths on a different Windows drive cannot be
+represented and bypass caching. CLI native image exports use the same relative
+paths and fail before writing if a path cannot be represented relative to the
+project root. `--native-image-input` binds them using the current `--project` root
+without loading source files. Existing images with absolute paths remain loadable.
+Design-authored strings are preserved; the cache still contains compiled design
+data and is not an anonymized artifact. Earlier cache entries are not reused by
+the new relative-path format.
+
+Caching is opt-in and supports the native backend, including host codegen in
+`host-qemu` mode and `--compile-only --native-image-output`. It cannot be combined
+with `--native-image-input` or `--dump-ir-dir`. Cache directories contain executable
+code and must be trusted local directories. Writes are atomic; invalid entries or
+cache I/O failures fall back to compilation. Delete the directory to clear it;
+entries are not evicted automatically.
+
+On a hit, `compile_ns` measures loading and initialization rather than compilation.
+Use cached runs to study execution, and disable caching when comparing build or
+end-to-end performance. The fixed CI `gate` always disables this cache.
+
 The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
 `veryl-cc-tiered` on x86-64. The nightly AArch64 job measures the same four
 backends. All pinned jobs use `scripts/heliodor-revision`. Each successful

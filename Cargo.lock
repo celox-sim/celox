@@ -560,13 +560,19 @@ dependencies = [
 name = "celox-bench"
 version = "0.8.2"
 dependencies = [
+ "blake3",
  "celox",
  "celox-design",
+ "celox-frontend-veryl",
  "clap",
  "fxhash",
  "libc",
+ "pathdiff",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "toml",
  "tracing-subscriber",
  "veryl-analyzer",
  "veryl-metadata",

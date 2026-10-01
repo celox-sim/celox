@@ -27,6 +27,10 @@ HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
 HELIODOR_CELOX_TARGET_DIR="${HELIODOR_CELOX_TARGET_DIR:-}"
 HELIODOR_CELOX_NATIVE_IMAGE_MODE="${HELIODOR_CELOX_NATIVE_IMAGE_MODE:-off}"
 HELIODOR_CELOX_NATIVE_IMAGE_DIR="${HELIODOR_CELOX_NATIVE_IMAGE_DIR:-$HELIODOR_RESULTS_DIR/native-images}"
+HELIODOR_CELOX_BUILD_CACHE_DIR="${HELIODOR_CELOX_BUILD_CACHE_DIR:-}"
+if [[ -n "$HELIODOR_CELOX_BUILD_CACHE_DIR" ]]; then
+    HELIODOR_CELOX_BUILD_CACHE_DIR="$(realpath -m "$HELIODOR_CELOX_BUILD_CACHE_DIR")"
+fi
 HELIODOR_CELOX_CODEGEN_CARGO_FEATURES="${HELIODOR_CELOX_CODEGEN_CARGO_FEATURES:-arm64-codegen}"
 HELIODOR_CELOX_EXECUTION_TARGET="${HELIODOR_CELOX_EXECUTION_TARGET:-}"
 HELIODOR_CELOX_EXECUTION_PREFIX="${HELIODOR_CELOX_EXECUTION_PREFIX:-}"
@@ -128,6 +132,8 @@ Environment:
                        off or host-qemu; generate ARM images on the host and run them through the execution prefix
   HELIODOR_CELOX_NATIVE_IMAGE_DIR
                        directory for host-generated native images
+  HELIODOR_CELOX_BUILD_CACHE_DIR
+                       opt-in native build cache for local profiling; empty disables caching
   HELIODOR_CELOX_CODEGEN_CARGO_FEATURES
                        Cargo features for the host codegen runner (default: arm64-codegen)
   HELIODOR_CELOX_EXECUTION_CARGO_FEATURES
@@ -1451,9 +1457,13 @@ run_one() {
     local semantic_status reported_elapsed compile_elapsed execute_elapsed jit_execute_elapsed full_elapsed result_valid
     local native_image_path="" native_codegen_log=""
     local veryl_aot_cache_dir=""
-    local -a source_files celox_args celox_execution_command timed_veryl_args
+    local -a source_files celox_args celox_cache_args celox_execution_command timed_veryl_args
     collect_test_source_files "$test" source_files || return "$?"
     celox_args=()
+    celox_cache_args=()
+    if [[ "$runner" == celox && -n "$HELIODOR_CELOX_BUILD_CACHE_DIR" ]]; then
+        celox_cache_args+=(--build-cache-dir "$HELIODOR_CELOX_BUILD_CACHE_DIR")
+    fi
     timed_veryl_args=()
     if [[ "$runner" == veryl-cc-tiered ]]; then
         if [[ "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
@@ -1522,6 +1532,7 @@ run_one() {
                 run_in_heliodor "$timeout_sec" "$native_codegen_log" \
                     "$CELOX_CODEGEN_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
                     "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
+                    "${celox_cache_args[@]}" \
                     --compile-only --native-image-output "$native_image_path"
                 process_status="$?"
                 if [[ "$process_status" == 0 ]]; then
@@ -1542,7 +1553,7 @@ run_one() {
                 run_in_heliodor "$timeout_sec" "$log" \
                     "${celox_execution_command[@]}" \
                     --project "$HELIODOR_DIR" --test "$test" \
-                    "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
+                    "${celox_args[@]}" "${celox_cache_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
                 process_status="$?"
             fi
             ;;
@@ -2088,6 +2099,7 @@ run_gate() {
     HELIODOR_TIMEOUT_SEC="$GATE_TIMEOUT_SEC"
     HELIODOR_CELOX_TIMEOUT_MULTIPLIER=1
     HELIODOR_COMPILE_ONLY=0
+    HELIODOR_CELOX_BUILD_CACHE_DIR=""
     HELIODOR_COMPILE_TIMEOUT_SEC=""
     HELIODOR_BUILD_CELOX_RUNNER=1
     HELIODOR_INSTALL_TOOLS=0
