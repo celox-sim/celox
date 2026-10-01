@@ -81,7 +81,10 @@ contents and order, project metadata and dependency mappings, test name,
 optimization/pass settings, four-state mode, native memory width, SLP settings,
 diagnostics, working directory, and the exact runner executable identify the
 compilation. Files consulted by `$readmemh`, including absent lookup candidates,
-are checked by content before reuse. Keep build inputs stable during compilation.
+are checked by content before reuse. Dependency namespaces and properties are
+resolved before cache lookup. Component Cargo metadata, manifest candidates, and
+prebuilt WASM files are also checked, including manifest modification times that
+determine which interface takes precedence. Keep build inputs stable during compilation.
 
 Caching is opt-in and supports the native backend, including host codegen in
 `host-qemu` mode and `--compile-only --native-image-output`. It cannot be combined

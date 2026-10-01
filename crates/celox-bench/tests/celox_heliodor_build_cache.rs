@@ -224,3 +224,125 @@ fn rejects_incompatible_modes() {
         assert!(output.contains("--build-cache-dir requires"), "{output}");
     }
 }
+
+#[test]
+fn invalidates_resolved_dependency_properties() {
+    let project = project(
+        r#"
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    var q: logic<32>;
+    inst dut: dep::Dep (q);
+    initial { clk.next(1); $assert(q == 4); $finish(); }
+}
+"#,
+    );
+    let path = project.path();
+    fs::write(
+        path.join("Veryl.toml"),
+        "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { path = \"dep\" }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(path.join("dep/src")).unwrap();
+    fs::write(
+        path.join("dep/src/dep.veryl"),
+        "pub module Dep (q: output logic<32>) { assign q = $prop::VALUE; }",
+    )
+    .unwrap();
+    let metadata = "[project]\nname = \"dep\"\nversion = \"0.1.0\"\n[properties]\nVALUE = 4\n";
+    fs::write(path.join("dep/Veryl.toml"), metadata).unwrap();
+    let args = ["--source-file", "dep/src/dep.veryl"];
+    cached(path, &args, "miss", true);
+    cached(path, &args, "hit", true);
+    fs::write(
+        path.join("dep/Veryl.toml"),
+        metadata.replace("VALUE = 4", "VALUE = 5"),
+    )
+    .unwrap();
+    // The root metadata and all supplied sources stay identical, but the
+    // refreshed dependency property must affect the generated design.
+    let output = cached(path, &args, "miss", false);
+    assert!(output.contains("status=fail"), "{output}");
+    cached(path, &args, "hit", false);
+    fs::write(path.join("dep/Veryl.toml"), metadata).unwrap();
+    cached(path, &args, "hit", true);
+}
+
+#[test]
+fn invalidates_component_manifest_contents_candidates_and_precedence() {
+    check_component_manifest_invalidation(false);
+}
+
+#[test]
+fn invalidates_dependency_component_manifests() {
+    check_component_manifest_invalidation(true);
+}
+
+fn check_component_manifest_invalidation(dependency: bool) {
+    let source = r#"
+#[test(t)]
+module t {
+    var component: $comp::demo;
+    initial { component.ping(); $finish(); }
+}
+"#;
+    let source = if dependency {
+        source.replace("$comp::demo", "$comp::dep::demo")
+    } else {
+        source.to_owned()
+    };
+    let project = project(&source);
+    let path = project.path();
+    let root = if dependency {
+        fs::write(
+            path.join("Veryl.toml"),
+            "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { path = \"dep\" }\n",
+        )
+        .unwrap();
+        path.join("dep")
+    } else {
+        path.to_path_buf()
+    };
+    fs::create_dir_all(root.join("comp")).unwrap();
+    fs::write(
+        root.join("Veryl.toml"),
+        "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[[components]]\npath = \"comp\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("comp/Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let committed = root.join("comp/veryl.manifest.json");
+    let valid = r#"{"types":{"demo":{"kind":"dynamic"}}}"#;
+    let removed = r#"{"types":{"other":{"kind":"dynamic"}}}"#;
+    fs::write(&committed, valid).unwrap();
+    let args = ["--compile-only"];
+    cached(path, &args, "miss", true);
+    cached(path, &args, "hit", true);
+    fs::write(&committed, removed).unwrap();
+    let output = cached(path, &args, "miss", false);
+    assert!(output.contains("unknown_member"), "{output}");
+
+    let sidecar = root.join("target/veryl-components/release/demo.manifest.json");
+    fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    fs::write(&sidecar, valid).unwrap();
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    fs::File::open(&sidecar)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(future))
+        .unwrap();
+    cached(path, &args, "miss", true);
+    cached(path, &args, "hit", true);
+    // Only mtime changes: the committed manifest now wins over the sidecar.
+    fs::File::open(&committed)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(future + std::time::Duration::from_secs(1)))
+        .unwrap();
+    cached(path, &args, "miss", false);
+    fs::remove_file(committed).unwrap();
+    cached(path, &args, "miss", true);
+    cached(path, &args, "hit", true);
+}

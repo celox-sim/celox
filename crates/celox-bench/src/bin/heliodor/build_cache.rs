@@ -42,6 +42,51 @@ fn dependency_hash(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
+fn component_inputs(
+    hash: &mut blake3::Hasher,
+    components: &[veryl_metadata::Component],
+    root: &Path,
+    target_dir: &Path,
+) -> io::Result<()> {
+    for component in components {
+        let crate_dir = root.join(&component.path);
+        let mut paths = vec![
+            (crate_dir.join("Cargo.toml"), false),
+            (
+                crate_dir.join(veryl_metadata::COMMITTED_MANIFEST_FILE),
+                true,
+            ),
+        ];
+        if let Some(name) = veryl_metadata::component_crate_name(&crate_dir) {
+            paths.push((
+                veryl_metadata::sidecar_manifest_path(target_dir, &name),
+                true,
+            ));
+        }
+        if let Some(wasm) = &component.wasm {
+            paths.push((root.join(wasm), false));
+        }
+        for (path, track_mtime) in paths {
+            field(hash, path.as_os_str().as_encoded_bytes());
+            let content = dependency_hash(&path)?;
+            field(
+                hash,
+                &serde_json::to_vec(&content).map_err(io::Error::other)?,
+            );
+            if track_mtime && content.is_some() {
+                // The newest valid sidecar/committed manifest wins. A touch
+                // alone can change the selected interface without changing bytes.
+                let modified = fs::metadata(&path)?.modified()?;
+                field(
+                    hash,
+                    &serde_json::to_vec(&modified).map_err(io::Error::other)?,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl BuildCache {
     pub(super) fn new(
         dir: &Path,
@@ -49,6 +94,10 @@ impl BuildCache {
         sources: &[(String, PathBuf)],
         metadata: &veryl_metadata::Metadata,
     ) -> Result<Self, CeloxHeliodorError> {
+        // Source loading deliberately excludes dependency discovery. Resolve
+        // the same namespaces and properties as the compiler before hashing.
+        let mut metadata = metadata.clone();
+        metadata.paths::<&Path>(&[], false, true)?;
         let mut hash = blake3::Hasher::new();
         field(&mut hash, MAGIC);
         // The exact compiler binary covers revisions, dirty builds, Cargo
@@ -77,12 +126,33 @@ impl BuildCache {
             format!("{:?}", celox::DiagnosticsOptions::from_env()).as_bytes(),
         );
         // Value uses ordered object keys, including metadata's HashMaps.
-        let metadata = serde_json::to_value((metadata, &metadata.lockfile, &metadata.pubfile))
-            .map_err(io::Error::other)?;
+        // Lockfile's active lock_table is skipped by serde; projects() reads
+        // that table in stable order, including refreshed dependency properties.
+        let resolved =
+            serde_json::to_value((&metadata, metadata.lockfile.projects(), &metadata.pubfile))
+                .map_err(io::Error::other)?;
         field(
             &mut hash,
-            &serde_json::to_vec(&metadata).map_err(io::Error::other)?,
+            &serde_json::to_vec(&resolved).map_err(io::Error::other)?,
         );
+        let root = metadata.project_path();
+        component_inputs(
+            &mut hash,
+            &metadata.components,
+            &root,
+            &root.join("target/veryl-components"),
+        )?;
+        let mut dependencies = metadata.collect_dependency_components()?;
+        dependencies.sort_by(|a, b| a.project.cmp(&b.project));
+        for dependency in dependencies {
+            field(&mut hash, dependency.project.as_bytes());
+            component_inputs(
+                &mut hash,
+                &dependency.components,
+                &dependency.root,
+                &dependency.target_dir,
+            )?;
+        }
         for (source, path) in sources {
             field(&mut hash, path.as_os_str().as_encoded_bytes());
             field(&mut hash, source.as_bytes());
