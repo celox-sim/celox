@@ -308,7 +308,10 @@ pub(super) fn expr_from_function_subroutine_call(
         };
         let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
         let args = call.nodes.1.nodes.1.0.contents();
-        if typecheck::bit_vector_function_return_type(name, args.len()).is_none()
+        let constant_clog2 =
+            packed_dimensions.constant_indexed_base && name == "$clog2" && args.len() == 1;
+        if (!constant_clog2
+            && typecheck::bit_vector_function_return_type(name, args.len()).is_none())
             || call.nodes.1.nodes.1.1.is_some()
         {
             return None;

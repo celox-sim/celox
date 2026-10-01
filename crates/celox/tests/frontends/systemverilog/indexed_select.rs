@@ -207,6 +207,50 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("written")), 0x123eu16.into());
     }
 
+    fn indexed_functions_preserve_selected_arguments(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [15:0] width,
+                    nested_width, offset_width, output logic [3:0] base);
+                    localparam logic [3:0] W = 4'b1011;
+                    localparam logic [7:4] OFFSET = 4'b1011;
+                    assign width = data[0 +: $clog2(W[1:0])];
+                    assign nested_width = data[0 +: $clog2($countones({W[1:0], 2'b11}))];
+                    assign offset_width = data[0 +: $clog2(OFFSET[5:4])];
+                    assign base = data[$clog2(W[1:0]) +: 4];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_functions.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x123fu16)).unwrap();
+        assert_eq!(sim.get(sim.signal("width")), 3u8.into());
+        assert_eq!(sim.get(sim.signal("nested_width")), 3u8.into());
+        assert_eq!(sim.get(sim.signal("offset_width")), 3u8.into());
+        assert_eq!(sim.get(sim.signal("base")), 15u8.into());
+    }
+
+    // IEEE 1800-2023 11.6.1: both ternary arms determine the result width.
+    fn indexed_ternaries_preserve_both_arm_types(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [3:0] true_base,
+                    false_base, output logic [15:0] width);
+                    localparam logic [3:0] W = 4'b1011;
+                    assign true_base = data[((1 ? W[1:0] : 8'b0) + 2'd1) +: 4];
+                    assign false_base = data[((0 ? 8'b0 : W[1:0]) + 2'd1) +: 4];
+                    assign width = data[0 +: ((1 ? W[1:0] : 8'b0) + 2'd1)];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_ternaries.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("true_base")), 3u8.into());
+        assert_eq!(sim.get(sim.signal("false_base")), 3u8.into());
+        assert_eq!(sim.get(sim.signal("width")), 4u8.into());
+    }
+
     fn indexed_select_multidimensional_packed_reads(sim) {
         @setup {
             let source = r#"
@@ -262,7 +306,7 @@ fn rejects_runtime_selected_bases() {
 
 #[test]
 fn rejects_selected_widths_that_are_nonpositive() {
-    for width in ["W[0]", "W[1:0] - 2", "int'(W[1:0]) - 3"] {
+    for width in ["W[0]", "$clog2(W[0])", "W[1:0] - 2", "int'(W[1:0]) - 3"] {
         let source = format!(
             "module Top(input logic [15:0] data, output logic [15:0] y); localparam logic [3:0] W = 4'b1010; assign y = data[0 +: ({width})]; endmodule"
         );

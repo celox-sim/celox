@@ -1243,7 +1243,7 @@ pub(super) fn indexed_select_base(
     match base {
         RefNode::Expression(base) => {
             let expression = expr_from_expression_with_types(base, syntax_tree, &dimensions)?;
-            let expression = simplify_constant_mux_conditions(expression, &dimensions.const_env);
+            // Keep both mux arms until typed evaluation determines their common width.
             expr_to_const(fold_const_integral_expr_preserving_mask(
                 expression,
                 &dimensions.const_env,
@@ -1327,6 +1327,30 @@ fn indexed_constant_expression(
                     }
                     _ => None,
                 }
+            }
+            sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+                // The parser can represent a bare genvar as a no-argument call.
+                if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(call)
+                    if call.nodes.2.is_none())
+                {
+                    return const_expr_from_ref_node_with_env(
+                        node,
+                        syntax_tree,
+                        &dimensions.const_env,
+                        &dimensions.type_aliases,
+                    )
+                    .map(const_expr_to_expr);
+                }
+                if let Some(ty) = size_system_function_expr_type(
+                    primary,
+                    syntax_tree,
+                    &dimensions.const_env,
+                    &dimensions.type_aliases,
+                ) {
+                    return Some(Expr::Literal(ty.width.to_string()));
+                }
+                // Function arguments need the same typed selection lowering as bases.
+                expr_from_function_subroutine_call(&call.nodes.0, syntax_tree, dimensions)
             }
             sv_parser::ConstantPrimary::ConstantCast(cast) => {
                 let operand = indexed_select_base(
