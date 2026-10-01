@@ -119,3 +119,16 @@ MIT license; its copyright notice and full permission text are retained in
 [LICENSE-VERYL-MIT](LICENSE-VERYL-MIT).
 
 Copyright (c) 2022 Naoya Hatta <dalance@gmail.com>.
+
+## Additional width and signedness cases
+
+The 14 `veryl_context_regressions` cases with upstream names are adapted from
+`veryl` commit `d17ce955ef2990af3201ca9529159eca6248aa76`,
+`crates/simulator/src/tests/simulation.rs`,
+an inspected upstream revision.
+They retain the Veryl sources, input vectors, and bit-pattern expectations;
+`signed_struct_member_sign_extends` additionally checks that an explicit
+full-width part-select remains unsigned. The two `runtime_*_context` cases
+isolate the Celox corrections from upstream constant-folding failures and
+exercise input transitions. The Celox harness marks unrepaired failures with
+explicit reasons; the shared assertions remain executable by other adapters.

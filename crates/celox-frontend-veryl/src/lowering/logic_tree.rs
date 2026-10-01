@@ -1520,7 +1520,13 @@ fn eval_for_bound(
             BoundaryMap::default(),
         )),
         ForBound::Expression(expr) => {
-            let ((node, sources), bounds) = eval_expression(module, store, expr, arena, None)?;
+            // Veryl emits an `int` induction variable. Its comparison context
+            // widens bound arithmetic to at least 32 bits before evaluation.
+            let width = crate::context_width::get_expr_width(expr)
+                .unwrap_or(0)
+                .max(32);
+            let ((node, sources), bounds) =
+                eval_expression(module, store, expr, arena, Some(width))?;
             Ok((SLTLoopBound::Expr(node), sources, bounds))
         }
     }
@@ -1546,8 +1552,11 @@ fn eval_for_bound_effectful(
             BoundaryMap::default(),
         )),
         ForBound::Expression(expression) => {
+            let width = crate::context_width::get_expr_width(expression)
+                .unwrap_or(0)
+                .max(32);
             let ((node, sources), boundaries) =
-                eval_expression_effectful(module, store, expression, arena, None)?;
+                eval_expression_effectful(module, store, expression, arena, Some(width))?;
             Ok((SLTLoopBound::Expr(node), sources, boundaries))
         }
     }

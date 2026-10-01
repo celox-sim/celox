@@ -2,7 +2,7 @@
 
 The earlier full run used Veryl 0.21.0, Verilator 5.052, and Icarus Verilog
 13.0 on x86_64 Linux on 2026-09-26; the incremental refresh is described below.
-The current corpus has **665 cases: 657 simulation cases
+The current corpus has **681 cases: 673 simulation cases
 and 8 compilation-rejection cases**. The original 646-case reports remain in
 [verification/baseline](verification/baseline/README.md).
 The [expectation review](MISMATCH_REVIEW.md) records the specification clauses,
@@ -12,18 +12,18 @@ and both JSON reports are retained in the crate.
 
 | Outcome | Verilator | Icarus |
 | --- | ---: | ---: |
-| Simulation assertions passed | 470 | 469 |
+| Simulation assertions passed | 485 | 480 |
 | Expected compilation rejection | 1 | 8 |
 | Invalid design unexpectedly accepted | 0 | 0 |
 | Assertion disagreement | 0 | 0 |
 | Reviewed discrepancy / limitation ignored | 82 | 185 |
 | Veryl emission blocked | 0 | 0 |
-| SystemVerilog compilation blocked | 0 | 3 |
+| SystemVerilog compilation blocked | 1 | 8 |
 | Execution error / unrepresentable result | 0 | 0 |
 | Unsupported four-state design | 112 | 0 |
-| Total | 665 | 665 |
+| Total | 681 | 681 |
 
-362 simulation cases pass both tools and 577 pass at least one. This does not
+373 simulation cases pass both tools and 592 pass at least one. This does not
 certify portability: a pass in one tool can coexist with a disagreement in the
 other. Icarus validates 103 of the 112 four-state cases that Verilator cannot
 execute; the remaining nine have five emission and four compilation errors.
@@ -64,6 +64,16 @@ constant-array cases retain compilation blockers. Together with the earlier
 `inside` case, three Icarus compiler failures remain unexcluded. Original
 expectations were unchanged, and the correctness-related Celox ignores were
 removed after its repaired backends passed.
+
+On 2026-10-02, 14 upstream Veryl expression regressions and two isolated
+Celox regressions were checked with both adapters. Verilator passed 15 and
+could not compile `constant_case_on_signed_target`: its constant evaluator does
+not support the emitted range case. Icarus passed 11; five cases retain
+compilation blockers for range cases/inside expressions, aggregate constants,
+and function output arguments.
+These are recorded compilation errors, not skipped cases or assertion failures.
+Both reports retain previous observations and refresh history. See the
+[Celox diagnosis](MISMATCH_REVIEW.md#veryl-width-and-signedness-regressions).
 
 ## Corrections since the baseline
 

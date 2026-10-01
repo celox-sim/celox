@@ -113,6 +113,7 @@ mod struct_constructor;
 mod synth_dynamic_loop;
 mod system_function;
 mod test_unimplemented_paths;
+mod veryl_context_regressions;
 mod veryl_language;
 mod veryl_regressions;
 mod wide_context_width;
@@ -178,6 +179,7 @@ pub(super) const GROUPS: &[&[crate::TestCase]] = &[
     synth_dynamic_loop::CASES,
     system_function::CASES,
     test_unimplemented_paths::CASES,
+    veryl_context_regressions::CASES,
     veryl_language::CASES,
     veryl_regressions::CASES,
     wide_context_width::CASES,
