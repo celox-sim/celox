@@ -27,6 +27,26 @@ module t {
 }
 "#;
 
+const MEMORY_SOURCE: &str = r#"
+module Rom (q: output logic<8>) {
+    #[allow(initial_assign)]
+    var mem: logic<8>[4];
+    initial { $readmemh("mem.hex", mem); }
+    assign q = mem[0];
+}
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    var q: logic<8>;
+    inst dut: Rom (q);
+    initial {
+        clk.next(1);
+        $assert(q == 8'h12);
+        $finish();
+    }
+}
+"#;
+
 fn project(source: &str) -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     fs::write(
@@ -43,8 +63,18 @@ fn run(project: &Path, args: &[&str], success: bool) -> String {
     run_with_env(project, args, success, &[])
 }
 
-#[allow(clippy::disallowed_methods)] // Isolate child-process environment in integration tests.
 fn run_with_env(
+    project: &Path,
+    args: &[&str],
+    success: bool,
+    environment: &[(&str, &std::ffi::OsStr)],
+) -> String {
+    run_with_project(project, project, args, success, environment)
+}
+
+#[allow(clippy::disallowed_methods)] // Isolate child-process environment in integration tests.
+fn run_with_project(
+    working_dir: &Path,
     project: &Path,
     args: &[&str],
     success: bool,
@@ -59,7 +89,7 @@ fn run_with_env(
     }
     let output = command
         .envs(environment.iter().copied())
-        .current_dir(project)
+        .current_dir(working_dir)
         .arg("--project")
         .arg(project)
         .args(["--test", "t", "--source-file", "src/test.veryl"])
@@ -230,27 +260,7 @@ fn reuses_compilation_across_processes_and_invalidates_changed_inputs() {
 
 #[test]
 fn tracks_readmem_contents_and_new_lookup_candidates() {
-    let project = project(
-        r#"
-module Rom (q: output logic<8>) {
-    #[allow(initial_assign)]
-    var mem: logic<8>[4];
-    initial { $readmemh("mem.hex", mem); }
-    assign q = mem[0];
-}
-#[test(t)]
-module t {
-    inst clk: $tb::clock_gen;
-    var q: logic<8>;
-    inst dut: Rom (q);
-    initial {
-        clk.next(1);
-        $assert(q == 8'h12);
-        $finish();
-    }
-}
-"#,
-    );
+    let project = project(MEMORY_SOURCE);
     let path = project.path();
     fs::write(path.join("mem.hex"), "12\n12\n12\n12\n").unwrap();
     cached(path, &[], "miss", true);
@@ -263,6 +273,188 @@ module t {
     assert!(output.contains("status=fail"), "{output}");
     fs::remove_file(path.join("src/mem.hex")).unwrap();
     cached(path, &[], "miss", true);
+}
+
+#[test]
+fn absolute_readmem_path_keeps_its_original_location_after_project_move() {
+    let fixture = project(MEMORY_SOURCE);
+    let parent = tempfile::tempdir().unwrap();
+    let old = parent.path().join("original-project");
+    let moved = parent.path().join("relocated-project");
+    fs::rename(fixture.path(), &old).unwrap();
+    fs::write(old.join("mem.hex"), "12\n12\n12\n12\n").unwrap();
+    let source = MEMORY_SOURCE.replace("mem.hex", old.join("mem.hex").to_str().unwrap());
+    fs::write(old.join("src/test.veryl"), source).unwrap();
+    cached(&old, &[], "miss", true);
+    cached(&old, &[], "hit", true);
+    fs::rename(&old, &moved).unwrap();
+    // The literal still names the original location, which no longer exists.
+    cached(&moved, &[], "miss", false);
+    // Restore that location with different contents: the cache must also miss
+    // while a fresh compilation follows the unchanged literal.
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("mem.hex"), "34\n34\n34\n34\n").unwrap();
+    cached(&moved, &[], "miss", false);
+}
+
+#[test]
+fn reuses_relative_cache_after_project_move() {
+    let nested = SOURCE.replace(
+        "$assert(q == 4);",
+        "if q == 4 { for _i in 0..2 { $assert(q == 4); } } else { $assert(q == 4); }",
+    );
+    for source in [&nested, MEMORY_SOURCE] {
+        check_project_move(source);
+    }
+}
+
+fn check_project_move(source: &str) {
+    let fixture = project(source);
+    fs::write(fixture.path().join("mem.hex"), "12\n12\n12\n12\n").unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let old = parent.path().join("private-original-project");
+    let moved = parent.path().join("relocated-project");
+    fs::rename(fixture.path(), &old).unwrap();
+    // Absolute path settings describing the same project-relative inputs must
+    // retain their identity when the checkout moves.
+    let metadata = format!(
+        "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[build]\nsources = [{}]\n",
+        serde_json::to_string(&old.join("src")).unwrap()
+    );
+    fs::write(old.join("Veryl.toml"), &metadata).unwrap();
+    cached(&old, &[], "miss", true);
+    let entry = fs::read_dir(old.join("cache"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let bytes = fs::read(entry).unwrap();
+    assert!(
+        !bytes
+            .windows(old.as_os_str().as_encoded_bytes().len())
+            .any(|window| window == old.as_os_str().as_encoded_bytes())
+    );
+    fs::rename(&old, &moved).unwrap();
+    fs::write(
+        moved.join("Veryl.toml"),
+        metadata.replace(old.to_str().unwrap(), moved.to_str().unwrap()),
+    )
+    .unwrap();
+    let output = cached(&moved, &[], "hit", true);
+    assert!(output.contains("CELOX_TEST_RESULT test=t status=pass"));
+    // Diagnostic paths and the component file base must now refer to the new root.
+    let image_path = moved.join("rebound.image");
+    cached(
+        &moved,
+        &[
+            "--compile-only",
+            "--native-image-output",
+            image_path.to_str().unwrap(),
+        ],
+        "hit",
+        true,
+    );
+    let image = fs::read(&image_path).unwrap();
+    assert!(
+        !image
+            .windows(old.as_os_str().as_encoded_bytes().len())
+            .any(|window| window == old.as_os_str().as_encoded_bytes())
+    );
+    assert!(
+        !image
+            .windows(moved.as_os_str().as_encoded_bytes().len())
+            .any(|window| window == moved.as_os_str().as_encoded_bytes())
+    );
+    run(
+        &moved,
+        &["--native-image-input", image_path.to_str().unwrap()],
+        true,
+    );
+    if source == MEMORY_SOURCE {
+        // Reload candidates against the relocated root, including a newly
+        // created source-relative file that outranks the root-relative file.
+        fs::write(moved.join("src/mem.hex"), "34\n34\n34\n34\n").unwrap();
+        cached(&moved, &[], "miss", false);
+    }
+    fs::remove_dir_all(moved.join("src")).unwrap();
+    fs::remove_file(moved.join("Veryl.toml")).unwrap();
+    run(
+        &moved,
+        &["--native-image-input", image_path.to_str().unwrap()],
+        true,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tracks_retargeted_readmem_directory_symlink() {
+    let fixture = project(&MEMORY_SOURCE.replace("mem.hex", "data/mem.hex"));
+    let root = fixture.path();
+    for (directory, contents) in [("good", "12\n12\n12\n12\n"), ("bad", "34\n34\n34\n34\n")] {
+        fs::create_dir(root.join(directory)).unwrap();
+        fs::write(root.join(directory).join("mem.hex"), contents).unwrap();
+    }
+    let alias = root.join("src/data");
+    std::os::unix::fs::symlink("../good", &alias).unwrap();
+    cached(root, &[], "miss", true);
+    cached(root, &[], "hit", true);
+    fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink("../bad", &alias).unwrap();
+    let output = cached(root, &[], "miss", false);
+    assert!(output.contains("status=fail"));
+}
+
+#[cfg(unix)]
+#[test]
+fn invalidates_namespace_changes_when_project_alias_moves() {
+    let parent = tempfile::tempdir().unwrap();
+    let mut projects = Vec::new();
+    for _ in 0..2 {
+        let project = project(
+            r#"
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    var q: logic<32>;
+    inst dut: dep::Dep(q);
+    initial { clk.next(1); $assert(q == 4); $finish(); }
+}
+"#,
+        );
+        fs::write(project.path().join("Veryl.toml"),
+            "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { path = \"dep\" }\n").unwrap();
+        fs::create_dir_all(project.path().join("dep/src")).unwrap();
+        fs::write(
+            project.path().join("dep/Veryl.toml"),
+            "[project]\nname = \"dep\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project.path().join("dep/src/dep.veryl"),
+            "pub module Dep(q: output logic<32>) { assign q = 4; }",
+        )
+        .unwrap();
+        projects.push(project);
+    }
+    let alias = parent.path().join("current");
+    std::os::unix::fs::symlink(projects[0].path(), &alias).unwrap();
+    let dependency = projects[0].path().join("dep/src/dep.veryl");
+    let cache = parent.path().join("cache");
+    // Keep the working directory and explicitly supplied source paths fixed.
+    let args = [
+        "--source-file",
+        dependency.to_str().unwrap(),
+        "--build-cache-dir",
+        cache.to_str().unwrap(),
+    ];
+    let output = run_with_project(parent.path(), &alias, &args, true, &[]);
+    assert!(output.contains("status=miss"));
+    fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(projects[1].path(), &alias).unwrap();
+    let output = run_with_project(parent.path(), &alias, &args, false, &[]);
+    assert!(output.contains("status=miss"), "{output}");
+    assert!(output.contains("unknown_member"), "{output}");
 }
 
 #[test]
@@ -444,6 +636,32 @@ fn check_native_component_library_presence(dependency: bool) {
         // The compiler uses is_file(), so a directory is also an absent library.
         fs::create_dir(&native).unwrap();
         cached(path, &args, "hit", true);
+        fs::remove_dir(&native).unwrap();
+        fs::write(&native, "native library placeholder").unwrap();
+        cached(path, &args, "hit", true);
+        for entry in fs::read_dir(path.join("cache")).unwrap() {
+            let bytes = fs::read(entry.unwrap().path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(path.as_os_str().as_encoded_bytes().len())
+                    .any(|window| window == path.as_os_str().as_encoded_bytes())
+            );
+        }
+        // Library paths, component source locations, and the runtime file base
+        // are rebound together for both root and dependency components.
+        let destination = tempfile::tempdir().unwrap();
+        let moved = destination.path().join("project");
+        fs::rename(path, &moved).unwrap();
+        cached(&moved, &args, "hit", true);
+        run(
+            &moved,
+            &["--compile-only", "--native-image-output", "fresh.image"],
+            true,
+        );
+        assert_eq!(
+            fs::read(moved.join("cached.image")).unwrap(),
+            fs::read(moved.join("fresh.image")).unwrap()
+        );
     }
 }
 

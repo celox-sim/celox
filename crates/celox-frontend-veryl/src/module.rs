@@ -2691,7 +2691,7 @@ fn resolve_readmem_path_with_fallback(
 ) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(filename);
     if path.is_absolute() {
-        crate::file_dependencies::record(&path);
+        crate::file_dependencies::record_absolute(&path);
         return path;
     }
 

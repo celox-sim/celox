@@ -303,9 +303,25 @@ fn run() -> Result<(), CeloxHeliodorError> {
         allow(unused_mut)
     )]
     let mut native_image = match &opts.native_image_input {
-        Some(path) => Some(celox::NativeProgramImage::from_container_bytes(&fs::read(
-            path,
-        )?)?),
+        Some(path) => {
+            let mut image = celox::NativeProgramImage::from_container_bytes(&fs::read(path)?)?;
+            // Relative images need the current project root, but not its sources.
+            // Existing standalone images with absolute paths remain loadable.
+            let root = if let Ok(metadata_path) = Metadata::search_from(&opts.project) {
+                fs::canonicalize(metadata_path)?
+                    .parent()
+                    .unwrap()
+                    .to_path_buf()
+            } else if opts.project.is_absolute() {
+                opts.project.clone()
+            } else {
+                std::env::current_dir()?.join(&opts.project)
+            };
+            image.try_map_paths(|path| {
+                Ok::<_, std::io::Error>(build_cache::bind_path(path, &root))
+            })?;
+            Some(image)
+        }
         None => None,
     };
     #[cfg(not(any(
@@ -329,6 +345,12 @@ fn run() -> Result<(), CeloxHeliodorError> {
         .iter()
         .map(|(source, path)| (source.as_str(), path.as_path()))
         .collect();
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    let project_root = metadata.as_ref().map(Metadata::project_path);
     println!(
         "CELOX_TEST_CONFIG test={} backend={} opt_level={} four_state={} compile_only={}",
         opts.test,
@@ -430,7 +452,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 {
                     fs::create_dir_all(parent)?;
                 }
-                compiled.write_image(output_path)?;
+                build_cache::write_relative_image(
+                    compiled.program_image(),
+                    project_root
+                        .as_ref()
+                        .expect("image export uses project sources"),
+                    output_path,
+                )?;
                 println!(
                     "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
                     opts.test,
@@ -642,7 +670,13 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     {
                         fs::create_dir_all(parent)?;
                     }
-                    image.write_container(output_path)?;
+                    build_cache::write_relative_image(
+                        &image,
+                        project_root
+                            .as_ref()
+                            .expect("image export uses project sources"),
+                        output_path,
+                    )?;
                     println!(
                         "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
                         opts.test,

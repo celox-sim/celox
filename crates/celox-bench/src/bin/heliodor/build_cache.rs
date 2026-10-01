@@ -6,13 +6,29 @@ use std::{
 };
 
 use celox::NativeProgramImage;
+use celox_frontend_veryl::FileDependency;
 
 use super::{CeloxHeliodorError, Options};
 
-const MAGIC: &[u8] = b"CELOX-BUILD-CACHE-1\n";
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedFileDependency {
+    path: PathBuf,
+    content_hash: Option<String>,
+    fixed_location_hash: Option<String>,
+}
+
+fn location_hash(path: &Path) -> io::Result<String> {
+    let physical = fs::canonicalize(path)?;
+    Ok(blake3::hash(physical.as_os_str().as_encoded_bytes())
+        .to_hex()
+        .to_string())
+}
+
+const MAGIC: &[u8] = b"CELOX-BUILD-CACHE-2\n";
 
 pub(super) struct BuildCache {
     path: PathBuf,
+    root: PathBuf,
 }
 
 fn field(hash: &mut blake3::Hasher, bytes: &[u8]) {
@@ -42,11 +58,118 @@ fn dependency_hash(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
+/// Preserve lookup symlinks below the project root. Only aliases of the root
+/// itself are normalized, so changing a nested symlink is observed on reload.
+pub(super) fn relative_path(path: &Path, root: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if let Ok(relative) = absolute.strip_prefix(root) {
+        return Ok(relative.to_path_buf());
+    }
+    for ancestor in absolute.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        if ancestor == root || fs::canonicalize(ancestor).is_ok_and(|base| base == root) {
+            return Ok(absolute.strip_prefix(ancestor).unwrap().to_path_buf());
+        }
+    }
+    pathdiff::diff_paths(absolute, root)
+        .ok_or_else(|| io::Error::other("cache path has no project-relative representation"))
+}
+
+pub(super) fn write_relative_image(
+    image: &NativeProgramImage,
+    root: &Path,
+    output: &Path,
+) -> Result<(), CeloxHeliodorError> {
+    let mut image = image.clone();
+    image.try_map_paths(|path| relative_path(path, root))?;
+    image.write_container(output)?;
+    Ok(())
+}
+
+pub(super) fn bind_path(path: &Path, root: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+// Normalize only metadata fields declared as filesystem paths. Compiler
+// arguments, descriptions, and other literal strings retain their exact value.
+fn relative_metadata(value: &mut serde_json::Value, root: &Path) -> io::Result<()> {
+    fn paths(value: &mut serde_json::Value, root: &Path) -> io::Result<()> {
+        match value {
+            serde_json::Value::String(text) if Path::new(text).is_absolute() => {
+                *text = relative_path(Path::new(text), root)?
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    paths(value, root)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let metadata = &mut value[0];
+    for pointer in [
+        "/build/source",
+        "/build/sources",
+        "/build/target/path",
+        "/build/sourcemap_target/path",
+        "/doc/path",
+        "/test/include_files",
+        "/test/waveform_target/path",
+    ] {
+        if let Some(value) = metadata.pointer_mut(pointer) {
+            paths(value, root)?;
+        }
+    }
+    if let Some(components) = metadata["components"].as_array_mut() {
+        for component in components {
+            paths(&mut component["path"], root)?;
+            paths(&mut component["wasm"], root)?;
+        }
+    }
+    if let Some(dependencies) = metadata["dependencies"].as_object_mut() {
+        for dependency in dependencies.values_mut() {
+            if let Some(entry) = dependency.as_object_mut() {
+                for name in ["path", "git"] {
+                    if let Some(value) = entry.get_mut(name) {
+                        paths(value, root)?;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(projects) = value[1].as_array_mut() {
+        for project in projects {
+            let source = &mut project["source"];
+            if let Some(repository) = source.as_object_mut() {
+                for name in ["url", "path", "override"] {
+                    if let Some(value) = repository.get_mut(name) {
+                        paths(value, root)?;
+                    }
+                }
+            } else {
+                paths(source, root)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn component_inputs(
     hash: &mut blake3::Hasher,
     components: &[veryl_metadata::Component],
     root: &Path,
     target_dir: &Path,
+    project_root: &Path,
 ) -> io::Result<()> {
     for component in components {
         let crate_dir = root.join(&component.path);
@@ -93,11 +216,21 @@ fn component_inputs(
                 name.replace('-', "_"),
                 std::env::consts::DLL_SUFFIX
             ));
-            field(hash, native.as_os_str().as_encoded_bytes());
+            field(
+                hash,
+                relative_path(&native, project_root)?
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            );
             field(hash, &[u8::from(native.is_file())]);
         }
         for (path, track_mtime) in paths {
-            field(hash, path.as_os_str().as_encoded_bytes());
+            field(
+                hash,
+                relative_path(&path, project_root)?
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            );
             let content = dependency_hash(&path)?;
             field(
                 hash,
@@ -127,7 +260,12 @@ impl BuildCache {
         // Source loading deliberately excludes dependency discovery. Resolve
         // the same namespaces and properties as the compiler before hashing.
         let mut metadata = metadata.clone();
-        metadata.paths::<&Path>(&[], false, true)?;
+        let namespaces = metadata
+            .paths::<&Path>(&[], false, true)?
+            .into_iter()
+            .map(|path| (path.src, path.prj))
+            .collect::<fxhash::FxHashMap<_, _>>();
+        let root = metadata.project_path();
         let mut hash = blake3::Hasher::new();
         field(&mut hash, MAGIC);
         // The exact compiler binary covers revisions, dirty builds, Cargo
@@ -145,9 +283,10 @@ impl BuildCache {
         );
         field(
             &mut hash,
-            std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+            relative_path(&std::env::current_dir()?, &root)?
+                .as_os_str()
+                .as_encoded_bytes(),
         );
-        field(&mut hash, opts.project.as_os_str().as_encoded_bytes());
         field(&mut hash, opts.test.as_bytes());
         field(
             &mut hash,
@@ -168,19 +307,20 @@ impl BuildCache {
         // Value uses ordered object keys, including metadata's HashMaps.
         // Lockfile's active lock_table is skipped by serde; projects() reads
         // that table in stable order, including refreshed dependency properties.
-        let resolved =
+        let mut resolved =
             serde_json::to_value((&metadata, metadata.lockfile.projects(), &metadata.pubfile))
                 .map_err(io::Error::other)?;
+        relative_metadata(&mut resolved, &root)?;
         field(
             &mut hash,
             &serde_json::to_vec(&resolved).map_err(io::Error::other)?,
         );
-        let root = metadata.project_path();
         component_inputs(
             &mut hash,
             &metadata.components,
             &root,
             &root.join("target/veryl-components"),
+            &root,
         )?;
         let mut dependencies = metadata.collect_dependency_components()?;
         dependencies.sort_by(|a, b| a.project.cmp(&b.project));
@@ -191,14 +331,28 @@ impl BuildCache {
                 &dependency.components,
                 &dependency.root,
                 &dependency.target_dir,
+                &root,
             )?;
         }
         for (source, path) in sources {
-            field(&mut hash, path.as_os_str().as_encoded_bytes());
+            field(
+                &mut hash,
+                relative_path(path, &root)?.as_os_str().as_encoded_bytes(),
+            );
+            // Match the compiler's exact source-to-namespace lookup. A supplied
+            // external source can fall back to the root namespace after relocation.
+            field(
+                &mut hash,
+                namespaces
+                    .get(path)
+                    .unwrap_or(&metadata.project.name)
+                    .as_bytes(),
+            );
             field(&mut hash, source.as_bytes());
         }
         Ok(Self {
             path: dir.join(format!("{}.cache", hash.finalize().to_hex())),
+            root,
         })
     }
 
@@ -228,19 +382,33 @@ impl BuildCache {
         let length = usize::try_from(length).map_err(|_| invalid())?;
         let rest = &rest[8..];
         let manifest = rest.get(..length).ok_or_else(invalid)?;
-        let dependencies: Vec<(PathBuf, Option<String>)> =
+        let dependencies: Vec<CachedFileDependency> =
             serde_json::from_slice(manifest).map_err(io::Error::other)?;
-        for (path, expected) in dependencies {
-            if dependency_hash(&path)? != expected {
+        for dependency in dependencies {
+            if dependency.path.is_absolute() {
+                return Err(invalid().into());
+            }
+            let path = bind_path(&dependency.path, &self.root);
+            if dependency_hash(&path)? != dependency.content_hash {
+                return Ok(None);
+            }
+            if let Some(expected) = dependency.fixed_location_hash
+                && location_hash(&path)? != expected
+            {
                 return Ok(None);
             }
         }
-        Ok(Some(NativeProgramImage::from_container_bytes(
-            &rest[length..],
-        )?))
+        let mut image = NativeProgramImage::from_container_bytes(&rest[length..])?;
+        image.try_map_paths(|path| {
+            if path.is_absolute() {
+                return Err(invalid());
+            }
+            Ok(bind_path(path, &self.root))
+        })?;
+        Ok(Some(image))
     }
 
-    pub(super) fn store(&self, image: &NativeProgramImage, dependencies: &[PathBuf]) {
+    pub(super) fn store(&self, image: &NativeProgramImage, dependencies: &[FileDependency]) {
         if let Err(error) = self.try_store(image, dependencies) {
             eprintln!("build cache write skipped {}: {error}", self.path.display());
         }
@@ -249,11 +417,20 @@ impl BuildCache {
     fn try_store(
         &self,
         image: &NativeProgramImage,
-        dependencies: &[PathBuf],
+        dependencies: &[FileDependency],
     ) -> Result<(), CeloxHeliodorError> {
         let dependencies = dependencies
             .iter()
-            .map(|path| Ok((path, dependency_hash(path)?)))
+            .map(|dependency| {
+                Ok(CachedFileDependency {
+                    path: relative_path(&dependency.path, &self.root)?,
+                    content_hash: dependency_hash(&dependency.path)?,
+                    fixed_location_hash: dependency
+                        .fixed_location
+                        .then(|| location_hash(&dependency.path))
+                        .transpose()?,
+                })
+            })
             .collect::<io::Result<Vec<_>>>()?;
         let manifest = serde_json::to_vec(&dependencies).map_err(io::Error::other)?;
         let dir = self.path.parent().expect("cache entry has a parent");
@@ -264,6 +441,8 @@ impl BuildCache {
         temporary.write_all(MAGIC)?;
         temporary.write_all(&(manifest.len() as u64).to_le_bytes())?;
         temporary.write_all(&manifest)?;
+        let mut image = image.clone();
+        image.try_map_paths(|path| relative_path(path, &self.root))?;
         temporary.write_all(&image.to_container_bytes()?)?;
         temporary.persist(&self.path).map_err(|error| error.error)?;
         Ok(())

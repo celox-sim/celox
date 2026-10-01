@@ -366,6 +366,20 @@ pub struct NativeProgramImage {
 }
 
 impl NativeProgramImage {
+    /// Remap filesystem paths in the image's runtime and diagnostic metadata.
+    /// This permits relative paths in stored artifacts and rebinding on load.
+    /// Machine code and design-authored literal strings are not modified.
+    /// A failed mapping can leave some paths remapped; discard that image.
+    pub fn try_map_paths<E>(
+        &mut self,
+        mut map: impl FnMut(&std::path::Path) -> Result<std::path::PathBuf, E>,
+    ) -> Result<(), E> {
+        if let Some(testbench) = &mut self.testbench {
+            testbench.try_map_paths(&mut map)?;
+        }
+        Ok(())
+    }
+
     /// Complete relocatable machine-code image.
     pub fn code_image(&self) -> &[u8] {
         &self.code
