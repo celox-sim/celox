@@ -1,0 +1,126 @@
+{
+  "status": "pass",
+  "sat_witnesses_replayed": 24,
+  "rows": [
+    {
+      "model": "pipeline",
+      "query": "binding_nonempty",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline",
+      "query": "commit_reachable_in_relation",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline",
+      "query": "progress_nonvacuity",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_forward",
+      "query": "binding_nonempty",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_forward",
+      "query": "commit_reachable_in_relation",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_forward",
+      "query": "microstep_refinement",
+      "context_values_replayed": 81
+    },
+    {
+      "model": "pipeline_bad_forward",
+      "query": "progress_nonvacuity",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_interlock",
+      "query": "binding_nonempty",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_interlock",
+      "query": "commit_reachable_in_relation",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_interlock",
+      "query": "microstep_refinement",
+      "context_values_replayed": 81
+    },
+    {
+      "model": "pipeline_bad_interlock",
+      "query": "progress_nonvacuity",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_priority",
+      "query": "binding_nonempty",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_priority",
+      "query": "commit_reachable_in_relation",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_priority",
+      "query": "microstep_refinement",
+      "context_values_replayed": 81
+    },
+    {
+      "model": "pipeline_bad_priority",
+      "query": "progress_nonvacuity",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_retire",
+      "query": "binding_nonempty",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_retire",
+      "query": "commit_reachable_in_relation",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_retire",
+      "query": "microstep_refinement",
+      "context_values_replayed": 81
+    },
+    {
+      "model": "pipeline_bad_retire",
+      "query": "progress_nonvacuity",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_stall",
+      "query": "binding_nonempty",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_stall",
+      "query": "commit_reachable_in_relation",
+      "context_values_replayed": 0
+    },
+    {
+      "model": "pipeline_bad_stall",
+      "query": "hold_contract",
+      "context_values_replayed": 81
+    },
+    {
+      "model": "pipeline_bad_stall",
+      "query": "microstep_refinement",
+      "context_values_replayed": 81
+    },
+    {
+      "model": "pipeline_bad_stall",
+      "query": "progress_nonvacuity",
+      "context_values_replayed": 0
+    }
+  ]
+}

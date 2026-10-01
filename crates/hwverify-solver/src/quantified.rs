@@ -251,6 +251,22 @@ impl Check {
             .join("\n");
         let mut script = format!("(set-option :timeout {timeout_ms})\n(set-option :produce-models true)\n(set-logic ALL)\n{declarations}\n(assert {expression})\n(check-sat)\n");
         let emission_seconds = start.elapsed().as_secs_f64();
+        if crate::z3::finite_only() {
+            let reason =
+                "quantified queries are outside the finite Bool/BV backend; Z3 not invoked";
+            fs::write(self.out.join(format!("{name}.smt2")), &script).map_err(|e| e.to_string())?;
+            fs::write(
+                self.out.join(format!("{name}.out")),
+                format!("unknown\n; {reason}\n"),
+            )
+            .map_err(|e| e.to_string())?;
+            self.reports.push(json!({"name":name,"status":"unknown","solver_result":"unknown","backend":"finite_bv",
+                "seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":0.0,
+                "finite":{"reason":reason,"original_formula_validated":false},
+                "kernel":{"enabled":false,"reason":"quantified formulas bypass the quantifier-free structural kernel"},
+                "context_symbols":ctx,"concrete_model":false,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
+            return Ok(());
+        }
         let z3_start = Instant::now();
         let mut raw = solver(&self.z3, &script)?;
         let verdict = raw.trim().to_string();

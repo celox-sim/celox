@@ -1,10 +1,25 @@
-# hwverify-rs 0.9.1
+# hwverify-rs 0.10.0
 
-Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
+Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
-現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.10の追加: 本当のpipelineとZ3なしの小さな検証経路
+
+- D/X/Wの3段で最大3命令を同時に保持。W retirement、X優先のforwarding、LOAD-use interlock、全段stallをモデル化
+- 2本の4bit register、4命令の任意循環ROM、任意readonly data4word。MOVI/ADDI/XORI/LOADを1命令ISAへ帰納的に対応づける
+- `HWVERIFY_SOLVER=finite` はscalar Bool/BVをbit-blastして自作CDCL solverで解く。SATも元の式で再評価し、非空性と反例をZ3なしで扱う
+- 元のSMT義務、finite diagnostics、SAT assignments/contextを保存。未対応のmemory/quantifierや資源不足を成功にせずUNKNOWNにする
+- 通常のZ3 fallback経路と既存の量化例を維持。新しいpipeline例がZ3なしで通ることと、処理系全体のZ3完全撤去は区別する
+
+範囲、invariant、solverの信頼境界、独立simulationと5負例は[パイプライン検証](PIPELINE-ja.md)を参照。
+
+```sh
+HWVERIFY_SOLVER=finite cargo run --release --locked -- examples/pipeline.hwv \
+  --out results/new-pipeline --z3 /definitely/absent/z3
+```
 
 ## 0.9.1の整理: 量化した名前をそのまま参照
 
@@ -191,7 +206,7 @@ Z3_BIN=/path/to/z3 python audit/replay_counterexamples.py
 
 - 0.1のPython版に対する全面的な互換移植ではなく、commit/stutterに焦点を当てたversion 2のIR
 - word/address幅は1〜64ビット。CPUは単一クロックの抽象モデル
-- パイプライン、OOO、割込み、例外、自己書換えコード、BRAMマクロは未実装
+- pipelineは上記の小さなD/X/Wモデルのみ。OoO、分岐pipeline、割込み、例外、自己書換えコード、BRAMマクロは未実装
 - Z3は通常各check-sat10秒、自動保存partitionは1秒。保存loopは30秒で次の問い合わせを停止し、未実行をUNKNOWNにする。試行選択・カーネル・既に走るquery・証跡I/Oを含めたhard wall-clock上限ではない
 - 仕様が意図を十分に表すこと、Rustの義務生成・正規化、SMT変換自体の正しさは形式的には未検証
 - 帰納条件の反例は、resetから到達するとは限らない。実装の誤りと、与えた関係の不足を区別する必要がある

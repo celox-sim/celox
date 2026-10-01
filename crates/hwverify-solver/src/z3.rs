@@ -40,7 +40,15 @@ impl Emitter {
         n
     }
 }
+pub(crate) fn finite_only() -> bool {
+    std::env::var("HWVERIFY_SOLVER").as_deref() == Ok("finite")
+}
 pub fn solver(z3: &str, script: &str) -> Res<String> {
+    // Defense in depth: opting into the finite route must never launch Z3,
+    // including through a caller that has not implemented finite reporting.
+    if finite_only() {
+        return Err("external SMT subprocess disabled by HWVERIFY_SOLVER=finite".into());
+    }
     let mut p = Command::new(z3)
         .args(["-in", "-smt2"])
         .stdin(Stdio::piped())
@@ -151,6 +159,77 @@ impl Check {
                     "context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
                 return Ok(());
             }
+        }
+        if finite_only() {
+            let finite_start = Instant::now();
+            let result = crate::finite::solve(
+                &bad,
+                context,
+                crate::finite::Limits {
+                    timeout_ms,
+                    ..Default::default()
+                },
+            );
+            let finite_seconds = finite_start.elapsed().as_secs_f64();
+            let verdict = result.verdict.as_str();
+            let status = match verdict {
+                "unsat" if expect_sat => "failed_nonvacuity",
+                "unsat" => "passed",
+                "sat" if expect_sat => "passed",
+                "sat" => "counterexample",
+                _ => "unknown",
+            };
+            let mut script = base;
+            let mut raw = format!("{verdict}\n; hwverify finite Bool/BV backend; Z3 not invoked\n");
+            if let Some(reason) = &result.reason {
+                raw.push_str(&format!("; {reason}\n"));
+            }
+            if result.verdict == crate::finite::Verdict::Sat {
+                // Every finite SAT result includes a validated original-formula
+                // witness, even nonvacuity checks that did not request a model.
+                script.push_str("(get-model)\n");
+                raw.push_str("; original-formula witness independently evaluated true\n(\n");
+                for (symbol, value) in &result.assignments {
+                    let sort = match value {
+                        crate::finite::Scalar::Bool(_) => "Bool".into(),
+                        crate::finite::Scalar::Bv { width, .. } => format!("(_ BitVec {width})"),
+                    };
+                    raw.push_str(&format!(
+                        "  (define-fun {symbol} () {sort} {})\n",
+                        value.smt()
+                    ));
+                }
+                raw.push_str(")\n");
+                if !ctx.is_empty() {
+                    script.push_str(&format!(
+                        "(get-value ({}))\n",
+                        ctx.values().cloned().collect::<Vec<_>>().join(" ")
+                    ));
+                    raw.push('(');
+                    for (label, symbol) in &ctx {
+                        raw.push_str(&format!(
+                            "({symbol} {})",
+                            result.context_values[label].smt()
+                        ));
+                    }
+                    raw.push_str(")\n");
+                }
+            }
+            let diagnostics = result.diagnostics();
+            let diagnostics_path = format!("{name}.finite.json");
+            fs::write(
+                self.out.join(&diagnostics_path),
+                serde_json::to_string_pretty(&diagnostics).unwrap(),
+            )
+            .map_err(|e| e.to_string())?;
+            fs::write(self.out.join(format!("{name}.smt2")), &script).map_err(|e| e.to_string())?;
+            fs::write(self.out.join(format!("{name}.out")), &raw).map_err(|e| e.to_string())?;
+            self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"finite_bv",
+                "seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":0.0,
+                "finite_seconds":finite_seconds,"finite":diagnostics,"finite_diagnostics":diagnostics_path,
+                "kernel":kernel_report,"context_symbols":ctx,"concrete_model":result.original_formula_validated,
+                "evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
+            return Ok(());
         }
         let z3_start = Instant::now();
         let mut raw = solver(&self.z3, &base)?;

@@ -167,14 +167,16 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
     let engine_summary = json!({
         "custom_closed":q.reports.iter().filter(|r|r["backend"]=="structural_kernel").count(),
         "z3_queries":q.reports.iter().filter(|r|r["backend"]=="z3").count(),
+        "finite_queries":q.reports.iter().filter(|r|r["backend"]=="finite_bv").count(),
         "not_run":q.reports.iter().filter(|r|r["solver_result"]=="not_run").count(),
         "query_seconds":q.reports.iter().filter_map(|r|r["seconds"].as_f64()).sum::<f64>(),
         "kernel_compute_seconds":q.reports.iter().filter_map(|r|r["kernel"]["seconds"].as_f64()).sum::<f64>(),
         "z3_seconds":q.reports.iter().filter_map(|r|r["z3_seconds"].as_f64()).sum::<f64>(),
+        "finite_seconds":q.reports.iter().filter_map(|r|r["finite_seconds"].as_f64()).sum::<f64>(),
         "scoring_seconds":partition_plan.as_ref().and_then(|p|p["scoring_seconds"].as_f64()).unwrap_or(0.0),
         "timing_note":"query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally"
     });
     Ok(
-        json!({"status":status,"name":doc.get("name"),"obligations":q.reports,"normalization":l.rules,"partition_plan":partition_plan,"engine_summary":engine_summary,"claim":"Reset-established inductive microstep/ISA-step correspondence; spec steps iff implementation commit, otherwise stutters; unsigned rank strictly decreases on enabled noncommit transitions", "limitations":["Rust structural-kernel UNSAT, Z3 fallback UNSAT, Rust lowering, specification and binding are trusted; kernel diagnostics are not an independent proof certificate; existing Lean memory theorems do not certify this kernel","Progress is conditional on enabled at every noncommit step; external stalls may continue forever","Supplied binding adequacy is not inferred; no RTL import or synthesis claim","Nonvacuity checks are satisfiability in the relation, not reset reachability"],"program_contract":doc.get("program_contract").map(|_| "ISA total correctness from precondition with immutable parameters; implementation transfer assumes no subsequent reset and continuously enabled progress until termination"),"reset":"active-high synchronous priority; reset expressions may use shared inputs"}),
+        json!({"status":status,"name":doc.get("name"),"obligations":q.reports,"normalization":l.rules,"partition_plan":partition_plan,"engine_summary":engine_summary,"claim":"Reset-established inductive microstep/ISA-step correspondence; spec steps iff implementation commit, otherwise stutters; unsigned rank strictly decreases on enabled noncommit transitions", "limitations":["Rust structural-kernel UNSAT, the selected finite Bool/BV solver or Z3 fallback, Rust lowering, specification and binding are trusted; diagnostics are not independent proof certificates; existing Lean memory theorems do not certify these solvers","Progress is conditional on enabled at every noncommit step; external stalls may continue forever","Supplied binding adequacy is not inferred; no RTL import or synthesis claim","Nonvacuity checks are satisfiability in the relation, not reset reachability"],"program_contract":doc.get("program_contract").map(|_| "ISA total correctness from precondition with immutable parameters; implementation transfer assumes no subsequent reset and continuously enabled progress until termination"),"reset":"active-high synchronous priority; reset expressions may use shared inputs"}),
     )
 }

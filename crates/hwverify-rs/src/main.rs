@@ -37,7 +37,7 @@ fn run() -> Res<i32> {
         return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE]".into());
     }
     if args[0] == "--help" || args[0] == "-h" {
-        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.");
+        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.");
         return Ok(0);
     }
     let mut out = PathBuf::from("results");
