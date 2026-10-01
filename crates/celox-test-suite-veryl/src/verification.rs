@@ -28,6 +28,30 @@ struct Args {
     /// Execute known discrepancies and toolchain limitations too.
     #[arg(long)]
     include_ignored: bool,
+    /// Exclude reviewed expectations that go beyond portable SV requirements.
+    #[arg(long)]
+    exclude_stronger_than_sv: bool,
+    /// Print the selected catalogue as JSON without invoking any tools.
+    #[arg(long)]
+    list: bool,
+}
+
+fn selected_cases(args: &Args) -> Vec<&'static crate::TestCase> {
+    cases()
+        .filter(|case| case.name.contains(&args.filter))
+        .filter(|case| !args.exclude_stronger_than_sv || !case.has_stronger_than_sv_expectations())
+        .collect()
+}
+
+fn case_metadata(case: &crate::TestCase) -> Value {
+    json!({
+        "name": case.name,
+        "category": format!("{:?}", case.category),
+        "expectation": format!("{:?}", case.expectation),
+        "stronger_than_sv": case.has_stronger_than_sv_expectations(),
+        "tags": case.tags.iter().map(|tag| tag.as_str()).collect::<Vec<_>>(),
+        "tag_reasons": case.tags.iter().map(|tag| (tag.as_str().to_owned(), json!(tag.reason()))).collect::<serde_json::Map<_, _>>(),
+    })
 }
 
 pub(crate) fn panic_message(error: &(dyn std::any::Any + Send)) -> String {
@@ -57,6 +81,22 @@ pub fn run(
     build: fn(&Design, &Path) -> Result<Box<dyn Backend>>,
 ) -> Result<()> {
     let args = Args::parse();
+    let tests = selected_cases(&args);
+    if tests.is_empty() {
+        return Err("no cases matched the selection".into());
+    }
+    if args.list {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 3,
+                "suite_version": env!("CARGO_PKG_VERSION"),
+                "exclude_stronger_than_sv": args.exclude_stronger_than_sv,
+                "cases": tests.iter().map(|case| case_metadata(case)).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
     let output = args
         .output
         .unwrap_or_else(|| PathBuf::from(format!("target/veryl-{tool}")));
@@ -72,12 +112,6 @@ pub fn run(
         .next()
         .unwrap_or("")
         .to_owned();
-    let tests: Vec<_> = cases()
-        .filter(|case| case.name.contains(&args.filter))
-        .collect();
-    if tests.is_empty() {
-        return Err("no cases matched the filter".into());
-    }
     let next = AtomicUsize::new(0);
     let results = Mutex::new(Vec::new());
     // Compiler and assertion panics are captured, with full diagnostics on disk.
@@ -118,7 +152,7 @@ pub fn run(
         .iter()
         .filter(|row| is_failure(row["status"].as_str().unwrap()))
         .count();
-    let report = json!({"schema_version": 2, "suite_version": env!("CARGO_PKG_VERSION"), "tool": tool, "version": version, "include_ignored": args.include_ignored, "counts": counts, "cases": results});
+    let report = json!({"schema_version": 3, "suite_version": env!("CARGO_PKG_VERSION"), "tool": tool, "version": version, "include_ignored": args.include_ignored, "exclude_stronger_than_sv": args.exclude_stronger_than_sv, "counts": counts, "cases": results});
     let contents = serde_json::to_string_pretty(&report)? + "\n";
     std::fs::write(output.join("results.json"), &contents)?;
     if let Some(path) = args.report {
@@ -185,15 +219,11 @@ fn run_case(
     if let Some(issue) = &known_issue
         && !include_ignored
     {
-        let row = json!({
-            "name": case.name,
-            "category": format!("{:?}", case.category),
-            "expectation": format!("{:?}", case.expectation),
-            "status": "ignored",
-            "phase": "skip",
-            "detail": issue["reason"],
-            "known_issue": issue,
-        });
+        let mut row = case_metadata(case);
+        row["status"] = json!("ignored");
+        row["phase"] = json!("skip");
+        row["detail"] = issue["reason"].clone();
+        row["known_issue"] = issue.clone();
         std::fs::write(
             directory.join("error.log"),
             issue["reason"].as_str().unwrap(),
@@ -289,7 +319,10 @@ fn run_case(
         portable_detail = portable_detail.replace(absolute.to_string_lossy().as_ref(), "<case>");
     }
     portable_detail = portable_detail.chars().take(8000).collect();
-    let mut row = json!({"name": case.name, "category": format!("{:?}", case.category), "expectation": format!("{:?}", case.expectation), "status": status, "phase": phase, "detail": portable_detail});
+    let mut row = case_metadata(case);
+    row["status"] = json!(status);
+    row["phase"] = json!(phase);
+    row["detail"] = json!(portable_detail);
     if let Some(issue) = known_issue {
         row["known_issue"] = issue;
     }
@@ -339,6 +372,11 @@ mod tests {
                 false,
             );
             assert_eq!(ignored["status"], "ignored");
+            assert_eq!(ignored["tags"], case_metadata(case)["tags"]);
+            assert_eq!(
+                ignored["stronger_than_sv"],
+                case.has_stronger_than_sv_expectations()
+            );
             assert_eq!(ignored["phase"], "skip");
             assert!(!is_failure(ignored["status"].as_str().unwrap()));
             assert!(!issue["reason"].as_str().unwrap().is_empty());
@@ -377,6 +415,7 @@ mod tests {
                     include_ignored,
                 );
                 assert_eq!(executed["status"], "compile_error");
+                assert_eq!(executed["tag_reasons"], case_metadata(case)["tag_reasons"]);
                 assert!(is_failure(executed["status"].as_str().unwrap()));
                 assert_eq!(executed.get("known_issue").is_some(), include_ignored);
             }
