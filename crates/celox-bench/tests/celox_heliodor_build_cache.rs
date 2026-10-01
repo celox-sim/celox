@@ -279,6 +279,99 @@ fn invalidates_dependency_component_manifests() {
     check_component_manifest_invalidation(true);
 }
 
+#[test]
+fn invalidates_native_component_library_presence() {
+    check_native_component_library_presence(false);
+}
+
+#[test]
+fn invalidates_dependency_native_component_library_presence() {
+    check_native_component_library_presence(true);
+}
+
+fn check_native_component_library_presence(dependency: bool) {
+    for override_name in [false, true] {
+        let export = if dependency { "dep::demo" } else { "demo" };
+        let project = project(&format!(
+            "#[test(t)]\nmodule t {{ var component: $comp::{export}; initial {{ component.ping(); $finish(); }} }}"
+        ));
+        let path = project.path();
+        let root = if dependency {
+            fs::write(
+                path.join("Veryl.toml"),
+                "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { path = \"dep\" }\n",
+            )
+            .unwrap();
+            path.join("dep")
+        } else {
+            path.to_path_buf()
+        };
+        fs::create_dir_all(root.join("comp")).unwrap();
+        fs::write(
+            root.join("Veryl.toml"),
+            "[project]\nname = \"cache_test\"\nversion = \"0.1.0\"\n[[components]]\npath = \"comp\"\n",
+        )
+        .unwrap();
+        let cargo = "[package]\nname = \"demo-comp\"\nversion = \"0.1.0\"\n";
+        fs::write(
+            root.join("comp/Cargo.toml"),
+            if override_name {
+                format!("{cargo}[lib]\nname = \"custom_component\"\n")
+            } else {
+                cargo.to_owned()
+            },
+        )
+        .unwrap();
+        fs::write(
+            root.join("comp/veryl.manifest.json"),
+            r#"{"types":{"demo":{"kind":"dynamic"}}}"#,
+        )
+        .unwrap();
+        let args = ["--compile-only", "--native-image-output", "cached.image"];
+        cached(path, &args, "miss", true);
+        let without_library = fs::read(path.join("cached.image")).unwrap();
+        cached(path, &args, "hit", true);
+
+        let name = if override_name {
+            "custom_component"
+        } else {
+            "demo_comp"
+        };
+        let native = root.join("target/veryl-components/release").join(format!(
+            "{}{}{}",
+            std::env::consts::DLL_PREFIX,
+            name,
+            std::env::consts::DLL_SUFFIX
+        ));
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        // Compile-only records the path without loading the library's ABI.
+        fs::write(&native, "native library placeholder").unwrap();
+        cached(path, &args, "miss", true);
+        cached(path, &args, "hit", true);
+        run(
+            path,
+            &["--compile-only", "--native-image-output", "fresh.image"],
+            true,
+        );
+        let with_library = fs::read(path.join("cached.image")).unwrap();
+        assert_ne!(with_library, without_library);
+        assert_eq!(with_library, fs::read(path.join("fresh.image")).unwrap());
+
+        // Changes to library code do not change the embedded runtime path.
+        fs::write(&native, "updated native library placeholder").unwrap();
+        cached(path, &args, "hit", true);
+        fs::remove_file(&native).unwrap();
+        cached(path, &args, "hit", true);
+        assert_eq!(
+            fs::read(path.join("cached.image")).unwrap(),
+            without_library
+        );
+        // The compiler uses is_file(), so a directory is also an absent library.
+        fs::create_dir(&native).unwrap();
+        cached(path, &args, "hit", true);
+    }
+}
+
 fn check_component_manifest_invalidation(dependency: bool) {
     let source = r#"
 #[test(t)]

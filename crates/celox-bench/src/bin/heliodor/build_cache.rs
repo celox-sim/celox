@@ -66,6 +66,36 @@ fn component_inputs(
         if let Some(wasm) = &component.wasm {
             paths.push((root.join(wasm), false));
         }
+        // The image embeds the runtime library selected by the compiler.
+        // Match its native candidate, including a Cargo [lib].name override.
+        // Only presence affects compilation: library contents are loaded anew
+        // when executing the testbench.
+        if let Some(name) = fs::read_to_string(crate_dir.join("Cargo.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .and_then(|value| {
+                value
+                    .get("lib")
+                    .and_then(|lib| lib.get("name"))
+                    .and_then(toml::Value::as_str)
+                    .or_else(|| {
+                        value
+                            .get("package")
+                            .and_then(|package| package.get("name"))
+                            .and_then(toml::Value::as_str)
+                    })
+                    .map(str::to_owned)
+            })
+        {
+            let native = target_dir.join("release").join(format!(
+                "{}{}{}",
+                std::env::consts::DLL_PREFIX,
+                name.replace('-', "_"),
+                std::env::consts::DLL_SUFFIX
+            ));
+            field(hash, native.as_os_str().as_encoded_bytes());
+            field(hash, &[u8::from(native.is_file())]);
+        }
         for (path, track_mtime) in paths {
             field(hash, path.as_os_str().as_encoded_bytes());
             let content = dependency_hash(&path)?;

@@ -84,7 +84,9 @@ compilation. Files consulted by `$readmemh`, including absent lookup candidates,
 are checked by content before reuse. Dependency namespaces and properties are
 resolved before cache lookup. Component Cargo metadata, manifest candidates, and
 prebuilt WASM files are also checked, including manifest modification times that
-determine which interface takes precedence. Keep build inputs stable during compilation.
+determine which interface takes precedence. Native component library presence,
+including Cargo `[lib].name` overrides, is tracked so adding or removing a library
+refreshes the runtime library selection. Keep build inputs stable during compilation.
 
 Caching is opt-in and supports the native backend, including host codegen in
 `host-qemu` mode and `--compile-only --native-image-output`. It cannot be combined
