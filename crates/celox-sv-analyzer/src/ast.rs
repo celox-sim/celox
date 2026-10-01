@@ -53,6 +53,7 @@ use case::{
 use casts::{
     cast_is_supported, cast_zero_type, constant_cast_const_expr, constant_cast_is_supported,
     expr_type_from_type, resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast,
+    runtime_constant_cast_const_expr,
 };
 use comb_process::{comb_processes_from_module_node, fold_conditional_assignment_over};
 use comb_rewrite::{
@@ -118,8 +119,8 @@ use parameters::{
     substitute_typed_parameter_literals,
 };
 use selects::{
-    add_expr, expr_select_from_select, net_lvalue_from_node, packed_index_offset,
-    part_select_bounds, product_expr, variable_lvalue_from_node,
+    add_expr, expr_select_from_select, indexed_select_base, net_lvalue_from_node,
+    packed_index_offset, part_select_bounds, product_expr, variable_lvalue_from_node,
 };
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, combine_expr_condition_terms,
@@ -1415,6 +1416,7 @@ struct PackedDimensions {
     functions: Arc<HashMap<String, Function>>,
     parameter_values: HashMap<String, Expr>,
     expression_signedness: Arc<HashMap<String, bool>>,
+    constant_indexed_base: bool,
 }
 
 impl PackedDimensions {
@@ -1431,6 +1433,7 @@ impl PackedDimensions {
             functions: Arc::default(),
             parameter_values: HashMap::default(),
             expression_signedness: Arc::default(),
+            constant_indexed_base: false,
         }
     }
 }

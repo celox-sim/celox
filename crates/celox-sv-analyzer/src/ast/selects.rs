@@ -279,9 +279,10 @@ pub(super) fn lvalue_from_constant_select(
             ),
             sv_parser::ConstantPartSelectRange::ConstantIndexedRange(range) => {
                 indexed_select_bounds(
-                    const_expr_from_ref_node(
+                    indexed_select_base(
                         RefNode::ConstantExpression(&range.nodes.0),
                         syntax_tree,
+                        packed_dimensions,
                     )?,
                     &range.nodes.1,
                     &range.nodes.2,
@@ -1143,7 +1144,7 @@ pub(super) fn part_select_bounds(
             )?,
         )),
         sv_parser::PartSelectRange::IndexedRange(range) => indexed_select_bounds(
-            const_expr_from_expr(&range.nodes.0, syntax_tree)?,
+            indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?,
             &range.nodes.1,
             &range.nodes.2,
             syntax_tree,
@@ -1200,4 +1201,45 @@ fn indexed_select_bounds(
     } else {
         (other, base)
     })
+}
+
+// Use the complete typed expression path: the lightweight constant-expression
+// parser can discard selections, and cannot resolve typedef casts.
+pub(super) fn indexed_select_base(
+    base: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
+    match base {
+        RefNode::Expression(base) => {
+            let mut dimensions = dimensions.clone();
+            dimensions.constant_indexed_base = true;
+            let expression = expr_from_expression_with_types(base, syntax_tree, &dimensions)?;
+            let expression = simplify_constant_mux_conditions(expression, &dimensions.const_env);
+            expr_to_const(fold_const_integral_expr_preserving_mask(
+                expression,
+                &dimensions.const_env,
+            ))
+        }
+        RefNode::ConstantExpression(base) => {
+            // The constant parser supports a single bit selection. Reject other
+            // selected forms rather than falling back to the whole parameter.
+            if RefNode::ConstantExpression(base).into_iter().any(|node| {
+                let RefNode::ConstantPrimaryPsParameter(parameter) = node else {
+                    return false;
+                };
+                let select = &parameter.nodes.1;
+                select.nodes.2.is_some() || select.nodes.1.nodes.0.len() > 1
+            }) {
+                return None;
+            }
+            const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(base),
+                syntax_tree,
+                &dimensions.const_env,
+                &dimensions.type_aliases,
+            )
+        }
+        _ => None,
+    }
 }

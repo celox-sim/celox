@@ -232,6 +232,12 @@ fn expr_from_primary_with_types(
             expr_from_function_subroutine_call(call, syntax_tree, packed_dimensions)
         }
         sv_parser::Primary::Cast(cast) => {
+            if packed_dimensions.constant_indexed_base
+                && let Some(value) =
+                    runtime_constant_cast_const_expr(cast, syntax_tree, packed_dimensions)
+            {
+                return Some(const_expr_to_expr(value));
+            }
             let expr = expr_from_expression_with_types(
                 &cast.nodes.2.nodes.1,
                 syntax_tree,

@@ -395,13 +395,37 @@ pub(super) fn reject_silently_ignored_constructs(
     } else {
         Vec::new()
     };
+    // Casts in indexed bases are checked by the full typed base converter.
+    // Keep the existing runtime-cast restrictions for all other expressions.
+    let indexed_base_casts: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter_map(|child| {
+            let RefNode::IndexedRange(range) = child else {
+                return None;
+            };
+            Some(
+                RefNode::Expression(&range.nodes.0)
+                    .into_iter()
+                    .filter_map(|child| {
+                        if let RefNode::Cast(cast) = child {
+                            Some(cast)
+                        } else {
+                            None
+                        }
+                    }),
+            )
+        })
+        .flatten()
+        .collect();
     for child in node.clone() {
         if generated_nodes.iter().any(|n| n == &child) {
             continue;
         }
         match child {
             RefNode::Cast(cast)
-                if !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+                if !indexed_base_casts.contains(&cast)
+                    && !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
@@ -579,7 +603,8 @@ pub(super) fn reject_silently_ignored_constructs(
                 ));
             }
             RefNode::IndexedRange(range) if
-                const_expr_from_expr(&range.nodes.0, syntax_tree)
+                indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
+                    &PackedDimensions::new(HashMap::default(), const_env, type_aliases))
                     .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
                 || !positive_indexed_width(&range.nodes.2, syntax_tree, const_env, type_aliases) => {
                 return Err(AnalyzerError::Unsupported(
@@ -587,7 +612,8 @@ pub(super) fn reject_silently_ignored_constructs(
                 ));
             }
             RefNode::ConstantIndexedRange(range) if
-                const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)
+                indexed_select_base(RefNode::ConstantExpression(&range.nodes.0), syntax_tree,
+                    &PackedDimensions::new(HashMap::default(), const_env, type_aliases))
                     .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
                 || !positive_indexed_width(&range.nodes.2, syntax_tree, const_env, type_aliases) => {
                 return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));

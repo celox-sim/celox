@@ -91,6 +91,42 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("narrow")), 0x1bu8.into());
     }
 
+    fn indexed_select_preserves_selected_and_cast_bases(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter logic [3:0] BASE = 4'b1010)(
+                    input logic [15:0] data, input logic [3:0] replacement,
+                    output logic [3:0] bit_base, range_base, cast_base, minus_base,
+                    output logic [15:0] continuous_written, procedural_written);
+                    typedef logic [3:0] nibble;
+                    assign bit_base = data[BASE[0] +: 4];
+                    assign range_base = data[BASE[1:0] +: 4];
+                    assign cast_base = data[(nibble'(20) + 0) +: 4];
+                    assign minus_base = data[(BASE[0] + 3) -: 4];
+                    assign continuous_written[nibble'(4) +: 4] = replacement;
+                    assign continuous_written[15:8] = data[15:8];
+                    assign continuous_written[3:0] = data[3:0];
+                    always_comb begin
+                        procedural_written = data;
+                        procedural_written[BASE[0] +: 4] = replacement;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_base_expression.sv"))], "Top");
+        let data = sim.signal("data");
+        let replacement = sim.signal("replacement");
+        for value in [0x00ffu16, 0x1234, 0xabcd] {
+            sim.modify(|io| { io.set(data, value); io.set(replacement, 9u8); }).unwrap();
+            assert_eq!(sim.get(sim.signal("bit_base")), (value & 15).into());
+            assert_eq!(sim.get(sim.signal("range_base")), ((value >> 2) & 15).into());
+            assert_eq!(sim.get(sim.signal("cast_base")), ((value >> 4) & 15).into());
+            assert_eq!(sim.get(sim.signal("minus_base")), (value & 15).into());
+            assert_eq!(sim.get(sim.signal("continuous_written")), ((value & 0xff0f) | 0x90).into());
+            assert_eq!(sim.get(sim.signal("procedural_written")), ((value & 0xfff0) | 9).into());
+        }
+    }
+
     fn indexed_select_multidimensional_packed_reads(sim) {
         @setup {
             let source = r#"
@@ -125,4 +161,21 @@ fn rejects_nonpositive_and_runtime_indexed_widths() {
                 .to_string();
         assert!(error.contains("indexed part-select"), "{error}");
     }
+}
+
+#[test]
+fn rejects_runtime_selected_bases() {
+    let source = r#"
+        module Top #(parameter logic [3:0] BASE = 4'b1010)(
+            input logic [15:0] data, input logic index, output logic [3:0] y);
+            assign y = data[BASE[index] +: 4];
+        endmodule
+    "#;
+    let error =
+        Simulator::from_sv_sources(vec![(source, Path::new("runtime_selected_base.sv"))], "Top")
+            .build_cranelift()
+            .err()
+            .expect("selected runtime base must be rejected")
+            .to_string();
+    assert!(error.contains("indexed part-select"), "{error}");
 }
