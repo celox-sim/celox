@@ -1,10 +1,20 @@
-# hwverify-rs 0.11.2
+# hwverify-rs 0.11.3
 
 Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.11.3: 反例を先に見つける探索
+
+分割前の式を短く探索し、そこで得た仮定なしの学習節を引き継いで、各分割を再開可能な
+round-robinで探索する。時間・work・clauseは引き続きquery全体の共有予算。
+同一環境の5回交互測定で32bit forwarding/interlock負例は0.700/0.683秒から0.098/0.086秒へ改善。
+全41負例中34件が高速化、7件が遅くなった。正しい32bitの証明は0.797秒から0.945秒へ遅くなるが、
+84.49M workで既定100M予算内に収まる。反例発見と証明完了の両方が常に速くなるという保証ではない。
+[全モデルの比較と探索方式](audit/counterexample_search/README.md)、
+[独立監査](results/counterexample_search_independent/REPORT.md)を参照。
 
 ## 0.11.2: 32bitも同じ予算で証明
 

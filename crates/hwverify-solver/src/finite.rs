@@ -98,6 +98,10 @@ pub struct Stats {
     pub split_alternatives: usize,
     pub split_completed: usize,
     pub split_unsat: usize,
+    pub probe_result: Option<Verdict>,
+    pub probe_work: u64,
+    pub search_slices: u64,
+    pub search_yields: u64,
     pub decisions: u64,
     pub conflicts: u64,
     pub work: u64,
@@ -123,6 +127,8 @@ impl Outcome {
             "base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
             "split_alternatives":self.stats.split_alternatives,"split_completed":self.stats.split_completed,
             "split_unsat":self.stats.split_unsat,
+            "probe_result":self.stats.probe_result.map(Verdict::as_str),"probe_work":self.stats.probe_work,
+            "search_slices":self.stats.search_slices,"search_yields":self.stats.search_yields,
             "clause_accounting":"aggregate materialized CNF/branch/learned clauses within the whole-query limit",
             "decisions":self.stats.decisions,"conflicts":self.stats.conflicts,"work":self.stats.work})
     }
@@ -923,9 +929,17 @@ impl VarOrder {
     }
 }
 
+/// A cooperative scheduling yield is distinct from a resource error/UNKNOWN.
+#[derive(Debug, PartialEq, Eq)]
+enum Search {
+    Complete(Verdict),
+    Pending,
+}
+
 /// Two-watched-literal CDCL. First-UIP learned clauses are resolution consequences
 /// of existing clauses; only a conflict at decision level zero establishes UNSAT.
 struct Sat {
+    initialized: bool,
     previous_clauses: usize,
     clauses: Vec<Vec<Lit>>,
     watches: Vec<Vec<usize>>,
@@ -951,6 +965,7 @@ fn truth(values: &[i8], lit: Lit) -> i8 {
 impl Sat {
     fn new(vars: usize, clauses: Vec<Vec<Lit>>) -> Self {
         Self {
+            initialized: false,
             previous_clauses: 0,
             clauses,
             watches: vec![vec![]; 2 * (vars + 1)],
@@ -1125,28 +1140,38 @@ impl Sat {
         }
         Ok((learned, backtrack))
     }
-    fn run(&mut self, b: &mut Budget) -> Res<Verdict> {
-        for id in 0..self.clauses.len() {
-            b.tick(1)?;
-            for &p in &self.clauses[id] {
-                self.activity[p.unsigned_abs() as usize] += 1.;
+    fn run_slice(&mut self, b: &mut Budget, quantum: u64) -> Res<Search> {
+        let stop_work = b.work.saturating_add(quantum.max(1));
+        if !self.initialized {
+            for id in 0..self.clauses.len() {
+                b.tick(1)?;
+                for &p in &self.clauses[id] {
+                    self.activity[p.unsigned_abs() as usize] += 1.;
+                }
+                if self.clauses[id].is_empty() {
+                    return Ok(Search::Complete(Verdict::Unsat));
+                }
+                if self.clauses[id].len() == 1 && !self.enqueue(self.clauses[id][0], Some(id)) {
+                    return Ok(Search::Complete(Verdict::Unsat));
+                }
+                self.attach(id);
             }
-            if self.clauses[id].is_empty() {
-                return Ok(Verdict::Unsat);
+            for v in 1..self.values.len() {
+                self.order.insert(v, &self.activity, b)?;
             }
-            if self.clauses[id].len() == 1 && !self.enqueue(self.clauses[id][0], Some(id)) {
-                return Ok(Verdict::Unsat);
-            }
-            self.attach(id);
-        }
-        for v in 1..self.values.len() {
-            self.order.insert(v, &self.activity, b)?;
+            self.initialized = true;
         }
         loop {
+            // Yield only here: propagation, conflict analysis, backtracking and
+            // clause insertion have all finished. A Budget error is terminal;
+            // it may interrupt a mutation and is NEVER used as a resumable yield.
+            if b.work >= stop_work {
+                return Ok(Search::Pending);
+            }
             if let Some(conflict) = self.propagate(b)? {
                 self.conflicts += 1;
                 if self.starts.is_empty() {
-                    return Ok(Verdict::Unsat);
+                    return Ok(Search::Complete(Verdict::Unsat));
                 }
                 let (learned, level) = self.analyze(conflict, b)?;
                 self.backtrack(level, b)?;
@@ -1166,7 +1191,7 @@ impl Sat {
                     let Some(v) = self.order.pop(&self.activity, b)? else {
                         #[cfg(test)]
                         assert!(self.values.iter().skip(1).all(|&x| x != 0));
-                        return Ok(Verdict::Sat);
+                        return Ok(Search::Complete(Verdict::Sat));
                     };
                     if self.values[v] == 0 {
                         break v;
@@ -1191,6 +1216,13 @@ impl Sat {
                 self.starts.push(self.trail.len());
                 self.enqueue(if self.phase[v] { v as Lit } else { -(v as Lit) }, None);
             }
+        }
+    }
+    #[cfg(test)]
+    fn run(&mut self, b: &mut Budget) -> Res<Verdict> {
+        match self.run_slice(b, u64::MAX)? {
+            Search::Complete(verdict) => Ok(verdict),
+            Search::Pending => Err("finite SAT unresolved search".into()),
         }
     }
 }
@@ -1292,70 +1324,143 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
             return outcome;
         }
     };
-    let original_clauses = std::mem::take(&mut blast.clauses);
-    let base_clauses = original_clauses.len();
+    let mut original_clauses = std::mem::take(&mut blast.clauses);
+    let mut base_clauses = original_clauses.len();
     let mut sat = Sat::new(blast.vars, Vec::new());
-    let mut previous_decisions = 0;
-    let mut previous_conflicts = 0;
     let mut cumulative_clauses = base_clauses;
     outcome.stats.split_alternatives = choices.len();
     let result = (|| -> Res<Verdict> {
-        let verdict = if choices.is_empty() {
-            // Preserve the original no-copy, single-search path.
-            sat.clauses = original_clauses;
-            let result = sat.run(&mut budget);
+        let mut probe_verdict = None;
+        if !choices.is_empty() {
+            // Probe the original query for a quick witness, scaled to its CNF
+            // size and capped at a tenth of the DEFAULT whole-query work limit.
+            // This fixed scheduling quantum does not change with user limits;
+            // reducing a limit must not change the search prefix. Every operation
+            // still charges the actual global Budget. Like all slices, it may
+            // finish its current atomic search step beyond the local quantum.
+            let probe_work = (base_clauses as u64).saturating_mul(512).min(10_000_000);
+            let before_work = budget.work;
+            sat.clauses = std::mem::take(&mut original_clauses);
+            outcome.stats.search_slices += 1;
+            let result = sat.run_slice(&mut budget, probe_work);
+            outcome.stats.probe_work = budget.work - before_work;
             cumulative_clauses = sat.clauses.len();
             outcome.stats.peak_live_clauses = cumulative_clauses;
-            result?
-        } else {
-            let mut verdict = Verdict::Unsat;
-            for &choice in &choices {
-                // Count every materialized branch copy and its unit assumption,
-                // as well as the retained base and all earlier learned clauses.
-                // No clause/work/time allowance resets between alternatives.
-                let additional = base_clauses
-                    .checked_add(1)
-                    .ok_or("finite solver split clause count overflow")?;
-                let next_count = cumulative_clauses
-                    .checked_add(additional)
-                    .ok_or("finite solver split clause count overflow")?;
-                if next_count > budget.limits.max_clauses {
-                    return Err("finite solver aggregate split clause budget exhausted".into());
+            outcome.stats.decisions = sat.decisions;
+            outcome.stats.conflicts = sat.conflicts;
+            match result? {
+                Search::Complete(verdict) => {
+                    outcome.stats.probe_result = Some(verdict);
+                    probe_verdict = Some(verdict);
                 }
-                for clause in &original_clauses {
-                    budget.tick(clause.len() as u64)?;
-                }
-                budget.tick(1)?;
-                let peak = base_clauses
-                    .saturating_add(sat.clauses.len())
-                    .saturating_add(additional);
-                outcome.stats.peak_live_clauses = outcome.stats.peak_live_clauses.max(peak);
-                let mut clauses = original_clauses.clone();
-                clauses.push(vec![choice]);
-                previous_decisions += sat.decisions;
-                previous_conflicts += sat.conflicts;
-                sat = Sat::new(blast.vars, clauses);
-                sat.previous_clauses = cumulative_clauses;
-                let result = sat.run(&mut budget);
-                cumulative_clauses = sat.previous_clauses + sat.clauses.len();
-                outcome.stats.peak_live_clauses = outcome
-                    .stats
-                    .peak_live_clauses
-                    .max(base_clauses + sat.clauses.len());
-                match result? {
-                    Verdict::Sat => {
-                        outcome.stats.split_completed += 1;
-                        verdict = Verdict::Sat;
-                        break;
-                    }
-                    Verdict::Unsat => {
-                        outcome.stats.split_completed += 1;
-                        outcome.stats.split_unsat += 1;
-                    }
-                    Verdict::Unknown => return Err("finite solver unresolved split branch".into()),
+                Search::Pending => {
+                    outcome.stats.search_yields += 1;
+                    outcome.stats.probe_result = Some(Verdict::Unknown);
+                    // The probe had NO branch assumption, so all of its learned
+                    // clauses follow from the original CNF. Reuse these clauses
+                    // in every branch. Branch-local learning is never shared.
+                    original_clauses = std::mem::take(&mut sat.clauses);
+                    base_clauses = original_clauses.len();
+                    sat = Sat::new(blast.vars, Vec::new());
                 }
             }
+        }
+        let verdict = if let Some(verdict) = probe_verdict {
             verdict
+        } else if choices.is_empty() {
+            // Preserve the original no-copy, single-search path.
+            sat.clauses = original_clauses;
+            outcome.stats.search_slices += 1;
+            let result = sat.run_slice(&mut budget, u64::MAX);
+            cumulative_clauses = sat.clauses.len();
+            outcome.stats.peak_live_clauses = cumulative_clauses;
+            outcome.stats.decisions = sat.decisions;
+            outcome.stats.conflicts = sat.conflicts;
+            match result? {
+                Search::Complete(verdict) => verdict,
+                Search::Pending => return Err("finite solver unresolved search".into()),
+            }
+        } else {
+            // Start every alternative with a small quantum, then double it on
+            // each round. A late SAT alternative need not wait for preceding
+            // hard UNSAT proofs. Every suspended branch keeps its exact CDCL
+            // state; no learning, phase saving or search work is discarded.
+            let mut branches: Vec<Option<Sat>> = (0..choices.len()).map(|_| None).collect();
+            let mut completed = vec![false; choices.len()];
+            let mut quantum = 50_000u64;
+            let mut live_clauses = base_clauses;
+            'rounds: loop {
+                for (i, &choice) in choices.iter().enumerate() {
+                    if completed[i] {
+                        continue;
+                    }
+                    budget.tick(1)?;
+                    if branches[i].is_none() {
+                        // Count the retained base, each materialized copy and
+                        // unit, and every learned clause, including discarded
+                        // completed branches. Never reset the query allowance.
+                        let additional = base_clauses
+                            .checked_add(1)
+                            .ok_or("finite solver split clause count overflow")?;
+                        let next_count = cumulative_clauses
+                            .checked_add(additional)
+                            .ok_or("finite solver split clause count overflow")?;
+                        if next_count > budget.limits.max_clauses {
+                            return Err(
+                                "finite solver aggregate split clause budget exhausted".into()
+                            );
+                        }
+                        for clause in &original_clauses {
+                            budget.tick(clause.len() as u64)?;
+                        }
+                        budget.tick(1)?;
+                        let mut clauses = original_clauses.clone();
+                        clauses.push(vec![choice]);
+                        cumulative_clauses = next_count;
+                        live_clauses += additional;
+                        outcome.stats.peak_live_clauses =
+                            outcome.stats.peak_live_clauses.max(live_clauses);
+                        branches[i] = Some(Sat::new(blast.vars, clauses));
+                    }
+                    let branch = branches[i].as_mut().unwrap();
+                    let before_clauses = branch.clauses.len();
+                    let before_decisions = branch.decisions;
+                    let before_conflicts = branch.conflicts;
+                    // All other current and discarded branch clauses remain
+                    // charged while this branch learns additional clauses.
+                    branch.previous_clauses = cumulative_clauses - before_clauses;
+                    outcome.stats.search_slices += 1;
+                    let result = branch.run_slice(&mut budget, quantum);
+                    let learned = branch.clauses.len() - before_clauses;
+                    cumulative_clauses += learned;
+                    live_clauses += learned;
+                    outcome.stats.peak_live_clauses =
+                        outcome.stats.peak_live_clauses.max(live_clauses);
+                    outcome.stats.decisions += branch.decisions - before_decisions;
+                    outcome.stats.conflicts += branch.conflicts - before_conflicts;
+                    match result? {
+                        Search::Complete(Verdict::Sat) => {
+                            outcome.stats.split_completed += 1;
+                            sat = branches[i].take().unwrap();
+                            break 'rounds Verdict::Sat;
+                        }
+                        Search::Complete(Verdict::Unsat) => {
+                            outcome.stats.split_completed += 1;
+                            outcome.stats.split_unsat += 1;
+                            completed[i] = true;
+                            live_clauses -= branches[i].take().unwrap().clauses.len();
+                        }
+                        Search::Pending => outcome.stats.search_yields += 1,
+                        Search::Complete(Verdict::Unknown) => {
+                            return Err("finite solver unresolved split branch".into())
+                        }
+                    }
+                }
+                if outcome.stats.split_unsat == choices.len() {
+                    break Verdict::Unsat;
+                }
+                quantum = quantum.saturating_mul(2);
+            }
         };
         budget.check_time()?;
         if verdict != Verdict::Sat {
@@ -1403,8 +1508,6 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
         Ok(verdict) => outcome.verdict = verdict,
         Err(reason) => outcome.reason = Some(reason),
     }
-    outcome.stats.decisions = previous_decisions + sat.decisions;
-    outcome.stats.conflicts = previous_conflicts + sat.conflicts;
     outcome.stats.clauses = cumulative_clauses;
     outcome.stats.work = budget.work;
     outcome
@@ -1425,6 +1528,97 @@ mod tests {
             time_check_in: 0,
         }
     }
+    fn pigeonhole(pigeons: usize, holes: usize) -> Term {
+        let vars: Vec<Vec<Term>> = (0..pigeons)
+            .map(|p| {
+                (0..holes)
+                    .map(|h| var(format!("p{p}h{h}"), Sort::Bool))
+                    .collect()
+            })
+            .collect();
+        let mut constraints = Vec::new();
+        for row in &vars {
+            constraints.push(
+                row.iter()
+                    .cloned()
+                    .reduce(|a, b| node(Sort::Bool, "or", vec![a, b]))
+                    .unwrap(),
+            );
+        }
+        for (h, _) in vars[0].iter().enumerate() {
+            for (p, row) in vars.iter().enumerate() {
+                for other in vars.iter().skip(p + 1) {
+                    constraints.push(not(and(row[h].clone(), other[h].clone())));
+                }
+            }
+        }
+        constraints.into_iter().reduce(and).unwrap()
+    }
+    #[test]
+    fn resumed_cdcl_is_identical_to_uninterrupted_search() {
+        let formula = pigeonhole(4, 3);
+        let mut blast = Blast::new();
+        let mut compile_budget = test_budget();
+        let root = blast.term(&formula, &mut compile_budget, 0).unwrap();
+        blast
+            .clause(vec![root.bits[0]], &mut compile_budget)
+            .unwrap();
+        let mut original = Sat::new(blast.vars, blast.clauses.clone());
+        let mut whole = test_budget();
+        assert_eq!(original.run(&mut whole).unwrap(), Verdict::Unsat);
+        assert!(original.conflicts > 1);
+        assert!(original.clauses.len() > blast.clauses.len());
+        for quantum in [1, 2, 7, 31, 127] {
+            let mut resumed = Sat::new(blast.vars, blast.clauses.clone());
+            let mut sliced = test_budget();
+            let mut yields = 0;
+            loop {
+                match resumed.run_slice(&mut sliced, quantum).unwrap() {
+                    Search::Complete(verdict) => {
+                        assert_eq!(verdict, Verdict::Unsat);
+                        break;
+                    }
+                    Search::Pending => yields += 1,
+                }
+            }
+            assert!(yields > 0);
+            assert_eq!(sliced.work, whole.work);
+            assert_eq!(resumed.clauses, original.clauses);
+            assert_eq!(resumed.watches, original.watches);
+            assert_eq!(resumed.values, original.values);
+            assert_eq!(resumed.trail, original.trail);
+            assert_eq!(resumed.starts, original.starts);
+            assert_eq!(resumed.head, original.head);
+            assert_eq!(resumed.levels, original.levels);
+            assert_eq!(resumed.reasons, original.reasons);
+            assert_eq!(resumed.phase, original.phase);
+            assert_eq!(resumed.activity, original.activity);
+            assert_eq!(resumed.increment, original.increment);
+            assert_eq!(resumed.order.heap, original.order.heap);
+            assert_eq!(resumed.order.positions, original.order.positions);
+            assert_eq!(resumed.decisions, original.decisions);
+            assert_eq!(resumed.conflicts, original.conflicts);
+        }
+    }
+    #[test]
+    fn unassumed_probe_learning_preserves_every_later_assumption() {
+        let clauses = vec![vec![1, 2], vec![1, -2], vec![-1, 3]];
+        let mut probe = Sat::new(3, clauses.clone());
+        let mut budget = test_budget();
+        while probe.conflicts == 0 {
+            assert_eq!(probe.run_slice(&mut budget, 1).unwrap(), Search::Pending);
+        }
+        assert!(probe.clauses.len() > clauses.len());
+        for assumption in [-3, -2, -1, 1, 2, 3] {
+            let mut original = clauses.clone();
+            original.push(vec![assumption]);
+            let mut enriched = probe.clauses.clone();
+            enriched.push(vec![assumption]);
+            let expected = Sat::new(3, original).run(&mut test_budget()).unwrap();
+            let actual = Sat::new(3, enriched).run(&mut test_budget()).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
     fn split_fixture(late_sat: bool) -> (Term, Env) {
         let a = var("a".into(), Sort::Bool);
         let b = var("b".into(), Sort::Bool);
@@ -1442,13 +1636,14 @@ mod tests {
         )
     }
     #[test]
-    fn disjunctive_split_covers_every_branch_and_preserves_late_sat_context() {
+    fn original_probe_decides_only_original_query_and_preserves_context() {
         for late_sat in [false, true] {
             let (formula, context) = split_fixture(late_sat);
             let result = solve(&formula, &context, Limits::default());
             assert_eq!(result.stats.split_alternatives, 2);
-            assert_eq!(result.stats.split_completed, 2);
-            assert_eq!(result.stats.split_unsat, if late_sat { 1 } else { 2 });
+            assert_eq!(result.stats.split_completed, 0);
+            assert_eq!(result.stats.split_unsat, 0);
+            assert_eq!(result.stats.probe_result, Some(result.verdict));
             assert_eq!(
                 result.verdict,
                 if late_sat {
@@ -1467,9 +1662,17 @@ mod tests {
     }
     #[test]
     fn split_budgets_are_whole_query_not_per_branch() {
-        let (formula, context) = split_fixture(false);
+        let choices = node(
+            Sort::Bool,
+            "or",
+            vec![var("a".into(), Sort::Bool), var("b".into(), Sort::Bool)],
+        );
+        let formula = and(choices, pigeonhole(8, 7));
+        let context = Env::new();
         let full = solve(&formula, &context, Limits::default());
         assert_eq!(full.verdict, Verdict::Unsat);
+        assert!(full.stats.search_yields > 0);
+        assert_eq!(full.stats.split_completed, full.stats.split_alternatives);
         assert!(full.stats.clauses > 2 * full.stats.base_clauses);
         for limits in [
             Limits {
