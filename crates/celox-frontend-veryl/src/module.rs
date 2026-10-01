@@ -814,6 +814,56 @@ impl<'a> ModuleParser<'a> {
         inst_ids: &'a [ModuleId],
         external_modules: &'a HashMap<ModuleId, ExternalModule>,
     ) -> Result<Self, ParserError> {
+        // Dynamic reads of constant arrays use ordinary state loads. Unlike
+        // static reads, they cannot be folded to an immediate, so retain the
+        // declared elements in the initial state instead of leaving zero/X.
+        let mut initial_memory_values = Vec::new();
+        for (&id, var) in &module.variables {
+            if var.kind != veryl_analyzer::ir::VarKind::Const || var.r#type.array.dims() == 0 {
+                continue;
+            }
+            let elements = var.r#type.total_array().ok_or_else(|| {
+                ParserError::illegal_context(
+                    "constant array",
+                    "unresolved array shape",
+                    Some(&var.token),
+                )
+            })?;
+            let width = resolve_total_width(module, var)?;
+            let element_width = width / elements.max(1);
+            let mut writes = Vec::new();
+            for index in 0..elements {
+                let value = var
+                    .value
+                    .get(index)
+                    .or_else(|| (var.value.len() == 1).then(|| &var.value[0]))
+                    .ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "constant array",
+                            "missing initial element",
+                            Some(&var.token),
+                        )
+                    })?;
+                let mask = value.mask_xz().into_owned();
+                let payload = value.payload().into_owned() ^ &mask;
+                let (payload, mask) = if var.r#type.is_2state() {
+                    let defined = ((BigUint::from(1u8) << element_width) - 1u8) ^ &mask;
+                    (payload & defined, BigUint::from(0u8))
+                } else {
+                    (payload, mask)
+                };
+                writes.push(InitialMemoryWriteRun {
+                    bit_offset: index * element_width,
+                    bit_width: element_width,
+                    value_bytes: payload.to_bytes_le(),
+                    mask_bytes: mask.to_bytes_le(),
+                });
+            }
+            initial_memory_values.push(ModuleInitialMemoryValue {
+                address: id,
+                data: InitialMemoryData::Writes(writes),
+            });
+        }
         Ok(Self {
             module,
             inst_ids,
@@ -825,7 +875,7 @@ impl<'a> ModuleParser<'a> {
             comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
-            initial_memory_values: Vec::new(),
+            initial_memory_values,
             ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),

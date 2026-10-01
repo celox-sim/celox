@@ -1,6 +1,7 @@
 use crate::HashMap;
 use crate::{
-    BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, UnaryOp,
+    BasicBlock, BinaryOp, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator,
+    SIRValue, UnaryOp,
 };
 
 #[derive(Clone)]
@@ -147,12 +148,61 @@ impl<Addr> SIRBuilder<Addr> {
     pub fn current_block(&self) -> BlockId {
         self.current_block_id.expect("No active block")
     }
-    pub fn emit(&mut self, inst: SIRInstruction<Addr>) {
+    pub fn emit(&mut self, mut inst: SIRInstruction<Addr>) {
+        if let SIRInstruction::Binary(dst, lhs, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar, rhs) =
+            &mut inst
+            && self.register(rhs).width() > 64
+        {
+            let bound = self.register(lhs).width().max(self.register(dst).width());
+            *rhs = self.normalize_shift_amount(*rhs, bound);
+        }
         self.blocks
             .get_mut(&self.current_block())
             .unwrap()
             .instructions
             .push(inst);
+    }
+
+    /// Backend shift instructions consume one count word. Saturate rather than
+    /// discard higher words: IEEE 1800-2023 11.4.10 treats the entire count as
+    /// unsigned. Counts at least as large as both operand/result widths have
+    /// identical overshift behavior, so clamp them to that representable bound.
+    fn normalize_shift_amount(&mut self, count: RegisterId, bound: usize) -> RegisterId {
+        let width = self.register(&count).width();
+        let limit = self.alloc_bit(width, false);
+        self.emit(SIRInstruction::Imm(limit, SIRValue::new(bound as u64)));
+        let too_large = self.alloc_logic(1);
+        self.emit(SIRInstruction::Binary(
+            too_large,
+            count,
+            BinaryOp::GtU,
+            limit,
+        ));
+        let low = self.alloc_logic(64);
+        self.emit(SIRInstruction::Slice(low, count, 0, 64));
+        let saturated = self.alloc_bit(64, false);
+        self.emit(SIRInstruction::Imm(saturated, SIRValue::new(bound as u64)));
+        let result = self.alloc_logic(64);
+        self.emit(SIRInstruction::Mux(result, too_large, saturated, low));
+
+        if matches!(self.register(&count), RegisterType::Logic { .. }) {
+            // Unknown bits in any count word require an unknown shift result.
+            // A comparison with itself is 1 for a known count and X otherwise.
+            // Merging the saturated result with all-X preserves that requirement,
+            // even if its low word is already the saturation value.
+            let known = self.alloc_logic(1);
+            self.emit(SIRInstruction::Binary(known, count, BinaryOp::Eq, count));
+            let unknown = self.alloc_logic(64);
+            self.emit(SIRInstruction::Imm(
+                unknown,
+                SIRValue::new_four_state(u64::MAX, u64::MAX),
+            ));
+            let checked = self.alloc_logic(64);
+            self.emit(SIRInstruction::Mux(checked, known, result, unknown));
+            checked
+        } else {
+            result
+        }
     }
 
     /// Returns the total number of blocks currently in this builder.

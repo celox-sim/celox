@@ -2,7 +2,7 @@
 
 The earlier full run used Veryl 0.21.0, Verilator 5.052, and Icarus Verilog
 13.0 on x86_64 Linux on 2026-09-26; the incremental refresh is described below.
-The current corpus has **662 cases: 654 simulation cases
+The current corpus has **664 cases: 656 simulation cases
 and 8 compilation-rejection cases**. The original 646-case reports remain in
 [verification/baseline](verification/baseline/README.md).
 The [expectation review](MISMATCH_REVIEW.md) records the specification clauses,
@@ -12,21 +12,21 @@ and both JSON reports are retained in the crate.
 
 | Outcome | Verilator | Icarus |
 | --- | ---: | ---: |
-| Simulation assertions passed | 470 | 468 |
+| Simulation assertions passed | 470 | 469 |
 | Expected compilation rejection | 1 | 8 |
 | Invalid design unexpectedly accepted | 0 | 0 |
 | Assertion disagreement | 0 | 0 |
 | Reviewed discrepancy / limitation ignored | 81 | 184 |
 | Veryl emission blocked | 0 | 0 |
-| SystemVerilog compilation blocked | 0 | 2 |
+| SystemVerilog compilation blocked | 0 | 3 |
 | Execution error / unrepresentable result | 0 | 0 |
-| Unsupported four-state design | 110 | 0 |
-| Total | 662 | 662 |
+| Unsupported four-state design | 112 | 0 |
+| Total | 664 | 664 |
 
-362 simulation cases pass both tools and 576 pass at least one. This does not
+362 simulation cases pass both tools and 577 pass at least one. This does not
 certify portability: a pass in one tool can coexist with a disagreement in the
-other. Icarus validates 102 of the 110 four-state cases that Verilator cannot
-execute; the remaining eight have five emission and three compilation errors.
+other. Icarus validates 103 of the 112 four-state cases that Verilator cannot
+execute; the remaining nine have five emission and four compilation errors.
 
 On 2026-09-27, `operators::test_ff_comb_constant_folding_consistency` and the
 new `operators::test_ff_constant_two_state_initialization` were run with both
@@ -61,6 +61,16 @@ unpacked array parameters (`veryl_regressions::nested_array_index_const_array`).
 No assertion disagreement was observed. These new compiler failures are not
 excluded: the Icarus runner exits nonzero for them, including on a full run.
 Both reports preserve the diagnostics and the earlier refresh metadata.
+
+The stacked Celox fix adds two four-state cases for wide shift-count X/Z
+handling and constant-array initialization in combinational and clocked reads.
+The ten-case upstream regression group was rerun on 2026-09-30. Verilator
+passed all eight two-state cases and reported both four-state cases unsupported.
+Icarus passed eight cases, including the new wide-count assertions; its two
+constant-array cases retain compilation blockers. Together with the earlier
+`inside` case, three Icarus compiler failures remain unexcluded. Original
+expectations were unchanged, and the correctness-related Celox ignores were
+removed after its repaired backends passed.
 
 ## Corrections since the baseline
 

@@ -4421,7 +4421,22 @@ fn compile_store(
                     } else {
                         // Source is 2-state, clear mask
                         let mask_store_offset = base_offset + var_byte_size + byte_off;
-                        compile_store_zero(mask_store_offset, effective_width, instrs);
+                        let zero = locals.alloc(1);
+                        instrs.push(Instruction::I64Const(0));
+                        instrs.push(Instruction::LocalSet(zero));
+                        let zero = RegLocal {
+                            value_idx: zero,
+                            num_chunks: 1,
+                            mask_idx: None,
+                        };
+                        compile_store_at_offset(
+                            &zero,
+                            mask_store_offset,
+                            bit_shift,
+                            effective_width,
+                            locals,
+                            instrs,
+                        );
                     }
                 }
             }
@@ -4680,6 +4695,31 @@ fn compile_store_at_offset(
         for c in 0..num_chunks {
             let remaining_bytes = (store_bytes - c * 8).min(8);
             let src_local = (c < src.num_chunks).then_some(src.value_idx + c as u32);
+            let chunk_width = (op_width - c * 64).min(64);
+            if !chunk_width.is_multiple_of(8) {
+                // The final byte shares storage with the next packed field.
+                // Preserve its unused high bits, even for a multiword source.
+                let value_idx = src_local.unwrap_or_else(|| {
+                    let zero = locals.alloc(1);
+                    instrs.push(Instruction::I64Const(0));
+                    instrs.push(Instruction::LocalSet(zero));
+                    zero
+                });
+                let tail = RegLocal {
+                    value_idx,
+                    num_chunks: 1,
+                    mask_idx: None,
+                };
+                emit_partial_store_small(
+                    &tail,
+                    byte_offset + c * 8,
+                    0,
+                    chunk_width,
+                    locals,
+                    instrs,
+                );
+                continue;
+            }
             let mut written = 0usize;
             while written < remaining_bytes {
                 let left = remaining_bytes - written;
@@ -4806,21 +4846,6 @@ fn emit_partial_store_small(
     instrs.push(Instruction::I64Or);
     instrs.push(Instruction::LocalSet(tmp));
     emit_store_small_word(byte_offset, affected_bytes, tmp, instrs);
-}
-
-fn compile_store_zero(byte_offset: usize, op_width: usize, instrs: &mut Vec<Instruction<'static>>) {
-    let store_bytes = get_byte_size(op_width);
-    let num_chunks = store_bytes.div_ceil(8);
-    for c in 0..num_chunks {
-        let off = byte_offset + c * 8;
-        instrs.push(Instruction::I32Const(off as i32));
-        instrs.push(Instruction::I64Const(0));
-        instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
-    }
 }
 
 fn compile_store_dynamic(
@@ -6157,13 +6182,30 @@ mod bit_count_tests {
         // OptimizeBlocks coalesces four 15-bit array elements into a 60-bit store
         // at bit 15; a u64 read-modify-write loses its final three bits.
         for four_state in [false, true] {
-            for (offset, width) in [(0, 64), (1, 63), (1, 64), (7, 58), (7, 64), (15, 60)] {
-                for packed_elements in [false, true] {
+            for (offset, width) in [
+                (0, 64),
+                (1, 63),
+                (1, 64),
+                (7, 58),
+                (7, 64),
+                (15, 60),
+                (0, 65),
+                (0, 98),
+                (0, 127),
+                (8, 98),
+            ] {
+                for (packed_elements, source_logic) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
                     let initial = 0xa55a_3cc3_f00f_6996_9669_0ff0_c33c_5aa5u128;
                     let initial_mask = 0x0ff0_9669_5aa5_c33c_3cc3_a55a_6996_f00fu128;
                     let field_mask = (1u128 << width) - 1;
                     let value = 0xd9e7_b3f5_a6c8_912fu128 & field_mask;
-                    let mask = 0xa55a_9669_3cc3_f00fu128 & field_mask;
+                    let mask = if source_logic {
+                        0xa55a_9669_3cc3_f00fu128 & field_mask
+                    } else {
+                        0
+                    };
                     let destination =
                         RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address());
                     let store_offset = if packed_elements {
@@ -6210,7 +6252,17 @@ mod bit_count_tests {
                         blocks: [(BlockId(0), block)].into_iter().collect(),
                         register_map: [
                             (RegisterId(0), RegisterType::Logic { width: 128 }),
-                            (RegisterId(1), RegisterType::Logic { width }),
+                            (
+                                RegisterId(1),
+                                if source_logic {
+                                    RegisterType::Logic { width }
+                                } else {
+                                    RegisterType::Bit {
+                                        width,
+                                        signed: false,
+                                    }
+                                },
+                            ),
                         ]
                         .into_iter()
                         .collect(),

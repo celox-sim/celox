@@ -5783,6 +5783,14 @@
     },
     {
       "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::constant_arrays_initialize_comb_and_ff_reads",
+      "phase": "compile",
+      "status": "unsupported"
+    },
+    {
+      "category": "Regression",
       "detail": "",
       "expectation": "Simulation",
       "name": "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign",
@@ -5828,6 +5836,14 @@
       "name": "veryl_regressions::wide_shift_amount_out_of_range",
       "phase": "execute",
       "status": "passed"
+    },
+    {
+      "category": "Regression",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "veryl_regressions::wide_shift_count_preserves_unknowns_and_sign_fill",
+      "phase": "compile",
+      "status": "unsupported"
     },
     {
       "category": "Regression",
@@ -6319,7 +6335,7 @@
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,
-    "unsupported": 110
+    "unsupported": 112
   },
   "include_ignored": false,
   "schema_version": 2,
@@ -6345,25 +6361,42 @@
         "packed_scatter_store::packed_scatter_last_lane_does_not_touch_adjacent_storage"
       ],
       "note": "Only these newly copied storage cases were run; all other observations are retained from earlier reports."
+    },
+    {
+      "date": "2026-09-30",
+      "suite_version": "0.8.2",
+      "cases": [
+        "veryl_language::inside_outside_range_endpoints",
+        "veryl_language::packed_union_members_alias",
+        "veryl_language::parameter_expression_type_cast_widths",
+        "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign",
+        "veryl_regressions::inst_port_default_value_connected_not_folded",
+        "veryl_regressions::nested_array_index_const_array",
+        "veryl_regressions::struct_bit_field_rhs_no_spill",
+        "veryl_regressions::unary_minus_as_shift_amount",
+        "veryl_regressions::wide_shift_amount_out_of_range",
+        "veryl_regressions::wide_struct_bit_field_rhs_no_spill",
+        "veryl_regressions::wide_ternary_narrow_branch_no_spill"
+      ],
+      "note": "Only these newly reconstructed upstream Veryl cases were run; all other observations are retained from earlier reports. Icarus compile failures are preserved without exclusions."
     }
   ],
   "partial_refresh": {
     "date": "2026-09-30",
     "suite_version": "0.8.2",
     "cases": [
-      "veryl_language::inside_outside_range_endpoints",
-      "veryl_language::packed_union_members_alias",
-      "veryl_language::parameter_expression_type_cast_widths",
+      "veryl_regressions::constant_arrays_initialize_comb_and_ff_reads",
       "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign",
       "veryl_regressions::inst_port_default_value_connected_not_folded",
       "veryl_regressions::nested_array_index_const_array",
       "veryl_regressions::struct_bit_field_rhs_no_spill",
       "veryl_regressions::unary_minus_as_shift_amount",
       "veryl_regressions::wide_shift_amount_out_of_range",
+      "veryl_regressions::wide_shift_count_preserves_unknowns_and_sign_fill",
       "veryl_regressions::wide_struct_bit_field_rhs_no_spill",
       "veryl_regressions::wide_ternary_narrow_branch_no_spill"
     ],
-    "note": "Only these newly reconstructed upstream Veryl cases were run; all other observations are retained from earlier reports. Icarus compile failures are preserved without exclusions."
+    "note": "The upstream regression group was rerun after adding wide-count X/Z and constant-array initialization cases. Other observations are retained. Icarus compilation blockers remain unexcluded."
   },
   "inout_refresh": {
     "date": "2026-09-28",
