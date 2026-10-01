@@ -280,9 +280,52 @@ fn eval_const_integral_expr_preserving_mask(
             concat_integral_literals(std::iter::repeat_n(part, count))
         }
         _ => {
-            let constant: crate::ir::ConstExpr = expr_to_const(expr.clone())?.into();
+            let constant: crate::ir::ConstExpr =
+                constant_with_folded_selections(expr, const_env, parameter_types)?.into();
             typecheck::eval_const_integral_literal_with_types(&constant, const_env, parameter_types)
         }
+    }
+}
+
+// Fold only self-determined operands. Keep arithmetic nodes intact so the
+// constant evaluator can propagate expression widths across compound trees.
+fn constant_with_folded_selections(
+    expr: &Expr,
+    const_env: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<ConstExpr> {
+    let convert = |expr: &Expr| constant_with_folded_selections(expr, const_env, parameter_types);
+    match expr {
+        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
+            let literal =
+                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+            Some(ConstExpr::Literal(
+                typecheck::format_integral_literal_binary(&literal),
+            ))
+        }
+        Expr::Unary { op, expr } => Some(ConstExpr::Unary {
+            op: *op,
+            expr: Box::new(convert(expr)?),
+        }),
+        Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
+            left: Box::new(convert(left)?),
+            op: *op,
+            right: Box::new(convert(right)?),
+        }),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(ConstExpr::Mux {
+            condition: Box::new(convert(condition)?),
+            then_expr: Box::new(convert(then_expr)?),
+            else_expr: Box::new(convert(else_expr)?),
+        }),
+        Expr::Call { name, args } => Some(ConstExpr::Function {
+            name: name.clone(),
+            args: args.iter().map(convert).collect::<Option<Vec<_>>>()?,
+        }),
+        _ => expr_to_const(expr.clone()),
     }
 }
 

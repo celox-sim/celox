@@ -127,6 +127,86 @@ sv_backends! {
         }
     }
 
+    fn indexed_widths_preserve_parameter_selections(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [15:0] plus, minus, compound, cast_width, written);
+                    localparam logic [3:0] W = 4'b1010;
+                    typedef logic [3:0] nibble;
+                    assign plus = data[0 +: W[1:0]];
+                    assign minus = data[3 -: W[1:0]];
+                    assign compound = data[0 +: (W[1:0] + 1)];
+                    assign cast_width = data[0 +: nibble'(W[1:0])];
+                    always_comb begin
+                        written = data;
+                        written[4 +: W[1:0]] = '1;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("selected_widths.sv"))], "Top");
+        let data = sim.signal("data");
+        for value in [0x1234u16, 0xabcd, 0xffff] {
+            sim.modify(|io| io.set(data, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("plus")), (value & 3).into());
+            assert_eq!(sim.get(sim.signal("minus")), ((value >> 2) & 3).into());
+            assert_eq!(sim.get(sim.signal("compound")), (value & 7).into());
+            assert_eq!(sim.get(sim.signal("cast_width")), (value & 3).into());
+            assert_eq!(sim.get(sim.signal("written")), (value | 0x30).into());
+        }
+    }
+
+    fn indexed_compound_bases_fold_selected_operands(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [3:0] selected, concatenated, nested,
+                    output logic [15:0] written);
+                    localparam logic [3:0] BASE = 4'b1010;
+                    localparam logic [3:0] IDX = 4'b0010;
+                    assign nested = data[(BASE[IDX[0] +: 2] + 1) +: 4];
+                    assign selected = data[(BASE[1:0] + 1) +: 4];
+                    assign concatenated = data[({1'b0, BASE[1:0]} + 1) +: 4];
+                    assign written[(BASE[1:0] + 1) +: 4] = 4'hf;
+                    assign written[2:0] = data[2:0];
+                    assign written[15:7] = data[15:7];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("compound_bases.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("selected")), 6u8.into());
+        assert_eq!(sim.get(sim.signal("concatenated")), 6u8.into());
+        assert_eq!(sim.get(sim.signal("nested")), 6u8.into());
+        assert_eq!(sim.get(sim.signal("written")), 0x127cu16.into());
+    }
+
+    fn indexed_constants_respect_declared_parameter_indices(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [3:0] down, up,
+                    output logic [15:0] selected_width, written);
+                    localparam logic [7:4] BASE = 4'b0001;
+                    localparam logic [4:7] UP = 4'b0001;
+                    localparam logic [7:4] W = 4'b1010;
+                    assign down = data[BASE[4] +: 4];
+                    assign up = data[UP[7] +: 4];
+                    assign selected_width = data[BASE[4] +: W[5:4]];
+                    assign written[BASE[4] +: 4] = 4'hf;
+                    assign written[0] = data[0];
+                    assign written[15:5] = data[15:5];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("parameter_indices.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("down")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("up")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("selected_width")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("written")), 0x123eu16.into());
+    }
+
     fn indexed_select_multidimensional_packed_reads(sim) {
         @setup {
             let source = r#"
@@ -178,4 +258,22 @@ fn rejects_runtime_selected_bases() {
             .expect("selected runtime base must be rejected")
             .to_string();
     assert!(error.contains("indexed part-select"), "{error}");
+}
+
+#[test]
+fn rejects_selected_widths_that_are_nonpositive() {
+    for width in ["W[0]", "W[1:0] - 2", "int'(W[1:0]) - 3"] {
+        let source = format!(
+            "module Top(input logic [15:0] data, output logic [15:0] y); localparam logic [3:0] W = 4'b1010; assign y = data[0 +: ({width})]; endmodule"
+        );
+        let error = Simulator::from_sv_sources(
+            vec![(&source, Path::new("invalid_selected_width.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .err()
+        .expect("selected width must be positive")
+        .to_string();
+        assert!(error.contains("indexed part-select"), "{error}");
+    }
 }

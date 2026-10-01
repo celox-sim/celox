@@ -858,3 +858,22 @@ impl Drop for ActiveFunctionReturnMetadataGuard {
         });
     }
 }
+
+pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
+    parameters
+        .iter()
+        .filter(|parameter| !parameter.packed_ranges.is_empty())
+        .map(|parameter| {
+            (
+                parameter.name.clone(),
+                VariableDimensions {
+                    packed: function_packed_dimension_widths(&parameter.packed_ranges),
+                    unpacked: Vec::new(),
+                    signed: parameter.declared_signed.unwrap_or(false),
+                    is_2state: parameter.declared_is_2state,
+                    members: Vec::new(),
+                },
+            )
+        })
+        .collect()
+}

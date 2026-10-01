@@ -86,10 +86,10 @@ use declarations::{
 use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,
     function_param_packed_dimensions, insert_parameter_type_markers, local_parameter_marker,
-    packed_dimensions_from_ports_and_signals, parameter_marker, parameter_signed_marker,
-    parameter_types_from_const_env, parameter_width_marker, size_system_function_expr_type,
-    unpacked_dimension_widths, variable_bits_marker, variable_signed_marker,
-    variable_size_function_width, variable_size_marker,
+    packed_dimensions_from_ports_and_signals, parameter_marker, parameter_packed_dimensions,
+    parameter_signed_marker, parameter_types_from_const_env, parameter_width_marker,
+    size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
+    variable_signed_marker, variable_size_function_width, variable_size_marker,
 };
 use expressions::{
     expr_from_expression, expr_from_expression_with_types, expr_from_function_subroutine_call,
@@ -362,6 +362,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &type_aliases,
+            &parameter_packed_dimensions(&parameters),
         ) {
             Ok(()) => {}
             // A parameter initializer may inspect a port or signal type
@@ -413,6 +414,7 @@ impl Module {
                     syntax_tree,
                     &const_env,
                     &type_aliases,
+                    &parameter_packed_dimensions(&parameters),
                 )?;
             }
             Err(error) => return Err(error),
@@ -459,20 +461,7 @@ impl Module {
         packed_dimensions
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
-        for parameter in &parameters {
-            if !parameter.packed_ranges.is_empty() {
-                packed_dimensions.insert(
-                    parameter.name.clone(),
-                    VariableDimensions {
-                        packed: function_packed_dimension_widths(&parameter.packed_ranges),
-                        unpacked: Vec::new(),
-                        signed: parameter.declared_signed.unwrap_or(false),
-                        is_2state: parameter.declared_is_2state,
-                        members: Vec::new(),
-                    },
-                );
-            }
-        }
+        packed_dimensions.extend(parameter_packed_dimensions(&parameters));
         let mut instances =
             instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let mut instance_names = HashSet::default();

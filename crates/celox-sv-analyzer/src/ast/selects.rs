@@ -257,10 +257,18 @@ pub(super) fn lvalue_from_constant_select(
     let indices = bit_selects
         .iter()
         .map(|bit_select| {
-            const_expr_from_ref_node(
-                RefNode::ConstantExpression(&bit_select.nodes.1),
-                syntax_tree,
-            )
+            if packed_dimensions.constant_indexed_base {
+                indexed_select_base(
+                    RefNode::ConstantExpression(&bit_select.nodes.1),
+                    syntax_tree,
+                    packed_dimensions,
+                )
+            } else {
+                const_expr_from_ref_node(
+                    RefNode::ConstantExpression(&bit_select.nodes.1),
+                    syntax_tree,
+                )
+            }
         })
         .collect::<Option<Vec<_>>>()?;
     // Struct members cannot use the raw-vector fallback: an invalid index
@@ -272,11 +280,21 @@ pub(super) fn lvalue_from_constant_select(
     }
 
     if let Some(range) = &select.nodes.2 {
+        let bound = |expression| {
+            if packed_dimensions.constant_indexed_base {
+                indexed_select_base(
+                    RefNode::ConstantExpression(expression),
+                    syntax_tree,
+                    packed_dimensions,
+                )
+            } else {
+                const_expr_from_ref_node(RefNode::ConstantExpression(expression), syntax_tree)
+            }
+        };
         let (mut msb, mut lsb) = match &range.nodes.1 {
-            sv_parser::ConstantPartSelectRange::ConstantRange(range) => (
-                const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?,
-                const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?,
-            ),
+            sv_parser::ConstantPartSelectRange::ConstantRange(range) => {
+                (bound(&range.nodes.0)?, bound(&range.nodes.2)?)
+            }
             sv_parser::ConstantPartSelectRange::ConstantIndexedRange(range) => {
                 indexed_select_bounds(
                     indexed_select_base(
@@ -407,7 +425,17 @@ pub(super) fn expr_select_from_select(
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
         .iter()
-        .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
+        .map(|bit_select| {
+            if packed_dimensions.constant_indexed_base {
+                indexed_select_base(
+                    RefNode::Expression(&bit_select.nodes.1),
+                    syntax_tree,
+                    packed_dimensions,
+                )
+            } else {
+                const_expr_from_expr(&bit_select.nodes.1, syntax_tree)
+            }
+        })
         .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
         let name = if let Expr::Ident(name) = &base {
@@ -1128,21 +1156,26 @@ pub(super) fn part_select_bounds(
     index_count: usize,
     dimensions: &PackedDimensions,
 ) -> Option<(ConstExpr, ConstExpr)> {
+    let bound = |expression| {
+        if dimensions.constant_indexed_base {
+            indexed_select_base(
+                RefNode::ConstantExpression(expression),
+                syntax_tree,
+                dimensions,
+            )
+        } else {
+            const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(expression),
+                syntax_tree,
+                &dimensions.const_env,
+                &dimensions.type_aliases,
+            )
+        }
+    };
     match range {
-        sv_parser::PartSelectRange::ConstantRange(range) => Some((
-            const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(&range.nodes.0),
-                syntax_tree,
-                &dimensions.const_env,
-                &dimensions.type_aliases,
-            )?,
-            const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(&range.nodes.2),
-                syntax_tree,
-                &dimensions.const_env,
-                &dimensions.type_aliases,
-            )?,
-        )),
+        sv_parser::PartSelectRange::ConstantRange(range) => {
+            Some((bound(&range.nodes.0)?, bound(&range.nodes.2)?))
+        }
         sv_parser::PartSelectRange::IndexedRange(range) => indexed_select_bounds(
             indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?,
             &range.nodes.1,
@@ -1163,12 +1196,7 @@ fn indexed_select_bounds(
     dimensions: &PackedDimensions,
 ) -> Option<(ConstExpr, ConstExpr)> {
     let (name, index_count) = selection;
-    let width = const_expr_from_ref_node_with_env(
-        RefNode::ConstantExpression(width),
-        syntax_tree,
-        &dimensions.const_env,
-        &dimensions.type_aliases,
-    )?;
+    let width = indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)?;
     let width = eval_ast_const_expr(&width, &dimensions.const_env)?;
     if width <= 0 {
         return None;
@@ -1210,10 +1238,10 @@ pub(super) fn indexed_select_base(
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Option<ConstExpr> {
+    let mut dimensions = dimensions.clone();
+    dimensions.constant_indexed_base = true;
     match base {
         RefNode::Expression(base) => {
-            let mut dimensions = dimensions.clone();
-            dimensions.constant_indexed_base = true;
             let expression = expr_from_expression_with_types(base, syntax_tree, &dimensions)?;
             let expression = simplify_constant_mux_conditions(expression, &dimensions.const_env);
             expr_to_const(fold_const_integral_expr_preserving_mask(
@@ -1222,24 +1250,122 @@ pub(super) fn indexed_select_base(
             ))
         }
         RefNode::ConstantExpression(base) => {
-            // The constant parser supports a single bit selection. Reject other
-            // selected forms rather than falling back to the whole parameter.
-            if RefNode::ConstantExpression(base).into_iter().any(|node| {
-                let RefNode::ConstantPrimaryPsParameter(parameter) = node else {
-                    return false;
-                };
-                let select = &parameter.nodes.1;
-                select.nodes.2.is_some() || select.nodes.1.nodes.0.len() > 1
-            }) {
-                return None;
-            }
-            const_expr_from_ref_node_with_env(
+            let expression = indexed_constant_expression(
                 RefNode::ConstantExpression(base),
+                syntax_tree,
+                &dimensions,
+            )?;
+            expr_to_const(fold_const_integral_expr_preserving_mask(
+                expression,
+                &dimensions.const_env,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn indexed_constant_expression(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let convert = |node| indexed_constant_expression(node, syntax_tree, dimensions);
+    match node {
+        RefNode::ConstantExpression(expression) => match expression {
+            sv_parser::ConstantExpression::ConstantPrimary(primary) => {
+                convert(RefNode::ConstantPrimary(primary))
+            }
+            sv_parser::ConstantExpression::Unary(unary) => unary_expr_from_symbol(
+                &unary.nodes.0.nodes.0.nodes.0,
+                convert(RefNode::ConstantPrimary(&unary.nodes.2))?,
+                syntax_tree,
+            ),
+            sv_parser::ConstantExpression::Binary(binary) => {
+                let grouped = matches!(&binary.nodes.3, sv_parser::ConstantExpression::ConstantPrimary(primary)
+                    if matches!(&**primary, sv_parser::ConstantPrimary::MintypmaxExpression(_)));
+                let expression = Expr::Binary {
+                    left: Box::new(convert(RefNode::ConstantExpression(&binary.nodes.0))?),
+                    op: binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?,
+                    right: Box::new(convert(RefNode::ConstantExpression(&binary.nodes.3))?),
+                };
+                Some(if grouped {
+                    expression
+                } else {
+                    left_associate_expr_binary(expression)
+                })
+            }
+            sv_parser::ConstantExpression::Ternary(ternary) => Some(Expr::Mux {
+                condition: Box::new(convert(RefNode::ConstantExpression(&ternary.nodes.0))?),
+                then_expr: Box::new(convert(RefNode::ConstantExpression(&ternary.nodes.3))?),
+                else_expr: Box::new(convert(RefNode::ConstantExpression(&ternary.nodes.5))?),
+            }),
+            _ => None,
+        },
+        RefNode::ConstantPrimary(primary) => match primary {
+            sv_parser::ConstantPrimary::PsParameter(parameter) => {
+                // Preserve all selections and normalize against declared ranges.
+                if parameter.nodes.1.nodes.0.is_some() {
+                    return None;
+                }
+                let name = identifier_text(
+                    RefNode::PsParameterIdentifier(&parameter.nodes.0),
+                    syntax_tree,
+                )?;
+                let selected = lvalue_from_constant_select(
+                    name,
+                    &parameter.nodes.1,
+                    syntax_tree,
+                    dimensions,
+                    false,
+                )?;
+                Some(expr_from_lvalue(&selected, dimensions))
+            }
+            sv_parser::ConstantPrimary::MintypmaxExpression(grouped) => {
+                match &grouped.nodes.0.nodes.1 {
+                    sv_parser::ConstantMintypmaxExpression::Unary(expression) => {
+                        convert(RefNode::ConstantExpression(expression))
+                    }
+                    _ => None,
+                }
+            }
+            sv_parser::ConstantPrimary::ConstantCast(cast) => {
+                let operand = indexed_select_base(
+                    RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
+                    syntax_tree,
+                    dimensions,
+                )?;
+                casts::cast_constant_operand(
+                    operand,
+                    &cast.nodes.0,
+                    syntax_tree,
+                    &dimensions.const_env,
+                    &dimensions.type_aliases,
+                )
+                .map(const_expr_to_expr)
+            }
+            sv_parser::ConstantPrimary::Concatenation(concat) if concat.nodes.1.is_none() => {
+                Some(Expr::Concat(
+                    concat
+                        .nodes
+                        .0
+                        .nodes
+                        .0
+                        .nodes
+                        .1
+                        .contents()
+                        .into_iter()
+                        .map(|expression| convert(RefNode::ConstantExpression(expression)))
+                        .collect::<Option<Vec<_>>>()?,
+                ))
+            }
+            _ => const_expr_from_ref_node_with_env(
+                node,
                 syntax_tree,
                 &dimensions.const_env,
                 &dimensions.type_aliases,
             )
-        }
+            .map(const_expr_to_expr),
+        },
         _ => None,
     }
 }

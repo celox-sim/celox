@@ -148,7 +148,7 @@ pub(super) fn runtime_constant_cast_const_expr(
     )
 }
 
-fn cast_constant_operand(
+pub(super) fn cast_constant_operand(
     operand: ConstExpr,
     casting_type: &sv_parser::CastingType,
     syntax_tree: &SyntaxTree,
