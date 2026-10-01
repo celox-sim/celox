@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod control;
+
 type Lit = i32;
 const TRUE: Lit = 1;
 const FALSE: Lit = -1;
@@ -70,6 +72,7 @@ impl SearchHint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchStrategy {
     NotStarted,
+    ControlCofactors,
     SingleSearch,
     ProofDecomposition,
     CounterexampleProbeFair,
@@ -78,6 +81,7 @@ impl SearchStrategy {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NotStarted => "not_started",
+            Self::ControlCofactors => "control_cofactors",
             Self::SingleSearch => "single_search",
             Self::ProofDecomposition => "proof_decomposition",
             Self::CounterexampleProbeFair => "counterexample_probe_fair",
@@ -123,6 +127,12 @@ impl Scalar {
 }
 #[derive(Default, Clone, Debug)]
 pub struct Stats {
+    pub control_variables: Vec<String>,
+    pub control_cases: usize,
+    pub control_cases_closed: usize,
+    pub control_case_work: Vec<u64>,
+    pub control_preprocess_work: u64,
+    pub asserted_definitions: usize,
     pub base_cnf_reused: bool,
     pub terms: usize,
     pub variables: usize,
@@ -154,14 +164,14 @@ pub struct Outcome {
 impl Outcome {
     pub fn diagnostics(&self) -> Value {
         json!({"solver_result":self.verdict.as_str(),"reason":self.reason,
-            "search_hint":self.search_hint.as_str(),"search_strategy":self.search_strategy.as_str(),
+            "control_variables":self.stats.control_variables,"control_cases":self.stats.control_cases,"control_cases_closed":self.stats.control_cases_closed,"control_case_work":self.stats.control_case_work,"control_preprocess_work":self.stats.control_preprocess_work,"search_hint":self.search_hint.as_str(),"search_strategy":self.search_strategy.as_str(),
             "kind":"bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
             "trusted":"Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
             "original_formula_validated":self.original_formula_validated,
             "assignments":self.assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "context_values":self.context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "terms":self.stats.terms,"variables":self.stats.variables,"clauses":self.stats.clauses,
-            "base_cnf_reused":self.stats.base_cnf_reused,"base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
+            "asserted_definitions":self.stats.asserted_definitions,"base_cnf_reused":self.stats.base_cnf_reused,"base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
             "split_alternatives":self.stats.split_alternatives,"split_completed":self.stats.split_completed,
             "split_unsat":self.stats.split_unsat,
             "probe_result":self.stats.probe_result.map(Verdict::as_str),"probe_work":self.stats.probe_work,
@@ -373,6 +383,7 @@ struct Bits {
 /// Union-by-size bounds lookup depth; every traversal is charged to the budget.
 #[derive(Default)]
 struct Aliases {
+    definitions: HashMap<String, Term>,
     ids: HashMap<String, usize>,
     names: Vec<String>,
     parents: Vec<usize>,
@@ -420,6 +431,7 @@ impl Aliases {
         }
     }
     fn collect(&mut self, formula: &Term, b: &mut Budget) -> Res<()> {
+        let mut candidates = Vec::new();
         let mut pending = vec![(formula, 0usize)];
         let mut seen = HashSet::new();
         while let Some((term, depth)) = pending.pop() {
@@ -438,14 +450,55 @@ impl Aliases {
                     pending.push((&term.0.args[1], depth + 1));
                     pending.push((&term.0.args[0], depth + 1));
                 }
-                Op::Eq => {
-                    if let (Op::Variable(x), Op::Variable(y)) =
-                        (operation(&term.0.args[0])?, operation(&term.0.args[1])?)
-                    {
-                        self.join(x, y, b)?;
+                Op::Eq => match (operation(&term.0.args[0])?, operation(&term.0.args[1])?) {
+                    (Op::Variable(x), Op::Variable(y)) => self.join(x, y, b)?,
+                    (Op::Variable(x), _) => candidates.push((x, term.0.args[1].clone())),
+                    (_, Op::Variable(y)) => candidates.push((y, term.0.args[0].clone())),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        // Optimize only asserted equalities; disjunctions/implications never
+        // introduce definitions. Union-find is complete before cycle checks.
+        for (name, rhs) in candidates {
+            if self.definitions.len() >= 64 {
+                break;
+            }
+            let name = self.representative(&name, b)?;
+            if self.definitions.contains_key(&name) {
+                continue;
+            }
+            let mut todo = vec![(rhs.clone(), 0usize)];
+            let mut visited = HashSet::new();
+            let mut occurs = false;
+            while let Some((term, depth)) = todo.pop() {
+                b.tick(1)?;
+                if depth > b.limits.max_depth {
+                    return Err("finite definition depth budget exhausted".into());
+                }
+                if !visited.insert(term.clone()) {
+                    continue;
+                }
+                if visited.len() > b.limits.max_terms {
+                    return Err("finite definition term budget exhausted".into());
+                }
+                if let Op::Variable(variable) = operation(&term)? {
+                    let representative = self.representative(&variable, b)?;
+                    if representative == name {
+                        occurs = true;
+                        break;
+                    }
+                    if let Some(definition) = self.definitions.get(&representative) {
+                        todo.push((definition.clone(), depth + 1));
                     }
                 }
-                _ => {}
+                for argument in &term.0.args {
+                    todo.push((argument.clone(), depth + 1));
+                }
+            }
+            if !occurs {
+                self.definitions.insert(name, rhs);
             }
         }
         Ok(())
@@ -650,6 +703,15 @@ impl Blast {
                         return Err(format!("finite variable {n} has inconsistent sorts"));
                     }
                     v.clone()
+                } else if let Some(definition) =
+                    self.aliases.definitions.get(&representative).cloned()
+                {
+                    let value = self.term(&definition, b, depth + 1)?;
+                    if value.sort != t.0.sort {
+                        return Err(format!("finite definition {n} has inconsistent sorts"));
+                    }
+                    self.inputs.insert(representative, value.clone());
+                    value
                 } else {
                     let value = Bits {
                         sort: t.0.sort.clone(),
@@ -1325,6 +1387,13 @@ pub fn solve_with_hint(
     limits: Limits,
     search_hint: SearchHint,
 ) -> Outcome {
+    if search_hint == SearchHint::Unsat {
+        control::route(formula, context, limits, search_hint)
+    } else {
+        solve_plain(formula, context, limits, search_hint)
+    }
+}
+fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: SearchHint) -> Outcome {
     let mut outcome = Outcome {
         search_hint,
         search_strategy: SearchStrategy::NotStarted,
@@ -1358,6 +1427,7 @@ pub fn solve_with_hint(
         blast.clause(vec![root.bits[0]], &mut budget)?;
         Ok(())
     })();
+    outcome.stats.asserted_definitions = blast.aliases.definitions.len();
     outcome.stats.terms = blast.memo.len();
     outcome.stats.variables = blast.vars;
     outcome.stats.clauses = blast.clauses.len();
@@ -1876,6 +1946,40 @@ mod tests {
             }
         }
         assert!(reused > 100);
+    }
+    #[test]
+    fn asserted_expression_definitions_are_acyclic_and_restore_original_words() {
+        let x = var("x".into(), Sort::Bv(3));
+        let y = var("y".into(), Sort::Bv(3));
+        let plus = node(Sort::Bv(3), "bvadd", vec![y.clone(), bv(3, 1)]);
+        let formula = and(eq(x.clone(), plus.clone()), eq(y.clone(), bv(3, 7)));
+        let result = solve(&formula, &Env::new(), Limits::default());
+        assert_eq!(result.verdict, Verdict::Sat);
+        assert!(result.original_formula_validated);
+        assert_eq!(result.assignments["x"], Scalar::Bv { width: 3, value: 0 });
+        assert!(result.stats.asserted_definitions > 0);
+        let cycle = and(eq(x.clone(), plus), eq(y.clone(), x.clone()));
+        assert_eq!(
+            solve(&cycle, &Env::new(), Limits::default()).verdict,
+            Verdict::Unsat
+        );
+        let neg = |v| node(Sort::Bv(3), "bvnot", vec![v]);
+        let mutual = and(eq(x.clone(), neg(y.clone())), eq(y.clone(), neg(x.clone())));
+        let result = solve(&mutual, &Env::new(), Limits::default());
+        assert_eq!(result.verdict, Verdict::Sat);
+        assert!(result.original_formula_validated);
+        let conditional = and(
+            node(
+                Sort::Bool,
+                "or",
+                vec![eq(x.clone(), bv(3, 0)), eq(x.clone(), bv(3, 1))],
+            ),
+            eq(x, bv(3, 1)),
+        );
+        assert_eq!(
+            solve(&conditional, &Env::new(), Limits::default()).verdict,
+            Verdict::Sat
+        );
     }
     #[test]
     fn expected_result_is_only_a_hint_for_both_actual_verdicts() {

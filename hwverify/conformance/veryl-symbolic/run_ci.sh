@@ -46,4 +46,5 @@ cargo test --release --locked -p hwverify-sir -p hwverify-solver
 python3 -m unittest discover -s "$HERE/tests" -v
 python3 "$HERE/run.py" --out "$OUT/cases" --frontend "$FRONTEND" --lifter "$REPO/target/release/hwverify-sir-lift"
 python3 "$REPO/audit/veryl_scaling/measure.py" --out "$OUT/scaling-regression" --sizes 16 32 64 --require-success
+python3 "$REPO/audit/veryl_scaling/cpu_capacity.py" --out "$OUT/cpu-capacity-regression" --sizes 8 --faults no_flush wrong_target no_forward no_interlock wrong_add missing_reset --require-success
 test ! -e "$Z3_TRIPWIRE_MARKER"

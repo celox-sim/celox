@@ -55,19 +55,24 @@ def source(n,axis='both'):
     return s
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--out',type=pathlib.Path,required=True);p.add_argument('--axis',choices=['both','rom','data'],default='both');p.add_argument('--sizes',type=int,nargs='+',default=[4,8,16]);args=p.parse_args();args.out=args.out.resolve();args.out.mkdir(parents=True,exist_ok=False);results=[]
+    p=argparse.ArgumentParser();p.add_argument('--out',type=pathlib.Path,required=True);p.add_argument('--axis',choices=['both','rom','data'],default='both');p.add_argument('--require-success',action='store_true');p.add_argument('--faults',nargs='*',choices=list(runner.FAULTS),default=['no_flush']);p.add_argument('--sizes',type=int,nargs='+',default=[4,8,16]);args=p.parse_args();args.out=args.out.resolve();args.out.mkdir(parents=True,exist_ok=False);results=[]
     for n in args.sizes:
         if n<4 or n&(n-1):raise ValueError('power of two >=4 required')
         setup=args.out/f'setup_{n}';setup.mkdir();(setup/'pipeline.veryl.in').write_text(source(n,args.axis));runner.__file__=str(setup/'runner.py');doc=model(n,args.axis);runner.build=lambda width:copy.deepcopy(doc)
-        for fault in [None,'no_flush']:
-            out=args.out/(f'cpu_{n}'+('_bad' if fault else ''))
-            try:r=runner.run_case(32,fault,out,ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend',ROOT/'target/release/hwverify-sir-lift',ROOT/'target/release/hwverify-rs')
+        runner.FAULTS['wrong_target']=(f'if taken {{ fetch_pc = x_ir[{(n if args.axis in ("both","rom") else 4).bit_length()-2}:0]; }}',f'if taken {{ fetch_pc = x_ir[{(n if args.axis in ("both","rom") else 4).bit_length()-2}:0] + {(n if args.axis in ("both","rom") else 4).bit_length()-1}\'d1; }}')
+        for fault in [None,*args.faults]:
+            out=args.out/(f'cpu_{n}'+('_bad_'+fault if fault else ''))
+            accepted=False
+            try:
+                r=runner.run_case(32,fault,out,ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend',ROOT/'target/release/hwverify-sir-lift',ROOT/'target/release/hwverify-rs')
+                accepted=r['status']==('stuttering_refinement_verified' if fault is None else 'reset_rejected' if fault=='missing_reset' else 'counterexample')
             except RuntimeError as e:
                 report=json.load(open(out/'report.json')) if (out/'report.json').exists() else {}
                 r={'status':report.get('status','error'),'error':str(e)}
             report=json.load(open(out/'report.json')) if (out/'report.json').exists() else {}
             q=next((o for o in report.get('obligations',[]) if o['name']=='microstep_refinement'),{})
-            r.update(capacity=n,axis=args.axis,scope='actual_branch_CPU_two_GPR_fixed_DXW',mutant=bool(fault),microstep=q)
+            r.update(correct_outcome=accepted,capacity=n,axis=args.axis,scope='actual_branch_CPU_two_GPR_fixed_DXW',mutant=bool(fault),microstep=q)
             results.append(r);(args.out/'summary.json').write_text(json.dumps(results,indent=2)+'\n');print(json.dumps({k:r.get(k) for k in ['capacity','mutant','status','seconds','error']}),flush=True)
-        if any(r['status'] not in ['stuttering_refinement_verified','counterexample'] for r in results[-2:]):break
+        if any(not r['correct_outcome'] for r in results[-(len(args.faults)+1):]):break
+    if args.require_success and any(not r['correct_outcome'] for r in results):raise SystemExit('CPU capacity regression failed')
 if __name__=='__main__':main()

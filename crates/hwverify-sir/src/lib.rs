@@ -7,6 +7,8 @@ use hwverify_ir::{self as ir, Env, Lower, Res, Sort, Term};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod guard;
+
 type Addr = (u64, u64, u64);
 fn num(v: &Value) -> Res<usize> {
     v.as_u64()
@@ -453,6 +455,9 @@ struct Binding {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Statistics {
+    pub guard_nodes: usize,
+    pub guard_work: usize,
+    pub guard_aborted: bool,
     pub execution_units: usize,
     pub branches: usize,
     pub joins: usize,
@@ -713,6 +718,13 @@ pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
         let value = st.read(x.element * st.lane as usize, st.lane)?;
         next.insert(x.name.clone(), word_to_term(value, &x.sort)?);
     }
+    let mut normalizer = guard::Normalizer::new();
+    for term in next.values_mut().chain(outputs.values_mut()) {
+        *term = normalizer.normalize(term);
+    }
+    l.stats.guard_nodes = normalizer.count();
+    l.stats.guard_work = normalizer.work;
+    l.stats.guard_aborted = normalizer.aborted;
     Ok(Transition {
         next,
         outputs,
@@ -1565,7 +1577,7 @@ impl Transition {
             outputs.insert(k.clone(), export.expression(v)?);
         }
         Ok(
-            json!({"status":"symbolic_one_step_lifted_not_verified","next":next,"outputs":outputs,"wires":export.wires,"statistics":{"execution_units":self.statistics.execution_units,"branches":self.statistics.branches,"joins":self.statistics.joins,"dynamic_accesses":self.statistics.dynamic_accesses,"instructions":self.statistics.instructions},"semantics":{"outputs":"pre_edge_after_eval_comb","next":"after_selected_event_eval_apply_ffs","state":"arbitrary_selected_state","domain":"two_state","cyclic_cfg":"unsupported"}}),
+            json!({"status":"symbolic_one_step_lifted_not_verified","next":next,"outputs":outputs,"wires":export.wires,"statistics":{"guard_nodes":self.statistics.guard_nodes,"guard_work":self.statistics.guard_work,"guard_aborted":self.statistics.guard_aborted,"execution_units":self.statistics.execution_units,"branches":self.statistics.branches,"joins":self.statistics.joins,"dynamic_accesses":self.statistics.dynamic_accesses,"instructions":self.statistics.instructions},"semantics":{"outputs":"pre_edge_after_eval_comb","next":"after_selected_event_eval_apply_ffs","state":"arbitrary_selected_state","domain":"two_state","cyclic_cfg":"unsupported"}}),
         )
     }
 }
