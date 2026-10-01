@@ -275,21 +275,19 @@ fn selected_expression_first_dimension_width(
     let dimensions = packed_dimensions.get(&name)?;
     let select = &hierarchical.nodes.2;
     if let Some(range) = &select.nodes.2 {
-        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
-        };
-        let bound = |expression| {
-            let expression = const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(expression),
-                syntax_tree,
-                &packed_dimensions.const_env,
-                &packed_dimensions.type_aliases,
-            )?;
-            eval_ast_const_expr(&expression, &packed_dimensions.const_env)
-        };
-        return usize::try_from(bound(&range.nodes.0)?.abs_diff(bound(&range.nodes.2)?))
-            .ok()?
-            .checked_add(1);
+        let (msb, lsb) = part_select_bounds(
+            &range.nodes.1,
+            syntax_tree,
+            Some(&name),
+            select.nodes.1.nodes.0.len(),
+            packed_dimensions,
+        )?;
+        return usize::try_from(
+            eval_ast_const_expr(&msb, &packed_dimensions.const_env)?
+                .abs_diff(eval_ast_const_expr(&lsb, &packed_dimensions.const_env)?),
+        )
+        .ok()?
+        .checked_add(1);
     }
     // Each index removes one declared dimension. Inspect the syntax before
     // flattening, which otherwise loses the remaining array shape.

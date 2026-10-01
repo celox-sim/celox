@@ -61,12 +61,10 @@ o_data: top_out[i],
     }
 
     fn test_instance_unpacked_array_slice_input(sim) {
-        @ignore_on(sv);
         @case "hierarchy::test_instance_unpacked_array_slice_input";
     }
 
     fn test_instance_unpacked_array_slice_output(sim) {
-        @ignore_on(sv);
         @case "hierarchy::test_instance_unpacked_array_slice_output";
     }
 

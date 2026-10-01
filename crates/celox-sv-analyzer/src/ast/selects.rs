@@ -133,13 +133,13 @@ pub(super) fn lvalue_from_select(
     }
 
     if let Some(range) = &select.nodes.2 {
-        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
-        };
-        let mut msb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
-        let mut lsb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        let (mut msb, mut lsb) = part_select_bounds(
+            &range.nodes.1,
+            syntax_tree,
+            Some(&name),
+            indices.len(),
+            packed_dimensions,
+        )?;
         let (array_slice_width, array_slice_reversed) =
             unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
                 .map_or((None, false), |(width, reversed)| (Some(width), reversed));
@@ -272,13 +272,25 @@ pub(super) fn lvalue_from_constant_select(
     }
 
     if let Some(range) = &select.nodes.2 {
-        let sv_parser::ConstantPartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
+        let (mut msb, mut lsb) = match &range.nodes.1 {
+            sv_parser::ConstantPartSelectRange::ConstantRange(range) => (
+                const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?,
+                const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?,
+            ),
+            sv_parser::ConstantPartSelectRange::ConstantIndexedRange(range) => {
+                indexed_select_bounds(
+                    const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&range.nodes.0),
+                        syntax_tree,
+                    )?,
+                    &range.nodes.1,
+                    &range.nodes.2,
+                    syntax_tree,
+                    (Some(&name), indices.len()),
+                    packed_dimensions,
+                )?
+            }
         };
-        let mut msb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
-        let mut lsb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
         let (array_slice_width, array_slice_reversed) =
             unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
                 .map_or((None, false), |(width, reversed)| (Some(width), reversed));
@@ -397,13 +409,18 @@ pub(super) fn expr_select_from_select(
         .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
         .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
-        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
+        let name = if let Expr::Ident(name) = &base {
+            Some(name.as_str())
+        } else {
+            None
         };
-        let mut msb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
-        let mut lsb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        let (mut msb, mut lsb) = part_select_bounds(
+            &range.nodes.1,
+            syntax_tree,
+            name,
+            indices.len(),
+            packed_dimensions,
+        )?;
         let Expr::Ident(name) = &base else {
             return indices.is_empty().then_some(Expr::Select {
                 expr: Box::new(base),
@@ -1098,4 +1115,89 @@ fn is_zero(expr: &ConstExpr) -> bool {
 
 fn is_one(expr: &ConstExpr) -> bool {
     matches!(expr, ConstExpr::Literal(value) if value == "1")
+}
+
+// IEEE 1800-2023 11.5.1: +:/-: specify an index direction, while the
+// declaration determines which endpoint is more significant. Reuse ordinary
+// range flattening after recovering those endpoints.
+pub(super) fn part_select_bounds(
+    range: &sv_parser::PartSelectRange,
+    syntax_tree: &SyntaxTree,
+    name: Option<&str>,
+    index_count: usize,
+    dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    match range {
+        sv_parser::PartSelectRange::ConstantRange(range) => Some((
+            const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(&range.nodes.0),
+                syntax_tree,
+                &dimensions.const_env,
+                &dimensions.type_aliases,
+            )?,
+            const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(&range.nodes.2),
+                syntax_tree,
+                &dimensions.const_env,
+                &dimensions.type_aliases,
+            )?,
+        )),
+        sv_parser::PartSelectRange::IndexedRange(range) => indexed_select_bounds(
+            const_expr_from_expr(&range.nodes.0, syntax_tree)?,
+            &range.nodes.1,
+            &range.nodes.2,
+            syntax_tree,
+            (name, index_count),
+            dimensions,
+        ),
+    }
+}
+
+fn indexed_select_bounds(
+    base: ConstExpr,
+    operator: &sv_parser::Symbol,
+    width: &sv_parser::ConstantExpression,
+    syntax_tree: &SyntaxTree,
+    selection: (Option<&str>, usize),
+    dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    let (name, index_count) = selection;
+    let width = const_expr_from_ref_node_with_env(
+        RefNode::ConstantExpression(width),
+        syntax_tree,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+    )?;
+    let width = eval_ast_const_expr(&width, &dimensions.const_env)?;
+    if width <= 0 {
+        return None;
+    }
+    let ascending = name
+        .and_then(|name| dimensions.get(name))
+        .and_then(|dims| {
+            let (left, right) = if let Some(dim) = dims.unpacked.get(index_count) {
+                (&dim.left, &dim.right)
+            } else {
+                let dim = dims
+                    .packed
+                    .get(index_count.checked_sub(dims.unpacked.len())?)?;
+                (&dim.left, &dim.right)
+            };
+            Some(
+                eval_ast_const_expr(left, &dimensions.const_env)?
+                    < eval_ast_const_expr(right, &dimensions.const_env)?,
+            )
+        })
+        .unwrap_or(false);
+    let plus = syntax_tree.get_str(&operator.nodes.0)? == "+:";
+    let other = ConstExpr::Binary {
+        left: Box::new(base.clone()),
+        op: if plus { BinaryOp::Add } else { BinaryOp::Sub },
+        right: Box::new(ConstExpr::Literal((width - 1).to_string())),
+    };
+    Some(if plus == ascending {
+        (base, other)
+    } else {
+        (other, base)
+    })
 }

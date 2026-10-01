@@ -118,8 +118,8 @@ use parameters::{
     substitute_typed_parameter_literals,
 };
 use selects::{
-    add_expr, expr_select_from_select, net_lvalue_from_node, packed_index_offset, product_expr,
-    variable_lvalue_from_node,
+    add_expr, expr_select_from_select, net_lvalue_from_node, packed_index_offset,
+    part_select_bounds, product_expr, variable_lvalue_from_node,
 };
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, combine_expr_condition_terms,

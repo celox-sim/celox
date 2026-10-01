@@ -49,6 +49,8 @@ mod always_comb;
 mod generate;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
+#[path = "frontends/systemverilog/indexed_select.rs"]
+mod indexed_select;
 #[path = "frontends/systemverilog/literals.rs"]
 mod literals;
 #[path = "frontends/systemverilog/mixed.rs"]

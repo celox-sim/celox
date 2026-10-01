@@ -4064,7 +4064,6 @@ fn test_ff_function_call_chained_range_access_on_argument(sim) {
 }
 
 fn test_ff_function_call_step_access_on_nonvariable_argument(sim) {
-    @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_step_access_on_nonvariable_argument";
 }
 

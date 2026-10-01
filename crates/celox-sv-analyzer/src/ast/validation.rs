@@ -578,10 +578,19 @@ pub(super) fn reject_silently_ignored_constructs(
                     "variable declaration initializer".to_string(),
                 ));
             }
-            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => {
+            RefNode::IndexedRange(range) if
+                const_expr_from_expr(&range.nodes.0, syntax_tree)
+                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
+                || !positive_indexed_width(&range.nodes.2, syntax_tree, const_env, type_aliases) => {
                 return Err(AnalyzerError::Unsupported(
                     "indexed part-select".to_string(),
                 ));
+            }
+            RefNode::ConstantIndexedRange(range) if
+                const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)
+                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
+                || !positive_indexed_width(&range.nodes.2, syntax_tree, const_env, type_aliases) => {
+                return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
             }
             RefNode::DataTypeStructUnion(data)
                 if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
@@ -820,4 +829,20 @@ fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) ->
             )
         }),
     }
+}
+
+fn positive_indexed_width(
+    width: &sv_parser::ConstantExpression,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> bool {
+    const_expr_from_ref_node_with_env(
+        RefNode::ConstantExpression(width),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )
+    .and_then(|width| eval_ast_const_expr(&width, const_env))
+    .is_some_and(|width| width > 0)
 }

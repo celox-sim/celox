@@ -194,17 +194,8 @@ fn expr_from_primary_with_types(
             match concat.nodes.1.as_ref().map(|range| &range.nodes.1) {
                 None => Some(base),
                 Some(sv_parser::RangeExpression::PartSelectRange(range)) => {
-                    let sv_parser::PartSelectRange::ConstantRange(range) = &**range else {
-                        return None;
-                    };
-                    let msb = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&range.nodes.0),
-                        syntax_tree,
-                    )?;
-                    let lsb = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&range.nodes.2),
-                        syntax_tree,
-                    )?;
+                    let (msb, lsb) =
+                        part_select_bounds(range, syntax_tree, None, 0, packed_dimensions)?;
                     Some(Expr::Select {
                         expr: Box::new(base),
                         msb,

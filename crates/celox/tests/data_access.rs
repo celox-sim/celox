@@ -32,7 +32,6 @@ all_backends! {
     }
 
     fn test_minus_colon_and_step_execution(sim) {
-        @ignore_on(sv);
         @case "data_access::test_minus_colon_and_step_execution";
     }
 
