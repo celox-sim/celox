@@ -1002,3 +1002,251 @@ fn partial_store_round_trip(extra_read: bool, final_store: bool) -> MFunction {
     func.spill_descs[3] = SpillDesc::transient().with_state_insert(VReg(2), 0, 3);
     func
 }
+
+fn indexed_forward_load(dst: u32, alias_range: Option<MemoryAliasRange>) -> MInst {
+    MInst::LoadIndexed {
+        dst: VReg(dst),
+        base: BaseReg::SimState,
+        offset: 16,
+        index: VReg(0),
+        scale: 1,
+        size: OpSize::S64,
+        alias_range,
+    }
+}
+
+#[test]
+fn indexed_forwarding_executes_original_value_after_first_consumer() {
+    let mut func = make_func(
+        vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 8,
+            },
+            indexed_forward_load(1, MemoryAliasRange::new(16, 32)),
+            MInst::AndImm {
+                dst: VReg(3),
+                src: VReg(1),
+                imm: 0xff,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: VReg(3),
+                size: OpSize::S64,
+            },
+            indexed_forward_load(2, None),
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: VReg(2),
+                size: OpSize::S64,
+            },
+            MInst::Return,
+        ],
+        4,
+    );
+    forward_local_indexed_loads(&mut func);
+    assert!(matches!(
+        func.blocks[0].insts[4],
+        MInst::Mov {
+            dst: VReg(2),
+            src: VReg(1)
+        }
+    ));
+    let mut assignment = AssignmentMap::default();
+    for (index, register) in [PhysReg::R8, PhysReg::R9, PhysReg::R10, PhysReg::R11]
+        .into_iter()
+        .enumerate()
+    {
+        assignment.set(VReg(index as u32), register);
+    }
+    crate::native::regalloc::verify_assignment(&func, &assignment).unwrap();
+    let emitted = crate::native::emit::emit(&func, &assignment, 0).unwrap();
+    let jit = crate::native::jit_mem::JitCode::new(&emitted.code).unwrap();
+    let value = 0xdead_beef_cafe_babeu64;
+    let mut state = [0u8; 64];
+    state[24..32].copy_from_slice(&value.to_le_bytes());
+    assert_eq!(unsafe { jit.call(&mut state) }, 0);
+    assert_eq!(
+        u64::from_le_bytes(state[..8].try_into().unwrap()),
+        value & 0xff
+    );
+    assert_eq!(u64::from_le_bytes(state[8..16].try_into().unwrap()), value);
+}
+
+#[test]
+fn indexed_forwarding_invalidates_aliasing_writes_and_virtual_definitions() {
+    for (alias, barrier, expected) in [
+        (
+            MemoryAliasRange::new(16, 32),
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 24,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            false,
+        ),
+        (
+            MemoryAliasRange::new(16, 32),
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 48,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            true,
+        ),
+        (
+            None,
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 48,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            false,
+        ),
+        (
+            None,
+            MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 24,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            true,
+        ),
+        (
+            MemoryAliasRange::new(16, 32),
+            MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 48,
+                index: VReg(0),
+                src: VReg(1),
+                size: OpSize::S64,
+                alias_range: None,
+            },
+            false,
+        ),
+        (
+            None,
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0,
+            },
+            false,
+        ),
+        (
+            None,
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0,
+            },
+            false,
+        ),
+    ] {
+        let mut func = make_func(
+            vec![
+                indexed_forward_load(1, alias),
+                barrier,
+                indexed_forward_load(2, None),
+                MInst::Return,
+            ],
+            3,
+        );
+        forward_local_indexed_loads(&mut func);
+        assert_eq!(
+            matches!(func.blocks[0].insts[2], MInst::Mov { .. }),
+            expected
+        );
+    }
+}
+
+#[test]
+fn indexed_forwarding_keeps_different_addresses_and_widths() {
+    for change in 0..5 {
+        let mut second = indexed_forward_load(2, None);
+        let MInst::LoadIndexed {
+            base,
+            offset,
+            index,
+            scale,
+            size,
+            ..
+        } = &mut second
+        else {
+            unreachable!()
+        };
+        match change {
+            0 => *base = BaseReg::StackFrame,
+            1 => *offset += 1,
+            2 => *index = VReg(3),
+            3 => *scale = 8,
+            _ => *size = OpSize::S32,
+        }
+        let mut func = make_func(
+            vec![indexed_forward_load(1, None), second, MInst::Return],
+            4,
+        );
+        forward_local_indexed_loads(&mut func);
+        assert!(matches!(func.blocks[0].insts[1], MInst::LoadIndexed { .. }));
+    }
+}
+
+#[test]
+fn indexed_forwarding_limits_reuse_distance() {
+    for intervening in [31u32, 32] {
+        let mut instructions = vec![indexed_forward_load(1, None)];
+        instructions.extend((0..intervening).map(|value| MInst::LoadImm {
+            dst: VReg(value + 3),
+            value: 0,
+        }));
+        instructions.push(indexed_forward_load(2, None));
+        instructions.push(MInst::Return);
+        let mut func = make_func(instructions, intervening + 3);
+        forward_local_indexed_loads(&mut func);
+        assert_eq!(
+            matches!(
+                func.blocks[0].insts[intervening as usize + 1],
+                MInst::Mov { .. }
+            ),
+            intervening == 31
+        );
+    }
+}
+
+#[test]
+fn indexed_forwarding_does_not_carry_values_across_blocks_or_unbounded_tables() {
+    let mut instructions = vec![indexed_forward_load(1, None)];
+    for n in 0..16u32 {
+        let mut load = indexed_forward_load(n + 3, None);
+        if let MInst::LoadIndexed { offset, .. } = &mut load {
+            *offset = 32 + n as i32 * 8;
+        }
+        instructions.push(load);
+    }
+    instructions.push(indexed_forward_load(2, None));
+    instructions.push(MInst::Return);
+    let mut func = make_func(instructions, 19);
+    forward_local_indexed_loads(&mut func);
+    assert!(matches!(
+        func.blocks[0].insts[17],
+        MInst::LoadIndexed { .. }
+    ));
+
+    let mut func = make_func(
+        vec![
+            indexed_forward_load(1, None),
+            MInst::Jump { target: BlockId(1) },
+        ],
+        3,
+    );
+    let mut exit = MBlock::new(BlockId(1));
+    exit.push(indexed_forward_load(2, None));
+    exit.push(MInst::Return);
+    func.push_block(exit);
+    forward_local_indexed_loads(&mut func);
+    assert!(matches!(func.blocks[1].insts[0], MInst::LoadIndexed { .. }));
+}

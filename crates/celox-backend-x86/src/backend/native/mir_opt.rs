@@ -57,8 +57,8 @@ use masks::{
 };
 pub(super) use memory_forward::eliminate_redundant_local_stores;
 use memory_forward::{
-    alloc_transient_vreg, forward_live_partial_stores, forward_local_store_loads,
-    promote_partial_store_round_trips,
+    alloc_transient_vreg, forward_live_partial_stores, forward_local_indexed_loads,
+    forward_local_store_loads, promote_partial_store_round_trips,
 };
 use memory_peephole::{fold_contiguous_load_packs, fold_contiguous_memory_copies};
 pub(crate) use post_regalloc::post_regalloc_direct_load_cse;

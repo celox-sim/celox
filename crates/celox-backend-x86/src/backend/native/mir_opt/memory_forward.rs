@@ -1164,3 +1164,105 @@ pub(in super::super) fn eliminate_redundant_local_stores(func: &mut MFunction) {
         block.insts = reversed;
     }
 }
+
+/// Reuse indexed reads before allocation can overwrite their result registers.
+/// Track at most 16 reads within 32 instructions to keep compile work bounded
+/// and avoid distant reuse. Unknown or overlapping writes invalidate the
+/// corresponding base/envelope as in direct forwarding.
+pub(super) fn forward_local_indexed_loads(func: &mut MFunction) {
+    const MAX_LOADS: usize = 16;
+    const MAX_DISTANCE: usize = 32;
+    #[derive(Clone, Copy)]
+    struct Available {
+        base: BaseReg,
+        offset: i32,
+        index: VReg,
+        scale: u8,
+        size: OpSize,
+        alias: Option<MemoryAliasRange>,
+        value: VReg,
+        position: usize,
+    }
+    let mut reused = 0usize;
+    for block in &mut func.blocks {
+        let mut available = Vec::<Available>::with_capacity(MAX_LOADS);
+        for (position, inst) in block.insts.iter_mut().enumerate() {
+            let writes = memory_effect::writes(inst);
+            available.retain(|load| {
+                if position - load.position > MAX_DISTANCE {
+                    return false;
+                }
+                if let Some(memory_effect::UnknownMemory::Direct(base)) = writes.unknown_memory()
+                    && load.base == base
+                {
+                    return false;
+                }
+                for range in writes.ranges() {
+                    if load.base != range.base {
+                        continue;
+                    }
+                    let Some(alias) = load.alias else {
+                        return false;
+                    };
+                    let Some(end) = range.end() else {
+                        return false;
+                    };
+                    if i64::from(alias.offset()) < end && range.offset < alias.end() {
+                        return false;
+                    }
+                }
+                true
+            });
+            let load = match inst {
+                MInst::LoadIndexed {
+                    dst,
+                    base,
+                    offset,
+                    index,
+                    scale,
+                    size,
+                    alias_range,
+                } => Some(Available {
+                    base: *base,
+                    offset: *offset,
+                    index: *index,
+                    scale: *scale,
+                    size: *size,
+                    alias: *alias_range,
+                    value: *dst,
+                    position,
+                }),
+                _ => None,
+            };
+            let source = load.and_then(|load| {
+                available
+                    .iter()
+                    .find(|old| {
+                        (old.base, old.offset, old.index, old.scale, old.size)
+                            == (load.base, load.offset, load.index, load.scale, load.size)
+                    })
+                    .map(|old| old.value)
+            });
+            if let Some(definition) = inst.def() {
+                available.retain(|old| old.index != definition && old.value != definition);
+            }
+            let Some(load) = load else {
+                continue;
+            };
+            if let Some(source) = source {
+                *inst = MInst::Mov {
+                    dst: load.value,
+                    src: source,
+                };
+                reused += 1;
+            }
+            if load.value != load.index {
+                if available.len() == MAX_LOADS {
+                    available.remove(0);
+                }
+                available.push(load);
+            }
+        }
+    }
+    tracing::debug!(reused, "local indexed load reuse");
+}

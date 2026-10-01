@@ -98,6 +98,7 @@ fn run_high_pressure_pipeline(runner: &mut PassRunner<'_>) {
             );
         }
         runner.run("forward_local_store_loads", forward_local_store_loads);
+        runner.run("forward_local_indexed_loads", forward_local_indexed_loads);
         runner.run(
             "eliminate_redundant_local_stores",
             eliminate_redundant_local_stores,
@@ -147,6 +148,7 @@ fn run_low_pressure_pipeline(runner: &mut PassRunner<'_>) {
         promote_partial_store_round_trips,
     );
     runner.run("forward_local_store_loads", forward_local_store_loads);
+    runner.run("forward_local_indexed_loads", forward_local_indexed_loads);
     runner.run(
         "eliminate_redundant_local_stores",
         eliminate_redundant_local_stores,
