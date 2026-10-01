@@ -5,6 +5,7 @@ macro_rules! cases {
     (@expectation reject) => { crate::Expectation::CompilationError };
     ($category:ident, $group:literal; $(
         fn $name:ident($sim:ident) {
+            $(@tags [$($tag:ident),+ $(,)?];)?
             $(@setup { $($setup:tt)* })?
             $(@expect $expectation:ident;)?
             @build $design:expr;
@@ -16,6 +17,7 @@ macro_rules! cases {
                 name: concat!($group, "::", stringify!($name)),
                 category: crate::Category::$category,
                 expectation: cases!(@expectation $($expectation)?),
+                tags: &[$($(crate::TestTag::$tag),+)?],
                 run: |factory| {
                     $($($setup)*)?
                     let design = $design;

@@ -39,6 +39,7 @@ fn test_comb_inout_statement_copies_input_before_mutating_formal(sim) {
 
 
 fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
+    @tags [DeferredFunctionEffects];
     @build Design::new(r#"
         module Top (
             clk: input clock,
@@ -387,6 +388,7 @@ fn test_ff_expression_output_copyout_extends_before_splitting_concat(sim) {
 
 
 fn test_ff_statement_output_copyout_freezes_all_inputs(sim) {
+    @tags [DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -428,6 +430,7 @@ fn test_ff_statement_output_copyout_freezes_all_inputs(sim) {
 
 
 fn test_ff_output_copyout_to_dynamic_slice_preserves_other_bits(sim) {
+    @tags [DeferredFunctionEffects];
     // Veryl 0.21.0 keeps writing byte 0 after the destination index changes.
 
     @build Design::new(r#"
@@ -470,6 +473,7 @@ fn test_ff_output_copyout_to_dynamic_slice_preserves_other_bits(sim) {
 
 
 fn test_ff_nested_output_copyout_is_visible_before_outer_copyout(sim) {
+    @tags [DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 

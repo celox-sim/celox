@@ -161,6 +161,7 @@ module Top (
 
 
     fn signed_divrem_i128(sim) {
+        @tags [TwoStateZeroDivision];
         @build Design::new(r#"
 module Top (
     a: input signed logic<128>,

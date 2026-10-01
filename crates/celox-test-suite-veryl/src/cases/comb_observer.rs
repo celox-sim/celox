@@ -4,6 +4,7 @@ cases! { Combinational, "comb_observer";
 
 
 fn test_comb_function_packed_array_literal_preserves_source_order(sim) {
+    @tags [AssignmentPatternEvaluation];
      // https://github.com/veryl-lang/veryl/pull/3131
     @build Design::new(r#"
 module Top (
@@ -293,6 +294,7 @@ module Top (
 
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
+    @tags [EvaluationOrder];
 
     @build Design::new(r#"
 module Top (
