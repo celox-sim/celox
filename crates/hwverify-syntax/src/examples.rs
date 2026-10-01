@@ -2,6 +2,139 @@
 use super::*;
 
 impl Lower<'_> {
+    /// Source spelling only: ordinary lexical binder names keep the established
+    /// q.<name> canonical representation and therefore the same typed formulas.
+    pub(super) fn resolve_example_bindings(&self, document: &mut Value) -> Res<()> {
+        let scoped = document["version"] == 4;
+        let groups: &[&str] = if scoped {
+            &["specs", "compositions"]
+        } else if document["version"] == 3 {
+            &["components", "compositions"]
+        } else {
+            return Ok(());
+        };
+        for group in groups {
+            if let Some(targets) = document.get_mut(*group).and_then(Value::as_object_mut) {
+                for (name, target) in targets {
+                    // Only scoped ensures have unqualified output aliases. V3
+                    // still spells an observable reference o.<name> explicitly.
+                    let outputs: BTreeSet<String> = if scoped {
+                        target["outputs"]
+                            .as_object()
+                            .map(|values| values.keys().cloned().collect())
+                            .unwrap_or_default()
+                    } else {
+                        BTreeSet::new()
+                    };
+                    let path = format!("/{group}/{name}/examples");
+                    if let Some(examples) =
+                        target.get_mut("examples").and_then(Value::as_object_mut)
+                    {
+                        for (name, example) in examples {
+                            self.resolve_example(example, &outputs, &format!("{path}/{name}"))?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_example(
+        &self,
+        example: &mut Value,
+        outputs: &BTreeSet<String>,
+        path: &str,
+    ) -> Res<()> {
+        let bound: BTreeSet<String> = example
+            .get("quantifiers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|binder| binder["variables"].as_object())
+            .flat_map(|variables| variables.keys().cloned())
+            .collect();
+        if bound.is_empty() {
+            return Ok(());
+        }
+        if let Some(initial) = example.get_mut("initial").and_then(Value::as_object_mut) {
+            for (name, expression) in initial {
+                self.bound_expression(expression, &bound, None, &format!("{path}/initial/{name}"))?;
+            }
+        }
+        if let Some(trace) = example.get_mut("trace").and_then(Value::as_array_mut) {
+            for (index, frame) in trace.iter_mut().enumerate() {
+                let path = format!("{path}/trace/{index}");
+                for field in ["inputs", "observe"] {
+                    if let Some(values) = frame.get_mut(field).and_then(Value::as_object_mut) {
+                        for (name, expression) in values {
+                            self.bound_expression(
+                                expression,
+                                &bound,
+                                None,
+                                &format!("{path}/{field}/{name}"),
+                            )?;
+                        }
+                    }
+                }
+                if let Some(expression) = frame.get_mut("ensure") {
+                    self.bound_expression(
+                        expression,
+                        &bound,
+                        Some(outputs),
+                        &format!("{path}/ensure"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn bound_expression(
+        &self,
+        value: &mut Value,
+        bound: &BTreeSet<String>,
+        outputs: Option<&BTreeSet<String>>,
+        path: &str,
+    ) -> Res<()> {
+        if let Some(name) = value.as_str() {
+            if bound.contains(name) {
+                if outputs.is_some_and(|outputs| outputs.contains(name)) {
+                    return Err(SyntaxError {
+                        filename: self.filename.into(),
+                        message: format!("{path}: ambiguous name {name}: both a quantified variable and an output; rename the quantified variable, or use o.{name} for the output"),
+                        span: self.spans.get(path).cloned(),
+                    });
+                }
+                *value = json!(format!("q.{name}"));
+            } else if name
+                .strip_suffix('\'')
+                .is_some_and(|name| bound.contains(name))
+            {
+                return Err(SyntaxError {
+                    filename: self.filename.into(),
+                    message: format!("{path}: quantified variables have no next-state value; remove the prime from {name}"),
+                    span: self.spans.get(path).cloned(),
+                });
+            }
+            return Ok(());
+        }
+        if let Some(values) = value.as_array_mut() {
+            // Never resolve the operator, literal payload, width or numeric
+            // metadata as a variable. Match the IR's expression positions.
+            let start = match values.first().and_then(Value::as_str) {
+                Some("bv") => values.len(),
+                Some("const_mem" | "zext" | "sext") => 2,
+                Some("extract") => 3,
+                _ => 1,
+            };
+            for (index, expression) in values.iter_mut().enumerate().skip(start) {
+                self.bound_expression(expression, bound, outputs, &format!("{path}/{index}"))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn invocation(&mut self, invocation: &g::Invocation<'_>, path: &str) -> Res<Value> {
         let operation = id_token(&invocation.id);
         let span = self.span(operation);

@@ -1,4 +1,4 @@
-# hwverify-rs 0.9
+# hwverify-rs 0.9.1
 
 Rust＋Z3による、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**実装の複数マイクロサイクルを、ISAの1ステップへ対応づける**ところまで実装した。
 
@@ -6,12 +6,18 @@ Rust＋Z3による、ハードウェア向け状態対応チェッカー。小�
 
 現状は **Rustの構造的UNSATカーネル、Z3 fallbackのUNSAT結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
 
+## 0.9.1の整理: 量化した名前をそのまま参照
+
+`forall a: bv<4>;` で宣言した変数は `a` と書く。実例と移行printerも
+`add(amount: a) => count == a;` を使う。曖昧な出力名との衝突はエラーにし、
+printerは必要な場合だけ束縛名を安全に改名する。量化順序・型・検証の意味は変えない。
+
 ## 0.9の追加: 期待する関係と量化を明示したtrace
 
 - scoped specでは `value` は現在値、`value'` は次状態。出力も同じ規則で、入力にはprimeを付けない
 - `operation add { expect value' == value + amount; }` で関係を記述。名前付き `expectation` と入れ子の `all` / `any` でAND/ORを合成
 - `forall a: bv<4>; execution forall;` のように入力と有限実行を別々に量化。入力prefixの順序を維持し、実行不能なforallを成功にしない
-- `add(amount: q.a) => count == q.a;` で一回の操作の入力と、操作後の検査条件を並べる。期待出力を操作の前提に混ぜない
+- `add(amount: a) => count == a;` で一回の操作の入力と、操作後の検査条件を並べる。期待出力を操作の前提に混ぜない
 - 旧prefix・操作関係・positive/negative trace・JSON version 2/3/4は互換性を維持。新しい量化情報はversion 3/4の任意フィールドとして扱う
 
 構文・量化順序・可実行性・有限長の制限は [期待と量化trace](EXPECTATIONS-AND-TRACES.md) を参照。

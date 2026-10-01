@@ -1,0 +1,31 @@
+{
+  "status": "pass",
+  "old_binary_sha256": "45ca592e5159781c9d54f671e04c4f692432bf52d05d3c5ce621242597ed05b4",
+  "new_binary_sha256": "4233f5ab009fa459c26cbf80b5613aed5da25e5d3200fa58793b90320255515e",
+  "cases": [
+    {
+      "case": "quantified_counter",
+      "status": "spec_examples_passed",
+      "exit_code": 0,
+      "identical_smt_files": 4,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "quantified_counter_bad_order",
+      "status": "spec_examples_failed",
+      "exit_code": 1,
+      "identical_smt_files": 2,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "quantified_counter_impossible",
+      "status": "spec_examples_failed",
+      "exit_code": 1,
+      "identical_smt_files": 4,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    }
+  ]
+}

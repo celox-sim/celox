@@ -1,0 +1,14 @@
+Cargo.toml
+Cargo.lock
+README.md
+LANGUAGE.md
+SPECIFICATION-LANGUAGE.md
+EXPECTATIONS-AND-TRACES.md
+crates/syntax/src/lib.rs
+crates/syntax/src/examples.rs
+crates/syntax/tests/bare_quantified_names.rs
+scripts/json_to_hwv.py
+scripts/test_json_to_hwv.py
+examples/quantified_counter.hwv
+examples/quantified_counter_bad_order.hwv
+examples/quantified_counter_impossible.hwv

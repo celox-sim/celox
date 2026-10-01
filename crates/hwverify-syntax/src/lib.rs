@@ -1000,6 +1000,7 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
             format!("invalid design string: {e}"),
         )
     })?;
+    lower.resolve_example_bindings(&mut canonical)?;
     Ok(ParsedDocument {
         canonical,
         spans: lower.spans,

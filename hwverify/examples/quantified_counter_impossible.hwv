@@ -12,6 +12,6 @@ spec Counter(input enabled: bool, output count: bv<2>) {
     forall flag: bool;
     execution forall;
     initial { count = 0u2; }
-    trace { add(enabled: q.flag) => true; }
+    trace { add(enabled: flag) => true; }
   }
 }

@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from json_to_hwv import expression, print_document, scoped_expression
+from json_to_hwv import expression, print_document, quantified_expression, scoped_expression
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +117,42 @@ def quantified_specification(version):
         target['examples']['quantified']['trace'].append({
             'actions': ['advance'], 'inputs': {}, 'observe': {}, 'ensure': True,
         })
+    return doc
+
+
+def nested_quantified_specification(version):
+    doc = quantified_specification(version)
+    target = doc['components']['component'] if version == 3 else doc['specs']['spec']
+    example = target['examples']['quantified']
+    example['quantifiers'][1]['variables'].update({'m': {'mem': [2, 4]}, 'add': {'bv': 4}})
+    example['initial']['count'] = ['read', 'q.m', ['bv', 2, 0]]
+    example['trace'][1]['inputs']['amount'] = [
+        'ite', 'q.flag', ['add', 'q.add', 'q.a'],
+        ['read', ['write', 'q.m', ['bv', 2, 0], 'q.b'], ['bv', 2, 0]],
+    ]
+    example['trace'][1]['observe']['count'] = ['extract', 3, 0, ['zext', 8, 'q.c']]
+    example['trace'][1]['ensure'] = ['and', 'q.flag', [
+        'eq', 'o.count', ['read', ['const_mem', 2, 'q.a'], ['bv', 2, 0]],
+    ]]
+    return doc
+
+
+def colliding_quantified_specification(version):
+    doc = quantified_specification(version)
+    target = doc['components']['component'] if version == 3 else doc['specs']['spec']
+    outputs = doc['observations'] if version == 3 else target['outputs']
+    outputs['count_value_2'] = {'bv': 4}
+    target['examples'] = {'collision': {
+        'expect': 'forall', 'quantifiers': [
+            {'kind': 'forall', 'variables': {'count': {'bv': 4}}},
+            {'kind': 'exists', 'variables': {'count_value': {'bv': 4}, 'flag': 'bool'}},
+            {'kind': 'forall', 'variables': {'a': {'bv': 4}}},
+        ],
+        'initial': {'count': ['add', 'q.count', ['bv', 4, 0]]},
+        'trace': [{'operation': 'advance', 'inputs': {'amount': 'q.count'}, 'observe': {},
+                   'ensure': ['and', ['eq', 'o.count' if version == 3 else 'count', 'q.count'],
+                              ['eq', 'o.count', 'q.count_value']]}],
+    }}
     return doc
 
 
@@ -275,15 +311,109 @@ class PrinterTests(unittest.TestCase):
                               '      b: bv<4>;\n      flag: bool;\n    }\n'
                               '    forall c: bv<4>;\n    execution forall;', source)
                 output = 'o.count' if version == 3 else 'count'
-                self.assertIn(f'      advance(amount: q.a) => eq({output}, q.a);', source)
+                self.assertIn(f'      advance(amount: a) => eq({output}, a);', source)
                 self.assertIn('      advance {\n        inputs {\n'
-                              '          amount = add(q.a, q.b);', source)
-                self.assertIn('        observe {\n          count = q.c;\n        }\n'
-                              '        ensure or(not(q.flag), eq(o.count, q.c));', source)
+                              '          amount = add(a, b);', source)
+                self.assertIn('        observe {\n          count = c;\n        }\n'
+                              '        ensure or(not(flag), eq(o.count, c));', source)
+                self.assertNotIn('q.', source)
                 if version == 4:
                     self.assertIn('      actions(advance) {\n        inputs {\n        }\n'
                                   '        observe {\n        }\n        ensure true;', source)
                 self.assertEqual(doc, original)
+
+    def test_quantified_references_in_all_nested_expression_contexts(self):
+        for version in (3, 4):
+            for infix in (False, True):
+                with self.subTest(version=version, infix=infix):
+                    doc = nested_quantified_specification(version)
+                    original = copy.deepcopy(doc)
+                    source = print_document(doc, infix)
+                    self.assertNotIn('q.', source)
+                    self.assertIn('m: mem<2, 4>;', source)
+                    self.assertIn('flag: bool;', source)
+                    self.assertIn('count = read(m, bv(2, 0));', source)
+                    self.assertIn('count = extract(3, 0, zext(8, c));', source)
+                    self.assertIn('const_mem(2, a)', source)
+                    self.assertIn('write(m, bv(2, 0), b)', source)
+                    if not infix:
+                        self.assertIn('add(add, a)', source)
+                    self.assertEqual(doc, original)
+
+    def test_quantified_rewrite_preserves_operators_and_numeric_metadata(self):
+        bound = {'add': 'add', 'a': 'a'}
+        for value, expected in (
+            (['add', 'q.add', 'q.a'], 'add(add, a)'),
+            (['q.add', 'q.a'], 'q.add(a)'),
+            (['bv', 'q.add', 'q.a'], 'bv(q.add, q.a)'),
+            (['zext', 'q.add', 'q.a'], 'zext(q.add, a)'),
+            (['sext', 'q.add', 'q.a'], 'sext(q.add, a)'),
+            (['extract', 'q.add', 'q.a', 'q.add'], 'extract(q.add, q.a, add)'),
+            (['const_mem', 'q.add', 'q.a'], 'const_mem(q.add, a)'),
+            (['eq', 'q.unbound', 'q.a.extra'], 'eq(q.unbound, q.a.extra)'),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(quantified_expression(value, bound), expected)
+
+    def test_v4_output_collision_is_hygienically_alpha_renamed(self):
+        doc = colliding_quantified_specification(4)
+        original = copy.deepcopy(doc)
+        source = print_document(doc)
+        self.assertIn('forall count_value_3: bv<4>;\n    exists {\n'
+                      '      count_value: bv<4>;\n      flag: bool;\n    }\n'
+                      '    forall a: bv<4>;', source)
+        self.assertIn('count = add(count_value_3, bv(4, 0));', source)
+        self.assertIn('advance(amount: count_value_3)', source)
+        self.assertIn('eq(count, count_value_3)', source)
+        self.assertIn('eq(o.count, count_value)', source)
+        self.assertNotIn('q.', source)
+        self.assertEqual(doc, original)
+
+    def test_v3_binder_may_share_explicit_output_name(self):
+        doc = colliding_quantified_specification(3)
+        source = print_document(doc)
+        self.assertIn('forall count: bv<4>;', source)
+        self.assertIn('advance(amount: count)', source)
+        self.assertIn('eq(o.count, count)', source)
+        self.assertNotIn('count_value_3', source)
+        self.assertNotIn('q.', source)
+
+    def test_quantified_names_do_not_leak_between_examples(self):
+        doc = quantified_specification(4)
+        examples = doc['specs']['spec']['examples']
+        examples['unbound'] = copy.deepcopy(examples['quantified'])
+        examples['unbound'].pop('quantifiers')
+        source = print_document(doc)
+        first, second = source.split('  example unbound {')
+        self.assertNotIn('q.', first)
+        self.assertIn('advance(amount: q.a) => eq(count, q.a);', second)
+
+    def test_alpha_renaming_does_not_capture_unbound_references(self):
+        doc = colliding_quantified_specification(4)
+        frame = doc['specs']['spec']['examples']['collision']['trace'][0]
+        frame['ensure'] = ['eq', 'q.count', 'q.count_value_3']
+        source = print_document(doc)
+        self.assertIn('forall count_value_4: bv<4>;', source)
+        self.assertIn('eq(count_value_4, q.count_value_3)', source)
+
+    def test_reserved_and_digit_leading_json_binders_get_source_names(self):
+        doc = quantified_specification(4)
+        example = doc['specs']['spec']['examples']['quantified']
+        example['quantifiers'][0]['variables'] = {'true': {'bv': 4}, '1': {'bv': 4}}
+        example['trace'][0]['inputs']['amount'] = ['add', 'q.true', 'q.1']
+        source = print_document(doc)
+        self.assertIn('true_value: bv<4>;', source)
+        self.assertIn('value_1: bv<4>;', source)
+        self.assertIn('add(true_value, value_1)', source)
+        self.assertIn('q.a', source)  # Removing a binder does not repair old refs.
+
+    def test_duplicate_quantified_names_rejected_without_mutation(self):
+        doc = quantified_specification(4)
+        doc['specs']['spec']['examples']['quantified']['quantifiers'][1]['variables']['a'] = 'bool'
+        original = copy.deepcopy(doc)
+        with self.assertRaisesRegex(ValueError, 'duplicate quantifier'):
+            print_document(doc)
+        self.assertEqual(doc, original)
 
     def test_new_execution_modes_and_legacy_expectations(self):
         doc = minimal_specification()
@@ -445,6 +575,82 @@ class ParserRoundTripTests(unittest.TestCase):
                                   else doc['specs']['spec'])
                         target['examples']['quantified']['expect'] = mode
                         self.assert_round_trip(doc, infix)
+
+    def test_nested_quantified_bool_word_and_memory_round_trip(self):
+        for version in (3, 4):
+            for infix in (False, True):
+                with self.subTest(version=version, infix=infix):
+                    self.assert_round_trip(nested_quantified_specification(version), infix)
+
+    def test_v4_output_collision_round_trip_is_only_alpha_renamed(self):
+        doc = colliding_quantified_specification(4)
+        renamed = copy.deepcopy(doc)
+        example = renamed['specs']['spec']['examples']['collision']
+        example['quantifiers'][0]['variables'] = {'count_value_3': {'bv': 4}}
+        example['initial']['count'][1] = 'q.count_value_3'
+        example['trace'][0]['inputs']['amount'] = 'q.count_value_3'
+        example['trace'][0]['ensure'][1][2] = 'q.count_value_3'
+        for infix in (False, True):
+            with self.subTest(infix=infix):
+                self.assert_source_document(print_document(doc, infix), renamed)
+
+    def test_v3_output_collision_preserves_exact_canonical_names(self):
+        for infix in (False, True):
+            with self.subTest(infix=infix):
+                self.assert_round_trip(colliding_quantified_specification(3), infix)
+
+    def test_explicit_old_quantified_refs_are_accepted_and_print_bare(self):
+        for version in (3, 4):
+            with self.subTest(version=version):
+                doc = quantified_specification(version)
+                source = print_document(doc)
+                output = 'o.count' if version == 3 else 'count'
+                source = source.replace(
+                    f'advance(amount: a) => eq({output}, a);',
+                    f'advance(amount: q.a) => eq({output}, q.a);')
+                self.assertIn('q.a', source)
+                self.assert_source_document(source, doc)
+                self.assertNotIn('q.', print_document(doc))
+
+    def test_reserved_and_digit_leading_binders_round_trip_alpha_renamed(self):
+        for version in (3, 4):
+            doc = quantified_specification(version)
+            target = doc['components']['component'] if version == 3 else doc['specs']['spec']
+            example = target['examples']['quantified']
+            example['quantifiers'][0]['variables'].update({'true': {'bv': 4}, '1': {'bv': 4}})
+            example['trace'][0]['inputs']['amount'] = ['add', 'q.true', 'q.1']
+            renamed = copy.deepcopy(doc)
+            renamed_target = (renamed['components']['component'] if version == 3
+                              else renamed['specs']['spec'])
+            renamed_example = renamed_target['examples']['quantified']
+            renamed_example['quantifiers'][0]['variables'] = {
+                'a': {'bv': 4}, 'true_value': {'bv': 4}, 'value_1': {'bv': 4},
+            }
+            renamed_example['trace'][0]['inputs']['amount'] = ['add', 'q.true_value', 'q.value_1']
+            with self.subTest(version=version):
+                self.assert_source_document(print_document(doc), renamed)
+
+    def test_unbound_quantified_refs_remain_rejected_after_printing(self):
+        doc = colliding_quantified_specification(4)
+        doc['specs']['spec']['examples']['collision']['trace'][0]['ensure'] = [
+            'eq', 'q.count', 'q.count_value_3',
+        ]
+        source_text = print_document(doc)
+        with tempfile.TemporaryDirectory(prefix='hwverify-printer-unbound-') as directory:
+            source = Path(directory) / 'input.hwv'
+            source.write_text(source_text, encoding='utf-8')
+            result = subprocess.run([os.environ['HWVERIFY_BIN'], str(source), '--check'],
+                                    capture_output=True, text=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('q.count_value_3', result.stdout + result.stderr)
+
+    def test_quantified_handwritten_sources_match_unchanged_json(self):
+        for name in ('quantified_counter', 'quantified_counter_bad_order',
+                     'quantified_counter_impossible'):
+            with self.subTest(name=name):
+                source = (ROOT / 'examples' / f'{name}.hwv').read_text()
+                self.assertNotIn('q.', source)
+                self.assert_source_document(source, fixture(name))
 
     def test_execution_modes_without_quantifiers_and_optional_ensure(self):
         for version in (3, 4):
