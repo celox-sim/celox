@@ -7,7 +7,7 @@
 use hwverify_ir::{Env, Res, Sort, Term};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -316,9 +316,94 @@ struct Bits {
     sort: Sort,
     bits: Vec<Lit>,
 }
+/// Variables equated by mandatory, positive top-level conjuncts may share bits.
+/// No equality below an implication, disjunction, negation or context term is used.
+/// Union-by-size bounds lookup depth; every traversal is charged to the budget.
+#[derive(Default)]
+struct Aliases {
+    ids: HashMap<String, usize>,
+    names: Vec<String>,
+    parents: Vec<usize>,
+    sizes: Vec<usize>,
+}
+impl Aliases {
+    fn intern(&mut self, name: String) -> usize {
+        if let Some(&id) = self.ids.get(&name) {
+            return id;
+        }
+        let id = self.parents.len();
+        self.ids.insert(name.clone(), id);
+        self.names.push(name);
+        self.parents.push(id);
+        self.sizes.push(1);
+        id
+    }
+    fn root(&self, mut id: usize, b: &mut Budget) -> Res<usize> {
+        loop {
+            b.tick(1)?;
+            if self.parents[id] == id {
+                return Ok(id);
+            }
+            id = self.parents[id];
+        }
+    }
+    fn join(&mut self, x: String, y: String, b: &mut Budget) -> Res<()> {
+        let x = self.intern(x);
+        let y = self.intern(y);
+        let mut x = self.root(x, b)?;
+        let mut y = self.root(y, b)?;
+        if x != y {
+            if self.sizes[x] < self.sizes[y] {
+                std::mem::swap(&mut x, &mut y);
+            }
+            self.parents[y] = x;
+            self.sizes[x] += self.sizes[y];
+        }
+        Ok(())
+    }
+    fn representative(&self, name: &str, b: &mut Budget) -> Res<String> {
+        match self.ids.get(name) {
+            Some(&id) => Ok(self.names[self.root(id, b)?].clone()),
+            None => Ok(name.into()),
+        }
+    }
+    fn collect(&mut self, formula: &Term, b: &mut Budget) -> Res<()> {
+        let mut pending = vec![(formula, 0usize)];
+        let mut seen = HashSet::new();
+        while let Some((term, depth)) = pending.pop() {
+            b.tick(1)?;
+            if depth > b.limits.max_depth {
+                return Err("finite solver term depth budget exhausted".into());
+            }
+            if !seen.insert(term.clone()) {
+                continue;
+            }
+            if seen.len() > b.limits.max_terms {
+                return Err("finite solver term budget exhausted".into());
+            }
+            match operation(term)? {
+                Op::And => {
+                    pending.push((&term.0.args[1], depth + 1));
+                    pending.push((&term.0.args[0], depth + 1));
+                }
+                Op::Eq => {
+                    if let (Op::Variable(x), Op::Variable(y)) =
+                        (operation(&term.0.args[0])?, operation(&term.0.args[1])?)
+                    {
+                        self.join(x, y, b)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
 struct Blast {
+    aliases: Aliases,
     memo: HashMap<Term, Bits>,
     gates: HashMap<(u8, Lit, Lit), Lit>,
+    muxes: HashMap<(Lit, Lit, Lit), Lit>,
     inputs: BTreeMap<String, Bits>,
     vars: usize,
     clauses: Vec<Vec<Lit>>,
@@ -326,8 +411,10 @@ struct Blast {
 impl Blast {
     fn new() -> Self {
         Self {
+            aliases: Aliases::default(),
             memo: HashMap::new(),
             gates: HashMap::new(),
+            muxes: HashMap::new(),
             inputs: BTreeMap::new(),
             vars: 1,
             clauses: vec![vec![TRUE]],
@@ -414,16 +501,49 @@ impl Blast {
         };
         Ok(if negate { -z } else { z })
     }
-    fn mux(&mut self, g: Lit, x: Lit, y: Lit, b: &mut Budget) -> Res<Lit> {
+    fn mux(&mut self, mut g: Lit, mut x: Lit, mut y: Lit, b: &mut Budget) -> Res<Lit> {
         if g == TRUE || x == y {
             return Ok(x);
         }
         if g == FALSE {
             return Ok(y);
         }
-        let a = self.and(g, x, b)?;
-        let c = self.and(-g, y, b)?;
-        self.or(a, c, b)
+        if x == TRUE {
+            return self.or(g, y, b);
+        }
+        if x == FALSE {
+            return self.and(-g, y, b);
+        }
+        if y == TRUE {
+            return self.or(-g, x, b);
+        }
+        if y == FALSE {
+            return self.and(g, x, b);
+        }
+        if x == -y {
+            return self.xor(g, y, b);
+        }
+        if g < 0 {
+            g = -g;
+            std::mem::swap(&mut x, &mut y);
+        }
+        let negate = x < 0;
+        if negate {
+            x = -x;
+            y = -y;
+        }
+        let z = if let Some(z) = self.muxes.get(&(g, x, y)) {
+            *z
+        } else {
+            let z = self.fresh(b)?;
+            self.clause(vec![-g, -x, z], b)?;
+            self.clause(vec![-g, x, -z], b)?;
+            self.clause(vec![g, -y, z], b)?;
+            self.clause(vec![g, y, -z], b)?;
+            self.muxes.insert((g, x, y), z);
+            z
+        };
+        Ok(if negate { -z } else { z })
     }
     fn add(&mut self, x: &[Lit], y: &[Lit], mut carry: Lit, b: &mut Budget) -> Res<Vec<Lit>> {
         let mut out = Vec::new();
@@ -472,22 +592,26 @@ impl Blast {
         };
         let bits = match op {
             Op::Variable(n) => {
-                if let Some(v) = self.inputs.get(&n) {
+                let representative = self.aliases.representative(&n, b)?;
+                let value = if let Some(v) = self.inputs.get(&representative) {
                     if v.sort != t.0.sort {
                         return Err(format!("finite variable {n} has inconsistent sorts"));
                     }
-                    v.bits.clone()
+                    v.clone()
                 } else {
-                    let bits = (0..w).map(|_| self.fresh(b)).collect::<Res<Vec<_>>>()?;
-                    self.inputs.insert(
-                        n,
-                        Bits {
-                            sort: t.0.sort.clone(),
-                            bits: bits.clone(),
-                        },
-                    );
-                    bits
+                    let value = Bits {
+                        sort: t.0.sort.clone(),
+                        bits: (0..w).map(|_| self.fresh(b)).collect::<Res<Vec<_>>>()?,
+                    };
+                    self.inputs.insert(representative, value.clone());
+                    value
+                };
+                if let Some(previous) = self.inputs.insert(n.clone(), value.clone()) {
+                    if previous.sort != value.sort {
+                        return Err(format!("finite variable {n} has inconsistent sorts"));
+                    }
                 }
+                value.bits
             }
             Op::Bool(v) => vec![if v { TRUE } else { FALSE }],
             Op::Word(v) => (0..w)
@@ -1083,6 +1207,7 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
         if formula.0.sort != Sort::Bool {
             return Err("finite formula must have Bool sort".into());
         }
+        blast.aliases.collect(formula, &mut budget)?;
         let root = blast.term(formula, &mut budget, 0)?;
         for term in context.values() {
             blast.term(term, &mut budget, 0)?;
@@ -1168,6 +1293,98 @@ mod tests {
             work: 0,
             time_check_in: 0,
         }
+    }
+    #[test]
+    fn canonical_mux_definitions_are_exact_and_shared() {
+        let mut b = test_budget();
+        let mut blast = Blast::new();
+        let g = blast.fresh(&mut b).unwrap();
+        let x = blast.fresh(&mut b).unwrap();
+        let y = blast.fresh(&mut b).unwrap();
+        let before = (blast.vars, blast.clauses.len());
+        let z = blast.mux(g, x, y, &mut b).unwrap();
+        assert_eq!(
+            (blast.vars, blast.clauses.len()),
+            (before.0 + 1, before.1 + 4)
+        );
+        assert_eq!(blast.mux(-g, y, x, &mut b).unwrap(), z);
+        assert_eq!(blast.mux(g, -x, -y, &mut b).unwrap(), -z);
+        assert_eq!(blast.mux(-g, -y, -x, &mut b).unwrap(), -z);
+        assert_eq!(blast.vars, before.0 + 1);
+        for assignment in 0..16 {
+            let values = [
+                1,
+                1,
+                if assignment & 1 == 0 { -1 } else { 1 },
+                if assignment & 2 == 0 { -1 } else { 1 },
+                if assignment & 4 == 0 { -1 } else { 1 },
+                if assignment & 8 == 0 { -1 } else { 1 },
+            ];
+            let satisfies = blast
+                .clauses
+                .iter()
+                .all(|clause| clause.iter().any(|&lit| truth(&values, lit) > 0));
+            let expected =
+                truth(&values, z) == truth(&values, if truth(&values, g) > 0 { x } else { y });
+            assert_eq!(satisfies, expected);
+        }
+    }
+    #[test]
+    fn mandatory_aliases_share_bits_and_replay_every_original_name() {
+        for sort in [Sort::Bool, Sort::Bv(1), Sort::Bv(32), Sort::Bv(64)] {
+            let x = var("x".into(), sort.clone());
+            let y = var("y".into(), sort.clone());
+            let z = var("z".into(), sort.clone());
+            let formula = and(
+                eq(x.clone(), y.clone()),
+                and(eq(z.clone(), y.clone()), eq(y.clone(), x.clone())),
+            );
+            let mut b = test_budget();
+            let mut blast = Blast::new();
+            blast.aliases.collect(&formula, &mut b).unwrap();
+            blast.term(&formula, &mut b, 0).unwrap();
+            assert_eq!(blast.inputs["x"].bits, blast.inputs["y"].bits);
+            assert_eq!(blast.inputs["y"].bits, blast.inputs["z"].bits);
+            let context = Env::from([
+                ("original x".into(), x),
+                ("original y".into(), y),
+                ("original z".into(), z),
+            ]);
+            let result = solve(&formula, &context, Limits::default());
+            assert_eq!(result.verdict, Verdict::Sat);
+            assert!(result.original_formula_validated);
+            assert_eq!(result.assignments.len(), 3);
+            assert_eq!(result.assignments["x"], result.assignments["z"]);
+            assert_eq!(
+                result.context_values["original x"],
+                result.context_values["original y"]
+            );
+        }
+    }
+    #[test]
+    fn conditional_and_context_equalities_never_become_assumptions() {
+        let x = var("x".into(), Sort::Bv(8));
+        let y = var("y".into(), Sort::Bv(8));
+        let equal = eq(x.clone(), y.clone());
+        let different = not(equal.clone());
+        for condition in [
+            not(equal.clone()),
+            node(Sort::Bool, "or", vec![boolv(true), equal.clone()]),
+            node(Sort::Bool, "=>", vec![boolv(false), equal.clone()]),
+            ite(boolv(false), equal.clone(), boolv(true)),
+        ] {
+            let formula = and(condition, different.clone());
+            let result = solve(
+                &formula,
+                &Env::from([("equal".into(), equal.clone())]),
+                Limits::default(),
+            );
+            assert_eq!(result.verdict, Verdict::Sat);
+            assert_eq!(result.context_values["equal"], Scalar::Bool(false));
+            assert_ne!(result.assignments["x"], result.assignments["y"]);
+        }
+        let mismatched = and(equal, eq(var("x".into(), Sort::Bool), boolv(true)));
+        assert_eq!(check(mismatched).verdict, Verdict::Unknown);
     }
     #[test]
     fn indexed_order_matches_linear_scan_after_updates_and_reinsertion() {
