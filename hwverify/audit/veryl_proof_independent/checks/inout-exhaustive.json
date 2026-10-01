@@ -1,0 +1,8 @@
+{
+  "status": "diagnostic_completed",
+  "comb_inputs_pass": 256,
+  "ff_pairs_tested": 65536,
+  "ff_return_mismatches": 0,
+  "first_counterexample": null,
+  "scope": "two-state concrete SIR replay only; not formal verification"
+}

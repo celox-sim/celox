@@ -1,11 +1,11 @@
 [workspace]
-exclude = ["conformance/veryl", "conformance/veryl/analyzer-probe"]
+exclude = ["conformance/veryl", "conformance/veryl/analyzer-probe", "conformance/veryl-proof"]
 members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli"]
 default-members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 
 [workspace.dependencies]

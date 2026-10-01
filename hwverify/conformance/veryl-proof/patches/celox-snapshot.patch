@@ -1,0 +1,14 @@
+--- a/crates/celox-frontend-veryl/src/lowering/ff/function_call.rs
++++ b/crates/celox-frontend-veryl/src/lowering/ff/function_call.rs
+@@ -3748,8 +3748,9 @@
+                     let is_whole = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+                     if is_whole && let Some(bound) = defs.get(var_id) {
+                         if expanding.insert(*var_id) {
+-                            let result =
+-                                self.substitute_function_expr_inner(bound, defs, expanding);
++                            // State entries already contain the value captured at assignment.
++                            // Re-expanding against later definitions would reread mutable formals.
++                            let result = bound.clone();
+                             expanding.remove(var_id);
+                             return result;
+                         }

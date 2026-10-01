@@ -1,0 +1,35 @@
+--- a/src/conv/declaration.rs
++++ b/src/conv/declaration.rs
+@@ -1225,6 +1225,7 @@
+                         let direction = match variable.kind {
+                             VarKind::Input => Direction::Input,
+                             VarKind::Output => Direction::Output,
++                            VarKind::Inout => Direction::Inout,
+                             _ => unreachable!(),
+                         };
+ 
+--- a/src/ir/function.rs
++++ b/src/ir/function.rs
+@@ -543,7 +543,7 @@
+             {
+                 let (path, _, direction) = &arg.members[0];
+                 match direction {
+-                    Direction::Input => {
++                    Direction::Input | Direction::Inout => {
+                         let arg_type = &arg.comptime.r#type;
+                         // Argument expressions are initially converted without a
+                         // destination type. Apply the resolved formal shape here,
+@@ -566,6 +566,13 @@
+                                 &expr_token,
+                             );
+                         }
++                        if *direction == Direction::Inout {
++                            let destinations = dst
++                                .into_iter()
++                                .filter_map(|x| x.to_assign_destination(context, false))
++                                .collect();
++                            outputs.push((path.clone(), destinations));
++                        }
+                         inputs.push((path.clone(), expr));
+                     }
+                     Direction::Output => {

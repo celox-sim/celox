@@ -1,0 +1,14 @@
+--- a/src/ir/function.rs
++++ b/src/ir/function.rs
+@@ -555,6 +555,11 @@
+                                 Some(arg_type.width()),
+                                 &mut expr,
+                             )?;
++                        }
++                        // Input binding is an assignment context. Set the formal width
++                        // before any constant folding can discard an operand carry.
++                        if arg_type.array.is_empty() {
++                            expr.eval_comptime(context, arg_type.total_width());
+                         }
+                         if arg_type.is_clock() || arg_type.is_reset() {
+                             let expr_comptime = expr.eval_comptime(context, None);

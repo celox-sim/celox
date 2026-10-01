@@ -1,0 +1,161 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "name": "0-signal",
+      "type": "logic",
+      "actual": {
+        "qs": 1,
+        "qb": 1
+      },
+      "expected": {
+        "qs": 1,
+        "qb": 1
+      }
+    },
+    {
+      "name": "0-type",
+      "type": "logic",
+      "actual": {
+        "qs": 1,
+        "qb": 1
+      },
+      "expected": {
+        "qs": 1,
+        "qb": 1
+      }
+    },
+    {
+      "name": "1-signal",
+      "type": "logic<8>",
+      "actual": {
+        "qs": 8,
+        "qb": 8
+      },
+      "expected": {
+        "qs": 8,
+        "qb": 8
+      }
+    },
+    {
+      "name": "1-type",
+      "type": "logic<8>",
+      "actual": {
+        "qs": 8,
+        "qb": 8
+      },
+      "expected": {
+        "qs": 8,
+        "qb": 8
+      }
+    },
+    {
+      "name": "2-signal",
+      "type": "logic<3,5>",
+      "actual": {
+        "qs": 3,
+        "qb": 15
+      },
+      "expected": {
+        "qs": 3,
+        "qb": 15
+      }
+    },
+    {
+      "name": "2-type",
+      "type": "logic<3,5>",
+      "actual": {
+        "qs": 3,
+        "qb": 15
+      },
+      "expected": {
+        "qs": 3,
+        "qb": 15
+      }
+    },
+    {
+      "name": "3-signal",
+      "type": "logic<10,20>",
+      "actual": {
+        "qs": 10,
+        "qb": 200
+      },
+      "expected": {
+        "qs": 10,
+        "qb": 200
+      }
+    },
+    {
+      "name": "3-type",
+      "type": "logic<10,20>",
+      "actual": {
+        "qs": 10,
+        "qb": 200
+      },
+      "expected": {
+        "qs": 10,
+        "qb": 200
+      }
+    },
+    {
+      "name": "4-signal",
+      "type": "logic<2,3,7>",
+      "actual": {
+        "qs": 2,
+        "qb": 42
+      },
+      "expected": {
+        "qs": 2,
+        "qb": 42
+      }
+    },
+    {
+      "name": "4-type",
+      "type": "logic<2,3,7>",
+      "actual": {
+        "qs": 2,
+        "qb": 42
+      },
+      "expected": {
+        "qs": 2,
+        "qb": 42
+      }
+    },
+    {
+      "name": "5-signal",
+      "type": "logic<8>[4]",
+      "actual": {
+        "qs": 4,
+        "qb": 32
+      },
+      "expected": {
+        "qs": 4,
+        "qb": 32
+      }
+    },
+    {
+      "name": "6-signal",
+      "type": "logic<3,5>[4]",
+      "actual": {
+        "qs": 4,
+        "qb": 60
+      },
+      "expected": {
+        "qs": 4,
+        "qb": 60
+      }
+    },
+    {
+      "name": "7-signal",
+      "type": "logic<2,7>[3,5]",
+      "actual": {
+        "qs": 3,
+        "qb": 210
+      },
+      "expected": {
+        "qs": 3,
+        "qb": 210
+      }
+    }
+  ]
+}

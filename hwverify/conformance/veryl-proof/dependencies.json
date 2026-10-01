@@ -1,0 +1,37 @@
+{
+  "celox_revision": "124a1315096d21b85d9d0d84fd7139363a181cad",
+  "analyzer_version": "0.21.0",
+  "analyzer_crate_sha256": "27642985fd83ff90aeea356cbc70f63d2ac83988e1e1bae9e7b0bd63fe61fcf8",
+  "patches": [
+    {
+      "target": "analyzer",
+      "file": "analyzer-inout.patch",
+      "sha256": "e9bfba81e8ce783e75e78ea237904ea12b54593ca29d7c71a753f716af82e218"
+    },
+    {
+      "target": "analyzer",
+      "file": "analyzer-formal-width.patch",
+      "sha256": "a94579554a36f2af342a5c73736dc9351c1c91d3a1176c0d9207732f27b89ea4"
+    },
+    {
+      "target": "analyzer",
+      "file": "analyzer-size.patch",
+      "sha256": "1f8209e2cac85257bf6df3f55ebfa96b61df6669a06eb30e57f212bdb84dc45d"
+    },
+    {
+      "target": "analyzer",
+      "file": "analyzer-runtime-functions.patch",
+      "sha256": "27fb9f4517b5fe9cbf7c6897f96c7572324a554dca1bfda1f7603b8f14555913"
+    },
+    {
+      "target": "analyzer",
+      "file": "analyzer-cast-signedness.patch",
+      "sha256": "5e7f2505fe304ea22f21f7d1c25652d410c8376bf8d3d4c310417691b99df7eb"
+    },
+    {
+      "target": "celox",
+      "file": "celox-snapshot.patch",
+      "sha256": "7fe795b7aa75bbfbccab32382a0e08c29ece69fb9758e302c4baec224f5c27df"
+    }
+  ]
+}
