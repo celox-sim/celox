@@ -1,10 +1,23 @@
-# hwverify-rs 0.11.3
+# hwverify-rs 0.12.0
 
 Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.12.0: Verylの実テストをZ3なしのFVとしてCIで実行
+
+Celoxの固定revisionから実際のRust stimulus/期待値を自動抽出し、Veryl 0.21.0の
+parser/analyzerを経由して有限traceを検証するCIを追加。**665ケースを全件分類、
+556ケース・6,142 assertionを抽出し、対応範囲の46ケース・118フレーム・104 assertionを検証**する。
+期待値を回路から作らず、実行可能性と各assertionの反例不存在を別々に検査する。
+全対応ケースの負例・元ソース改変対照・実行可能なZ3 tripwireもCIで必ず走る。
+
+未対応とUNKNOWNは成功にしない。固定coverage manifestにより、ケース消失・skip化・
+assertion減少・ソース変化を検出する。scalar read、unary/reduction、ternary、if、比較、
+cast、shift等を拡張したが、一般のVeryl全体・4状態・非同期resetの完全対応ではない。
+[再現コマンド・対応範囲・coverage gate](conformance/veryl/README.md)を参照。
 
 ## 0.11.3: 呼び出し側の予想に合わせた探索
 
