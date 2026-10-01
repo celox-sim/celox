@@ -251,6 +251,70 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("width")), 4u8.into());
     }
 
+    fn indexed_parameter_initializers_preserve_selections(sim) {
+        @setup {
+            let source = r#"
+                module Top(output logic [3:0] plus, minus, compound, ascending, function_width,
+                    default_q, specialized_q);
+                    localparam logic [7:0] P = 8'hab;
+                    localparam logic [4:11] UP = 8'hab;
+                    localparam logic [3:0] Q = P[4 +: 4];
+                    localparam logic [3:0] R = P[7 -: 4];
+                    localparam logic [3:0] S = P[4 +: 4] + 4'd1;
+                    localparam logic [3:0] T = UP[4 +: 4];
+                    localparam logic [3:0] F = $clog2(P[4 +: 4]);
+                    assign plus = Q;
+                    assign minus = R;
+                    assign compound = S;
+                    assign ascending = T;
+                    assign function_width = F;
+                    Child default_child(.y(default_q));
+                    Child #(.P(8'hcd)) specialized_child(.y(specialized_q));
+                endmodule
+                module Child #(parameter logic [7:0] P = 8'hab,
+                    parameter logic [3:0] Q = P[4 +: 4])(output logic [3:0] y);
+                    assign y = Q;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_parameters.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("plus")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("minus")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("compound")), 11u8.into());
+        assert_eq!(sim.get(sim.signal("ascending")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("function_width")), 4u8.into());
+        assert_eq!(sim.get(sim.signal("default_q")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("specialized_q")), 12u8.into());
+    }
+
+    fn indexed_unsigned_bases_cross_zero(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [3:-4] data, output logic [3:0] minus, up_minus,
+                    plus, wrapped_base, output logic [3:-4] written);
+                    logic [-4:3] up;
+                    assign up = data;
+                    assign minus = data[32'd0 -: 4];
+                    assign up_minus = up[32'd0 -: 4];
+                    assign plus = data[(-3) +: 4];
+                    assign wrapped_base = data[(2'd3 + 2'd1) +: 4];
+                    always_comb begin
+                        written = data;
+                        written[32'd0 -: 4] = 4'hf;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_unsigned.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0xa5u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("minus")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("up_minus")), 4u8.into());
+        assert_eq!(sim.get(sim.signal("plus")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("wrapped_base")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("written")), 0xbfu8.into());
+    }
+
     fn indexed_select_multidimensional_packed_reads(sim) {
         @setup {
             let source = r#"
@@ -319,5 +383,20 @@ fn rejects_selected_widths_that_are_nonpositive() {
         .expect("selected width must be positive")
         .to_string();
         assert!(error.contains("indexed part-select"), "{error}");
+    }
+}
+
+#[test]
+fn rejects_indexed_selections_in_unlowered_constant_contexts() {
+    for declaration in [
+        "logic [P[4 +: 4]-1:0] y; assign y = '0;",
+        "typedef enum logic [3:0] { E = P[4 +: 4] } nibble; nibble y; assign y = E;",
+    ] {
+        let source =
+            format!("module Top; localparam logic [7:0] P = 8'hab; {declaration} endmodule");
+        Simulator::from_sv_sources(vec![(&source, Path::new("unlowered_constant.sv"))], "Top")
+            .build_cranelift()
+            .err()
+            .expect("unlowered indexed constants must be rejected");
     }
 }

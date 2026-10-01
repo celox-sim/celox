@@ -398,6 +398,29 @@ pub(super) fn reject_silently_ignored_constructs(
     } else {
         Vec::new()
     };
+    // These are the constant contexts that use selection-aware lowering.
+    // Other contexts (such as declaration ranges) still use the lightweight
+    // constant parser and must reject indexed selections rather than drop them.
+    let lowered_constant_indexed_ranges: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter_map(|child| match child {
+            RefNode::IndexedRange(_) | RefNode::NetLvalue(_) | RefNode::VariableLvalue(_) => {
+                Some(child)
+            }
+            RefNode::ParamAssignment(parameter) => parameter
+                .nodes
+                .2
+                .as_ref()
+                .map(|(_, expression)| RefNode::ConstantParamExpression(expression)),
+            _ => None,
+        })
+        .flat_map(|root| root.into_iter())
+        .filter_map(|child| match child {
+            RefNode::ConstantIndexedRange(range) => Some(range),
+            _ => None,
+        })
+        .collect();
     // Casts in indexed bases are checked by the full typed base converter.
     // Keep the existing runtime-cast restrictions for all other expressions.
     let indexed_base_casts: Vec<_> = node
@@ -615,7 +638,8 @@ pub(super) fn reject_silently_ignored_constructs(
                 ));
             }
             RefNode::ConstantIndexedRange(range) if
-                indexed_select_base(RefNode::ConstantExpression(&range.nodes.0), syntax_tree,
+                !lowered_constant_indexed_ranges.contains(&range)
+                || indexed_select_base(RefNode::ConstantExpression(&range.nodes.0), syntax_tree,
                     &indexed_dimensions)
                     .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
                 || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {

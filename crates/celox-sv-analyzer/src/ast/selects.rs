@@ -1219,11 +1219,17 @@ fn indexed_select_bounds(
         })
         .unwrap_or(false);
     let plus = syntax_tree.get_str(&operator.nodes.0)? == "+:";
-    let other = ConstExpr::Binary {
-        left: Box::new(base.clone()),
-        op: if plus { BinaryOp::Add } else { BinaryOp::Sub },
-        right: Box::new(ConstExpr::Literal((width - 1).to_string())),
+    // The base is self-determined; endpoint arithmetic must not inherit its
+    // unsigned type or truncate a carry across the base expression's width.
+    let base = eval_ast_const_expr(&base, &dimensions.const_env)?;
+    let offset = width.checked_sub(1)?;
+    let other = if plus {
+        base.checked_add(offset)?
+    } else {
+        base.checked_sub(offset)?
     };
+    let base = const_expr_from_i128(base);
+    let other = const_expr_from_i128(other);
     Some(if plus == ascending {
         (base, other)
     } else {

@@ -117,9 +117,53 @@ pub(super) fn parameters_from_ref_node(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let mut const_env = base_const_env.clone();
             const_env.extend(const_env_from_parameters(parameters));
-            let mut value = param.nodes.2.as_ref().and_then(|(_, expr)| {
-                const_expr_from_constant_param_with_env(expr, syntax_tree, &const_env, type_aliases)
-            });
+            let mut value = if let Some((_, expr)) = &param.nodes.2 {
+                if expr.into_iter().any(|node| {
+                    matches!(
+                        node,
+                        RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
+                    )
+                }) {
+                    let expression = match expr {
+                        sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(expr) => {
+                            match &**expr {
+                                sv_parser::ConstantMintypmaxExpression::Unary(expr) => Some(expr),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let dimensions = PackedDimensions::new(
+                        parameter_packed_dimensions(parameters),
+                        &const_env,
+                        type_aliases,
+                    );
+                    Some(
+                        expression
+                            .and_then(|expr| {
+                                indexed_select_base(
+                                    RefNode::ConstantExpression(expr),
+                                    syntax_tree,
+                                    &dimensions,
+                                )
+                            })
+                            .ok_or_else(|| {
+                                AnalyzerError::Unsupported(
+                                    "indexed parameter initializer".to_string(),
+                                )
+                            })?,
+                    )
+                } else {
+                    const_expr_from_constant_param_with_env(
+                        expr,
+                        syntax_tree,
+                        &const_env,
+                        type_aliases,
+                    )
+                }
+            } else {
+                None
+            };
             value =
                 normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
             // Apply overrides as each declaration is collected so later
