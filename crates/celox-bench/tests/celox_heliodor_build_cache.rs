@@ -39,8 +39,17 @@ fn project(source: &str) -> tempfile::TempDir {
     project
 }
 
-#[allow(clippy::disallowed_methods)] // Isolate child-process environment in integration tests.
 fn run(project: &Path, args: &[&str], success: bool) -> String {
+    run_with_env(project, args, success, &[])
+}
+
+#[allow(clippy::disallowed_methods)] // Isolate child-process environment in integration tests.
+fn run_with_env(
+    project: &Path,
+    args: &[&str],
+    success: bool,
+    environment: &[(&str, &std::ffi::OsStr)],
+) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_celox-heliodor"));
     // Isolate the test from user diagnostics and codegen environment switches.
     for (name, _) in std::env::vars_os() {
@@ -49,6 +58,7 @@ fn run(project: &Path, args: &[&str], success: bool) -> String {
         }
     }
     let output = command
+        .envs(environment.iter().copied())
         .current_dir(project)
         .arg("--project")
         .arg(project)
@@ -71,6 +81,71 @@ fn cached(project: &Path, args: &[&str], status: &str, success: bool) -> String 
         "{output}"
     );
     output
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    not(target_feature = "crt-static")
+))]
+#[test]
+#[allow(clippy::disallowed_macros)] // Report a host-specific test exclusion.
+fn invalidates_changed_os_native_features() {
+    // This regression needs a host where normal codegen uses the GS state base.
+    if celox::native_backend::features::detected_image_feature_bits() & (1 << 3) == 0 {
+        eprintln!("skipping FSGSBASE regression: host uses the baseline state base");
+        return;
+    }
+    let project = project(SOURCE);
+    let path = project.path();
+    let shim_source = path.join("mask_fsgsbase.c");
+    let shim = path.join("mask_fsgsbase.so");
+    fs::write(
+        &shim_source,
+        r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <sys/auxv.h>
+
+unsigned long getauxval(unsigned long type) {
+    unsigned long (*original)(unsigned long) = dlsym(RTLD_NEXT, "getauxval");
+    unsigned long value = original(type);
+    /* Mask Linux's OS-enabled FSGSBASE capability, leaving other facts intact. */
+    return type == AT_HWCAP2 ? value & ~2UL : value;
+}
+"#,
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&shim)
+        .arg(&shim_source)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    cached(path, &[], "miss", true);
+    cached(path, &[], "hit", true);
+    for status in ["miss", "hit"] {
+        let output = run_with_env(
+            path,
+            &["--build-cache-dir", "cache"],
+            true,
+            &[("LD_PRELOAD", shim.as_os_str())],
+        );
+        assert!(
+            output.contains(&format!("CELOX_BUILD_CACHE test=t status={status}")),
+            "{output}"
+        );
+        assert!(output.contains("CELOX_TEST_RESULT test=t status=pass"));
+    }
+    // Restoring the original capabilities reuses the original compilation.
+    cached(path, &[], "hit", true);
 }
 
 #[test]

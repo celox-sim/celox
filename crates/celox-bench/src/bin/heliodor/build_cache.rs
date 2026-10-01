@@ -133,6 +133,16 @@ impl BuildCache {
         // The exact compiler binary covers revisions, dirty builds, Cargo
         // features, target architecture, and changes to image serialization.
         field(&mut hash, file_hash(&std::env::current_exe()?)?.as_bytes());
+        // x86 codegen selects instructions and its state-base strategy from
+        // CPU and OS capabilities, which can change without rebuilding the runner.
+        #[cfg(any(
+            feature = "x86_64-codegen",
+            all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+        ))]
+        field(
+            &mut hash,
+            &[celox::native_backend::features::detected_image_feature_bits()],
+        );
         field(
             &mut hash,
             std::env::current_dir()?.as_os_str().as_encoded_bytes(),

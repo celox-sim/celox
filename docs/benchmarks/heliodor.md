@@ -79,10 +79,11 @@ analysis, optimization, and native code generation; each run initializes fresh
 simulation state. `CELOX_BUILD_CACHE` logs `status=hit` or `status=miss`. Source
 contents and order, project metadata and dependency mappings, test name,
 optimization/pass settings, four-state mode, native memory width, SLP settings,
-diagnostics, working directory, and the exact runner executable identify the
-compilation. Files consulted by `$readmemh`, including absent lookup candidates,
-are checked by content before reuse. Dependency namespaces and properties are
-resolved before cache lookup. Component Cargo metadata, manifest candidates, and
+diagnostics, detected x86 CPU/OS capabilities, working directory, and the exact
+runner executable identify the compilation. Files consulted by `$readmemh`,
+including absent lookup candidates, are checked by content before reuse.
+Dependency namespaces and properties are resolved before cache lookup.
+Component Cargo metadata, manifest candidates, and
 prebuilt WASM files are also checked, including manifest modification times that
 determine which interface takes precedence. Native component library presence,
 including Cargo `[lib].name` overrides, is tracked so adding or removing a library
