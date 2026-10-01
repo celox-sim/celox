@@ -1,4 +1,4 @@
-# hwverify-rs 0.11.1
+# hwverify-rs 0.11.2
 
 Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
@@ -6,12 +6,19 @@ Rustによる、ハードウェア向け状態対応チェッカー。小さなC
 
 現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
 
+## 0.11.2: 32bitも同じ予算で証明
+
+有限solverが一般のBool式の選択肢を完全に分割し、**分岐付き4/8/16/32bitの全8義務**を通す。
+元の式・モデル・bindingを保持し、時間・work・clauseをquery全体で共有する。各branchへの予算増配はしない。
+全ての主負例も反例のまま。ただし後の選択肢に反例がある一部のSAT queryは遅くなる。
+[分割の意味・測定・残る信頼境界](BRANCH-SOLVER-DECOMPOSITION-ja.md)を参照。
+
 ## 0.11.1: 幅を増やしたときの探索量を削減
 
 有限solver内で、必須の同値変数のbit共有とmuxの直接CNF化を行った。
 モデル・ISA・binding・元SMT・既定予算は変えず、16bitの分岐付きpipelineも全8義務が通る。
-32bitのforward/interlock負例も反例を取得できるようになった。32bit正例のrefinementは
-既定work予算でまだUNKNOWNであり、未証明として扱う。
+32bitのforward/interlock負例も反例を取得できるようになった。0.11.1時点では32bit正例のrefinementは
+既定work予算でUNKNOWNであり、未証明として扱った。
 詳細・比較・信頼境界は[幅スケーリング改善](BRANCH-SOLVER-SCALING-ja.md)、
 [再現可能な性能監査](audit/branch_solver_scaling/README.md)を参照。
 

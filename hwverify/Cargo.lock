@@ -441,14 +441,14 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hwverify-ir"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "hwverify-rs"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "hwverify-ir",
  "hwverify-solver",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "hwverify-solver"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "hwverify-ir",
  "serde_json",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "hwverify-syntax"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "hwverify-ir",
  "parol",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "hwverify-verify"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "hwverify-ir",
  "hwverify-solver",

@@ -93,6 +93,11 @@ pub struct Stats {
     pub terms: usize,
     pub variables: usize,
     pub clauses: usize,
+    pub base_clauses: usize,
+    pub peak_live_clauses: usize,
+    pub split_alternatives: usize,
+    pub split_completed: usize,
+    pub split_unsat: usize,
     pub decisions: u64,
     pub conflicts: u64,
     pub work: u64,
@@ -115,6 +120,10 @@ impl Outcome {
             "assignments":self.assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "context_values":self.context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "terms":self.stats.terms,"variables":self.stats.variables,"clauses":self.stats.clauses,
+            "base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
+            "split_alternatives":self.stats.split_alternatives,"split_completed":self.stats.split_completed,
+            "split_unsat":self.stats.split_unsat,
+            "clause_accounting":"aggregate materialized CNF/branch/learned clauses within the whole-query limit",
             "decisions":self.stats.decisions,"conflicts":self.stats.conflicts,"work":self.stats.work})
     }
 }
@@ -917,6 +926,7 @@ impl VarOrder {
 /// Two-watched-literal CDCL. First-UIP learned clauses are resolution consequences
 /// of existing clauses; only a conflict at decision level zero establishes UNSAT.
 struct Sat {
+    previous_clauses: usize,
     clauses: Vec<Vec<Lit>>,
     watches: Vec<Vec<usize>>,
     values: Vec<i8>,
@@ -941,6 +951,7 @@ fn truth(values: &[i8], lit: Lit) -> i8 {
 impl Sat {
     fn new(vars: usize, clauses: Vec<Vec<Lit>>) -> Self {
         Self {
+            previous_clauses: 0,
             clauses,
             watches: vec![vec![]; 2 * (vars + 1)],
             values: vec![0; vars + 1],
@@ -1139,7 +1150,8 @@ impl Sat {
                 }
                 let (learned, level) = self.analyze(conflict, b)?;
                 self.backtrack(level, b)?;
-                if self.clauses.len() >= b.limits.max_clauses {
+                if self.previous_clauses.saturating_add(self.clauses.len()) >= b.limits.max_clauses
+                {
                     return Err("finite SAT learned-clause budget exhausted".into());
                 }
                 let p = learned[0];
@@ -1183,6 +1195,53 @@ impl Sat {
     }
 }
 
+/// Pick a disjunctive factor whose alternatives cover the asserted formula.
+/// Every branch keeps the complete original CNF and adds one alternative as a
+/// unit assumption. Branches share a single work/time budget.
+fn split_choices(formula: &Term, blast: &Blast, b: &mut Budget) -> Res<Vec<Lit>> {
+    let mut conjuncts = vec![formula];
+    let mut visited_conjuncts = HashSet::new();
+    let mut best = Vec::new();
+    while let Some(term) = conjuncts.pop() {
+        b.tick(1)?;
+        if !visited_conjuncts.insert(term.clone()) {
+            continue;
+        }
+        if term.0.op == "and" {
+            conjuncts.extend(&term.0.args);
+            continue;
+        }
+        let mut alternatives = vec![(term, false)];
+        let mut visited_alternatives = HashSet::new();
+        let mut choices = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some((part, negative)) = alternatives.pop() {
+            b.tick(1)?;
+            if !visited_alternatives.insert((part.clone(), negative)) {
+                continue;
+            }
+            if part.0.op == "not" {
+                alternatives.push((&part.0.args[0], !negative));
+            } else if (!negative && part.0.op == "or") || (negative && part.0.op == "and") {
+                alternatives.push((&part.0.args[1], negative));
+                alternatives.push((&part.0.args[0], negative));
+            } else {
+                let lit = blast.memo[part].bits[0] * if negative { -1 } else { 1 };
+                if lit != FALSE && seen.insert(lit) {
+                    choices.push(lit);
+                }
+            }
+        }
+        if !choices.contains(&TRUE) && choices.len() > best.len() {
+            best = choices;
+        }
+    }
+    if best.len() < 2 {
+        best.clear();
+    }
+    Ok(best)
+}
+
 pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
     let mut outcome = Outcome {
         verdict: Verdict::Unknown,
@@ -1218,14 +1277,86 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
     outcome.stats.terms = blast.memo.len();
     outcome.stats.variables = blast.vars;
     outcome.stats.clauses = blast.clauses.len();
+    outcome.stats.base_clauses = blast.clauses.len();
+    outcome.stats.peak_live_clauses = blast.clauses.len();
     if let Err(reason) = compile {
         outcome.reason = Some(reason);
         outcome.stats.work = budget.work;
         return outcome;
     }
-    let mut sat = Sat::new(blast.vars, std::mem::take(&mut blast.clauses));
+    let choices = match split_choices(formula, &blast, &mut budget) {
+        Ok(choices) => choices,
+        Err(reason) => {
+            outcome.reason = Some(reason);
+            outcome.stats.work = budget.work;
+            return outcome;
+        }
+    };
+    let original_clauses = std::mem::take(&mut blast.clauses);
+    let base_clauses = original_clauses.len();
+    let mut sat = Sat::new(blast.vars, Vec::new());
+    let mut previous_decisions = 0;
+    let mut previous_conflicts = 0;
+    let mut cumulative_clauses = base_clauses;
+    outcome.stats.split_alternatives = choices.len();
     let result = (|| -> Res<Verdict> {
-        let verdict = sat.run(&mut budget)?;
+        let verdict = if choices.is_empty() {
+            // Preserve the original no-copy, single-search path.
+            sat.clauses = original_clauses;
+            let result = sat.run(&mut budget);
+            cumulative_clauses = sat.clauses.len();
+            outcome.stats.peak_live_clauses = cumulative_clauses;
+            result?
+        } else {
+            let mut verdict = Verdict::Unsat;
+            for &choice in &choices {
+                // Count every materialized branch copy and its unit assumption,
+                // as well as the retained base and all earlier learned clauses.
+                // No clause/work/time allowance resets between alternatives.
+                let additional = base_clauses
+                    .checked_add(1)
+                    .ok_or("finite solver split clause count overflow")?;
+                let next_count = cumulative_clauses
+                    .checked_add(additional)
+                    .ok_or("finite solver split clause count overflow")?;
+                if next_count > budget.limits.max_clauses {
+                    return Err("finite solver aggregate split clause budget exhausted".into());
+                }
+                for clause in &original_clauses {
+                    budget.tick(clause.len() as u64)?;
+                }
+                budget.tick(1)?;
+                let peak = base_clauses
+                    .saturating_add(sat.clauses.len())
+                    .saturating_add(additional);
+                outcome.stats.peak_live_clauses = outcome.stats.peak_live_clauses.max(peak);
+                let mut clauses = original_clauses.clone();
+                clauses.push(vec![choice]);
+                previous_decisions += sat.decisions;
+                previous_conflicts += sat.conflicts;
+                sat = Sat::new(blast.vars, clauses);
+                sat.previous_clauses = cumulative_clauses;
+                let result = sat.run(&mut budget);
+                cumulative_clauses = sat.previous_clauses + sat.clauses.len();
+                outcome.stats.peak_live_clauses = outcome
+                    .stats
+                    .peak_live_clauses
+                    .max(base_clauses + sat.clauses.len());
+                match result? {
+                    Verdict::Sat => {
+                        outcome.stats.split_completed += 1;
+                        verdict = Verdict::Sat;
+                        break;
+                    }
+                    Verdict::Unsat => {
+                        outcome.stats.split_completed += 1;
+                        outcome.stats.split_unsat += 1;
+                    }
+                    Verdict::Unknown => return Err("finite solver unresolved split branch".into()),
+                }
+            }
+            verdict
+        };
         budget.check_time()?;
         if verdict != Verdict::Sat {
             return Ok(verdict);
@@ -1272,9 +1403,9 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
         Ok(verdict) => outcome.verdict = verdict,
         Err(reason) => outcome.reason = Some(reason),
     }
-    outcome.stats.decisions = sat.decisions;
-    outcome.stats.conflicts = sat.conflicts;
-    outcome.stats.clauses = sat.clauses.len();
+    outcome.stats.decisions = previous_decisions + sat.decisions;
+    outcome.stats.conflicts = previous_conflicts + sat.conflicts;
+    outcome.stats.clauses = cumulative_clauses;
     outcome.stats.work = budget.work;
     outcome
 }
@@ -1293,6 +1424,135 @@ mod tests {
             work: 0,
             time_check_in: 0,
         }
+    }
+    fn split_fixture(late_sat: bool) -> (Term, Env) {
+        let a = var("a".into(), Sort::Bool);
+        let b = var("b".into(), Sort::Bool);
+        let c = var("c".into(), Sort::Bool);
+        let d = var("d".into(), Sort::Bool);
+        let alternatives = node(Sort::Bool, "or", vec![and(a.clone(), b), and(c.clone(), d)]);
+        let constraints = if late_sat {
+            not(a)
+        } else {
+            and(not(a), not(c))
+        };
+        (
+            and(alternatives, constraints),
+            Env::from([("extra".into(), var("extra".into(), Sort::Bv(64)))]),
+        )
+    }
+    #[test]
+    fn disjunctive_split_covers_every_branch_and_preserves_late_sat_context() {
+        for late_sat in [false, true] {
+            let (formula, context) = split_fixture(late_sat);
+            let result = solve(&formula, &context, Limits::default());
+            assert_eq!(result.stats.split_alternatives, 2);
+            assert_eq!(result.stats.split_completed, 2);
+            assert_eq!(result.stats.split_unsat, if late_sat { 1 } else { 2 });
+            assert_eq!(
+                result.verdict,
+                if late_sat {
+                    Verdict::Sat
+                } else {
+                    Verdict::Unsat
+                }
+            );
+            assert!(result.stats.peak_live_clauses <= result.stats.clauses);
+            if late_sat {
+                assert!(result.original_formula_validated);
+                assert_eq!(result.assignments.len(), 5);
+                assert!(result.context_values.contains_key("extra"));
+            }
+        }
+    }
+    #[test]
+    fn split_budgets_are_whole_query_not_per_branch() {
+        let (formula, context) = split_fixture(false);
+        let full = solve(&formula, &context, Limits::default());
+        assert_eq!(full.verdict, Verdict::Unsat);
+        assert!(full.stats.clauses > 2 * full.stats.base_clauses);
+        for limits in [
+            Limits {
+                max_clauses: 2 * full.stats.base_clauses + 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_clauses: full.stats.clauses - 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_work: full.stats.work - 1,
+                ..Limits::default()
+            },
+        ] {
+            let result = solve(&formula, &context, limits);
+            assert_eq!(result.verdict, Verdict::Unknown);
+            assert!(result.reason.is_some());
+            assert!(result.stats.split_completed < result.stats.split_alternatives);
+            assert!(!result.original_formula_validated);
+        }
+        let exact = solve(
+            &formula,
+            &context,
+            Limits {
+                max_clauses: full.stats.clauses,
+                max_work: full.stats.work,
+                ..Limits::default()
+            },
+        );
+        assert_eq!(exact.verdict, Verdict::Unsat);
+    }
+    #[test]
+    fn split_polarity_duplicates_and_opaque_operators_are_exact() {
+        let a = var("a".into(), Sort::Bool);
+        let b = var("b".into(), Sort::Bool);
+        let c = var("c".into(), Sort::Bool);
+        let left = and(a.clone(), b.clone());
+        let alternatives = node(
+            Sort::Bool,
+            "or",
+            vec![
+                left.clone(),
+                node(
+                    Sort::Bool,
+                    "or",
+                    vec![boolv(false), node(Sort::Bool, "or", vec![left, c.clone()])],
+                ),
+            ],
+        );
+        let mut budget = test_budget();
+        let mut blast = Blast::new();
+        blast.term(&alternatives, &mut budget, 0).unwrap();
+        assert_eq!(
+            split_choices(&alternatives, &blast, &mut budget)
+                .unwrap()
+                .len(),
+            2
+        );
+        let negative_and = not(and(not(a.clone()), and(not(b.clone()), not(c.clone()))));
+        blast.term(&negative_and, &mut budget, 0).unwrap();
+        assert_eq!(
+            split_choices(&negative_and, &blast, &mut budget)
+                .unwrap()
+                .len(),
+            3
+        );
+        for opaque in [
+            not(alternatives.clone()),
+            ite(a.clone(), alternatives.clone(), boolv(true)),
+            node(Sort::Bool, "=>", vec![a, alternatives]),
+        ] {
+            blast.term(&opaque, &mut budget, 0).unwrap();
+            assert!(split_choices(&opaque, &blast, &mut budget)
+                .unwrap()
+                .is_empty());
+        }
+        let (formula, _) = split_fixture(true);
+        let malformed = Env::from([("dead".into(), node(Sort::Bool, "unsupported", vec![]))]);
+        assert_eq!(
+            solve(&formula, &malformed, Limits::default()).verdict,
+            Verdict::Unknown
+        );
     }
     #[test]
     fn canonical_mux_definitions_are_exact_and_shared() {
