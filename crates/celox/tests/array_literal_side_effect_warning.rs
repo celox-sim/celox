@@ -124,3 +124,44 @@ fn nested_patterns_and_dynamic_output_destinations_warn() {
         .replace("state = 0;", "state = '{default: 0};");
     assert_eq!(warnings(&dynamic).len(), 1);
 }
+
+#[test]
+fn unevaluated_shape_operands_do_not_warn() {
+    for query in ["$bits", "$size"] {
+        for literal in [
+            format!("'{{default: {query}(update(d, state))}}"),
+            format!("'{{{query}(update(d, state)) repeat 2}}"),
+        ] {
+            assert!(warnings(&source(&literal, false)).is_empty(), "{literal}");
+        }
+        let code = source("'{default: calculate(d)}", false).replace(
+            "local_value = x + 8'd1;",
+            &format!("local_value = {query}(update(x, local_value));"),
+        );
+        assert!(warnings(&code).is_empty(), "{query} in function body");
+    }
+}
+
+#[test]
+fn dynamic_nonlocal_writes_warn_but_local_writes_and_reads_do_not() {
+    for literal in ["'{default: calculate(d)}", "'{calculate(d) repeat 2}"] {
+        let base = source(literal, false);
+        let nonlocal = base.replace(
+            "local_value = x + 8'd1;",
+            "state[x[0]] = 1'b1; local_value = x;",
+        );
+        assert_eq!(warnings(&nonlocal).len(), 1, "nonlocal: {literal}");
+        let array = nonlocal
+            .replace("state: output logic<8>", "state: output logic<8>[2]")
+            .replace("state = 0;", "state = '{default: 0};")
+            .replace("state[x[0]] = 1'b1;", "state[x[0]] = 8'd1;");
+        assert_eq!(warnings(&array).len(), 1, "nonlocal array: {literal}");
+        let local = base.replace(
+            "local_value = x + 8'd1;",
+            "local_value = x; local_value[x[0]] = 1'b1;",
+        );
+        assert!(warnings(&local).is_empty(), "local: {literal}");
+        let read = base.replace("local_value = x + 8'd1;", "local_value = x[x[0]];");
+        assert!(warnings(&read).is_empty(), "read: {literal}");
+    }
+}

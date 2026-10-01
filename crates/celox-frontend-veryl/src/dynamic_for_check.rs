@@ -1588,9 +1588,9 @@ fn collect_system_function_effects(
     effects: &mut Effects,
 ) {
     match &call.kind {
-        SystemFunctionKind::Bits(input)
-        | SystemFunctionKind::Size(input)
-        | SystemFunctionKind::Clog2(input)
+        // Shape queries do not evaluate their operands, including calls.
+        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+        SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
         | SystemFunctionKind::Unsigned(input) => effects.append(collect_expression_effects(

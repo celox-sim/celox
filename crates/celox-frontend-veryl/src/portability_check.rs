@@ -343,9 +343,9 @@ impl Checker<'_, '_> {
 
     fn system_call(&mut self, call: &SystemFunctionCall) {
         match &call.kind {
-            SystemFunctionKind::Bits(x)
-            | SystemFunctionKind::Size(x)
-            | SystemFunctionKind::Clog2(x)
+            // Do not diagnose calls nested in unevaluated shape operands.
+            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+            SystemFunctionKind::Clog2(x)
             | SystemFunctionKind::Onehot(x)
             | SystemFunctionKind::Signed(x)
             | SystemFunctionKind::Unsigned(x) => self.expression(&x.0),
