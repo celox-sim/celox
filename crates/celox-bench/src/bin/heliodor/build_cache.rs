@@ -58,6 +58,15 @@ fn dependency_hash(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
+fn is_project_relative(path: &Path) -> bool {
+    !path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        )
+    })
+}
+
 /// Preserve lookup symlinks below the project root. Only aliases of the root
 /// itself are normalized, so changing a nested symlink is observed on reload.
 pub(super) fn relative_path(path: &Path, root: &Path) -> io::Result<PathBuf> {
@@ -75,6 +84,8 @@ pub(super) fn relative_path(path: &Path, root: &Path) -> io::Result<PathBuf> {
         }
     }
     pathdiff::diff_paths(absolute, root)
+        // On Windows, differing drive/UNC prefixes can produce Some(absolute).
+        .filter(|path| is_project_relative(path))
         .ok_or_else(|| io::Error::other("cache path has no project-relative representation"))
 }
 
@@ -385,7 +396,7 @@ impl BuildCache {
         let dependencies: Vec<CachedFileDependency> =
             serde_json::from_slice(manifest).map_err(io::Error::other)?;
         for dependency in dependencies {
-            if dependency.path.is_absolute() {
+            if !is_project_relative(&dependency.path) {
                 return Err(invalid().into());
             }
             let path = bind_path(&dependency.path, &self.root);
@@ -400,7 +411,7 @@ impl BuildCache {
         }
         let mut image = NativeProgramImage::from_container_bytes(&rest[length..])?;
         image.try_map_paths(|path| {
-            if path.is_absolute() {
+            if !is_project_relative(path) {
                 return Err(invalid());
             }
             Ok(bind_path(path, &self.root))
@@ -446,5 +457,38 @@ impl BuildCache {
         temporary.write_all(&image.to_container_bytes()?)?;
         temporary.persist(&self.path).map_err(|error| error.error)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_paths_must_preserve_the_project_root_when_joined() {
+        for path in ["", "src/test.veryl", "../dependency/mem.hex"] {
+            assert!(is_project_relative(Path::new(path)));
+        }
+        assert!(!is_project_relative(&std::env::current_dir().unwrap()));
+        #[cfg(windows)]
+        for path in [
+            r"C:\memory.hex",
+            r"C:memory.hex",
+            r"\memory.hex",
+            r"\\host\share\memory.hex",
+        ] {
+            assert!(!is_project_relative(Path::new(path)));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_paths_on_other_drives_or_unc_shares() {
+        for (path, root) in [
+            (r"D:\memory.hex", r"C:\project"),
+            (r"\\host\other\memory.hex", r"\\host\project\checkout"),
+        ] {
+            assert!(relative_path(Path::new(path), Path::new(root)).is_err());
+        }
     }
 }

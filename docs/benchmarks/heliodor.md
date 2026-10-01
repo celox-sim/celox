@@ -98,7 +98,8 @@ Moving a project preserves cache reuse when its inputs and relative
 working directory stay equivalent. The key also includes each source's resolved
 namespace. External paths use `..`; paths on a different Windows drive cannot be
 represented and bypass caching. CLI native image exports use the same relative
-paths and `--native-image-input` binds them using the current `--project` root
+paths and fail before writing if a path cannot be represented relative to the
+project root. `--native-image-input` binds them using the current `--project` root
 without loading source files. Existing images with absolute paths remain loadable.
 Design-authored strings are preserved; the cache still contains compiled design
 data and is not an anonymized artifact. Earlier cache entries are not reused by
