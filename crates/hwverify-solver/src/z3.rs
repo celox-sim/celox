@@ -72,6 +72,58 @@ pub fn solver(z3: &str, script: &str) -> Res<String> {
     }
     Ok(s)
 }
+/// Search and evidence options, separate from the query's logical expectation.
+#[derive(Clone, Debug)]
+pub struct QueryOptions {
+    pub timeout_ms: u64,
+    pub capture_sat: bool,
+    /// None derives a hint from `expect_sat`, unless an explicit environment
+    /// override is present. Some(...) overrides that environment as well.
+    pub finite_search_hint: Option<crate::finite::SearchHint>,
+}
+impl Default for QueryOptions {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 10_000,
+            capture_sat: false,
+            finite_search_hint: None,
+        }
+    }
+}
+/// Validate the CLI/environment setting. `query` uses each logical expectation.
+pub fn parse_finite_search_hint(value: &str) -> Res<Option<crate::finite::SearchHint>> {
+    match value {
+        "query" => Ok(None),
+        "sat" => Ok(Some(crate::finite::SearchHint::Sat)),
+        "unsat" => Ok(Some(crate::finite::SearchHint::Unsat)),
+        _ => Err("finite search hint must be query, sat or unsat".into()),
+    }
+}
+pub(crate) fn resolve_finite_search_hint(
+    expect_sat: bool,
+    explicit: Option<crate::finite::SearchHint>,
+) -> Res<(crate::finite::SearchHint, &'static str)> {
+    if let Some(hint) = explicit {
+        return Ok((hint, "query_options"));
+    }
+    match std::env::var("HWVERIFY_FINITE_SEARCH_HINT") {
+        Ok(value) => {
+            if let Some(hint) = parse_finite_search_hint(&value)? {
+                return Ok((hint, "environment"));
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(_) => return Err("HWVERIFY_FINITE_SEARCH_HINT is not valid UTF-8".into()),
+    }
+    Ok((
+        if expect_sat {
+            crate::finite::SearchHint::Sat
+        } else {
+            crate::finite::SearchHint::Unsat
+        },
+        "logical_expectation",
+    ))
+}
 pub struct Check {
     pub z3: String,
     pub out: PathBuf,
@@ -89,7 +141,16 @@ impl Check {
         expect_sat: bool,
         context: &Env,
     ) -> Res<()> {
-        self.query_options(name, formula, expect_sat, context, 10000, true)
+        self.query_with_options(
+            name,
+            formula,
+            expect_sat,
+            context,
+            QueryOptions {
+                capture_sat: true,
+                ..QueryOptions::default()
+            },
+        )
     }
     pub fn query_with_timeout(
         &mut self,
@@ -99,17 +160,38 @@ impl Check {
         context: &Env,
         timeout_ms: u64,
     ) -> Res<()> {
-        self.query_options(name, bad, expect_sat, context, timeout_ms, false)
+        self.query_with_options(
+            name,
+            bad,
+            expect_sat,
+            context,
+            QueryOptions {
+                timeout_ms,
+                ..QueryOptions::default()
+            },
+        )
     }
-    fn query_options(
+    /// `expect_sat` controls pass/fail only. The optional finite search hint
+    /// controls search order only; neither can substitute for a solver result.
+    pub fn query_with_options(
         &mut self,
         name: &str,
         bad: Term,
         expect_sat: bool,
         context: &Env,
-        timeout_ms: u64,
-        capture_sat: bool,
+        options: QueryOptions,
     ) -> Res<()> {
+        let QueryOptions {
+            timeout_ms,
+            capture_sat,
+            finite_search_hint,
+        } = options;
+        let logical_expectation = if expect_sat { "sat" } else { "unsat" };
+        let finite_hint = if finite_only() {
+            Some(resolve_finite_search_hint(expect_sat, finite_search_hint)?)
+        } else {
+            None
+        };
         let start = Instant::now();
         let mut e = Emitter::default();
         let b = e.emit(&bad);
@@ -154,7 +236,10 @@ impl Check {
                 )
                 .map_err(|e| e.to_string())?;
                 self.reports.push(json!({"name":name,"status":"passed","solver_result":"unsat",
-                    "backend":"structural_kernel","seconds":start.elapsed().as_secs_f64(),
+                    "backend":"structural_kernel","logical_expectation":logical_expectation,
+                    "finite_search_hint":finite_hint.map(|(hint, _)| hint.as_str()),
+                    "search_hint_source":finite_hint.map(|(_, source)| source),
+                    "search_strategy":"structural_kernel","seconds":start.elapsed().as_secs_f64(),
                     "emission_seconds":emission_seconds,"z3_seconds":0.0,"kernel":kernel_report,
                     "context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
                 return Ok(());
@@ -162,13 +247,15 @@ impl Check {
         }
         if finite_only() {
             let finite_start = Instant::now();
-            let result = crate::finite::solve(
+            let (search_hint, search_hint_source) = finite_hint.unwrap();
+            let result = crate::finite::solve_with_hint(
                 &bad,
                 context,
                 crate::finite::Limits {
                     timeout_ms,
                     ..Default::default()
                 },
+                search_hint,
             );
             let finite_seconds = finite_start.elapsed().as_secs_f64();
             let verdict = result.verdict.as_str();
@@ -225,6 +312,7 @@ impl Check {
             fs::write(self.out.join(format!("{name}.smt2")), &script).map_err(|e| e.to_string())?;
             fs::write(self.out.join(format!("{name}.out")), &raw).map_err(|e| e.to_string())?;
             self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"finite_bv",
+                "logical_expectation":logical_expectation,"search_hint_source":search_hint_source,
                 "seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":0.0,
                 "finite_seconds":finite_seconds,"finite":diagnostics,"finite_diagnostics":diagnostics_path,
                 "kernel":kernel_report,"context_symbols":ctx,"concrete_model":result.original_formula_validated,
@@ -273,7 +361,7 @@ impl Check {
         }
         fs::write(self.out.join(format!("{name}.smt2")), &script).map_err(|e| e.to_string())?;
         fs::write(self.out.join(format!("{name}.out")), &raw).map_err(|e| e.to_string())?;
-        self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"z3","seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":z3_seconds,"kernel":kernel_report,"context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
+        self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"z3","logical_expectation":logical_expectation,"seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":z3_seconds,"kernel":kernel_report,"context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
         Ok(())
     }
 }

@@ -9,5 +9,4 @@ hwverify-ir.workspace = true
 hwverify-verify.workspace = true
 hwverify-syntax.workspace = true
 
-[dev-dependencies]
 hwverify-solver.workspace = true

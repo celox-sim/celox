@@ -6,15 +6,25 @@ Rustによる、ハードウェア向け状態対応チェッカー。小さなC
 
 現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
 
-## 0.11.3: 反例を先に見つける探索
+## 0.11.3: 呼び出し側の予想に合わせた探索
 
-分割前の式を短く探索し、そこで得た仮定なしの学習節を引き継いで、各分割を再開可能な
-round-robinで探索する。時間・work・clauseは引き続きquery全体の共有予算。
-同一環境の5回交互測定で32bit forwarding/interlock負例は0.700/0.683秒から0.098/0.086秒へ改善。
-全41負例中34件が高速化、7件が遅くなった。正しい32bitの証明は0.797秒から0.945秒へ遅くなるが、
-84.49M workで既定100M予算内に収まる。反例発見と証明完了の両方が常に速くなるという保証ではない。
-[全モデルの比較と探索方式](audit/counterexample_search/README.md)、
-[独立監査](results/counterexample_search_independent/REPORT.md)を参照。
+呼び出し側が宣言したSAT/UNSATの予想を、**探索順序だけのhint**として使う。
+通常の証明義務はUNSAT向けの0.11.2型分割を使い、反例優先probeの費用を払わない。
+非空性・存在確認はSAT向けのprobe＋再開可能な分割探索を使う。
+`--finite-search-hint query|sat|unsat` で、論理上の合否条件を変えずに探索方針を指定できる。
+例えばバグ探索は `--finite-search-hint sat`。既定の `query` は各義務の合否期待に従う。
+
+全46モデルを各hintと2つの旧実装で5回ずつ交互測定した1,150実行で、結果と元SMTは不変。
+正しい32bitの通常証明は中央値0.735秒（0.11.2は0.773秒、一律probeは0.889秒）に戻る。
+SAT hintでの32bit forwarding/interlock反例は0.094/0.078秒。逆のhintでも結果は正しい。
+
+hintは結果・仮定ではない。予想と逆のSAT/UNSATも通常どおり返し、SATは元の式とcontextを再評価する。
+未対応・予算不足はUNKNOWNのまま。正しいhintなら必ず速い、予想外の結果だけが遅いという保証はない。
+モデル・元SMT・共有予算は変更せず、量化例の有限solver未対応も維持する。
+[API・CLI・hint×実結果の比較](audit/expected_result_search/README.md)と
+[独立監査](audit/expected_result_search_independent/README.md)を参照。
+以前の未公開0.11.3で試した一律反例優先方針と測定は、
+[不採用方針の履歴](audit/counterexample_search/README.md)として保存している。
 
 ## 0.11.2: 32bitも同じ予算で証明
 

@@ -51,6 +51,39 @@ impl Verdict {
         }
     }
 }
+/// Caller-declared expected result, used ONLY to choose search order.
+/// It never adds an assumption or changes what a completed SAT/UNSAT means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchHint {
+    Sat,
+    #[default]
+    Unsat,
+}
+impl SearchHint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sat => "sat",
+            Self::Unsat => "unsat",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchStrategy {
+    NotStarted,
+    SingleSearch,
+    ProofDecomposition,
+    CounterexampleProbeFair,
+}
+impl SearchStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::SingleSearch => "single_search",
+            Self::ProofDecomposition => "proof_decomposition",
+            Self::CounterexampleProbeFair => "counterexample_probe_fair",
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scalar {
     Bool(bool),
@@ -108,6 +141,8 @@ pub struct Stats {
 }
 #[derive(Debug)]
 pub struct Outcome {
+    pub search_hint: SearchHint,
+    pub search_strategy: SearchStrategy,
     pub verdict: Verdict,
     pub reason: Option<String>,
     pub assignments: BTreeMap<String, Scalar>,
@@ -118,6 +153,7 @@ pub struct Outcome {
 impl Outcome {
     pub fn diagnostics(&self) -> Value {
         json!({"solver_result":self.verdict.as_str(),"reason":self.reason,
+            "search_hint":self.search_hint.as_str(),"search_strategy":self.search_strategy.as_str(),
             "kind":"bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
             "trusted":"Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
             "original_formula_validated":self.original_formula_validated,
@@ -1274,8 +1310,23 @@ fn split_choices(formula: &Term, blast: &Blast, b: &mut Budget) -> Res<Vec<Lit>>
     Ok(best)
 }
 
+/// Compatibility entry point: use proof-oriented search, as in 0.11.2.
+/// SAT is still returned and validated normally, even though the hint is UNSAT.
 pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
+    solve_with_hint(formula, context, limits, SearchHint::Unsat)
+}
+
+/// Decide the unchanged formula under a caller-selected search-order hint.
+/// Both hints share the same support checks, limits, and SAT witness validation.
+pub fn solve_with_hint(
+    formula: &Term,
+    context: &Env,
+    limits: Limits,
+    search_hint: SearchHint,
+) -> Outcome {
     let mut outcome = Outcome {
+        search_hint,
+        search_strategy: SearchStrategy::NotStarted,
         verdict: Verdict::Unknown,
         reason: None,
         assignments: BTreeMap::new(),
@@ -1329,9 +1380,16 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
     let mut sat = Sat::new(blast.vars, Vec::new());
     let mut cumulative_clauses = base_clauses;
     outcome.stats.split_alternatives = choices.len();
+    outcome.search_strategy = if choices.is_empty() {
+        SearchStrategy::SingleSearch
+    } else if search_hint == SearchHint::Unsat {
+        SearchStrategy::ProofDecomposition
+    } else {
+        SearchStrategy::CounterexampleProbeFair
+    };
     let result = (|| -> Res<Verdict> {
         let mut probe_verdict = None;
-        if !choices.is_empty() {
+        if !choices.is_empty() && search_hint == SearchHint::Sat {
             // Probe the original query for a quick witness, scaled to its CNF
             // size and capped at a tenth of the DEFAULT whole-query work limit.
             // This fixed scheduling quantum does not change with user limits;
@@ -1380,6 +1438,56 @@ pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
                 Search::Complete(verdict) => verdict,
                 Search::Pending => return Err("finite solver unresolved search".into()),
             }
+        } else if search_hint == SearchHint::Unsat {
+            // The proof-oriented 0.11.2 route pays no whole-query probe and
+            // finishes one alternative before allocating/searching the next.
+            // A mismatched hint may be slower, but can still find a valid SAT.
+            let mut verdict = Verdict::Unsat;
+            for &choice in &choices {
+                let additional = base_clauses
+                    .checked_add(1)
+                    .ok_or("finite solver split clause count overflow")?;
+                let next_count = cumulative_clauses
+                    .checked_add(additional)
+                    .ok_or("finite solver split clause count overflow")?;
+                if next_count > budget.limits.max_clauses {
+                    return Err("finite solver aggregate split clause budget exhausted".into());
+                }
+                for clause in &original_clauses {
+                    budget.tick(clause.len() as u64)?;
+                }
+                budget.tick(1)?;
+                let peak = base_clauses
+                    .saturating_add(sat.clauses.len())
+                    .saturating_add(additional);
+                outcome.stats.peak_live_clauses = outcome.stats.peak_live_clauses.max(peak);
+                let mut clauses = original_clauses.clone();
+                clauses.push(vec![choice]);
+                sat = Sat::new(blast.vars, clauses);
+                sat.previous_clauses = cumulative_clauses;
+                outcome.stats.search_slices += 1;
+                let result = sat.run_slice(&mut budget, u64::MAX);
+                cumulative_clauses = sat.previous_clauses + sat.clauses.len();
+                outcome.stats.peak_live_clauses = outcome
+                    .stats
+                    .peak_live_clauses
+                    .max(base_clauses + sat.clauses.len());
+                outcome.stats.decisions += sat.decisions;
+                outcome.stats.conflicts += sat.conflicts;
+                match result? {
+                    Search::Complete(Verdict::Sat) => {
+                        outcome.stats.split_completed += 1;
+                        verdict = Verdict::Sat;
+                        break;
+                    }
+                    Search::Complete(Verdict::Unsat) => {
+                        outcome.stats.split_completed += 1;
+                        outcome.stats.split_unsat += 1;
+                    }
+                    _ => return Err("finite solver unresolved split branch".into()),
+                }
+            }
+            verdict
         } else {
             // Start every alternative with a small quantum, then double it on
             // each round. A late SAT alternative need not wait for preceding
@@ -1518,7 +1626,14 @@ mod tests {
     use super::*;
     use hwverify_ir::{and, boolv, bv, eq, ite, node, not, var};
     fn check(t: Term) -> Outcome {
-        solve(&t, &Env::new(), Limits::default())
+        let proof = solve(&t, &Env::new(), Limits::default());
+        let witness = solve_with_hint(&t, &Env::new(), Limits::default(), SearchHint::Sat);
+        assert_eq!(proof.verdict, witness.verdict);
+        assert_eq!(
+            proof.original_formula_validated,
+            witness.original_formula_validated
+        );
+        proof
     }
     fn test_budget() -> Budget {
         Budget {
@@ -1636,10 +1751,84 @@ mod tests {
         )
     }
     #[test]
+    fn expected_result_is_only_a_hint_for_both_actual_verdicts() {
+        for actual_sat in [false, true] {
+            let (formula, context) = split_fixture(actual_sat);
+            for hint in [SearchHint::Sat, SearchHint::Unsat] {
+                let result = solve_with_hint(&formula, &context, Limits::default(), hint);
+                assert_eq!(
+                    result.verdict,
+                    if actual_sat {
+                        Verdict::Sat
+                    } else {
+                        Verdict::Unsat
+                    }
+                );
+                assert_eq!(result.search_hint, hint);
+                assert_eq!(result.original_formula_validated, actual_sat);
+                assert_eq!(result.context_values.contains_key("extra"), actual_sat);
+                assert_eq!(result.assignments.is_empty(), !actual_sat);
+                if hint == SearchHint::Unsat {
+                    assert_eq!(result.search_strategy, SearchStrategy::ProofDecomposition);
+                    assert_eq!(result.stats.probe_result, None);
+                    assert_eq!(result.stats.probe_work, 0);
+                    assert_eq!(result.stats.search_yields, 0);
+                    assert_eq!(result.stats.split_completed, 2);
+                    assert_eq!(result.stats.split_unsat, if actual_sat { 1 } else { 2 });
+                    let default = solve(&formula, &context, Limits::default());
+                    assert_eq!(default.stats.work, result.stats.work);
+                    assert_eq!(default.stats.clauses, result.stats.clauses);
+                } else {
+                    assert_eq!(
+                        result.search_strategy,
+                        SearchStrategy::CounterexampleProbeFair
+                    );
+                    assert!(result.stats.probe_work > 0);
+                }
+                let bounded = solve_with_hint(
+                    &formula,
+                    &context,
+                    Limits {
+                        max_work: result.stats.work - 1,
+                        ..Limits::default()
+                    },
+                    hint,
+                );
+                assert_eq!(bounded.verdict, Verdict::Unknown);
+                assert!(!bounded.original_formula_validated);
+                assert!(bounded.assignments.is_empty());
+                assert!(bounded.context_values.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn both_hints_preserve_unsupported_and_deadline_unknown() {
+        let (formula, _) = split_fixture(true);
+        let unsupported = Env::from([("array".into(), var("array".into(), Sort::Mem(2, 2)))]);
+        for hint in [SearchHint::Sat, SearchHint::Unsat] {
+            let result = solve_with_hint(&formula, &unsupported, Limits::default(), hint);
+            assert_eq!(result.verdict, Verdict::Unknown);
+            assert_eq!(result.search_strategy, SearchStrategy::NotStarted);
+            assert!(!result.original_formula_validated);
+            let result = solve_with_hint(
+                &formula,
+                &Env::new(),
+                Limits {
+                    timeout_ms: 0,
+                    ..Limits::default()
+                },
+                hint,
+            );
+            assert_eq!(result.verdict, Verdict::Unknown);
+            assert_eq!(result.search_hint, hint);
+            assert!(result.assignments.is_empty());
+        }
+    }
+    #[test]
     fn original_probe_decides_only_original_query_and_preserves_context() {
         for late_sat in [false, true] {
             let (formula, context) = split_fixture(late_sat);
-            let result = solve(&formula, &context, Limits::default());
+            let result = solve_with_hint(&formula, &context, Limits::default(), SearchHint::Sat);
             assert_eq!(result.stats.split_alternatives, 2);
             assert_eq!(result.stats.split_completed, 0);
             assert_eq!(result.stats.split_unsat, 0);
@@ -1669,7 +1858,7 @@ mod tests {
         );
         let formula = and(choices, pigeonhole(8, 7));
         let context = Env::new();
-        let full = solve(&formula, &context, Limits::default());
+        let full = solve_with_hint(&formula, &context, Limits::default(), SearchHint::Sat);
         assert_eq!(full.verdict, Verdict::Unsat);
         assert!(full.stats.search_yields > 0);
         assert_eq!(full.stats.split_completed, full.stats.split_alternatives);
@@ -1688,13 +1877,13 @@ mod tests {
                 ..Limits::default()
             },
         ] {
-            let result = solve(&formula, &context, limits);
+            let result = solve_with_hint(&formula, &context, limits, SearchHint::Sat);
             assert_eq!(result.verdict, Verdict::Unknown);
             assert!(result.reason.is_some());
             assert!(result.stats.split_completed < result.stats.split_alternatives);
             assert!(!result.original_formula_validated);
         }
-        let exact = solve(
+        let exact = solve_with_hint(
             &formula,
             &context,
             Limits {
@@ -1702,6 +1891,7 @@ mod tests {
                 max_work: full.stats.work,
                 ..Limits::default()
             },
+            SearchHint::Sat,
         );
         assert_eq!(exact.verdict, Verdict::Unsat);
     }

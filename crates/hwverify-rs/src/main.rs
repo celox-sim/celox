@@ -34,10 +34,10 @@ impl Input {
 fn run() -> Res<i32> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE]".into());
+        return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--finite-search-hint query|sat|unsat]".into());
     }
     if args[0] == "--help" || args[0] == "-h" {
-        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.");
+        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence.");
         return Ok(0);
     }
     let mut out = PathBuf::from("results");
@@ -52,6 +52,7 @@ fn run() -> Res<i32> {
     };
     let mut check_only = false;
     let mut emit_json = None;
+    let mut finite_search_hint = None;
     let mut n = 1;
     while n < args.len() {
         if args[n] == "--check" {
@@ -65,6 +66,13 @@ fn run() -> Res<i32> {
         match args[n].as_str() {
             "--out" => out = PathBuf::from(&args[n + 1]),
             "--z3" => z3 = args[n + 1].clone(),
+            "--finite-search-hint" => {
+                hwverify_solver::parse_finite_search_hint(&args[n + 1])?;
+                if finite_search_hint.is_some() {
+                    return Err("--finite-search-hint may only be specified once".into());
+                }
+                finite_search_hint = Some(args[n + 1].clone());
+            }
             "--format" => {
                 format = args[n + 1].clone();
                 if format != "json" && format != "hwv" {
@@ -78,6 +86,19 @@ fn run() -> Res<i32> {
             _ => return Err("unsupported option".into()),
         }
         n += 2;
+    }
+    // This single-threaded CLI selects the process-wide default. Library users
+    // can instead pass QueryOptions without changing process environment.
+    if let Some(hint) = finite_search_hint {
+        env::set_var("HWVERIFY_FINITE_SEARCH_HINT", hint);
+    } else {
+        match env::var("HWVERIFY_FINITE_SEARCH_HINT") {
+            Ok(hint) => {
+                hwverify_solver::parse_finite_search_hint(&hint)?;
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(_) => return Err("HWVERIFY_FINITE_SEARCH_HINT is not valid UTF-8".into()),
+        }
     }
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let outcome = (|| -> Res<Value> {
