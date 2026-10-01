@@ -1,10 +1,18 @@
-# hwverify-rs 0.10.1
+# hwverify-rs 0.11.0
 
 Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
 この版はRustで型付きIR・正規化・証明義務を構築し、小さなカーネルで閉じない義務のSMT-LIBをZ3へ送る。Pythonチェッカーを呼ぶラッパーではない。Pythonファイルは実例の生成・移行と独立監査にだけ使う。
 
 現状は **Rustの構造的UNSATカーネル、選択した有限Bool/BV solverまたはZ3 fallbackの結果、Rust側の変換を信頼する**。処理系自身に形式的な正しさの証明を付けたものではない。
+
+## 0.11: 分岐・flushと幅別の検証
+
+独立した分岐付きD/X/Wパイプライン例を追加した。Xでゼロ分岐を判定し、
+誤経路の若い命令を破棄しながら、古いW命令は順序通りretireする。
+4/8bitは有限solverで全8義務を確認。16/32bitは既定のwork予算でrefinementがUNKNOWNとなり、
+未証明として報告する。既存の分岐なしpipelineとsolver本体は変更していない。
+詳細と負例・測定結果は[分岐付きパイプライン](BRANCH-PIPELINE-ja.md)を参照。
 
 ## 0.10.1: 同じ検証義務を高速化
 
