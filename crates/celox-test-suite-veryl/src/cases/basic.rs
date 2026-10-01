@@ -499,6 +499,7 @@ module Top (
 
 
     fn test_comb_function_call_expression_output_is_visible_to_later_operand(sim) {
+        @tags [EvaluationOrder];
 
         @setup { let code = r#"
 module Top (
@@ -1167,6 +1168,7 @@ module Top (
 
 
     fn test_statement_call_inputs_follow_output_writeback_order(sim) {
+        @tags [EvaluationOrder];
 
         @setup { let code = r#"
 module Top (

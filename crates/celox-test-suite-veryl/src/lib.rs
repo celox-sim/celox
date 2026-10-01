@@ -68,16 +68,75 @@ pub enum Expectation {
     CompilationError,
 }
 
+/// Reviewed expectations that go beyond SystemVerilog's portable requirements.
+/// These tags describe the oracle, independently of tool-specific exclusions.
+/// An untagged case is not a certification of SV conformance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TestTag {
+    EvaluationOrder,
+    AssignmentPatternEvaluation,
+    DeferredFunctionEffects,
+    EagerAssertionMessages,
+    TwoStateZeroDivision,
+    TwoStateInitialization,
+}
+
+impl TestTag {
+    /// Stable machine-readable identifier, independent of Rust variant names.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EvaluationOrder => "evaluation_order",
+            Self::AssignmentPatternEvaluation => "assignment_pattern_evaluation",
+            Self::DeferredFunctionEffects => "deferred_function_effects",
+            Self::EagerAssertionMessages => "eager_assertion_messages",
+            Self::TwoStateZeroDivision => "two_state_zero_division",
+            Self::TwoStateInitialization => "two_state_initialization",
+        }
+    }
+
+    /// Why the tagged oracle needs more than the SV requirements.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::EvaluationOrder => {
+                "Requires a particular evaluation order for effectful arguments or expression operands; SV does not guarantee that order (IEEE 1800-2023 13.5, 11.4.2)."
+            }
+            Self::AssignmentPatternEvaluation => {
+                "Requires source-order evaluation or a particular evaluation count for effectful assignment-pattern items; SV does not guarantee these choices (IEEE 1800-2023 10.9.1, 11.4.2)."
+            }
+            Self::DeferredFunctionEffects => {
+                "Requires Celox's deferred FF function effects so subsequent statements read pre-edge state; SV subroutine copy-out is blocking (IEEE 1800-2023 4.9.7)."
+            }
+            Self::EagerAssertionMessages => {
+                "Requires message argument effects even on a successful assertion; SV executes the fail action only on failure (IEEE 1800-2023 16.3)."
+            }
+            Self::TwoStateZeroDivision => {
+                "Requires the suite's totalized two-state division/remainder result of zero, including logic destinations; SV arithmetic produces X before any two-state destination conversion (IEEE 1800-2023 11.3.4, 11.4.3)."
+            }
+            Self::TwoStateInitialization => {
+                "Explicitly requires the suite's zero-initialized two-state storage even for emitted four-state logic; SV default initialization depends on the declared type (IEEE 1800-2023 6.8, Table 6-7)."
+            }
+        }
+    }
+}
+
 /// One reusable test. Names are stable `group::test_name` identifiers.
 /// Backend-specific exclusions belong in the consuming project's runner.
 pub struct TestCase {
     pub name: &'static str,
     pub category: Category,
     pub expectation: Expectation,
+    pub tags: &'static [TestTag],
     run: fn(&mut Factory<'_>),
 }
 
 impl TestCase {
+    /// Whether a reviewed assertion relies on behavior beyond portable SV.
+    /// Untagged cases may still rely on the suite's general adapter contract.
+    pub fn has_stronger_than_sv_expectations(&self) -> bool {
+        !self.tags.is_empty()
+    }
+
     /// Compile and run this case with a fresh backend supplied by `factory`.
     /// For `CompilationError`, the factory must return [`CompilationRejected`].
     /// Every other error fails the case, including infrastructure failures.

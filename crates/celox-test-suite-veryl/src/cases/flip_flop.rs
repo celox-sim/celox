@@ -139,6 +139,7 @@ fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
 
 
 fn test_ff_assert_message_output_argument_is_eager(sim) {
+    @tags [EagerAssertionMessages];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -653,6 +654,7 @@ fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
 
 
 fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
+    @tags [DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -794,6 +796,7 @@ fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
 
 
 fn test_ff_pure_input_is_snapshotted_before_later_effectful_input(sim) {
+    @tags [EvaluationOrder, DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -1914,6 +1917,7 @@ fn test_ff_function_call_expression(sim) {
 
 
 fn test_ff_function_call_statement_with_output_argument(sim) {
+    @tags [DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -1946,6 +1950,7 @@ fn test_ff_function_call_statement_with_output_argument(sim) {
 
 
 fn test_ff_function_call_statement_with_output_argument_and_return_value(sim) {
+    @tags [DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -1980,6 +1985,7 @@ fn test_ff_function_call_statement_with_output_argument_and_return_value(sim) {
 
 
 fn test_ff_function_call_expression_with_output_argument_and_return_value(sim) {
+    @tags [DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -2686,6 +2692,7 @@ fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim)
 
 
 fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
+    @tags [EvaluationOrder];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -2731,6 +2738,7 @@ fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
 
 
 fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) {
+    @tags [EvaluationOrder, DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -3205,6 +3213,7 @@ fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(si
 
 
 fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
+    @tags [EvaluationOrder];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -3730,6 +3739,7 @@ fn test_ff_function_call_nested_bits_evaluates_effectful_array_argument(sim) {
 
 
 fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
+    @tags [AssignmentPatternEvaluation];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 
@@ -3771,6 +3781,7 @@ fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
 
 
 fn test_ff_function_call_snapshots_pure_array_items_before_later_effect(sim) {
+    @tags [AssignmentPatternEvaluation, DeferredFunctionEffects];
     // Celox opt-in FF function effects are rejected by the Veryl analyzer.
 
 

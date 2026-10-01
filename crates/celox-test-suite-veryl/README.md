@@ -120,11 +120,70 @@ example, a sequential case may request four-state mode through `Design`.
 The corpus was extracted against Veryl 0.21.0; the optional emitter and the
 standard library dependency follow this workspace's Veryl version.
 
+### Expectations beyond SV
+
+`TestCase::tags` exposes reviewed expectations that require additional or
+different behavior from portable SystemVerilog. `TestTag::as_str()` supplies
+stable machine-readable names and `TestTag::reason()` supplies the rationale
+with IEEE 1800-2023 clauses. These are properties of the shared assertions,
+independent of backend ignores, emission failures, and simulator bugs. A tagged
+case still runs its original assertions by default.
+
+| Tag | Additional expectation |
+| --- | --- |
+| `evaluation_order` | A specific order for effectful input arguments or expression operands (13.5, 11.4.2) |
+| `assignment_pattern_evaluation` | Source order or evaluation count for effectful array-pattern items (10.9.1, 11.4.2) |
+| `deferred_function_effects` | Celox FF function effects are deferred so later statements read old state, whereas SV copy-out is blocking (4.9.7) |
+| `eager_assertion_messages` | Assertion message effects occur even on success, whereas an SV fail action only executes on failure (16.3) |
+| `two_state_zero_division` | The suite's two-state model returns zero for division/remainder by zero, including four-state `logic` destinations in emitted SV (11.3.4, 11.4.3) |
+| `two_state_initialization` | An explicit check of zero-initialized storage even for emitted four-state `logic` (6.8, Table 6-7) |
+
+The initial review tags 21 cases; cases may carry multiple tags. Matching a
+word such as `source_order` in a case name is insufficient: the two output
+alias cases already accept either copy-out order and are untagged. Ordinary
+sequential statement order, eager pass-by-value inputs before a callee starts,
+and short-circuiting inside that callee are SV requirements. Those cases are
+not tagged merely because their names mention order or eager effects.
+
+Consumers can select the extra expectations explicitly:
+
+```rust
+use celox_test_suite_veryl::{TestTag, cases};
+
+let ordered: Vec<_> = cases()
+    .filter(|case| case.tags.contains(&TestTag::EvaluationOrder))
+    .collect();
+let without_extra_sv_expectations: Vec<_> = cases()
+    .filter(|case| !case.has_stronger_than_sv_expectations())
+    .collect();
+```
+
+This is a review of known extra expectations, not certification of every
+untagged case. The general adapter contract still applies, including initial
+two-state zero storage even when Veryl emits `logic`. Unsupported Veryl syntax
+and emitter limitations remain separately documented in [LIMITATIONS.md](LIMITATIONS.md).
+
+Both external runners provide `--list` to emit a JSON catalogue without
+invoking the emitter or any simulator, and `--exclude-stronger-than-sv` to
+select only untagged cases for listing or execution. Empty selections fail.
+
+```sh
+cargo run -q -p celox-test-suite-veryl --features icarus --bin verify-icarus -- \
+  --list > /tmp/veryl-catalogue.json
+jq '.cases[] | select(.stronger_than_sv) | {name, tags, tag_reasons}' \
+  /tmp/veryl-catalogue.json
+cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator -- \
+  --exclude-stronger-than-sv --jobs 8
+```
+
 `src/cases/` contains the canonical cases, grouped by their original topics.
 Add cases to a group's private `cases!` declaration with optional `@setup`, a
 `@build Design::new(...)`, and ordinary Rust assertions using the shared driver.
 For an invalid design, put `@expect reject;` before `@build` and omit simulation
 assertions. `TestCase::expectation` lets consumers select these separately.
+For additional SV expectations, put `@tags [EvaluationOrder];` (or multiple
+`TestTag` variants) before `@setup`/`@build`. Review the actual assertions and
+specification basis rather than inferring a tag from a failure or test name.
 For a new group, add it to `GROUPS` in `src/cases/mod.rs`. Keep implementation
 specific optimization, diagnostics, tracing, runtime-event, and API tests in
 the implementing project. Celox retains its original test names, backend matrix,
@@ -249,7 +308,11 @@ protocol transcripts, full panic diagnostics, and per-case results. The runner
 also writes `results.json`. `--report` writes a portable copy with tool versions,
 counts, every case, and bounded diagnostics, independently of disposable build
 caches. Report schema 2 adds `ignored`, optional per-case `known_issue`, and the
-top-level `include_ignored` setting. Ignored cases write their result and reason
+top-level `include_ignored` setting. New reports use schema 3, adding per-case
+`tags`, `tag_reasons`, and `stronger_than_sv`, and the top-level
+`exclude_stronger_than_sv` setting. All statuses retain the case metadata,
+including ignored cases. Historical retained reports remain at their original
+schema and do not gain retroactive tags. Ignored cases write their result and reason
 only; any other files already in their artifact directory are from an earlier
 execution. Multiple designs in one case receive separate artifact folders.
 
