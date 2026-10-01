@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790879690472,
+  "lastUpdate": 1790880006061,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -305785,6 +305785,41 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-tiered/heliodor_suite_71_linux_boot_end_to_end",
             "unit": "ms",
             "value": 296886.177991
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "124a1315096d21b85d9d0d84fd7139363a181cad",
+          "message": "fix(simulator): preserve wide shift counts and packed constant storage (#953)",
+          "timestamp": "2026-09-30T19:16:29Z",
+          "url": "https://github.com/celox-sim/celox/commit/124a1315096d21b85d9d0d84fd7139363a181cad"
+        },
+        "date": 1790880006061,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_startup",
+            "unit": "ms",
+            "value": 14796.275372
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_execution",
+            "unit": "ms",
+            "value": 292782.891032
+          },
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_71_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 307579.166935
           }
         ]
       }
