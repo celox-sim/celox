@@ -300,3 +300,14 @@ Z3_BIN=/path/to/z3 python audit/replay_counterexamples.py
 - Z3は通常各check-sat10秒、自動保存partitionは1秒。保存loopは30秒で次の問い合わせを停止し、未実行をUNKNOWNにする。試行選択・カーネル・既に走るquery・証跡I/Oを含めたhard wall-clock上限ではない
 - 仕様が意図を十分に表すこと、Rustの義務生成・正規化、SMT変換自体の正しさは形式的には未検証
 - 帰納条件の反例は、resetから到達するとは限らない。実装の誤りと、与えた関係の不足を区別する必要がある
+
+
+## Symbolic Veryl → ISA refinement
+
+`crates/sir` lifts a compiled Veryl/Celox SIR clock event with arbitrary state and
+inputs into the existing Bool/BV transition IR. `conformance/veryl-symbolic`
+connects a handwritten branch pipeline to the sequential ISA/binding, checks
+4/8/16/32-bit variants, and rejects six source-level RTL mutations per width.
+See [the symbolic pipeline guide](conformance/veryl-symbolic/README.md) for the
+explicit synchronous two-state model, trusted boundaries and reproduction.
+The original concrete-observation corpus backend remains separate.

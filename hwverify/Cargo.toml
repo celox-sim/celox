@@ -1,7 +1,7 @@
 [workspace]
 exclude = ["conformance/veryl", "conformance/veryl/analyzer-probe", "conformance/veryl-proof"]
-members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli"]
-default-members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli"]
+members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli", "crates/sir"]
+default-members = ["crates/ir", "crates/solver", "crates/verify", "crates/syntax", "crates/cli", "crates/sir"]
 resolver = "2"
 
 [workspace.package]

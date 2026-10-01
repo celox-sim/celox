@@ -145,7 +145,7 @@ fn compile(design: &Value) -> Result<Value, String> {
         phases.insert(name.to_string(), json!(units));
     }
     Ok(
-        json!({"status":"compiled_only_not_verified", "allow_always_ff_function_effects":true,
+        json!({"status":"compiled_only_not_verified", "four_state":design["four_state"].as_bool().unwrap_or(false), "allow_always_ff_function_effects":true,
         "allowed_diagnostics":allowed,"signals":signals,"runtime_event_sites":scheduled.runtime_schema.runtime_event_sites,"design":{
         "state_objects":scheduled.design.state_objects.iter().map(|(address,metadata)|json!({"address":address,"metadata":metadata})).collect::<Vec<_>>(),
         "initial_state":scheduled.design.initial_state,

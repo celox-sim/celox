@@ -458,6 +458,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwverify-sir"
+version = "0.13.0"
+dependencies = [
+ "hwverify-ir",
+ "hwverify-solver",
+ "serde_json",
+]
+
+[[package]]
 name = "hwverify-solver"
 version = "0.13.0"
 dependencies = [
