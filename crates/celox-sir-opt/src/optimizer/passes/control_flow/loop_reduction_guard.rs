@@ -238,7 +238,7 @@ fn preserved(
         SIRInstruction::Mux(_, condition, _, otherwise)
             if types.get(&value) == types.get(otherwise) =>
         {
-            let guard = false_guard(*condition, defs, local, types, 0)?;
+            let guard = false_guard(*condition, defs, local, types)?;
             let (param, nested) = preserved(*otherwise, params, defs, local, types, depth + 1)?;
             // One invariant guard must cover the whole recurrence.
             if nested.is_some_and(|nested| nested != guard) {
@@ -255,24 +255,30 @@ fn false_guard(
     defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
     local: &HashSet<RegisterId>,
     types: &HashMap<RegisterId, RegisterType>,
-    depth: usize,
 ) -> Option<RegisterId> {
-    if depth > 32 || types.get(&value)?.width() != 1 {
-        return None;
-    }
-    if !local.contains(&value) {
-        return Some(value);
-    }
-    match defs.get(&value)? {
-        SIRInstruction::Unary(_, UnaryOp::Ident | UnaryOp::ToTwoState, source) => {
-            false_guard(*source, defs, local, types, depth + 1)
+    let mut work = vec![value];
+    let mut visited = HashSet::default();
+    // Predicate expressions are DAGs. Visiting each node once prevents shared
+    // all-local conjunctions from causing exponential recursive searches.
+    while let Some(value) = work.pop() {
+        if !visited.insert(value) || types.get(&value)?.width() != 1 {
+            continue;
         }
-        SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd | BinaryOp::And, rhs) => {
-            false_guard(*lhs, defs, local, types, depth + 1)
-                .or_else(|| false_guard(*rhs, defs, local, types, depth + 1))
+        if !local.contains(&value) {
+            return Some(value);
         }
-        _ => None,
+        match defs.get(&value) {
+            Some(SIRInstruction::Unary(_, UnaryOp::Ident | UnaryOp::ToTwoState, source)) => {
+                work.push(*source)
+            }
+            Some(SIRInstruction::Binary(_, lhs, BinaryOp::LogicAnd | BinaryOp::And, rhs)) => {
+                work.push(*rhs);
+                work.push(*lhs);
+            }
+            _ => {}
+        }
     }
+    None
 }
 
 #[cfg(test)]
@@ -498,5 +504,36 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(preserved(result, &[param], &defs, &local, &types, 0), None);
+    }
+
+    #[test]
+    fn shared_predicate_dag_without_invariants_finishes() {
+        let instructions = (1..4096)
+            .map(|id| {
+                SIRInstruction::Binary(
+                    RegisterId(id),
+                    RegisterId(id - 1),
+                    BinaryOp::LogicAnd,
+                    RegisterId(id - 1),
+                )
+            })
+            .collect::<Vec<_>>();
+        let defs = instructions
+            .iter()
+            .map(|inst| (def_reg(inst).unwrap(), inst))
+            .collect();
+        let local = (0..4096).map(RegisterId).collect();
+        let types = (0..4096)
+            .map(|id| {
+                (
+                    RegisterId(id),
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(false_guard(RegisterId(4095), &defs, &local, &types), None);
     }
 }
