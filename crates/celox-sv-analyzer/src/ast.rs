@@ -363,6 +363,7 @@ impl Module {
             &const_env,
             &type_aliases,
             &parameter_packed_dimensions(&parameters),
+            &parameter_value_env(&parameters, &const_env),
         ) {
             Ok(()) => {}
             // A parameter initializer may inspect a port or signal type
@@ -415,6 +416,7 @@ impl Module {
                     &const_env,
                     &type_aliases,
                     &parameter_packed_dimensions(&parameters),
+                    &parameter_value_env(&parameters, &const_env),
                 )?;
             }
             Err(error) => return Err(error),

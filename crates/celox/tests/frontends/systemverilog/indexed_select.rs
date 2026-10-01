@@ -343,6 +343,80 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("enum_dependent")), 10u8.into());
     }
 
+    fn indexed_parameter_ports_preserve_declared_ranges(sim) {
+        @setup {
+            let source = r#"
+                module Top(output logic [3:0] down, up, specialized, header);
+                    Child default_child(.down(down), .up(up), .header(header));
+                    Child #(.P(8'hcd)) specialized_child(.down(specialized), .up(), .header());
+                endmodule
+                module Child #(parameter logic [11:4] P = 8'hab,
+                    logic [4:11] U = 8'hab, parameter logic [3:0] H = P[8 +: 4])(
+                    output logic [3:0] down, up, header);
+                    localparam logic [3:0] Q = P[8 +: 4];
+                    localparam logic [3:0] R = U[4 +: 4];
+                    assign down = Q;
+                    assign up = R;
+                    assign header = H;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_port_ranges.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("down")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("up")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("specialized")), 12u8.into());
+        assert_eq!(sim.get(sim.signal("header")), 10u8.into());
+    }
+
+    fn indexed_bases_resolve_size_queries(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [3:0] bits_base,
+                    size_base, selected_base, type_base);
+                    typedef logic [7:0] octet;
+                    assign bits_base = data[$bits(data)/2 +: 4];
+                    assign size_base = data[$size(data)/2 +: 4];
+                    assign selected_base = data[$bits(data[7:0]) +: 4];
+                    assign type_base = data[$bits(octet) +: 4];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_size_queries.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0xabcdu16)).unwrap();
+        for name in ["bits_base", "size_base", "selected_base", "type_base"] {
+            assert_eq!(sim.get(sim.signal(name)), 11u8.into());
+        }
+    }
+
+    fn indexed_initializers_preserve_four_state_parameters(sim) {
+        @setup {
+            let source = r#"
+                module Top(output logic [3:0] low, high, port_value,
+                    output logic [7:0] sum);
+                    localparam logic [7:0] P = 8'hxa;
+                    localparam logic [11:4] Z = 8'haz;
+                    localparam logic [3:0] Q = P[0 +: 4];
+                    localparam logic [3:0] R = Z[8 +: 4];
+                    localparam logic [7:0] S = P[0 +: 4] + 4'd6;
+                    assign low = Q;
+                    assign high = R;
+                    assign sum = S;
+                    Child child(.y(port_value));
+                endmodule
+                module Child #(parameter logic [11:4] P = 8'hxa,
+                    parameter logic [3:0] Q = P[4 +: 4])(output logic [3:0] y);
+                    assign y = Q;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_four_state_parameters.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("low")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("high")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("port_value")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("sum")), 16u8.into());
+    }
+
     fn indexed_unsigned_bases_cross_zero(sim) {
         @setup {
             let source = r#"

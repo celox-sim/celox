@@ -1250,6 +1250,7 @@ pub(super) fn indexed_select_base(
         RefNode::Expression(base) => {
             let expression = expr_from_expression_with_types(base, syntax_tree, &dimensions)?;
             // Keep both mux arms until typed evaluation determines their common width.
+            let expression = substitute_indexed_parameter_values(expression, &dimensions);
             expr_to_const(fold_const_integral_expr_preserving_mask(
                 expression,
                 &dimensions.const_env,
@@ -1261,6 +1262,7 @@ pub(super) fn indexed_select_base(
                 syntax_tree,
                 &dimensions,
             )?;
+            let expression = substitute_indexed_parameter_values(expression, &dimensions);
             expr_to_const(fold_const_integral_expr_preserving_mask(
                 expression,
                 &dimensions.const_env,
@@ -1268,6 +1270,19 @@ pub(super) fn indexed_select_base(
         }
         _ => None,
     }
+}
+
+fn substitute_indexed_parameter_values(expression: Expr, dimensions: &PackedDimensions) -> Expr {
+    // Known values come from the current environment, which may include a
+    // generate index shadowing a parameter. Supply expressions only for values
+    // absent from that numeric environment, including X/Z parameters.
+    let values = dimensions
+        .parameter_values
+        .iter()
+        .filter(|(name, _)| !dimensions.const_env.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    substitute_expr_constants_with_parameter_literals(expression, &dimensions.const_env, &values)
 }
 
 // Parameter arithmetic receives the assignment width after self-determined
@@ -1292,6 +1307,7 @@ pub(super) fn indexed_parameter_initializer(
         syntax_tree,
         &dimensions,
     )?;
+    let expression = substitute_indexed_parameter_values(expression, &dimensions);
     let types = parameter_types_from_const_env(&dimensions.const_env);
     let integral_types = types
         .iter()

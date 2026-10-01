@@ -54,14 +54,26 @@ pub(super) fn parameters_from_ref_node(
     // Restrict declaration-type queries to the header. Walking the complete
     // declaration also visits data types and ranges nested in initializers,
     // including the target of a size-function cast.
-    let type_node = match node.clone() {
+    let declaration_node = match node.clone() {
+        RefNode::ParameterPortDeclaration(
+            sv_parser::ParameterPortDeclaration::ParameterDeclaration(declaration),
+        ) => RefNode::ParameterDeclaration(declaration),
+        RefNode::ParameterPortDeclaration(
+            sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(declaration),
+        ) => RefNode::LocalParameterDeclaration(declaration),
+        RefNode::ParameterPortDeclaration(sv_parser::ParameterPortDeclaration::ParamList(
+            declaration,
+        )) => RefNode::DataType(&declaration.nodes.0),
+        node => node,
+    };
+    let type_node = match declaration_node {
         RefNode::ParameterDeclaration(sv_parser::ParameterDeclaration::Param(declaration)) => {
             RefNode::DataTypeOrImplicit(&declaration.nodes.1)
         }
         RefNode::LocalParameterDeclaration(sv_parser::LocalParameterDeclaration::Param(
             declaration,
         )) => RefNode::DataTypeOrImplicit(&declaration.nodes.1),
-        _ => node.clone(),
+        node => node,
     };
     if type_node.clone().into_iter().any(|child| {
         matches!(
@@ -93,6 +105,7 @@ pub(super) fn parameters_from_ref_node(
         matches!(
             child,
             RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(_))
+                | RefNode::DataType(_)
         )
     });
     let parameter_signed = parameter_width.map(|_| {
@@ -124,11 +137,12 @@ pub(super) fn parameters_from_ref_node(
                         RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
                     )
                 }) {
-                    let dimensions = PackedDimensions::new(
+                    let mut dimensions = PackedDimensions::new(
                         parameter_packed_dimensions(parameters),
                         &const_env,
                         type_aliases,
                     );
+                    dimensions.parameter_values = parameter_value_env(parameters, &const_env);
                     // Enum constants are unavailable during preliminary collection.
                     // Leave unresolved values for the subsequent lowering pass;
                     // final validation rejects anything that still cannot be lowered.

@@ -380,9 +380,11 @@ pub(super) fn reject_silently_ignored_constructs(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_dimensions: &VariablePackedDimensions,
+    parameter_values: &HashMap<String, Expr>,
 ) -> Result<(), AnalyzerError> {
-    let indexed_dimensions =
+    let mut indexed_dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
+    indexed_dimensions.parameter_values = parameter_values.clone();
     let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
     let generated_nodes: Vec<_> = if is_module {
         node.clone()
@@ -828,6 +830,7 @@ pub(super) fn reject_silently_ignored_constructs(
                 &item.env,
                 type_aliases,
                 parameter_dimensions,
+                parameter_values,
             )?;
         }
     }

@@ -302,6 +302,16 @@ pub(super) fn expr_from_function_subroutine_call(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
+    if packed_dimensions.constant_indexed_base
+        && let Some(ty) = dimensions::size_system_function_call_type(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+        )
+    {
+        return Some(Expr::Literal(ty.width.to_string()));
+    }
     if let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 {
         let sv_parser::SystemTfCall::ArgExpression(call) = &**call else {
             return None;

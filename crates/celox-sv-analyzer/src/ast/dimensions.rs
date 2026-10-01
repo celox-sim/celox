@@ -11,7 +11,16 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::ConstantPrimary::ConstantFunctionCall(call) = primary else {
         return None;
     };
-    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0 else {
+    size_system_function_call_type(&call.nodes.0, syntax_tree, const_env, type_aliases)
+}
+
+pub(super) fn size_system_function_call_type(
+    call: &sv_parser::FunctionSubroutineCall,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
         return None;
     };
     let (name, r#type) = match &**system_call {
