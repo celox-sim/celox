@@ -78,6 +78,11 @@ fn optimized_sir_recovers_expanded_bit_count_loops() {
 
 all_backends! {
 
+fn test_guarded_scan_preserves_independent_outputs(sim) {
+    @ignore_on(sv);
+    @case "loop_idiom::test_guarded_scan_preserves_independent_outputs";
+}
+
 fn test_recovered_bit_count_loop_semantics(sim) {
     @ignore_on(sv);
     @case "loop_idiom::test_recovered_bit_count_loop_semantics";

@@ -21,7 +21,7 @@ pub(in crate::optimizer) struct GuardedRegionSinkingPass;
 /// Recover effect/value regions which become visible only after native EUs
 /// have been merged into one CFG.
 ///
-/// This deliberately runs only the coupled-store and closed same-predicate
+/// This runs the coupled-store, closed same-predicate and guarded scan
 /// planners. Replaying the complete source-EU pass after fusion would also
 /// perform unrelated edge sinking and repeated CFG repair.
 pub(in crate::optimizer) fn recover_merged_effect_regions(
@@ -33,6 +33,7 @@ pub(in crate::optimizer) fn recover_merged_effect_regions(
     }
     form_coupled_store_regions(eu);
     form_same_predicate_regions(eu);
+    super::loop_reduction_guard::run(eu);
 }
 
 #[derive(Clone)]
@@ -223,6 +224,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         if options.four_state || eu.verify_result().is_err() {
             return;
         }
+        super::loop_reduction_guard::run(eu);
         let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
             if options.optimize_options.diagnostics.verify_passes
                 && let Err(error) = eu.verify_result()
