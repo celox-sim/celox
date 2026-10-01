@@ -115,3 +115,13 @@ counterexample feasibility, reset-prestate preservation and rejected inputs.
 These are semantic unit checks, not a replacement for compiled Veryl examples.
 See `conformance/veryl-symbolic` for the independently written Veryl CPU versus
 sequential ISA inductive refinement, actual HDL mutations and non-vacuity.
+
+### Scaling corrections
+
+Flattened metadata.width is the total across unpacked dimensions; the binding
+lane width is total/product(array_dims). A real exported array fixture guards
+this convention. Whole-word sparse NBA writes additionally retain guarded update
+DAGs until commit, including last-write-wins and branch joins. This avoids
+unnecessary bit-mask expansion. Any partial write drops the optional fast path;
+the exact mask representation remains authoritative as a fallback. The fast path
+is checked against those mask equations at widths2–64.

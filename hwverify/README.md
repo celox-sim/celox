@@ -311,3 +311,8 @@ connects a handwritten branch pipeline to the sequential ISA/binding, checks
 See [the symbolic pipeline guide](conformance/veryl-symbolic/README.md) for the
 explicit synchronous two-state model, trusted boundaries and reproduction.
 The original concrete-observation corpus backend remains separate.
+
+The follow-up [scaling investigation](audit/veryl_scaling/README.md) records the
+array-layout correction, word-preserving sparse NBA updates and sequential CNF
+buffer reuse. Component tests extend to256words; the real8-word CPU still reaches
+the unchanged work budget and is explicitly not reported as proved.

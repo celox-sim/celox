@@ -123,6 +123,7 @@ impl Scalar {
 }
 #[derive(Default, Clone, Debug)]
 pub struct Stats {
+    pub base_cnf_reused: bool,
     pub terms: usize,
     pub variables: usize,
     pub clauses: usize,
@@ -160,12 +161,12 @@ impl Outcome {
             "assignments":self.assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "context_values":self.context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "terms":self.stats.terms,"variables":self.stats.variables,"clauses":self.stats.clauses,
-            "base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
+            "base_cnf_reused":self.stats.base_cnf_reused,"base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
             "split_alternatives":self.stats.split_alternatives,"split_completed":self.stats.split_completed,
             "split_unsat":self.stats.split_unsat,
             "probe_result":self.stats.probe_result.map(Verdict::as_str),"probe_work":self.stats.probe_work,
             "search_slices":self.stats.search_slices,"search_yields":self.stats.search_yields,
-            "clause_accounting":"aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+            "clause_accounting":"aggregate allocated CNF/branch/learned clauses within the whole-query limit; sequential proof splits retain one immutable base and one reusable working CNF",
             "decisions":self.stats.decisions,"conflicts":self.stats.conflicts,"work":self.stats.work})
     }
 }
@@ -1439,14 +1440,15 @@ pub fn solve_with_hint(
                 Search::Pending => return Err("finite solver unresolved search".into()),
             }
         } else if search_hint == SearchHint::Unsat {
-            // The proof-oriented 0.11.2 route pays no whole-query probe and
-            // finishes one alternative before allocating/searching the next.
-            // A mismatched hint may be slower, but can still find a valid SAT.
+            // Sequential proof splits keep one immutable base and reuse one
+            // working allocation. Restore literal order exactly, so this does
+            // not silently alter the search heuristic. Drop the previous unit
+            // and ALL branch-local learning before resetting search state.
+            outcome.stats.base_cnf_reused = true;
             let mut verdict = Verdict::Unsat;
             for &choice in &choices {
-                let additional = base_clauses
-                    .checked_add(1)
-                    .ok_or("finite solver split clause count overflow")?;
+                let first = sat.clauses.is_empty();
+                let additional = if first { base_clauses + 1 } else { 1 };
                 let next_count = cumulative_clauses
                     .checked_add(additional)
                     .ok_or("finite solver split clause count overflow")?;
@@ -1457,14 +1459,23 @@ pub fn solve_with_hint(
                     budget.tick(clause.len() as u64)?;
                 }
                 budget.tick(1)?;
-                let peak = base_clauses
-                    .saturating_add(sat.clauses.len())
-                    .saturating_add(additional);
-                outcome.stats.peak_live_clauses = outcome.stats.peak_live_clauses.max(peak);
-                let mut clauses = original_clauses.clone();
+                let mut clauses = if first {
+                    original_clauses.clone()
+                } else {
+                    let mut clauses = std::mem::take(&mut sat.clauses);
+                    clauses.truncate(base_clauses);
+                    for (working, original) in clauses.iter_mut().zip(&original_clauses) {
+                        working.copy_from_slice(original);
+                    }
+                    clauses
+                };
+                debug_assert_eq!(clauses.len(), base_clauses);
                 clauses.push(vec![choice]);
                 sat = Sat::new(blast.vars, clauses);
-                sat.previous_clauses = cumulative_clauses;
+                // Retain cumulative charges for earlier units/learned clauses,
+                // including discarded ones. Each of the two base allocations
+                // is charged once; restoring existing buffers allocates none.
+                sat.previous_clauses = next_count - sat.clauses.len();
                 outcome.stats.search_slices += 1;
                 let result = sat.run_slice(&mut budget, u64::MAX);
                 cumulative_clauses = sat.previous_clauses + sat.clauses.len();
@@ -1749,6 +1760,122 @@ mod tests {
             and(alternatives, constraints),
             Env::from([("extra".into(), var("extra".into(), Sort::Bv(64)))]),
         )
+    }
+    #[test]
+    fn sequential_base_reuse_discards_assumption_learning_and_keeps_global_limits() {
+        let a = var("switch".into(), Sort::Bool);
+        let formula = node(
+            Sort::Bool,
+            "or",
+            vec![and(a.clone(), pigeonhole(6, 5)), not(a)],
+        );
+        let full = solve_with_hint(&formula, &Env::new(), Limits::default(), SearchHint::Unsat);
+        assert_eq!(full.verdict, Verdict::Sat);
+        assert!(full.original_formula_validated);
+        assert!(full.stats.base_cnf_reused);
+        assert_eq!(full.stats.split_completed, 2);
+        assert_eq!(full.stats.split_unsat, 1);
+        assert!(full.stats.conflicts > 1);
+        assert!(full.stats.clauses > 2 * full.stats.base_clauses + 2);
+        for limits in [
+            Limits {
+                max_clauses: full.stats.clauses - 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_work: full.stats.work - 1,
+                ..Limits::default()
+            },
+        ] {
+            assert_eq!(
+                solve_with_hint(&formula, &Env::new(), limits, SearchHint::Unsat).verdict,
+                Verdict::Unknown
+            );
+        }
+        assert_eq!(
+            solve_with_hint(
+                &formula,
+                &Env::new(),
+                Limits {
+                    max_clauses: full.stats.clauses,
+                    max_work: full.stats.work,
+                    ..Limits::default()
+                },
+                SearchHint::Unsat
+            )
+            .verdict,
+            Verdict::Sat
+        );
+    }
+    #[test]
+    fn split_reuse_agrees_with_independent_exhaustive_boolean_truth_sets() {
+        let mut seed = 0x879f421abu64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let vars = (0..6)
+            .map(|i| {
+                let truth = (0..64)
+                    .filter(|assignment| assignment & (1 << i) != 0)
+                    .fold(0u64, |set, assignment| set | (1u64 << assignment));
+                (var(format!("v{i}"), Sort::Bool), truth)
+            })
+            .collect::<Vec<_>>();
+        let literal = |n: u64| {
+            let (term, truth) = vars[(n % 6) as usize].clone();
+            if n & 8 != 0 {
+                (not(term), !truth)
+            } else {
+                (term, truth)
+            }
+        };
+        let mut reused = 0;
+        for _ in 0..500 {
+            let mut arms = Vec::new();
+            let mut truth = 0u64;
+            for _ in 0..4 {
+                let (a, ta) = literal(next());
+                let (c, tc) = literal(next());
+                arms.push(and(a, c));
+                truth |= ta & tc;
+            }
+            let mut formula = arms
+                .into_iter()
+                .reduce(|a, c| node(Sort::Bool, "or", vec![a, c]))
+                .unwrap();
+            for _ in 0..4 {
+                let (a, ta) = literal(next());
+                let (c, tc) = literal(next());
+                formula = and(formula, node(Sort::Bool, "or", vec![a, c]));
+                truth &= ta | tc;
+            }
+            for hint in [SearchHint::Unsat, SearchHint::Sat] {
+                let result = solve_with_hint(&formula, &Env::new(), Limits::default(), hint);
+                assert_eq!(
+                    result.verdict,
+                    if truth == 0 {
+                        Verdict::Unsat
+                    } else {
+                        Verdict::Sat
+                    }
+                );
+                reused += usize::from(result.stats.base_cnf_reused);
+                if result.verdict == Verdict::Sat {
+                    assert!(result.original_formula_validated);
+                    let mut assignment = 0;
+                    for i in 0..6 {
+                        if result.assignments.get(&format!("v{i}")) == Some(&Scalar::Bool(true)) {
+                            assignment |= 1 << i;
+                        }
+                    }
+                    assert_ne!(truth & (1u64 << assignment), 0);
+                }
+            }
+        }
+        assert!(reused > 100);
     }
     #[test]
     fn expected_result_is_only_a_hint_for_both_actual_verdicts() {

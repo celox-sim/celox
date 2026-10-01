@@ -29,9 +29,10 @@ import hashlib, json, pathlib, subprocess, sys
 out, root, frontend = map(pathlib.Path, sys.argv[1:])
 files = [root/'Cargo.toml', root/'Cargo.lock', frontend,
          root/'target/release/hwverify-rs', root/'target/release/hwverify-sir-lift']
-for directory in ('crates/sir', 'conformance/veryl-symbolic'):
+for directory in ('crates/sir', 'crates/solver', 'conformance/veryl-symbolic'):
     files.extend(p for p in (root/directory).rglob('*') if p.is_file()
                  and '__pycache__' not in p.parts and p.suffix != '.pyc')
+files.extend((root/'audit/veryl_scaling').glob('*.py'))
 (out/'tested-files.json').write_text(json.dumps({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)}, indent=2)+'\n')
 (out/'base-commit.txt').write_text(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True))
 PYHASH
@@ -41,7 +42,8 @@ cp conformance/veryl-proof/tools/z3-tripwire.sh "$OUT/tripwire-bin/z3"
 export PATH="$OUT/tripwire-bin:$PATH"
 export Z3_BIN="$OUT/tripwire-bin/z3"
 export HWVERIFY_SOLVER=finite
-cargo test --release --locked -p hwverify-sir
+cargo test --release --locked -p hwverify-sir -p hwverify-solver
 python3 -m unittest discover -s "$HERE/tests" -v
 python3 "$HERE/run.py" --out "$OUT/cases" --frontend "$FRONTEND" --lifter "$REPO/target/release/hwverify-sir-lift"
+python3 "$REPO/audit/veryl_scaling/measure.py" --out "$OUT/scaling-regression" --sizes 16 32 64 --require-success
 test ! -e "$Z3_TRIPWIRE_MARKER"

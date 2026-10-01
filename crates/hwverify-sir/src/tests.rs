@@ -403,3 +403,107 @@ fn input_binding_cannot_hide_state_or_unbound_storage() {
     config["inputs"].as_object_mut().unwrap().remove("a");
     assert!(lift(&code, &config).unwrap_err().contains("unbound"));
 }
+
+#[test]
+fn exported_array_width_is_total_not_per_element() {
+    assert_eq!(
+        storage_shape(&json!({"width":64,"array_dims":[2]})).unwrap(),
+        (32, 2)
+    );
+    assert_eq!(
+        storage_shape(&json!({"width":512,"array_dims":[4,4]})).unwrap(),
+        (32, 16)
+    );
+    for metadata in [
+        json!({"width":65,"array_dims":[2]}),
+        json!({"width":64,"array_dims":[0]}),
+        json!({"width":131072,"array_dims":[4096]}),
+    ] {
+        assert!(storage_shape(&metadata).is_err());
+    }
+}
+
+#[test]
+fn actual_veryl_array_layout_read_old_write_and_reset() {
+    let code: Value =
+        serde_json::from_str(include_str!("../tests/fixtures/array_read_write2.json")).unwrap();
+    let mut config = json!({"event":"clk","inputs":{"rst":{"type":"bool"},"we":{"type":"bool"},"wa":{"type":{"bv":1}},"wd":{"type":{"bv":32}},"ra0":{"type":{"bv":1}}},"state":{"m0":{"signal":"mem","element":0,"type":{"bv":32}},"m1":{"signal":"mem","element":1,"type":{"bv":32}},"q0":{"type":{"bv":32}}},"outputs":{},"overrides":{"rst":false}});
+    let t = lift(&code, &config).unwrap();
+    for index in 0..2 {
+        prove(
+            t.next[&format!("m{index}")].clone(),
+            ite(
+                and(
+                    ir::var("i.we".into(), Sort::Bool),
+                    eq(var("i.wa", 1), bv(1, index)),
+                ),
+                var("i.wd", 32),
+                var(&format!("s.m{index}"), 32),
+            ),
+        );
+    }
+    prove(
+        t.next["q0"].clone(),
+        ite(
+            eq(var("i.ra0", 1), bv(1, 0)),
+            var("s.m0", 32),
+            var("s.m1", 32),
+        ),
+    );
+    config["overrides"] = json!({"rst":true});
+    let reset = lift(&code, &config).unwrap();
+    for term in reset.next.values() {
+        assert_eq!(term, &bv(32, 0));
+    }
+}
+
+#[test]
+fn guarded_word_updates_match_the_original_bit_mask_encoding() {
+    for w in [2, 4, 8, 16, 32, 64] {
+        let g = ir::var("g".into(), Sort::Bool);
+        let h = ir::var("h".into(), Sort::Bool);
+        let mut a = Storage::new(w, 1, true);
+        a.write(0, w, var("a", w), g.clone()).unwrap();
+        a.write(0, w, var("b", w), h.clone()).unwrap();
+        let mut c = Storage::new(w, 1, true);
+        c.write(0, w, var("c", w), h).unwrap();
+        let joined = Storage::merge(g, &a, &c).unwrap();
+        for storage in [&a, &joined] {
+            let cell = &storage.cells[0];
+            let old = var("old", w);
+            let masked = op(
+                "bvor",
+                w,
+                op("bvand", w, old.clone(), bitnot(cell.mask.clone())),
+                op("bvand", w, cell.value.clone().unwrap(), cell.mask.clone()),
+            );
+            let word = apply_word_update(
+                cell.whole_word.as_ref().unwrap(),
+                &old,
+                &mut Default::default(),
+            );
+            prove(word, masked);
+        }
+    }
+}
+#[test]
+fn partial_writes_drop_word_fast_path_until_unconditional_overwrite() {
+    let mut storage = Storage::new(8, 1, true);
+    storage.write(0, 8, var("a", 8), b(true)).unwrap();
+    storage.write(2, 3, var("part", 3), b(true)).unwrap();
+    assert!(storage.cells[0].whole_word.is_none());
+    storage
+        .write(0, 8, var("b", 8), ir::var("g".into(), Sort::Bool))
+        .unwrap();
+    assert!(storage.cells[0].whole_word.is_none());
+    storage.write(0, 8, var("c", 8), b(true)).unwrap();
+    assert!(storage.cells[0].whole_word.is_some());
+    prove(
+        apply_word_update(
+            storage.cells[0].whole_word.as_ref().unwrap(),
+            &var("old", 8),
+            &mut Default::default(),
+        ),
+        var("c", 8),
+    );
+}

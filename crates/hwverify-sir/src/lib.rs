@@ -164,6 +164,13 @@ fn resize(x: Term, w: u32, signed: bool) -> Term {
         vec![x],
     )
 }
+fn bitnot(x: Term) -> Term {
+    if let Some(value) = constant(&x) {
+        bv(width(&x), !value)
+    } else {
+        ir::node(x.0.sort.clone(), "bvnot", vec![x])
+    }
+}
 fn op(name: &str, w: u32, a: Term, c: Term) -> Term {
     if let (Some(x), Some(y)) = (constant(&a), constant(&c)) {
         let n = match name {
@@ -228,8 +235,61 @@ fn bytes(v: &Value) -> Res<u64> {
     Ok(n)
 }
 
+// Preserve whole-word writes as guarded updates. Partial writes invalidate this
+// optional tag and continue through the existing bit-mask semantics.
+#[derive(Clone, Debug)]
+enum WordUpdate {
+    Keep,
+    Value(Term),
+    Choice(Term, std::rc::Rc<WordUpdate>, std::rc::Rc<WordUpdate>),
+}
+fn word_choice(
+    g: Term,
+    a: std::rc::Rc<WordUpdate>,
+    c: std::rc::Rc<WordUpdate>,
+) -> std::rc::Rc<WordUpdate> {
+    if g == b(true) {
+        a
+    } else if g == b(false) || std::rc::Rc::ptr_eq(&a, &c) {
+        c
+    } else {
+        std::rc::Rc::new(WordUpdate::Choice(g, a, c))
+    }
+}
+fn apply_word_update(
+    action: &std::rc::Rc<WordUpdate>,
+    old: &Term,
+    memo: &mut std::collections::HashMap<usize, Term>,
+) -> Term {
+    let key = std::rc::Rc::as_ptr(action) as usize;
+    if let Some(value) = memo.get(&key) {
+        return value.clone();
+    }
+    let value = match action.as_ref() {
+        WordUpdate::Keep => old.clone(),
+        WordUpdate::Value(value) => value.clone(),
+        WordUpdate::Choice(guard, a, c) => {
+            let yes = apply_word_update(a, old, memo);
+            let no = apply_word_update(c, old, memo);
+            // A conditional whole-word write nested under another enable is
+            // still one word update: ite(g,ite(h,v,old),old).
+            if yes.0.op == "ite" && yes.0.args[2] == no {
+                ite(
+                    and(guard.clone(), yes.0.args[0].clone()),
+                    yes.0.args[1].clone(),
+                    no,
+                )
+            } else {
+                ite(guard.clone(), yes, no)
+            }
+        }
+    };
+    memo.insert(key, value.clone());
+    value
+}
 #[derive(Clone, Debug)]
 struct Cell {
+    whole_word: Option<std::rc::Rc<WordUpdate>>,
     value: Option<Term>,
     mask: Term,
 }
@@ -244,6 +304,7 @@ impl Storage {
             lane,
             cells: (0..count)
                 .map(|_| Cell {
+                    whole_word: Some(std::rc::Rc::new(WordUpdate::Keep)),
                     value: if sparse { Some(bv(lane, 0)) } else { None },
                     mask: bv(lane, 0),
                 })
@@ -305,19 +366,29 @@ impl Storage {
             let moved = op("bvshl", self.lane, piece, bv(self.lane, low as u64));
             let cell = &mut self.cells[index];
             let new = if low == 0 && n == self.lane {
-                moved
+                moved.clone()
             } else {
                 let old = cell
                     .value
                     .clone()
                     .ok_or("partial write to unbound storage")?;
-                let inverse = ir::node(Sort::Bv(self.lane), "bvnot", vec![mask.clone()]);
+                let inverse = bitnot(mask.clone());
                 op(
                     "bvor",
                     self.lane,
                     op("bvand", self.lane, old, inverse),
-                    moved,
+                    moved.clone(),
                 )
+            };
+            cell.whole_word = if low == 0 && n == self.lane {
+                let value = std::rc::Rc::new(WordUpdate::Value(moved.clone()));
+                match &cell.whole_word {
+                    Some(previous) => Some(word_choice(guard.clone(), value, previous.clone())),
+                    None if guard == b(true) => Some(value),
+                    _ => None,
+                }
+            } else {
+                None
             };
             cell.value = Some(if guard == b(true) {
                 new
@@ -350,6 +421,12 @@ impl Storage {
                 .iter()
                 .zip(&c.cells)
                 .map(|(a, c)| Cell {
+                    whole_word: match (&a.whole_word, &c.whole_word) {
+                        (Some(a), Some(c)) => {
+                            Some(word_choice(guard.clone(), a.clone(), c.clone()))
+                        }
+                        _ => None,
+                    },
                     value: match (&a.value, &c.value) {
                         (Some(a), Some(c)) => Some(ite(guard.clone(), a.clone(), c.clone())),
                         _ => None,
@@ -408,6 +485,25 @@ fn word_to_term(t: Term, s: &Sort) -> Res<Term> {
         _ => Err("output binding type mismatch".into()),
     }
 }
+// Celox VariableInfo/StateMetadata.width is the TOTAL flattened bit width,
+// including unpacked array dimensions. Divide by their product for a lane.
+fn storage_shape(metadata: &Value) -> Res<(u32, usize)> {
+    let total = num(&metadata["width"])?;
+    let count = arr(&metadata["array_dims"])?
+        .iter()
+        .try_fold(1usize, |a, b| {
+            a.checked_mul(num(b)?)
+                .ok_or_else(|| "storage dimension overflow".to_string())
+        })?;
+    if total == 0 || total > 65536 || count == 0 || !total.is_multiple_of(count) {
+        return Err("invalid flattened storage shape or exceeds 65536-bit budget".into());
+    }
+    let lane = total / count;
+    if !(1..=64).contains(&lane) {
+        return Err(format!("symbolic storage lane width {lane} outside 1..64"));
+    }
+    Ok((lane as u32, count))
+}
 fn signal(code: &Value, name: &str) -> Res<(Addr, u32, usize)> {
     let found = arr(&code["signals"])?
         .iter()
@@ -426,19 +522,8 @@ fn signal(code: &Value, name: &str) -> Res<(Addr, u32, usize)> {
         return Err(format!("missing/ambiguous top-level signal {name}"));
     }
     let s = found[0];
-    let w = num(&s["metadata"]["width"])?;
-    if !(1..=64).contains(&w) {
-        return Err(format!(
-            "symbolic lane width {w} unsupported; expected 1..64"
-        ));
-    }
-    let n = arr(&s["metadata"]["array_dims"])?
-        .iter()
-        .try_fold(1usize, |a, b| {
-            a.checked_mul(num(b)?)
-                .ok_or_else(|| "array size overflow".to_string())
-        })?;
-    Ok((addr(&s["address"])?, w as u32, n))
+    let (w, n) = storage_shape(&s["metadata"])?;
+    Ok((addr(&s["address"])?, w, n))
 }
 fn bindings(code: &Value, values: &Value) -> Res<Vec<Binding>> {
     obj(values)?
@@ -539,22 +624,8 @@ pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
     for o in arr(&code["design"]["state_objects"])? {
         let a = addr(&o["address"])?;
         let m = &o["metadata"];
-        let w = num(&m["width"])?;
-        if !(1..=64).contains(&w) {
-            return Err(format!("symbolic storage lane width {w} outside 1..64"));
-        }
-        let n = arr(&m["array_dims"])?.iter().try_fold(1usize, |a, b| {
-            a.checked_mul(num(b)?)
-                .ok_or_else(|| "storage dimension overflow".to_string())
-        })?;
-        if n == 0 || n.checked_mul(w).is_none_or(|bits| bits > 65536) {
-            return Err("symbolic storage exceeds 65536-bit budget".into());
-        }
-        if frame
-            .state
-            .insert(a, Storage::new(w as u32, n, false))
-            .is_some()
-        {
+        let (w, n) = storage_shape(m)?;
+        if frame.state.insert(a, Storage::new(w, n, false)).is_some() {
             return Err("duplicate storage address".into());
         }
     }
@@ -801,13 +872,20 @@ impl Lifter {
             for (a, c) in source.cells.iter().zip(&mut target.cells) {
                 let old = c.value.clone().ok_or("sparse commit to unbound storage")?;
                 let val = a.value.clone().ok_or("sparse source undefined")?;
-                let inverse = ir::node(Sort::Bv(source.lane), "bvnot", vec![a.mask.clone()]);
-                c.value = Some(op(
-                    "bvor",
-                    source.lane,
-                    op("bvand", source.lane, old, inverse),
-                    op("bvand", source.lane, val, a.mask.clone()),
-                ));
+                let inverse = bitnot(a.mask.clone());
+                c.value = Some(if let Some(action) = &a.whole_word {
+                    apply_word_update(action, &old, &mut Default::default())
+                } else {
+                    op(
+                        "bvor",
+                        source.lane,
+                        op("bvand", source.lane, old, inverse),
+                        op("bvand", source.lane, val, a.mask.clone()),
+                    )
+                });
+                // The target's mask may include earlier partial updates. Keep
+                // its exact bits and conservatively drop the optional tag.
+                c.whole_word = None;
                 c.mask = op("bvor", source.lane, c.mask.clone(), a.mask.clone());
             }
             self.frame

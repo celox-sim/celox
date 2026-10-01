@@ -59,3 +59,7 @@ It installs a Z3 tripwire; no Z3 fallback is allowed. The whole-corpus CI job ru
 this step after the original conformance suite and uploads its own evidence.
 For iteration, `run.py --out FRESH_DIR --widths 4 32` accepts explicit frontend,
 lifter and checker paths. `--faults` with no arguments runs only correct designs.
+
+The CI entry point also executes the scaling regression gate:18 correct/mutant
+component cases at16/32/64 sizes, plus the solver's bounded-search tests. See
+`audit/veryl_scaling` for the full study and the still-unresolved CPU8 work limit.
