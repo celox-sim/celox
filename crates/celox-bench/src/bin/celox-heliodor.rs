@@ -16,6 +16,14 @@ use celox::{
 use clap::{Parser, ValueEnum};
 use veryl_metadata::Metadata;
 
+#[cfg(any(
+    target_arch = "x86_64",
+    feature = "arm64-codegen",
+    target_arch = "aarch64"
+))]
+#[path = "heliodor/build_cache.rs"]
+mod build_cache;
+
 #[derive(Parser)]
 #[command(about = "Run a Heliodor test with Celox and report split benchmark timing")]
 struct Cli {
@@ -39,6 +47,9 @@ struct Cli {
     /// Load a pointer-free native image instead of generating machine code.
     #[arg(long, value_name = "PATH")]
     native_image_input: Option<PathBuf>,
+    /// Reuse native compilation artifacts from this trusted local directory.
+    #[arg(long, value_name = "DIR")]
+    build_cache_dir: Option<PathBuf>,
     #[arg(long, value_parser = parse_positive_u64)]
     tick_limit: Option<u64>,
     #[arg(long)]
@@ -65,6 +76,7 @@ struct Options {
     compile_only: bool,
     native_image_output: Option<PathBuf>,
     native_image_input: Option<PathBuf>,
+    build_cache_dir: Option<PathBuf>,
     tick_limit: Option<u64>,
     dump_ir_dir: Option<PathBuf>,
     dump_ir_and_run: bool,
@@ -172,6 +184,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         compile_only: cli.compile_only,
         native_image_output: cli.native_image_output,
         native_image_input: cli.native_image_input,
+        build_cache_dir: cli.build_cache_dir,
         tick_limit: cli.tick_limit,
         dump_ir_dir: cli.dump_ir_dir,
         dump_ir_and_run: cli.dump_ir_and_run,
@@ -195,6 +208,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 all(target_arch = "x86_64", not(feature = "arm64-codegen"))
             ))),
     };
+    if opts.build_cache_dir.is_some()
+        && (!matches!(opts.backend, Backend::Native)
+            || opts.native_image_input.is_some()
+            || opts.dump_ir_dir.is_some())
+    {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--build-cache-dir requires --backend native and cannot be combined with --native-image-input or --dump-ir-dir",
+        });
+    }
     if opts.native_image_output.is_some() && !opts.compile_only {
         return Err(CeloxHeliodorError::InvalidConfiguration {
             message: "--native-image-output requires --compile-only",
@@ -317,6 +339,44 @@ fn run() -> Result<(), CeloxHeliodorError> {
     );
 
     let total_start = Instant::now();
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    let build_cache = opts.build_cache_dir.as_ref().and_then(|dir| {
+        match build_cache::BuildCache::new(
+            dir,
+            &opts,
+            &sources,
+            metadata.as_ref().expect("cache uses sources"),
+        ) {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                eprintln!("build cache disabled: {error}");
+                println!("CELOX_BUILD_CACHE test={} status=bypass", opts.test);
+                None
+            }
+        }
+    });
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    ))]
+    if let Some(cache) = &build_cache {
+        native_image = cache.load();
+        println!(
+            "CELOX_BUILD_CACHE test={} status={} path={}",
+            opts.test,
+            if native_image.is_some() {
+                "hit"
+            } else {
+                "miss"
+            },
+            cache.path().display()
+        );
+    }
     let optimize_options =
         OptimizeOptions::new(opts.opt_level).with_max_native_memory_width(opts.native_memory_width);
     let mut builder = Simulator::from_sources(source_refs, &opts.test);
@@ -554,7 +614,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         }
     }
     if opts.compile_only {
-        let compile_start = Instant::now();
+        let compile_start = total_start;
         match opts.backend {
             #[cfg(any(
                 target_arch = "x86_64",
@@ -562,7 +622,19 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 target_arch = "aarch64"
             ))]
             Backend::Native => {
-                let compiled = builder.compile_native()?;
+                let image = if let Some(image) = native_image.take() {
+                    image
+                } else if let Some(cache) = &build_cache {
+                    let (compiled, dependencies) =
+                        celox_frontend_veryl::capture_file_dependencies(|| {
+                            builder.compile_native()
+                        });
+                    let compiled = compiled?;
+                    cache.store(compiled.program_image(), &dependencies);
+                    compiled.into_program_image()
+                } else {
+                    builder.compile_native()?.into_program_image()
+                };
                 if let Some(output_path) = &opts.native_image_output {
                     if let Some(parent) = output_path
                         .parent()
@@ -570,7 +642,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     {
                         fs::create_dir_all(parent)?;
                     }
-                    compiled.write_image(output_path)?;
+                    image.write_container(output_path)?;
                     println!(
                         "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
                         opts.test,
@@ -608,7 +680,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         return Ok(());
     }
 
-    let compile_start = Instant::now();
+    let compile_start = total_start;
     let (
         result,
         ticks,
@@ -626,16 +698,21 @@ fn run() -> Result<(), CeloxHeliodorError> {
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
         Backend::Native => {
-            let mut sim = if let Some(image_path) = &opts.native_image_input {
-                let image = native_image
-                    .take()
-                    .expect("native image was loaded before builder construction");
-                println!(
-                    "CELOX_NATIVE_IMAGE test={} mode=loaded path={}",
-                    opts.test,
-                    image_path.display()
-                );
+            let mut sim = if let Some(image) = native_image.take() {
+                if let Some(image_path) = &opts.native_image_input {
+                    println!(
+                        "CELOX_NATIVE_IMAGE test={} mode=loaded path={}",
+                        opts.test,
+                        image_path.display()
+                    );
+                }
                 builder.build_native_from_image(image)?
+            } else if let Some(cache) = &build_cache {
+                let (compiled, dependencies) =
+                    celox_frontend_veryl::capture_file_dependencies(|| builder.compile_native());
+                let compiled = compiled?;
+                cache.store(compiled.program_image(), &dependencies);
+                compiled.initialize()?
             } else {
                 builder.build_native()?
             };

@@ -60,6 +60,33 @@ bash scripts/run-heliodor-bench.sh run
 HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.sh run
 ```
 
+生成したネイティブコードの性能を繰り返し調べる場合は、ビルドキャッシュを有効にできます。
+
+```bash
+HELIODOR_RUNNERS=celox \
+HELIODOR_CELOX_BUILD_CACHE_DIR="$PWD/target/heliodor/build-cache" \
+bash scripts/run-heliodor-bench.sh run
+```
+
+ランナー単体でも `--build-cache-dir DIR` を指定できます。ヒット時は解析・最適化・
+ネイティブコード生成を省略し、シミュレーション状態は毎回初期化します。
+`CELOX_BUILD_CACHE` の `status=hit` / `status=miss` で再利用の有無を確認できます。
+ソースの内容と順序、プロジェクト設定と依存関係、テスト名、最適化とパスの設定、
+4-state モード、メモリ幅、SLP、診断設定、作業ディレクトリ、実行バイナリを照合します。
+`$readmemh` の参照ファイルも内容を確認し、探索候補のファイルが新しく作られた場合も
+再ビルドします。コンパイル中は入力ファイルを変更しないでください。
+
+キャッシュは明示的な指定時だけ有効で、native バックエンドに対応します。
+`host-qemu` のホスト側コード生成や `--compile-only --native-image-output` でも利用できます。
+`--native-image-input` および `--dump-ir-dir` との併用はできません。
+実行可能コードを保存するため、信頼できるローカルディレクトリを指定してください。
+書き込みはアトミックに行い、破損やキャッシュの入出力エラー時は再ビルドします。
+削除するにはディレクトリを消してください。古いエントリの自動削除は行いません。
+
+ヒット時の `compile_ns` はコンパイルではなくロード・初期化の時間です。
+実行性能の調査に利用し、ビルド時間や全体の性能を比較する際は無効にしてください。
+固定構成の CI `gate` では常に無効にします。
+
 CI の固定 `gate` は x86-64 で `veryl-cc-sync`、`celox`、`celox-tiered`、
 `veryl-cc-tiered` を実行します。夜間の AArch64 ジョブも同じ 4 種類を測定し、
 固定版のジョブはすべて `scripts/heliodor-revision` を参照します。suite では成功した

@@ -14,10 +14,14 @@ arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]
 
 [dependencies]
+blake3          = "1.8"
 celox           = { path = "../celox" }
+celox-frontend-veryl = { path = "../celox-frontend-veryl" }
 clap            = { workspace = true }
 fxhash          = { workspace = true }
 libc            = { workspace = true }
+serde_json      = { workspace = true }
+tempfile        = { workspace = true }
 thiserror       = { workspace = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 veryl-analyzer  = { workspace = true }
@@ -27,7 +31,6 @@ veryl-simulator = { workspace = true }
 
 [dev-dependencies]
 celox-design = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

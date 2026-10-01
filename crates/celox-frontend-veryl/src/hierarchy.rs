@@ -218,6 +218,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
     // assignment are identical to the single-threaded construction.
     let resource_snapshot = resource_table::export_tables();
     let text_snapshot = text_table::export_tables();
+    let file_dependencies = crate::file_dependencies::current();
     let tasks = module_ir
         .iter()
         .filter(|(module_id, _)| !external_modules_by_global.contains_key(module_id))
@@ -258,6 +259,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             let handles = (0..worker_count)
                 .map(|_| {
                     scope.spawn(|| {
+                        let _files = crate::file_dependencies::install(file_dependencies.clone());
                         resource_table::import_tables(&resource_snapshot);
                         text_table::import_tables(&text_snapshot);
                         let mut parsed = Vec::new();

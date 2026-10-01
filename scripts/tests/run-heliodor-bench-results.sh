@@ -360,10 +360,13 @@ run_in_heliodor() {
 ensure_results_schema "$integration_results/results.tsv"
 HELIODOR_COMPILE_ONLY=0
 CELOX_OPT_LEVEL=O2
+HELIODOR_CELOX_BUILD_CACHE_DIR="$TMP/build-cache"
 CELOX_SIR_PASS_OVERRIDES="-branchify_mux +gvn"
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
 run_one celox integration_pass >/dev/null \
     || fail "run_one rejected a fixture full pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --build-cache-dir $TMP/build-cache "* ]] \
+    || fail "native runner did not receive the configured build cache"
 fixture_arg_count="${#FIXTURE_RUN_ARGS[@]}"
 assert_eq "${FIXTURE_RUN_ARGS[$((fixture_arg_count - 2))]}" --opt-level \
     "Celox optimization flag"
@@ -472,6 +475,8 @@ assert_eq "$(awk -F '\t' 'NR == 9 { print $12 }' "$integration_results/results.t
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_interpreter compile_ns=8 execute_ns=55 jit_execute_ns=NA\nCELOX_TEST_RESULT test=integration_interpreter status=pass elapsed_ns=65'
 run_one celox-interpreter integration_interpreter >/dev/null \
     || fail "run_one rejected a fixture interpreter pass"
+[[ " ${FIXTURE_RUN_ARGS[*]} " != *" --build-cache-dir "* ]] \
+    || fail "interpreter runner received the native build cache"
 [[ " ${FIXTURE_RUN_ARGS[*]} " == *" --backend interpreter "* ]] \
     || fail "interpreter runner did not select the interpreter backend"
 assert_eq "$(awk -F '\t' 'NR == 10 { print $1 }' "$integration_results/results.tsv")" \

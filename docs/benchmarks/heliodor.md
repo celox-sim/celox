@@ -66,6 +66,34 @@ To compare both tiered backends:
 HELIODOR_RUNNERS="celox-tiered veryl-cc-tiered" bash scripts/run-heliodor-bench.sh run
 ```
 
+For repeated local profiling of generated native code, enable the build cache:
+
+```bash
+HELIODOR_RUNNERS=celox \
+HELIODOR_CELOX_BUILD_CACHE_DIR="$PWD/target/heliodor/build-cache" \
+bash scripts/run-heliodor-bench.sh run
+```
+
+The runner also accepts `--build-cache-dir DIR` directly. A hit skips frontend
+analysis, optimization, and native code generation; each run initializes fresh
+simulation state. `CELOX_BUILD_CACHE` logs `status=hit` or `status=miss`. Source
+contents and order, project metadata and dependency mappings, test name,
+optimization/pass settings, four-state mode, native memory width, SLP settings,
+diagnostics, working directory, and the exact runner executable identify the
+compilation. Files consulted by `$readmemh`, including absent lookup candidates,
+are checked by content before reuse. Keep build inputs stable during compilation.
+
+Caching is opt-in and supports the native backend, including host codegen in
+`host-qemu` mode and `--compile-only --native-image-output`. It cannot be combined
+with `--native-image-input` or `--dump-ir-dir`. Cache directories contain executable
+code and must be trusted local directories. Writes are atomic; invalid entries or
+cache I/O failures fall back to compilation. Delete the directory to clear it;
+entries are not evicted automatically.
+
+On a hit, `compile_ns` measures loading and initialization rather than compilation.
+Use cached runs to study execution, and disable caching when comparing build or
+end-to-end performance. The fixed CI `gate` always disables this cache.
+
 The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
 `veryl-cc-tiered` on x86-64. The nightly AArch64 job measures the same four
 backends. All pinned jobs use `scripts/heliodor-revision`. Each successful
