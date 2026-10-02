@@ -46,6 +46,13 @@ pub struct Node {
     pub args: Vec<Term>,
     // Nodes are immutable after construction; only node() constructs them.
     structural_hash: u64,
+    contains_memory: bool,
+}
+impl Term {
+    /// Cached structural property; never used to establish equality.
+    pub fn contains_memory(&self) -> bool {
+        self.0.contains_memory
+    }
 }
 pub fn node(sort: Sort, op: impl Into<String>, args: Vec<Term>) -> Term {
     let op = op.into();
@@ -53,11 +60,13 @@ pub fn node(sort: Sort, op: impl Into<String>, args: Vec<Term>) -> Term {
     sort.hash(&mut hasher);
     op.hash(&mut hasher);
     args.hash(&mut hasher);
+    let contains_memory = matches!(sort, Sort::Mem(_, _)) || args.iter().any(Term::contains_memory);
     Term(Rc::new(Node {
         sort,
         op,
         args,
         structural_hash: hasher.finish(),
+        contains_memory,
     }))
 }
 pub fn boolv(v: bool) -> Term {
@@ -139,6 +148,7 @@ mod hash_collision_tests {
                 op: op.into(),
                 args: vec![],
                 structural_hash: 7,
+                contains_memory: false,
             }))
         };
         let a = term("(_ bv0 4)");

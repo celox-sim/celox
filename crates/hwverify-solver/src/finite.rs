@@ -1,8 +1,9 @@
-//! Opt-in, bounded decision procedure for the quantifier-free scalar Bool/BV IR.
+//! Opt-in, bounded decision procedure for quantifier-free Bool/BV and readonly-array IR.
 //!
 //! Terms are bit-blasted to definitional CNF and decided by a small CDCL solver.
 //! SAT assignments are independently evaluated on the ORIGINAL formula and all
-//! requested context terms. Unsupported terms or exhausted budgets yield Unknown.
+//! requested context terms. Readonly arrays use exact finite-observation reduction
+//! and total sparse-array model replay. Unsupported terms or exhausted budgets yield Unknown.
 //! Diagnostics are not proof certificates: UNSAT trusts this Rust implementation.
 use hwverify_ir::{Env, Res, Sort, Term};
 use serde_json::{json, Value};
@@ -13,6 +14,8 @@ use std::{
 
 mod control;
 mod lookup;
+mod readonly;
+pub use readonly::ArrayModel;
 
 type Lit = i32;
 const TRUE: Lit = 1;
@@ -166,12 +169,14 @@ pub struct Outcome {
     pub reason: Option<String>,
     pub assignments: BTreeMap<String, Scalar>,
     pub context_values: BTreeMap<String, Scalar>,
+    pub array_assignments: BTreeMap<String, ArrayModel>,
+    pub array_context_values: BTreeMap<String, ArrayModel>,
     pub original_formula_validated: bool,
     pub stats: Stats,
 }
 impl Outcome {
     pub fn diagnostics(&self) -> Value {
-        json!({"solver_result":self.verdict.as_str(),"reason":self.reason,
+        let mut result = json!({"solver_result":self.verdict.as_str(),"reason":self.reason,
             "control_variables":self.stats.control_variables,"control_cases":self.stats.control_cases,"control_cases_closed":self.stats.control_cases_closed,"control_case_work":self.stats.control_case_work,"control_preprocess_work":self.stats.control_preprocess_work,"search_hint":self.search_hint.as_str(),"search_strategy":self.search_strategy.as_str(),
             "kind":"bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
             "trusted":"Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
@@ -188,7 +193,9 @@ impl Outcome {
             "probe_result":self.stats.probe_result.map(Verdict::as_str),"probe_work":self.stats.probe_work,
             "search_slices":self.stats.search_slices,"search_yields":self.stats.search_yields,
             "clause_accounting":"aggregate allocated CNF/branch/learned clauses within the whole-query limit; sequential proof splits retain one immutable base and one reusable working CNF",
-            "decisions":self.stats.decisions,"conflicts":self.stats.conflicts,"work":self.stats.work})
+            "decisions":self.stats.decisions,"conflicts":self.stats.conflicts,"work":self.stats.work});
+        result["readonly_arrays"] = json!({            "readonly_array_rule":"Complete finite read congruence and extensional disequality witnesses; consistent observations extend to total arrays with common zero default. Rust reduction and original-array replay are trusted",            "array_assignments":self.array_assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),            "array_context_values":self.array_context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>()});
+        result
     }
 }
 struct Budget {
@@ -1616,8 +1623,14 @@ pub fn solve_with_hint(
     limits: Limits,
     search_hint: SearchHint,
 ) -> Outcome {
+    if formula.contains_memory() || context.values().any(Term::contains_memory) {
+        return readonly::solve(formula, context, limits, search_hint);
+    }
+    solve_scalar(formula, context, limits, search_hint)
+}
+fn solve_scalar(formula: &Term, context: &Env, limits: Limits, search_hint: SearchHint) -> Outcome {
     if search_hint == SearchHint::Unsat {
-        control::route(formula, context, limits, search_hint)
+        control::route(formula, context, limits, search_hint, false)
     } else {
         solve_plain(formula, context, limits, search_hint)
     }
@@ -1630,6 +1643,8 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         reason: None,
         assignments: BTreeMap::new(),
         context_values: BTreeMap::new(),
+        array_assignments: BTreeMap::new(),
+        array_context_values: BTreeMap::new(),
         original_formula_validated: false,
         stats: Stats::default(),
     };
@@ -2296,7 +2311,8 @@ mod tests {
     #[test]
     fn both_hints_preserve_unsupported_and_deadline_unknown() {
         let (formula, _) = split_fixture(true);
-        let unsupported = Env::from([("array".into(), var("array".into(), Sort::Mem(2, 2)))]);
+        let unsupported =
+            Env::from([("array".into(), node(Sort::Mem(2, 2), "unsupported", vec![]))]);
         for hint in [SearchHint::Sat, SearchHint::Unsat] {
             let result = solve_with_hint(&formula, &unsupported, Limits::default(), hint);
             assert_eq!(result.verdict, Verdict::Unknown);
@@ -2687,7 +2703,7 @@ mod tests {
     fn unsupported_and_malformed_terms_never_prove_anything() {
         let memory = var("mem".into(), Sort::Mem(2, 8));
         let tests = [
-            eq(memory.clone(), memory),
+            eq(node(Sort::Mem(2, 8), "store", vec![memory.clone()]), memory),
             node(Sort::Bool, "unknown", vec![]),
             node(Sort::Bool, "=", vec![]),
             node(Sort::Bv(4), "bvadd", vec![bv(4, 1)]),
@@ -2705,7 +2721,7 @@ mod tests {
         for formula in tests {
             assert_eq!(check(formula).verdict, Verdict::Unknown);
         }
-        let ctx = Env::from([("array".into(), var("memory".into(), Sort::Mem(2, 8)))]);
+        let ctx = Env::from([("array".into(), node(Sort::Mem(2, 8), "unsupported", vec![]))]);
         assert_eq!(
             solve(&boolv(true), &ctx, Limits::default()).verdict,
             Verdict::Unknown

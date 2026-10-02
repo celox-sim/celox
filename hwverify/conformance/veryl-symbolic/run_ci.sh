@@ -29,7 +29,8 @@ import hashlib, json, pathlib, subprocess, sys
 out, root, frontend = map(pathlib.Path, sys.argv[1:])
 files = [root/'Cargo.toml', root/'Cargo.lock', frontend,
          root/'target/release/hwverify-rs', root/'target/release/hwverify-sir-lift']
-for directory in ('crates/sir', 'crates/solver', 'conformance/veryl-symbolic'):
+for directory in ('crates/ir', 'crates/solver', 'crates/verify', 'crates/syntax',
+                  'crates/cli', 'crates/sir', 'conformance/veryl-symbolic'):
     files.extend(p for p in (root/directory).rglob('*') if p.is_file()
                  and '__pycache__' not in p.parts and p.suffix != '.pyc')
 files.extend((root/'audit/veryl_scaling').glob('*.py'))
@@ -52,4 +53,7 @@ python3 "$REPO/audit/veryl_scaling/cpu_registers.py" --out "$OUT/register-scalin
 python3 "$REPO/audit/veryl_scaling/test_cpu_registers.py" --evidence "$OUT/register-scaling-regression"
 python3 "$REPO/audit/veryl_scaling/cpu_memory_contract.py" --out "$OUT/memory-contract-regression" --require-success
 python3 "$REPO/audit/veryl_scaling/test_cpu_memory_contract.py" --evidence "$OUT/memory-contract-regression"
+python3 -m unittest audit.veryl_scaling.test_cpu_memory_reuse
+python3 "$REPO/audit/veryl_scaling/test_readonly_array_differential.py" --root "$REPO" --out "$OUT/readonly-array-differential"
+python3 "$REPO/audit/veryl_scaling/cpu_memory_reuse.py" --out "$OUT/memory-reuse-regression" --negative-controls
 test ! -e "$Z3_TRIPWIRE_MARKER"

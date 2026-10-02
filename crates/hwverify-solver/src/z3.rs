@@ -267,7 +267,9 @@ impl Check {
                 _ => "unknown",
             };
             let mut script = base;
-            let mut raw = format!("{verdict}\n; hwverify finite Bool/BV backend; Z3 not invoked\n");
+            let mut raw = format!(
+                "{verdict}\n; hwverify finite Bool/BV/readonly-array backend; Z3 not invoked\n"
+            );
             if let Some(reason) = &result.reason {
                 raw.push_str(&format!("; {reason}\n"));
             }
@@ -286,6 +288,13 @@ impl Check {
                         value.smt()
                     ));
                 }
+                for (symbol, value) in &result.array_assignments {
+                    raw.push_str(&format!(
+                        "  (define-fun {symbol} () {} {})\n",
+                        hwverify_ir::Sort::Mem(value.address_width, value.value_width).smt(),
+                        value.smt()
+                    ));
+                }
                 raw.push_str(")\n");
                 if !ctx.is_empty() {
                     script.push_str(&format!(
@@ -296,7 +305,11 @@ impl Check {
                     for (label, symbol) in &ctx {
                         raw.push_str(&format!(
                             "({symbol} {})",
-                            result.context_values[label].smt()
+                            result
+                                .context_values
+                                .get(label)
+                                .map(|v| v.smt())
+                                .unwrap_or_else(|| result.array_context_values[label].smt())
                         ));
                     }
                     raw.push_str(")\n");

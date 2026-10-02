@@ -324,6 +324,15 @@ It checks arbitrary read responses, historical load values and request addresses
 then separately proves immutable memory and actual wired ISA composition with
 4/16/64 backing words. This new fixture uses a fixed six-bit address space and
 zero-filled unmapped reads. The local CPU theorem is capacity-independent;
-the full concrete ISA proof still expands memory and does not yet reuse
-component certificates. All 41 new cases and the previous gates run finite-only
+that milestone’s full concrete ISA proof still expands memory. All 41 new cases and the previous gates run finite-only
 under unchanged limits, with original-query SAT validation and Z3 tripwires.
+
+
+The subsequent [checked immutable-memory proof reuse](audit/veryl_scaling/CPU-MEMORY-REUSE.md)
+proves the whole CPU/ISA relation once over two abstract immutable memories,
+without expanding backing cells, and reuses that theorem for independently
+checked imported 4/16/64-word memories. Exact source/interface/wiring checks and
+current CPU port-contract proofs are mandatory. This is a specialized read-only
+substitution rule with same-session verified handles, not a general reusable
+certificate framework. The finite-only gate also checks 13 fault controls and
+8,000 independently evaluated small-array obligations under unchanged budgets.

@@ -3,7 +3,7 @@
 use super::*;
 use hwverify_ir::{boolv, bv, node, not};
 
-fn empty(hint: SearchHint) -> Outcome {
+pub(super) fn empty(hint: SearchHint) -> Outcome {
     Outcome {
         search_hint: hint,
         search_strategy: SearchStrategy::NotStarted,
@@ -11,6 +11,8 @@ fn empty(hint: SearchHint) -> Outcome {
         reason: None,
         assignments: BTreeMap::new(),
         context_values: BTreeMap::new(),
+        array_assignments: BTreeMap::new(),
+        array_context_values: BTreeMap::new(),
         original_formula_validated: false,
         stats: Stats::default(),
     }
@@ -234,7 +236,13 @@ fn merge_stats(out: &mut Stats, child: &Stats) {
     out.search_slices += child.search_slices;
     out.search_yields += child.search_yields;
 }
-pub(super) fn route(original: &Term, context: &Env, limits: Limits, hint: SearchHint) -> Outcome {
+pub(super) fn route(
+    original: &Term,
+    context: &Env,
+    limits: Limits,
+    hint: SearchHint,
+    readonly: bool,
+) -> Outcome {
     let mut budget = Budget {
         limits,
         start: Instant::now(),
@@ -308,6 +316,11 @@ pub(super) fn route(original: &Term, context: &Env, limits: Limits, hint: Search
                 .iter()
                 .map(|(name, t)| Ok((name.clone(), fold(t, &fixed, &mut memo, &mut budget, 0)?)))
                 .collect::<Res<Env>>()?;
+            let formula = if readonly {
+                readonly::strengthen(&formula, &mut budget)?
+            } else {
+                formula
+            };
             let child = solve_plain(
                 &formula,
                 &folded_context,
