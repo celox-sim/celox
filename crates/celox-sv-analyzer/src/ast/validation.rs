@@ -827,13 +827,14 @@ pub(super) fn reject_silently_ignored_constructs(
     }
     if is_module {
         for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
+            let dimensions = item.dimensions(&indexed_dimensions);
             reject_silently_ignored_constructs(
                 RefNode::ModuleOrGenerateItem(item.node),
                 syntax_tree,
-                &item.env,
+                &dimensions.const_env,
                 type_aliases,
-                parameter_dimensions,
-                parameter_values,
+                &dimensions,
+                &dimensions.parameter_values,
             )?;
         }
     }

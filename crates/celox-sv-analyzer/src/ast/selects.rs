@@ -1435,24 +1435,26 @@ fn indexed_constant_expression(
                 )
                 .map(const_expr_to_expr)
             }
-            sv_parser::ConstantPrimary::Concatenation(concat) if concat.nodes.1.is_none() => {
-                Some(Expr::Concat(
-                    concat
-                        .nodes
-                        .0
-                        .nodes
-                        .0
-                        .nodes
-                        .1
-                        .contents()
-                        .into_iter()
-                        .map(|expression| convert(RefNode::ConstantExpression(expression)))
-                        .collect::<Option<Vec<_>>>()?,
-                ))
+            sv_parser::ConstantPrimary::Concatenation(concat) => {
+                let parts = concat
+                    .nodes
+                    .0
+                    .nodes
+                    .0
+                    .nodes
+                    .1
+                    .contents()
+                    .into_iter()
+                    .map(|expression| convert(RefNode::ConstantExpression(expression)))
+                    .collect::<Option<Vec<_>>>()?;
+                selected_constant_concatenation(
+                    Expr::Concat(parts),
+                    concat.nodes.1.as_ref().map(|range| &range.nodes.1),
+                    syntax_tree,
+                    dimensions,
+                )
             }
-            sv_parser::ConstantPrimary::MultipleConcatenation(concat)
-                if concat.nodes.1.is_none() =>
-            {
+            sv_parser::ConstantPrimary::MultipleConcatenation(concat) => {
                 let (count, repeated) = &concat.nodes.0.nodes.0.nodes.1;
                 let count = indexed_select_base(
                     RefNode::ConstantExpression(count),
@@ -1468,7 +1470,12 @@ fn indexed_constant_expression(
                     .into_iter()
                     .map(|expression| convert(RefNode::ConstantExpression(expression)))
                     .collect::<Option<Vec<_>>>()?;
-                Some(Expr::RepeatConcat { count, parts })
+                selected_constant_concatenation(
+                    Expr::RepeatConcat { count, parts },
+                    concat.nodes.1.as_ref().map(|range| &range.nodes.1),
+                    syntax_tree,
+                    dimensions,
+                )
             }
             _ => const_expr_from_ref_node_with_env(
                 node,
@@ -1480,4 +1487,49 @@ fn indexed_constant_expression(
         },
         _ => None,
     }
+}
+
+fn selected_constant_concatenation(
+    expression: Expr,
+    selection: Option<&sv_parser::ConstantRangeExpression>,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let bound = |expression| {
+        indexed_select_base(
+            RefNode::ConstantExpression(expression),
+            syntax_tree,
+            dimensions,
+        )
+    };
+    let (msb, lsb) = match selection {
+        None => return Some(expression),
+        Some(sv_parser::ConstantRangeExpression::ConstantExpression(bit)) => {
+            let bit = bound(bit)?;
+            (bit.clone(), bit)
+        }
+        Some(sv_parser::ConstantRangeExpression::ConstantPartSelectRange(range)) => {
+            match &**range {
+                sv_parser::ConstantPartSelectRange::ConstantRange(range) => {
+                    (bound(&range.nodes.0)?, bound(&range.nodes.2)?)
+                }
+                sv_parser::ConstantPartSelectRange::ConstantIndexedRange(range) => {
+                    indexed_select_bounds(
+                        bound(&range.nodes.0)?,
+                        &range.nodes.1,
+                        &range.nodes.2,
+                        syntax_tree,
+                        (None, 0),
+                        dimensions,
+                    )?
+                }
+            }
+        }
+    };
+    Some(Expr::Select {
+        expr: Box::new(expression),
+        msb,
+        lsb,
+        signed: false,
+    })
 }

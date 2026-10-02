@@ -503,6 +503,66 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("selected_count")), 7u8.into());
     }
 
+    fn indexed_generate_parameters_retain_local_metadata(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter logic [3:0] BASE = 4'd2)(input logic [15:0] data,
+                    output logic [3:0] down, up, masked, derived, outer,
+                    output logic [7:0] loop_value);
+                    if (1) begin : selected
+                        localparam logic [7:4] BASE = 4'b0001;
+                        localparam logic [4:7] UP = 4'b0001;
+                        localparam logic [7:4] MASK = 4'bx001;
+                        localparam logic [3:0] Q = MASK[4 +: 3];
+                        assign down = data[BASE[4] +: 4];
+                        assign up = data[UP[7] +: 4];
+                        assign masked = data[MASK[4] +: 4];
+                        assign derived = data[Q +: 4];
+                    end
+                    for (genvar i = 0; i < 2; i++) begin : lanes
+                        localparam logic [7:4] LOCAL_BASE = i + 1;
+                        assign loop_value[i*4 +: 4] = data[LOCAL_BASE[4 +: 4] +: 4];
+                    end
+                    assign outer = data[BASE +: 4];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_generate_metadata.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x1234u16)).unwrap();
+        for name in ["down", "up", "masked", "derived"] {
+            assert_eq!(sim.get(sim.signal(name)), 10u8.into());
+        }
+        assert_eq!(sim.get(sim.signal("outer")), 13u8.into());
+        assert_eq!(sim.get(sim.signal("loop_value")), 0xdau8.into());
+    }
+
+    fn indexed_constants_lower_selected_concatenations(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [15:0] range_width,
+                    indexed_width, repeated_width, repeated_indexed_width, bit_width,
+                    output logic [3:0] parameter_value);
+                    localparam logic [3:0] Q = {4'b0011, 4'b0000}[4 +: 4];
+                    assign range_width = data[0 +: {4'b0011, 4'b0000}[7:4]];
+                    assign indexed_width = data[0 +: {4'b0011, 4'b0000}[4 +: 4]];
+                    assign repeated_width = data[0 +: {2{4'b0011}}[3:0]];
+                    assign repeated_indexed_width = data[0 +: {2{4'b0011}}[7 -: 4]];
+                    assign bit_width = data[0 +: {1'b0, 1'b1}[0]];
+                    assign parameter_value = Q;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_selected_concatenations.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x123fu16)).unwrap();
+        for name in ["range_width", "indexed_width", "repeated_width", "repeated_indexed_width"] {
+            assert_eq!(sim.get(sim.signal(name)), 7u8.into());
+        }
+        assert_eq!(sim.get(sim.signal("bit_width")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("parameter_value")), 3u8.into());
+    }
+
     fn indexed_unsigned_bases_cross_zero(sim) {
         @setup {
             let source = r#"
