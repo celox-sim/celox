@@ -2726,6 +2726,7 @@ fn resolve_readmem_path_with_fallback(
 ) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(filename);
     if path.is_absolute() {
+        crate::file_dependencies::record_absolute(&path);
         return path;
     }
 
@@ -2733,12 +2734,14 @@ fn resolve_readmem_path_with_fallback(
         .and_then(std::path::Path::parent)
         .map(|parent| parent.join(&path))
         .unwrap_or_else(|| path.clone());
+    crate::file_dependencies::record(&source_relative);
     if source_relative.exists() {
         return source_relative;
     }
 
     if let Some(cwd) = cwd {
         let cwd_relative = cwd.join(&path);
+        crate::file_dependencies::record(&cwd_relative);
         if cwd_relative.exists() {
             return cwd_relative;
         }

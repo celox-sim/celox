@@ -357,6 +357,61 @@ impl<A> TestbenchProgram<A> {
         &self.component_bindings
     }
 
+    /// Remap filesystem paths retained for runtime libraries and diagnostics.
+    /// Literal strings supplied by the design are left untouched.
+    /// A failed mapping can leave some paths remapped; discard that program.
+    pub fn try_map_paths<E>(
+        &mut self,
+        map: &mut impl FnMut(&std::path::Path) -> Result<PathBuf, E>,
+    ) -> Result<(), E> {
+        fn location<E>(
+            source: &mut Option<SourceLocation>,
+            map: &mut impl FnMut(&std::path::Path) -> Result<PathBuf, E>,
+        ) -> Result<(), E> {
+            if let Some(source) = source
+                && !source.file.is_empty()
+            {
+                source.file = map(std::path::Path::new(&source.file))?
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            Ok(())
+        }
+        fn statements<A, E>(
+            block: &mut [SemanticStatement<A>],
+            map: &mut impl FnMut(&std::path::Path) -> Result<PathBuf, E>,
+        ) -> Result<(), E> {
+            for statement in block {
+                match statement {
+                    TestbenchStatement::Assert {
+                        location: source, ..
+                    } => location(source, map)?,
+                    TestbenchStatement::If {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        statements(then_block, map)?;
+                        statements(else_block, map)?;
+                    }
+                    TestbenchStatement::For { body, .. } => statements(body, map)?,
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        for library in &mut self.component_libraries {
+            library.path = map(&library.path)?;
+        }
+        if let Some(base) = &mut self.component_file_base {
+            *base = map(base)?;
+        }
+        for component in &mut self.components {
+            location(&mut component.source, map)?;
+        }
+        statements(&mut self.statements, map)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.statements.is_empty()
     }

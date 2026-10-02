@@ -381,3 +381,63 @@ function-output and nonconstant-port probes. Their compiler diagnostics remain
 in the report. Sixteen probes execute; no execution error or timeout occurred.
 The default artifact directory is `/tmp/veryl-mismatch-probes`; the portable JSON
 report is retained beside the probe sources.
+
+## Veryl width and signedness regressions
+
+Checked on 2026-10-02 with Celox 0.8.2 and its pinned Veryl 0.21.0. The
+14 upstream probes exposed seven failing cases on native, Cranelift, Wasm,
+and the SIR interpreter. The first failing output in each case was:
+
+| Case (`veryl_context_regressions::` omitted) | Output | Expected | Observed | Diagnosis |
+| --- | --- | --- | --- | --- |
+| `signed_struct_member_sign_extends` | `y0` | `0xfffe` | `0x00fe` | Celox treats a rebased member read as an unsigned select |
+| `case_compares_each_label_as_an_if_does` | `y1` | `2` | `0` | Celox computes an 8-bit target before the 9-bit label comparison |
+| `runtime_for_bound_keeps_its_type` | `y0` | `0` | `4` | Veryl's `ForBound::Const(usize)` erases the unsigned upper bound type |
+| `constant_ternary_keeps_both_arm_types` | `t` | `4` | `12` | Veryl folds/clears an arm before preserving its selected type |
+| `signed_cast_of_folded_constant_sign_extends` | `y1` | `0xfb` | `0x0b` | Folded AIR already contains the zero-extended result |
+| `constant_case_on_signed_target` | `y0` | `1` | `2` | Veryl elaboration evaluates a negative case label incorrectly |
+| `folded_const_select_keeps_its_sign` | `y4` | `0xfffb` | `0x00fb` | Veryl folds a signed constant array element into an unsigned value |
+
+IEEE 1800-2023 11.8.1 (Rules for expression types) and 11.8.2 (Steps for
+evaluating an expression) distinguish unsigned explicit part-selects from
+signed operands and propagate a comparison's common width into its operands
+before evaluating arithmetic. The oracles retain those distinctions.
+Verilator passes all original cases except the constant-function range case,
+which it cannot compile; Icarus passes ten and cannot compile four.
+
+Celox now recovers whole packed-member signedness from the retained member
+path, while leaving explicit bit/part-selects unsigned. Pure context-determined
+case targets are evaluated using each comparison's width and signedness against
+a frozen symbolic store; targets containing calls retain their single evaluation.
+Dynamic loop-bound arithmetic is evaluated at no less than the emitted
+32-bit `int` width, preserving wider bounds. The two added isolated cases
+exercise runtime case targets in statements, expressions, and functions and
+forward/reverse/inclusive loop bounds at the 8-bit carry boundary. The case
+probe additionally checks that function copy-out occurs once. Both probes pass
+Verilator; Icarus passes the loop probe but cannot compile the function output
+argument in the case probe. The packed-member case passes both tools.
+
+The dependency version is unchanged. Six original cases remain ignored in
+Celox's harness because their residual failures require information already
+lost in Veryl AIR. In particular, fixing the runtime target makes the combined
+case probe advance to `y2` (expected `1`, observed `0`), where the constant
+label was evaluated before the unsigned target context was known. The runtime
+loop probe still stops at `y0`; the isolated bound-arithmetic probe passes.
+Veryl-only failures are excluded separately, including a negative-bound loop
+that failed to terminate during the reference run and was stopped after more
+than 60 seconds. The reusable shared cases keep their expected values.
+
+Reproduce the remaining failures with:
+
+```sh
+cargo test -p celox --test veryl_context_regressions -- --include-ignored \
+    --skip runtime_for_with_negative_bound::veryl
+```
+
+The optional Celox SystemVerilog frontend was checked separately. Eight of the
+new enabled cases encounter its existing unsupported constructs (casts,
+procedural loops, member assignments, or dynamic partial-array writes).
+`runtime_case_target_uses_comparison_context` also reproduces its own target
+truncation (`y0 = 0`, expected `2`). These SV frontend variants are explicitly
+excluded; this patch repairs the Veryl frontend, not the separate SV lowering.
+The 128-bit folded-shift case passes through the SV frontend.

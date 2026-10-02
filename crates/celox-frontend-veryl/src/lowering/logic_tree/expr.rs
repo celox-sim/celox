@@ -1136,10 +1136,12 @@ pub(super) fn eval_function_body_return(
                 arena,
             )?;
             state = apply_function_loop_continue_guard(module, guard_state, function, arena)?;
-            let target = EvaluatedCaseTarget {
-                node: target_node,
-                sources: target_sources,
-            };
+            let target = EvaluatedCaseTarget::new(
+                &case_stmt.case_target,
+                target_node,
+                target_sources,
+                &state.function.store,
+            );
             eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)
         }
 
@@ -1849,10 +1851,12 @@ pub(super) fn eval_function_body_return(
             arena,
         )?;
         state.function = function;
-        let target = EvaluatedCaseTarget {
-            node: target_node,
-            sources: target_sources,
-        };
+        let target = EvaluatedCaseTarget::new(
+            &case_stmt.case_target,
+            target_node,
+            target_sources,
+            &state.function.store,
+        );
         let executed_state = eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)?;
 
         if matches!(constant_bool(arena, outer_state.continue_expr), Some(true)) {
@@ -2101,10 +2105,12 @@ pub(super) fn eval_function_body_return(
         let (next_state, target_node, target_sources) =
             eval_function_expression(module, state, &case_stmt.case_target, None, arena)?;
         state = next_state;
-        let target = EvaluatedCaseTarget {
-            node: target_node,
-            sources: target_sources,
-        };
+        let target = EvaluatedCaseTarget::new(
+            &case_stmt.case_target,
+            target_node,
+            target_sources,
+            &state.store,
+        );
         eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)
     }
 
@@ -2410,6 +2416,59 @@ pub(crate) fn eval_expression_effectful(
 pub(super) struct EvaluatedCaseTarget {
     pub(super) node: NodeId,
     pub(super) sources: HashSet<VarAtomBase<VarId>>,
+    // Preserve the symbolic values at case entry. A context-determined target
+    // must be computed in each label's comparison width, before truncation.
+    comparison_store: Option<SymbolicStore<VarId>>,
+}
+
+impl EvaluatedCaseTarget {
+    pub(super) fn new(
+        expression: &Expression,
+        node: NodeId,
+        sources: HashSet<VarAtomBase<VarId>>,
+        store: &SymbolicStore<VarId>,
+    ) -> Self {
+        let comparison_store = if !matches!(expression, Expression::Term(_))
+            && case_target_can_be_recomputed(expression)
+        {
+            Some(store.fork())
+        } else {
+            None
+        };
+        Self {
+            node,
+            sources,
+            comparison_store,
+        }
+    }
+}
+
+// A call can update symbolic variables even without a display/assert runtime
+// effect. Keep every call's single evaluation; recompute only operator trees
+// whose leaves and index expressions are reads or literals.
+fn case_target_can_be_recomputed(expression: &Expression) -> bool {
+    match expression {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::Variable(_, index, select, _) => index
+                .0
+                .iter()
+                .chain(select.0.iter())
+                .chain(select.1.iter().map(|(_, end)| end))
+                .all(case_target_can_be_recomputed),
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => true,
+            _ => false,
+        },
+        Expression::Binary(lhs, _, rhs, _) => {
+            case_target_can_be_recomputed(lhs) && case_target_can_be_recomputed(rhs)
+        }
+        Expression::Unary(_, inner, _) => case_target_can_be_recomputed(inner),
+        Expression::Ternary(condition, yes, no, _) => {
+            case_target_can_be_recomputed(condition)
+                && case_target_can_be_recomputed(yes)
+                && case_target_can_be_recomputed(no)
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn eval_case_target_effectful(
@@ -2420,7 +2479,10 @@ pub(super) fn eval_case_target_effectful(
 ) -> Result<(EvaluatedCaseTarget, BoundaryMap<VarId>), ParserError> {
     let ((node, sources), boundaries) =
         eval_expression_effectful(module, store, target, arena, None)?;
-    Ok((EvaluatedCaseTarget { node, sources }, boundaries))
+    Ok((
+        EvaluatedCaseTarget::new(target, node, sources, store),
+        boundaries,
+    ))
 }
 
 pub(super) fn short_circuit_rhs_guard(
@@ -2478,14 +2540,32 @@ pub(super) fn eval_case_comparison(
     } else {
         semantics.rhs_context
     };
-    let target_node = coerce_node_width(
-        arena,
-        target.node,
-        target_context.map(|context| context.width),
-        target_context
-            .map(|context| context.signed)
-            .unwrap_or(target_signed),
-    )?;
+    let context_changes = target_context.is_some_and(|context| {
+        context.width != get_width(target.node, arena) || context.signed != target_signed
+    });
+    let (target_node, target_boundaries) =
+        if context_changes && let Some(snapshot) = &target.comparison_store {
+            let ((node, _), boundaries) = eval_expression_in_context(
+                module,
+                &mut ExpressionStore::ReadOnly(snapshot),
+                target_expr,
+                arena,
+                target_context,
+            )?;
+            (node, boundaries)
+        } else {
+            (
+                coerce_node_width(
+                    arena,
+                    target.node,
+                    target_context.map(|context| context.width),
+                    target_context
+                        .map(|context| context.signed)
+                        .unwrap_or(target_signed),
+                )?,
+                BoundaryMap::default(),
+            )
+        };
     let other_context = if target_is_lhs {
         semantics.rhs_context
     } else {
@@ -2511,7 +2591,10 @@ pub(super) fn eval_case_comparison(
     )?;
     let mut sources = target.sources.clone();
     sources.extend(other_sources);
-    Ok(((node, sources), boundaries))
+    Ok((
+        (node, sources),
+        merge_boundaries(target_boundaries, boundaries),
+    ))
 }
 
 fn merge_short_circuit_case_condition(

@@ -93,7 +93,7 @@ fn catalogue_has_unique_stable_names_and_categories() {
         assert!(names.insert(case.name), "duplicate {}", case.name);
         assert!(case.name.contains("::"));
     }
-    assert_eq!(names.len(), 664);
+    assert_eq!(names.len(), 680);
     assert_eq!(
         case("operators::test_bitwise_operations").unwrap().category,
         Category::Operators
