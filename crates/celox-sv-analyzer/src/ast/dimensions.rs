@@ -11,7 +11,7 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::ConstantPrimary::ConstantFunctionCall(call) = primary else {
         return None;
     };
-    size_system_function_call_type(&call.nodes.0, syntax_tree, const_env, type_aliases)
+    size_system_function_call_type(&call.nodes.0, syntax_tree, const_env, type_aliases, None)
 }
 
 pub(super) fn size_system_function_call_type(
@@ -19,6 +19,7 @@ pub(super) fn size_system_function_call_type(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    dimensions: Option<&PackedDimensions>,
 ) -> Option<ExprType> {
     let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
         return None;
@@ -54,6 +55,18 @@ pub(super) fn size_system_function_call_type(
             let argument = arguments[0].as_ref()?;
             if name != "$bits" && name != "$size" {
                 return None;
+            }
+            if let Some(dimensions) = dimensions
+                && let Some(ty) = size_function_expression_type(
+                    argument,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                    name == "$size",
+                    Some(dimensions),
+                )
+            {
+                return Some(ty);
             }
             // Function formals and locals shadow generated signal type markers.
             if let Some(dimensions) = containing_function_dimensions(
@@ -98,6 +111,7 @@ pub(super) fn size_system_function_call_type(
                 const_env,
                 type_aliases,
                 name == "$size",
+                None,
             ) {
                 return Some(r#type);
             }
@@ -185,6 +199,7 @@ fn size_function_expression_type(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     first_dimension_only: bool,
+    dimensions: Option<&PackedDimensions>,
 ) -> Option<ExprType> {
     let mut packed_dimensions = containing_packed_dimensions(
         RefNode::Expression(argument),
@@ -203,6 +218,18 @@ fn size_function_expression_type(
         const_env,
         type_aliases,
     );
+    if let Some(dimensions) = dimensions {
+        packed_dimensions.extend(
+            dimensions
+                .iter()
+                .map(|(name, metadata)| (name.clone(), metadata.clone())),
+        );
+        packed_dimensions.parameter_values = dimensions.parameter_values.clone();
+        packed_dimensions.constant_indexed_base = dimensions.constant_indexed_base;
+        packed_dimensions
+            .function_return_types
+            .extend(dimensions.function_return_types.clone());
+    }
     let expression = expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions)?;
     let width = if first_dimension_only {
         selected_expression_first_dimension_width(argument, syntax_tree, &packed_dimensions)

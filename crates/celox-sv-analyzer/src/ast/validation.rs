@@ -423,28 +423,30 @@ pub(super) fn reject_silently_ignored_constructs(
             _ => None,
         })
         .collect();
-    // Casts in indexed bases are checked by the full typed base converter.
-    // Keep the existing runtime-cast restrictions for all other expressions.
-    let indexed_base_casts: Vec<_> = node
+    // Typed indexed lowering validates casts in bases, widths and supported
+    // parameter initializers. Keep the generic cast checks for other contexts.
+    let typed_indexed_casts: Vec<_> = node
         .clone()
         .into_iter()
-        .filter_map(|child| {
-            let RefNode::IndexedRange(range) = child else {
-                return None;
-            };
-            Some(
-                RefNode::Expression(&range.nodes.0)
-                    .into_iter()
-                    .filter_map(|child| {
-                        if let RefNode::Cast(cast) = child {
-                            Some(cast)
-                        } else {
-                            None
-                        }
-                    }),
-            )
+        .filter_map(|child| match child {
+            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => Some(child),
+            RefNode::ParamAssignment(parameter) => parameter
+                .nodes
+                .2
+                .as_ref()
+                .filter(|(_, expression)| {
+                    expression.into_iter().any(|child| {
+                        matches!(
+                            child,
+                            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_)
+                        )
+                    })
+                })
+                .map(|(_, expression)| RefNode::ConstantParamExpression(expression)),
+            _ => None,
         })
-        .flatten()
+        .flat_map(|root| root.into_iter())
+        .filter(|child| matches!(child, RefNode::Cast(_) | RefNode::ConstantCast(_)))
         .collect();
     for child in node.clone() {
         if generated_nodes.iter().any(|n| n == &child) {
@@ -452,13 +454,14 @@ pub(super) fn reject_silently_ignored_constructs(
         }
         match child {
             RefNode::Cast(cast)
-                if !indexed_base_casts.contains(&cast)
+                if !typed_indexed_casts.contains(&RefNode::Cast(cast))
                     && !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
             RefNode::ConstantCast(cast)
-                if !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+                if !typed_indexed_casts.contains(&RefNode::ConstantCast(cast))
+                    && !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
             }

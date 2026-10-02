@@ -308,6 +308,7 @@ pub(super) fn expr_from_function_subroutine_call(
             syntax_tree,
             &packed_dimensions.const_env,
             &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
         )
     {
         return Some(Expr::Literal(ty.width.to_string()));

@@ -417,6 +417,92 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("sum")), 16u8.into());
     }
 
+    fn indexed_initializers_accept_casts_around_selections(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output int integer_value, nested_value, function_value,
+                    output logic [3:0] alias_value, output logic [7:0] arithmetic,
+                    output logic [15:0] cast_width);
+                    typedef logic [3:0] nibble;
+                    localparam logic [7:0] P = 8'hab;
+                    localparam int Q = int'(P[0 +: 4]);
+                    localparam nibble R = nibble'(P[4 +: 4]);
+                    localparam int S = int'(nibble'(P[4 +: 4]));
+                    localparam logic [7:0] T = 8'(P[0 +: 4]) + 8'd5;
+                    localparam int F = $clog2(int'(P[0 +: 4]));
+                    assign integer_value = Q;
+                    assign alias_value = R;
+                    assign nested_value = S;
+                    assign arithmetic = T;
+                    assign function_value = F;
+                    assign cast_width = data[0 +: int'(P[4 +: 4])];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_initializer_casts.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x1234u16)).unwrap();
+        assert_eq!(sim.get(sim.signal("integer_value")), 11u8.into());
+        assert_eq!(sim.get(sim.signal("alias_value")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("nested_value")), 10u8.into());
+        assert_eq!(sim.get(sim.signal("arithmetic")), 16u8.into());
+        assert_eq!(sim.get(sim.signal("function_value")), 4u8.into());
+        assert_eq!(sim.get(sim.signal("cast_width")), 0x234u16.into());
+    }
+
+    fn indexed_size_queries_preserve_parameter_dimensions(sim) {
+        @setup {
+            let source = r#"
+                module Top #(parameter logic [1:0][3:0] P = 8'hab,
+                    parameter logic [2:1][7:4] OFFSET = 8'hab,
+                    parameter logic [1:2][4:7] UP = 8'hab)(input logic [15:0] data,
+                    output logic [3:0] size_base, bits_base, offset_base, up_base, outer_base, whole_base,
+                    output logic [7:0] size_width, bits_width);
+                    assign size_base = data[$size(P[0]) +: 4];
+                    assign bits_base = data[$bits(P[0]) +: 4];
+                    assign offset_base = data[$size(OFFSET[1]) +: 4];
+                    assign up_base = data[$bits(UP[2]) +: 4];
+                    assign outer_base = data[$size(P) +: 4];
+                    assign whole_base = data[$bits(P) +: 4];
+                    assign size_width = data[0 +: $size(P[0])];
+                    assign bits_width = data[0 +: $bits(OFFSET[1])];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_parameter_size_queries.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x1234u16)).unwrap();
+        for name in ["size_base", "bits_base", "offset_base", "up_base"] {
+            assert_eq!(sim.get(sim.signal(name)), 3u8.into());
+        }
+        assert_eq!(sim.get(sim.signal("outer_base")), 13u8.into());
+        assert_eq!(sim.get(sim.signal("whole_base")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("size_width")), 4u8.into());
+        assert_eq!(sim.get(sim.signal("bits_width")), 4u8.into());
+    }
+
+    fn indexed_widths_accept_replication_concatenations(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [15:0] data, output logic [15:0] simple,
+                    parts, nested, selected_count);
+                    localparam logic [3:0] COUNT = 4'b1010;
+                    assign simple = data[0 +: {2{1'b1}}];
+                    assign parts = data[0 +: {2{1'b0, 1'b1}}];
+                    assign nested = data[0 +: {2{{2{1'b1}}}}];
+                    assign selected_count = data[0 +: {COUNT[1:0]{1'b1}}];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_replication_widths.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0x123fu16)).unwrap();
+        assert_eq!(sim.get(sim.signal("simple")), 7u8.into());
+        assert_eq!(sim.get(sim.signal("parts")), 31u8.into());
+        assert_eq!(sim.get(sim.signal("nested")), 0x123fu16.into());
+        assert_eq!(sim.get(sim.signal("selected_count")), 7u8.into());
+    }
+
     fn indexed_unsigned_bases_cross_zero(sim) {
         @setup {
             let source = r#"
@@ -467,7 +553,7 @@ sv_backends! {
 
 #[test]
 fn rejects_nonpositive_and_runtime_indexed_widths() {
-    for width in ["0", "-1", "width"] {
+    for width in ["0", "-1", "width", "{2{1'b0}}", "{0{1'b1}}"] {
         let source = format!(
             "module Top(input logic [7:0] data, input int width, output logic [7:0] y); assign y = data[0 +: {width}]; endmodule"
         );

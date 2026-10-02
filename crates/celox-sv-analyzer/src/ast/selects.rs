@@ -1408,11 +1408,12 @@ fn indexed_constant_expression(
                     )
                     .map(const_expr_to_expr);
                 }
-                if let Some(ty) = size_system_function_expr_type(
-                    primary,
+                if let Some(ty) = dimensions::size_system_function_call_type(
+                    &call.nodes.0,
                     syntax_tree,
                     &dimensions.const_env,
                     &dimensions.type_aliases,
+                    Some(dimensions),
                 ) {
                     return Some(Expr::Literal(ty.width.to_string()));
                 }
@@ -1448,6 +1449,26 @@ fn indexed_constant_expression(
                         .map(|expression| convert(RefNode::ConstantExpression(expression)))
                         .collect::<Option<Vec<_>>>()?,
                 ))
+            }
+            sv_parser::ConstantPrimary::MultipleConcatenation(concat)
+                if concat.nodes.1.is_none() =>
+            {
+                let (count, repeated) = &concat.nodes.0.nodes.0.nodes.1;
+                let count = indexed_select_base(
+                    RefNode::ConstantExpression(count),
+                    syntax_tree,
+                    dimensions,
+                )?;
+                let parts = repeated
+                    .nodes
+                    .0
+                    .nodes
+                    .1
+                    .contents()
+                    .into_iter()
+                    .map(|expression| convert(RefNode::ConstantExpression(expression)))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Expr::RepeatConcat { count, parts })
             }
             _ => const_expr_from_ref_node_with_env(
                 node,
