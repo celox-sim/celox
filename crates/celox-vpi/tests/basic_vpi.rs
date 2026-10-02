@@ -1209,7 +1209,7 @@ unsafe extern "C" fn record_batch_callback_value(data: *mut VpiCbData) -> i32 {
     let value = unsafe { (*(*data).value).value.integer } as usize;
     BATCH_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
     BATCH_CALLBACK_SEQUENCE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |sequence| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |sequence| {
             Some(sequence * 10 + value)
         })
         .unwrap();
@@ -1218,7 +1218,7 @@ unsafe extern "C" fn record_batch_callback_value(data: *mut VpiCbData) -> i32 {
 
 fn record_region(digit: usize) {
     REGION_ORDER
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |order| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |order| {
             Some(order * 10 + digit)
         })
         .unwrap();
@@ -1793,7 +1793,7 @@ unsafe extern "C" fn record_clock_value_change(data: *mut VpiCbData) -> i32 {
     let value = unsafe { (*(*data).value).value.integer } as usize;
     EDGE_VALUE_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst);
     EDGE_VALUE_CHANGE_SEQUENCE
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |sequence| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |sequence| {
             Some(sequence * 10 + value)
         })
         .unwrap();
