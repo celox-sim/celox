@@ -34,6 +34,15 @@
   "packageRules": [
     {
       "matchManagers": [
+        "nix"
+      ],
+      "matchDepNames": [
+        "!rust-overlay"
+      ],
+      "enabled": false
+    },
+    {
+      "matchManagers": [
         "github-actions"
       ],
       "matchDepNames": [
@@ -129,10 +138,12 @@
     },
     {
       "matchManagers": [
-        "custom.regex"
+        "custom.regex",
+        "nix"
       ],
       "matchPackageNames": [
-        "rust-lang/rust"
+        "rust-lang/rust",
+        "https://github.com/oxalica/rust-overlay"
       ],
       "groupName": "rust stable toolchain",
       "commitMessageTopic": "Rust toolchain",
@@ -144,7 +155,9 @@
       "labels": [
         "dependencies",
         "rust"
-      ]
+      ],
+      "separateMajorMinor": false,
+      "separateMinorPatch": false
     },
     {
       "matchManagers": [
@@ -183,6 +196,18 @@
       "labels": [
         "dependencies"
       ]
+    },
+    {
+      "matchManagers": [
+        "nix"
+      ],
+      "matchDepNames": [
+        "rust-overlay"
+      ],
+      "minimumReleaseAge": "0 days"
     }
-  ]
+  ],
+  "nix": {
+    "enabled": true
+  }
 }
