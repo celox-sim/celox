@@ -50,4 +50,6 @@ python3 "$REPO/audit/veryl_scaling/measure.py" --out "$OUT/scaling-regression" -
 python3 "$REPO/audit/veryl_scaling/cpu_capacity.py" --out "$OUT/cpu-capacity-regression" --sizes 8 16 32 64 --faults no_flush wrong_target no_forward no_interlock wrong_add missing_reset --require-success
 python3 "$REPO/audit/veryl_scaling/cpu_registers.py" --out "$OUT/register-scaling-regression" --sizes 8 16 32 --require-success
 python3 "$REPO/audit/veryl_scaling/test_cpu_registers.py" --evidence "$OUT/register-scaling-regression"
+python3 "$REPO/audit/veryl_scaling/cpu_memory_contract.py" --out "$OUT/memory-contract-regression" --require-success
+python3 "$REPO/audit/veryl_scaling/test_cpu_memory_contract.py" --evidence "$OUT/memory-contract-regression"
 test ! -e "$Z3_TRIPWIRE_MARKER"

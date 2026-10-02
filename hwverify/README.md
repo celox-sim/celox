@@ -313,6 +313,17 @@ explicit synchronous two-state model, trusted boundaries and reproduction.
 The original concrete-observation corpus backend remains separate.
 
 The follow-up [scaling investigation](audit/veryl_scaling/README.md) records the
-array-layout correction, word-preserving sparse NBA updates and sequential CNF
-buffer reuse. Component tests extend to256words; the real8-word CPU still reaches
-the unchanged work budget and is explicitly not reported as proved.
+array-layout correction, word-preserving sparse NBA updates, CNF reuse and
+subsequent finite-solver improvements, retaining the earlier capacity failures
+as historical evidence. Current gates cover the two-GPR CPU through 64 memory
+words and a separate 8/16/32-GPR axis with four words per memory.
+
+The [CPU/memory contract milestone](audit/veryl_scaling/CPU-MEMORY-CONTRACT.md)
+removes memory words from an eight-GPR CPU-local ISA retirement/provenance proof.
+It checks arbitrary read responses, historical load values and request addresses,
+then separately proves immutable memory and actual wired ISA composition with
+4/16/64 backing words. This new fixture uses a fixed six-bit address space and
+zero-filled unmapped reads. The local CPU theorem is capacity-independent;
+the full concrete ISA proof still expands memory and does not yet reuse
+component certificates. All 41 new cases and the previous gates run finite-only
+under unchanged limits, with original-query SAT validation and Z3 tripwires.

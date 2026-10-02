@@ -69,3 +69,10 @@ independent concrete integer-ISA regression over the imported DUT.
 See `audit/veryl_scaling/README.md` and `audit/veryl_scaling/CPU-REGISTERS.md` for
 actual measurements, fixed budgets, semantic scope and reproduction. Neither
 axis implies combined maximum capacity/register coverage or RV32I support.
+
+The memory-boundary gate adds 41 CPU/memory/composition cases and independent
+concrete regressions. Its 8-GPR CPU has fixed six-bit addresses and zero-filled
+unmapped reads, with 4/16/64 backing words. The CPU-local ISA retirement and
+provenance proof contains no memory words; the separately wired full ISA proof
+still scales with memory. See
+[`CPU-MEMORY-CONTRACT.md`](../../audit/veryl_scaling/CPU-MEMORY-CONTRACT.md).
