@@ -1,6 +1,6 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 665 Veryl language tests for compiler and simulator
+A reusable corpus of 681 Veryl language tests for compiler and simulator
 implementations. Sources, input sequences, and assertions live together in this
 crate. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.

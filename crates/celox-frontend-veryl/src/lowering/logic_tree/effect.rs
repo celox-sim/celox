@@ -1864,10 +1864,12 @@ fn collect_function_body_effects(
             arena,
         )?;
         state = apply_function_loop_continue_guard(module, guard_state, function, arena)?;
-        let target = expr::EvaluatedCaseTarget {
-            node: target_node,
-            sources: target_sources,
-        };
+        let target = expr::EvaluatedCaseTarget::new(
+            &case_stmt.case_target,
+            target_node,
+            target_sources,
+            &state.function.store,
+        );
         collect_from_arm(
             module, state, case_stmt, &target, 0, ret_id, arena, collector,
         )
@@ -2422,10 +2424,12 @@ fn collect_function_body_effects(
                     None,
                     arena,
                 )?;
-                let target = expr::EvaluatedCaseTarget {
-                    node: target_node,
-                    sources: target_sources,
-                };
+                let target = expr::EvaluatedCaseTarget::new(
+                    &case_stmt.case_target,
+                    target_node,
+                    target_sources,
+                    &state.store,
+                );
                 collect_case_from_arm(
                     module, state, case_stmt, &target, 0, ret_id, arena, collector,
                 )

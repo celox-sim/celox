@@ -117,7 +117,24 @@ pub fn factor_signed(factor: &Factor) -> bool {
         // VarIndex has already been split out and does not change signedness.
         // The declaration type retains intrinsic signedness even when the
         // analyzer propagates an unsigned sibling into expr_context.
-        Factor::Variable(_, _, select, comptime) => select.is_empty() && comptime.r#type.signed,
+        Factor::Variable(_, _, select, comptime) => {
+            if select.is_empty() {
+                return comptime.r#type.signed;
+            }
+            // Veryl 0.21 rebases a packed member to a select of its containing
+            // struct, overwriting the member type. The member path still
+            // retains that type. An explicit bit/part-select ends at `]`,
+            // whereas a whole member access ends at the member identifier.
+            // This distinction also preserves unsigned full-width selects.
+            comptime.part_select.as_ref().is_some_and(|path| {
+                path.path.0.last() == Some(&comptime.token.end.text)
+                    && path.part_select.last().is_some_and(|member| {
+                        let mut ty = member.r#type.clone();
+                        ty.flatten_struct_union_enum();
+                        ty.signed
+                    })
+            })
+        }
         Factor::HierVariable(reference) => {
             reference.select.is_empty() && reference.comptime.r#type.signed
         }
