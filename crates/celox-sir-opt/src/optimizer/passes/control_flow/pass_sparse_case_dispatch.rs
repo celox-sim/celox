@@ -210,6 +210,10 @@ fn find_sparse_case_plans(
     let mut planned_blocks = HashSet::default();
     let mut plans = Vec::new();
     let dominance = OnceCell::<Option<SirCfg>>::new();
+    // Discovery borrows the EU immutably. All candidates therefore share the
+    // same ID limits; compute them only if a profitable candidate needs them.
+    // A new discovery call after applying plans gets a fresh cache.
+    let max_ids = OnceCell::<(usize, usize)>::new();
 
     // The first sweep plans only maximal same-selector spines.  This avoids
     // repeating global-use cloning, local DCE, and arm-DAG collection for all
@@ -224,6 +228,14 @@ fn find_sparse_case_plans(
             }
             let block = &eu.blocks[&block_id];
             let local_defs = local_definition_positions(block);
+            // Unchanged zero-use definitions are shared by all candidates in
+            // this immutable block. Candidate-specific zeros come from the
+            // sparse use-count overrides, not a rescan of every definition.
+            let initially_unused = local_defs
+                .keys()
+                .copied()
+                .filter(|reg| use_counts.get(reg).copied().unwrap_or(0) == 0)
+                .collect::<Vec<_>>();
             let deferred =
                 nonmaximal_same_selector_muxes(eu, block, &local_defs, &def_sites, &use_counts);
             let dense_lookup_indices =
@@ -246,6 +258,8 @@ fn find_sparse_case_plans(
                     &use_counts,
                     stable_alias_class,
                     &dominance,
+                    &max_ids,
+                    &initially_unused,
                 ) else {
                     continue;
                 };
@@ -416,6 +430,8 @@ fn recognize_sparse_case_chain(
     use_counts: &HashMap<RegisterId, usize>,
     stable_alias_class: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     dominance: &OnceCell<Option<SirCfg>>,
+    max_ids: &OnceCell<(usize, usize)>,
+    initially_unused: &[RegisterId],
 ) -> Option<SparseCasePlan> {
     let SIRInstruction::Mux(result, _, _, _) = &block.instructions[root_index] else {
         return None;
@@ -609,6 +625,7 @@ fn recognize_sparse_case_chain(
         use_counts,
         local_defs,
         &occupied_sink_defs,
+        initially_unused,
     )?;
     let cross_block_dead_defs = cross_block_exact_dead_defs_after_rewrite(
         eu,
@@ -648,8 +665,12 @@ fn recognize_sparse_case_chain(
     } else {
         boundaries.len().checked_mul(2)?
     };
-    let max_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0);
-    let max_register = eu.register_map.keys().map(|id| id.0).max().unwrap_or(0);
+    let &(max_block, max_register) = max_ids.get_or_init(|| {
+        (
+            eu.blocks.keys().map(|id| id.0).max().unwrap_or(0),
+            eu.register_map.keys().map(|id| id.0).max().unwrap_or(0),
+        )
+    });
     // `fresh_*` maintains a one-past-the-last sentinel after returning an ID,
     // so prove that sentinel representable as well as every generated ID.
     max_block.checked_add(additional_blocks)?.checked_add(1)?;
@@ -1199,6 +1220,7 @@ fn dead_defs_after_rewrite(
     use_counts: &HashMap<RegisterId, usize>,
     local_defs: &HashMap<RegisterId, usize>,
     protected_defs: &HashSet<usize>,
+    initially_unused: &[RegisterId],
 ) -> Option<HashSet<usize>> {
     let chain_indices = stages
         .iter()
@@ -1216,7 +1238,18 @@ fn dead_defs_after_rewrite(
     }
 
     let mut queue = VecDeque::new();
-    for (&reg, &index) in local_defs {
+    // A count can become zero only if this rewrite changed it, or if it
+    // was zero already. The recursive queue below handles newly dead users'
+    // operands. Keep pre-existing dead definitions for the same profitability
+    // accounting as the full local-definition scan.
+    for reg in initially_unused
+        .iter()
+        .copied()
+        .chain(remaining.overrides.keys().copied())
+    {
+        let Some(&index) = local_defs.get(&reg) else {
+            continue;
+        };
         if index <= root_index
             && !chain_indices.contains(&index)
             && !protected_defs.contains(&index)
@@ -2258,6 +2291,43 @@ mod tests {
                 .iter()
                 .any(|inst| def_reg(inst) == Some(reg))
         })
+    }
+
+    #[test]
+    fn sparse_dead_seed_worklist_keeps_existing_dead_dags_and_live_uses() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let unused_leaf = builder.immediate(64, 123);
+        let unused_root = builder.binary(64, unused_leaf, BinaryOp::Add, unused_leaf);
+        let live = builder.immediate(64, 987);
+        builder.observe(live);
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(17, factor);
+        for key in 0..4 {
+            let cond = builder.exact_condition(selector, key, BinaryOp::EqWildcard);
+            let value = builder.expensive_value(30 + key, factor);
+            previous = builder.mux(cond, value, previous);
+        }
+        let output = builder.ident(previous);
+        builder.observe(output);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+        let expected = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        let defs = local_definition_positions(&eu.blocks[&BlockId(0)]);
+        let plans = find_sparse_case_plans(&eu, &HashMap::default(), None);
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].dead_defs.contains(&defs[&unused_root]));
+        assert!(plans[0].dead_defs.contains(&defs[&unused_leaf]));
+        assert!(!plans[0].dead_defs.contains(&defs[&live]));
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+        eu.verify();
+        let actual = (0..16)
+            .map(|value| evaluate(&eu, selector, value, output))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
