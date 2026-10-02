@@ -115,9 +115,10 @@ fn dump_addr_map_if_requested(program: &RuntimeProgram, diagnostics: &crate::Run
     for (instance, variable) in entries {
         let metadata = &program.design.state_objects[&variable.address];
         tracing::debug!(
-            "[addr-map] inst={} var={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",
+            "[addr-map] inst={} var={} state={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",
             instance.id,
             variable.source_id,
+            variable.address,
             instance.module_name,
             program.get_path(&variable.address),
             metadata.width,

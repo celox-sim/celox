@@ -42,6 +42,101 @@ const CODE: &str = r#"
 
 cases! { ControlFlow, "loop_idiom";
 
+fn test_guarded_scan_preserves_independent_outputs(sim) {
+    @setup { let code = r#"
+        module Top (
+            entries: input logic<32>,
+            gate0: input logic,
+            gate1: input logic,
+            seed: input logic<8>,
+            result0: output logic<8>,
+            result1: output logic<8>,
+        ) {
+            always_comb {
+                result0 = seed;
+                result1 = seed;
+                for i in 0..32 {
+                    if gate0 && entries[i] {
+                        result0 = seed + (i as 8);
+                    }
+                    if gate1 && entries[31 - i] {
+                        result1 = seed ^ (i as 8);
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Design::new(code, "Top");
+    let entries = sim.signal("entries");
+    let gate0 = sim.signal("gate0");
+    let gate1 = sim.signal("gate1");
+    let seed = sim.signal("seed");
+    let result0 = sim.signal("result0");
+    let result1 = sim.signal("result1");
+    for mask in [0u32, 1, 1 << 31, 0x8000_0024, u32::MAX] {
+        for initial in [0u8, 37, 250] {
+            sim.set(entries, mask);
+            sim.set(seed, initial);
+            // Change guards while retaining the same data, then return idle.
+            for (g0, g1) in [(0u8, 0u8), (1, 0), (0, 1), (1, 1), (0, 0)] {
+                sim.set(gate0, g0);
+                sim.set(gate1, g1);
+                sim.eval_comb().unwrap();
+                let expected0 = if g0 != 0 && mask != 0 {
+                    initial.wrapping_add((31 - mask.leading_zeros()) as u8)
+                } else { initial };
+                let expected1 = if g1 != 0 && mask != 0 {
+                    initial ^ (31 - mask.trailing_zeros()) as u8
+                } else { initial };
+                assert_eq!(sim.get(result0), expected0.into(), "mask={mask:#x} gates={g0}/{g1}");
+                assert_eq!(sim.get(result1), expected1.into(), "mask={mask:#x} gates={g0}/{g1}");
+            }
+        }
+    }
+}
+
+
+fn test_guarded_packed_scan(sim) {
+    @setup { let code = r#"
+        module Top (
+            entries: input logic<32>,
+            gate: input logic,
+            seed: input logic<32>,
+            result: output logic<32>,
+            partial: output logic<32>,
+        ) {
+            always_comb {
+                result = 32'd0;
+                partial = seed;
+                for i in 0..32 {
+                    result[i] = gate && entries[i];
+                }
+                for i in 0..16 {
+                    partial[i] = gate && entries[i];
+                }
+            }
+        }
+    "#; }
+    @build Design::new(code, "Top");
+    let entries = sim.signal("entries");
+    let gate = sim.signal("gate");
+    let seed = sim.signal("seed");
+    let result = sim.signal("result");
+    let partial = sim.signal("partial");
+    for mask in [0u32, 1, 0x8000_0024, u32::MAX] {
+        for initial in [0u32, 0xabcd_ffff, u32::MAX] {
+            sim.set(entries, mask);
+            sim.set(seed, initial);
+            for active in [0u8, 1, 0] {
+                sim.set(gate, active);
+                sim.eval_comb().unwrap();
+                let expected = if active != 0 { mask } else { 0 };
+                assert_eq!(sim.get(result), expected.into());
+                assert_eq!(sim.get(partial), ((initial & 0xffff_0000) | (expected & 0xffff)).into());
+            }
+        }
+    }
+}
 
 fn test_recovered_bit_count_loop_semantics(sim) {
 
