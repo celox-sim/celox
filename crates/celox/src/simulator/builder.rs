@@ -384,6 +384,7 @@ fn analyze(
         diagnostics.extend(celox_frontend_veryl::check_array_literal_side_effects(
             &ir,
             parsers.iter().map(|x| &x.veryl),
+            &context.config.defines,
         ));
         diagnostics
     };

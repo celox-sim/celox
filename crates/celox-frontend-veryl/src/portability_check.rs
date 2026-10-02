@@ -22,7 +22,7 @@ use crate::{
 };
 
 pub fn check_function_output_aliases(ir: &Ir) -> Vec<FrontendDiagnostic> {
-    check(ir, Check::OutputAliases, &[])
+    check(ir, Check::OutputAliases, &[], &HashSet::default())
 }
 
 /// IEEE 1800-2023 10.9.1 leaves evaluation counts undefined for effectful
@@ -31,6 +31,7 @@ pub fn check_function_output_aliases(ir: &Ir) -> Vec<FrontendDiagnostic> {
 pub fn check_array_literal_side_effects<'a>(
     ir: &Ir,
     asts: impl IntoIterator<Item = &'a Veryl>,
+    defines: &HashSet<veryl_parser::resource_table::StrId>,
 ) -> Vec<FrontendDiagnostic> {
     // Pass 2 expands assignment literals into individual element assignments.
     // Retain their syntax provenance so expanded default/repeat items remain
@@ -39,12 +40,13 @@ pub fn check_array_literal_side_effects<'a>(
     for ast in asts {
         sources.veryl(ast);
     }
-    check(ir, Check::ArrayLiteralSideEffects, &sources.0)
+    check(ir, Check::ArrayLiteralSideEffects, &sources.0, defines)
 }
 
 struct ArrayItemSource {
     token: TokenRange,
     value: TokenRange,
+    expression: ast::Expression,
     kind: &'static str,
 }
 
@@ -52,6 +54,10 @@ struct ArrayItemSource {
 struct ArrayItemSources(Vec<ArrayItemSource>);
 
 impl VerylWalker for ArrayItemSources {
+    fn identifier_factor(&mut self, factor: &ast::IdentifierFactor) {
+        walk_evaluated_identifier(self, factor);
+    }
+
     fn array_literal_item(&mut self, item: &ast::ArrayLiteralItem) {
         let (value, repeat, kind) = match item.array_literal_item_group.as_ref() {
             ast::ArrayLiteralItemGroup::ExpressionArrayLiteralItemOpt(x) => (
@@ -78,6 +84,7 @@ impl VerylWalker for ArrayItemSources {
             self.0.push(ArrayItemSource {
                 token,
                 value: range.0,
+                expression: value.clone(),
                 kind,
             });
         }
@@ -86,6 +93,81 @@ impl VerylWalker for ArrayItemSources {
             self.expression(repeat);
         }
     }
+}
+
+// Use the same unevaluated context when collecting source-only items and
+// examining their calls as when walking analyzed IR.
+fn walk_evaluated_identifier(walker: &mut impl VerylWalker, factor: &ast::IdentifierFactor) {
+    if let Ok(resolved) =
+        veryl_analyzer::symbol_table::resolve(factor.expression_identifier.as_ref())
+        && matches!(
+            resolved.found.kind,
+            veryl_analyzer::symbol::SymbolKind::SystemFunction(_)
+        )
+        && matches!(
+            resolved.found.token.text.to_string().as_str(),
+            "$bits" | "$size" | "bits" | "size"
+        )
+    {
+        return;
+    }
+    walker.expression_identifier(&factor.expression_identifier);
+    if let Some(opt) = &factor.identifier_factor_opt {
+        match opt.identifier_factor_opt_group.as_ref() {
+            ast::IdentifierFactorOptGroup::FunctionCall(x) => {
+                walker.function_call(&x.function_call)
+            }
+            ast::IdentifierFactorOptGroup::StructConstructor(x) => {
+                walker.struct_constructor(&x.struct_constructor)
+            }
+        }
+    }
+}
+
+struct SourceEffects<'a> {
+    module: &'a Module,
+    defines: &'a HashSet<veryl_parser::resource_table::StrId>,
+    observable: bool,
+}
+
+impl VerylWalker for SourceEffects<'_> {
+    fn identifier_factor(&mut self, factor: &ast::IdentifierFactor) {
+        if factor.identifier_factor_opt.as_ref().is_some_and(|opt| {
+            matches!(
+                opt.identifier_factor_opt_group.as_ref(),
+                ast::IdentifierFactorOptGroup::FunctionCall(_)
+            )
+        }) && let Ok(resolved) =
+            veryl_analyzer::symbol_table::resolve(factor.expression_identifier.as_ref())
+            && let veryl_analyzer::symbol::SymbolKind::Function(function) = &resolved.found.kind
+        {
+            self.observable |= function.has_side_effect_in(self.defines)
+                || !function.written_output_paths(self.defines).is_empty()
+                || self.module.functions.values().any(|body| {
+                    body.path.sig.symbol == resolved.found.id
+                        && crate::dynamic_for_check::function_has_observable_effect(
+                            body,
+                            self.module,
+                        )
+                });
+        }
+        walk_evaluated_identifier(self, factor);
+    }
+}
+
+fn contains(outer: &TokenRange, inner: &TokenRange) -> bool {
+    outer.beg.source == inner.beg.source
+        && outer.beg.pos <= inner.beg.pos
+        && inner.end.pos <= outer.end.pos
+}
+
+fn symbol_contains(id: veryl_analyzer::symbol::SymbolId, token: &TokenRange) -> bool {
+    use veryl_analyzer::symbol::SymbolKind;
+    veryl_analyzer::symbol_table::get(id).is_some_and(|symbol| match &symbol.kind {
+        SymbolKind::Module(module) => contains(&module.range, token),
+        SymbolKind::Function(function) => contains(&function.range, token),
+        _ => false,
+    })
 }
 
 struct ExpressionRange(TokenRange);
@@ -104,7 +186,12 @@ enum Check {
     ArrayLiteralSideEffects,
 }
 
-fn check(ir: &Ir, kind: Check, sources: &[ArrayItemSource]) -> Vec<FrontendDiagnostic> {
+fn check(
+    ir: &Ir,
+    kind: Check,
+    sources: &[ArrayItemSource],
+    defines: &HashSet<veryl_parser::resource_table::StrId>,
+) -> Vec<FrontendDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen = HashSet::default();
     let mut visited = HashSet::default();
@@ -123,6 +210,8 @@ fn check(ir: &Ir, kind: Check, sources: &[ArrayItemSource]) -> Vec<FrontendDiagn
         let mut checker = Checker {
             kind,
             sources,
+            defines,
+            represented: HashSet::default(),
             module,
             diagnostics: &mut diagnostics,
             seen: &mut seen,
@@ -154,6 +243,7 @@ fn check(ir: &Ir, kind: Check, sources: &[ArrayItemSource]) -> Vec<FrontendDiagn
                 checker.statements(&body.statements);
             }
         }
+        checker.eliminated_items();
     }
     diagnostics
 }
@@ -161,6 +251,8 @@ fn check(ir: &Ir, kind: Check, sources: &[ArrayItemSource]) -> Vec<FrontendDiagn
 struct Checker<'a, 'b> {
     kind: Check,
     sources: &'a [ArrayItemSource],
+    defines: &'a HashSet<veryl_parser::resource_table::StrId>,
+    represented: HashSet<usize>,
     module: &'a Module,
     diagnostics: &'b mut Vec<FrontendDiagnostic>,
     seen: &'b mut HashSet<(String, usize, usize)>,
@@ -314,10 +406,11 @@ impl Checker<'_, '_> {
         let matches: Vec<_> = self
             .sources
             .iter()
-            .filter(|source| {
-                source.value.beg.source == token.beg.source
-                    && source.value.beg.pos <= token.beg.pos
-                    && token.end.pos <= source.value.end.pos
+            .enumerate()
+            .filter(|(_, source)| contains(&source.value, token))
+            .map(|(index, source)| {
+                self.represented.insert(index);
+                source
             })
             .collect();
         if matches.is_empty()
@@ -326,18 +419,52 @@ impl Checker<'_, '_> {
             return;
         }
         for source in matches {
-            let token = &source.token;
-            let key = (
-                token.beg.source.to_string(),
-                token.beg.pos as usize,
-                token.end.pos as usize,
-            );
-            if self.seen.insert(key) {
-                self.diagnostics.push(FrontendDiagnostic::undefined_array_literal_evaluation_count(
-                    token,
-                    format!("`{}` item has side effects; IEEE 1800-2023 §10.9.1 leaves its evaluation count undefined in the emitted SystemVerilog assignment pattern", source.kind),
-                ));
+            self.warn_array_item(source);
+        }
+    }
+
+    fn eliminated_items(&mut self) {
+        if self.kind != Check::ArrayLiteralSideEffects {
+            return;
+        }
+        for (index, source) in self.sources.iter().enumerate() {
+            if self.represented.contains(&index)
+                || !(symbol_contains(self.module.signature.symbol, &source.token)
+                    || self
+                        .module
+                        .functions
+                        .values()
+                        .any(|function| symbol_contains(function.path.sig.symbol, &source.token)))
+            {
+                continue;
             }
+            // An unused default can disappear entirely during array expansion.
+            // Resolve its source calls against analyzer effect summaries and
+            // any available specialized bodies instead of requiring surviving IR.
+            let mut effects = SourceEffects {
+                module: self.module,
+                defines: self.defines,
+                observable: false,
+            };
+            effects.expression(&source.expression);
+            if effects.observable {
+                self.warn_array_item(source);
+            }
+        }
+    }
+
+    fn warn_array_item(&mut self, source: &ArrayItemSource) {
+        let token = &source.token;
+        let key = (
+            token.beg.source.to_string(),
+            token.beg.pos as usize,
+            token.end.pos as usize,
+        );
+        if self.seen.insert(key) {
+            self.diagnostics.push(FrontendDiagnostic::undefined_array_literal_evaluation_count(
+                token,
+                format!("`{}` item has side effects; IEEE 1800-2023 §10.9.1 leaves its evaluation count undefined in the emitted SystemVerilog assignment pattern", source.kind),
+            ));
         }
     }
 

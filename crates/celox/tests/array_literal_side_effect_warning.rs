@@ -165,3 +165,41 @@ fn dynamic_nonlocal_writes_warn_but_local_writes_and_reads_do_not() {
         assert!(warnings(&read).is_empty(), "read: {literal}");
     }
 }
+
+#[test]
+fn warns_on_effectful_defaults_eliminated_by_expansion() {
+    for default in ["update(d, state)", "calculate(update(d, state))"] {
+        let code = source(&format!("'{{d, d, default: {default}}}"), false);
+        assert_eq!(warnings(&code).len(), 1, "{default}");
+    }
+    for default in [
+        "calculate(d)",
+        "$bits(update(d, state))",
+        "$size(update(d, state))",
+    ] {
+        let code = source(&format!("'{{d, d, default: {default}}}"), false);
+        assert!(warnings(&code).is_empty(), "{default}");
+    }
+}
+
+#[test]
+fn eliminated_defaults_preserve_body_effects_and_unevaluated_contexts() {
+    let base = source("'{d, d, default: calculate(d)}", false);
+    let observable = base.replace(
+        "local_value = x + 8'd1;",
+        "local_value = x; $display(\"value %d\", x);",
+    );
+    assert_eq!(warnings(&observable).len(), 1);
+    let local_output = base.replace(
+        "local_value = x + 8'd1;",
+        "local_value = update(x, local_value);",
+    );
+    assert!(warnings(&local_output).is_empty());
+    for query in ["$bits", "$size"] {
+        let code = source(
+            &format!("'{{default: {query}(pick('{{d, d, default: update(d, state)}}))}}"),
+            false,
+        );
+        assert!(warnings(&code).is_empty(), "{query}");
+    }
+}

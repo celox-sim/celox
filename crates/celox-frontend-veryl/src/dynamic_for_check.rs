@@ -1426,6 +1426,19 @@ fn collect_statement_effects(
     effects
 }
 
+/// Effects visible outside a function, excluding writes to its local storage.
+pub(crate) fn function_has_observable_effect(
+    function: &veryl_analyzer::ir::Function,
+    module: &Module,
+) -> bool {
+    function.functions.iter().any(|body| {
+        let mut effects =
+            collect_statement_effects(&body.statements, module, &mut HashSet::default(), false);
+        effects.discard_function_locals(module);
+        effects.observable || !effects.writes.is_empty() || !effects.state_changes.is_empty()
+    })
+}
+
 /// Proven observable effects, including effects in called function bodies.
 /// Assignments to a callee's local variables do not make a pure call effectful.
 pub(crate) fn expression_has_observable_effect(expression: &Expression, module: &Module) -> bool {
