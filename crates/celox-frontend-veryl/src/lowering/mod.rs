@@ -5,6 +5,7 @@ pub(crate) mod bitslicer;
 pub(crate) mod case;
 pub(crate) mod context_width;
 pub(crate) mod ff;
+mod function_return;
 pub(crate) mod global_ff;
 pub(crate) mod logic_tree;
 pub(crate) mod registry;

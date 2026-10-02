@@ -21,7 +21,7 @@ all_backends! {
     }
 
     fn test_direct_comb_size_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "system_function::test_direct_comb_size_system_function";
     }
 
@@ -36,7 +36,7 @@ all_backends! {
     }
 
     fn test_comb_function_body_bits_size_system_functions(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "system_function::test_comb_function_body_bits_size_system_functions";
     }
 
@@ -51,7 +51,7 @@ all_backends! {
     }
 
     fn test_direct_comb_signed_unsigned_system_functions_affect_comparison(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "system_function::test_direct_comb_signed_unsigned_system_functions_affect_comparison";
     }
 
@@ -76,12 +76,12 @@ all_backends! {
     }
 
     fn test_direct_ff_bits_array_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "system_function::test_direct_ff_bits_array_system_function";
     }
 
     fn test_direct_ff_size_system_function(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_system_function";
     }
 
@@ -90,13 +90,13 @@ all_backends! {
         @case "system_function::test_direct_ff_size_type_system_function";
     }
 
-    #[ignore = "$size on packed multidimensional types is folded to total width by Veryl analyzer before Celox FF lowering"]
     fn test_direct_ff_size_packed_multidimensional_system_function(sim) {
+        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_packed_multidimensional_system_function";
     }
 
-    #[ignore = "$size on packed multidimensional type arguments is folded to total width by Veryl analyzer before Celox FF lowering"]
     fn test_direct_ff_size_packed_multidimensional_type_system_function(sim) {
+        @ignore_on(sv);
         @case "system_function::test_direct_ff_size_packed_multidimensional_type_system_function";
     }
 

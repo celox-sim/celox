@@ -7,7 +7,7 @@ use veryl_analyzer::ir as air;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context};
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
-use veryl_simulator::ir::{Config, Event, ProtoModuleCache, build_ir_cached};
+use veryl_simulator::ir::{BuildSession, Config, Event, ProtoModuleCache, build_ir_cached};
 use veryl_simulator::testbench::{TestResult, run_native_testbench_timed};
 
 #[derive(ClapParser)]
@@ -117,8 +117,9 @@ fn run() -> Result<(), VerylHeliodorError> {
         aot_c_min_stmts: 0,
         ..Config::default()
     };
-    let mut cache = ProtoModuleCache::default();
-    let sim_ir = build_ir_cached(&analyzer_ir, top, &config, &mut cache)?;
+    let session = BuildSession::new(&analyzer_ir, &config, &[top]);
+    let mut cache = ProtoModuleCache::new(&session);
+    let sim_ir = build_ir_cached(top, &mut cache)?;
     let module_name = sim_ir.name.to_string();
     let compile_elapsed = compile_start.elapsed();
 

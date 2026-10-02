@@ -654,6 +654,15 @@ mod host {
                 .restore_initial_state(initial_memory_values);
         }
 
+        pub(crate) fn apply_testbench_memory_writes(
+            &mut self,
+            signal: SignalRef,
+            runs: &[InitialMemoryWriteRun],
+        ) {
+            self.apply_initial_memory_writes(signal, runs);
+            self.dirty = true;
+        }
+
         fn apply_initial_memory_writes(
             &mut self,
             signal: SignalRef,
