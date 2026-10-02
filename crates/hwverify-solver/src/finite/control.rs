@@ -49,6 +49,7 @@ fn candidate(t: &Term, b: &mut Budget) -> Res<bool> {
     let mut todo = vec![(t, 0usize)];
     let mut seen = HashSet::new();
     let mut guarded = 0;
+    let mut word_mux = false;
     while let Some((t, depth)) = todo.pop() {
         b.tick(1)?;
         if depth > b.limits.max_depth {
@@ -60,9 +61,12 @@ fn candidate(t: &Term, b: &mut Budget) -> Res<bool> {
         if seen.len() > b.limits.max_terms {
             return Err("finite solver term budget exhausted".into());
         }
-        if t.0.op == "and" && t.0.args.len() == 2 {
-            todo.extend(t.0.args.iter().map(|x| (x, depth + 1)));
-        } else if t.0.op == "=>"
+        // Eligibility is only a search heuristic. Word muxes benefit even with
+        // one or two Boolean inputs; every valuation is still solved below.
+        if t.0.op == "ite" && matches!(t.0.sort, Sort::Bv(_)) {
+            word_mux = true;
+        }
+        if t.0.op == "=>"
             && t.0.args.len() == 2
             && t.0.args[0].0.op.starts_with('@')
             && t.0.args[0].0.sort == Sort::Bool
@@ -70,8 +74,9 @@ fn candidate(t: &Term, b: &mut Budget) -> Res<bool> {
         {
             guarded += 1;
         }
+        todo.extend(t.0.args.iter().map(|x| (x, depth + 1)));
     }
-    Ok(guarded >= 2)
+    Ok(guarded >= 2 || word_mux)
 }
 fn validate(
     t: &Term,
@@ -269,7 +274,7 @@ pub(super) fn route(
                 &mut seen,
                 &mut budget,
             )?;
-            eligible = (3..=6).contains(&controls.len()) && seen.len() >= 128;
+            eligible = (1..=6).contains(&controls.len()) && seen.len() >= 128;
             if eligible {
                 for value in context.values() {
                     validate(
@@ -491,6 +496,100 @@ mod tests {
                 .verdict,
                 result.verdict
             );
+        }
+    }
+    #[test]
+    fn one_and_two_control_word_muxes_replay_and_share_limits() {
+        for count in 1..=2 {
+            for sat in [false, true] {
+                let controls = (0..count)
+                    .map(|i| var(format!("select{i}"), Sort::Bool))
+                    .collect::<Vec<_>>();
+                let mut formula = boolv(true);
+                for i in 0..48 {
+                    formula = and(formula, eq(var(format!("word{i}"), Sort::Bv(8)), bv(8, i)));
+                }
+                let mut mux = bv(8, 7);
+                for control in &controls {
+                    mux = ite(control.clone(), mux, bv(8, 3));
+                }
+                formula = and(formula, eq(mux.clone(), bv(8, if sat { 7 } else { 9 })));
+                let context = Env::from([("mux".into(), mux)]);
+                let out = super::super::solve_with_hint(
+                    &formula,
+                    &context,
+                    Limits::default(),
+                    SearchHint::Unsat,
+                );
+                assert_eq!(out.search_strategy, SearchStrategy::ControlCofactors);
+                assert_eq!(out.stats.control_cases, 1 << count);
+                assert_eq!(
+                    out.stats.control_cases_closed,
+                    (1 << count) - usize::from(sat)
+                );
+                assert_eq!(out.verdict, if sat { Verdict::Sat } else { Verdict::Unsat });
+                assert_eq!(out.original_formula_validated, sat);
+                if sat {
+                    assert_eq!(out.context_values["mux"], Scalar::Bv { width: 8, value: 7 });
+                    for i in 0..count {
+                        assert_eq!(out.assignments[&format!("select{i}")], Scalar::Bool(true));
+                    }
+                }
+                let limited = super::super::solve_with_hint(
+                    &formula,
+                    &context,
+                    Limits {
+                        max_work: out.stats.work - 1,
+                        ..Limits::default()
+                    },
+                    SearchHint::Unsat,
+                );
+                assert_eq!(limited.verdict, Verdict::Unknown);
+                assert!(!limited.original_formula_validated);
+                assert!(limited.assignments.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn mux_routing_falls_back_outside_control_range_and_validates_dead_context() {
+        for count in [0, 1, 7] {
+            let mut formula = boolv(true);
+            for i in 0..48 {
+                formula = and(formula, eq(var(format!("word{i}"), Sort::Bv(8)), bv(8, i)));
+            }
+            let mut mux = var("value".into(), Sort::Bv(8));
+            for i in 0..count {
+                mux = ite(var(format!("c{i}"), Sort::Bool), mux, bv(8, i));
+            }
+            formula = and(formula, eq(mux, bv(8, 42)));
+            let result = super::super::solve_with_hint(
+                &formula,
+                &Env::new(),
+                Limits::default(),
+                SearchHint::Unsat,
+            );
+            assert_eq!(result.verdict, Verdict::Sat);
+            assert!(result.original_formula_validated);
+            assert_eq!(
+                result.search_strategy == SearchStrategy::ControlCofactors,
+                count == 1
+            );
+            let context = Env::from([(
+                "dead".into(),
+                ite(
+                    boolv(false),
+                    node(Sort::Bv(8), "unsupported", vec![]),
+                    bv(8, 0),
+                ),
+            )]);
+            let result = super::super::solve_with_hint(
+                &formula,
+                &context,
+                Limits::default(),
+                SearchHint::Unsat,
+            );
+            assert_eq!(result.verdict, Verdict::Unknown);
+            assert!(!result.original_formula_validated);
         }
     }
     #[test]

@@ -57,3 +57,9 @@ python3 -m unittest audit.veryl_scaling.test_cpu_memory_reuse
 python3 "$REPO/audit/veryl_scaling/test_readonly_array_differential.py" --root "$REPO" --out "$OUT/readonly-array-differential"
 python3 "$REPO/audit/veryl_scaling/cpu_memory_reuse.py" --out "$OUT/memory-reuse-regression" --negative-controls
 test ! -e "$Z3_TRIPWIRE_MARKER"
+# STORE milestone: retain all prior gates, add writable array/CPU/memory proofs.
+python3 -m unittest audit.veryl_scaling.test_cpu_store_reuse audit.veryl_scaling.test_cpu_writable_memory
+python3 "$REPO/audit/veryl_scaling/test_array_store_differential.py" --root "$REPO" --out "$OUT/array-store-differential"
+python3 "$REPO/audit/veryl_scaling/cpu_store_reuse.py" --out "$OUT/store-memory-reuse-regression" --negative-controls
+python3 "$REPO/audit/veryl_scaling/test_cpu_writable_memory.py" --evidence "$OUT/store-memory-reuse-regression"
+test ! -e "$Z3_TRIPWIRE_MARKER"

@@ -1,10 +1,11 @@
-//! Exact finite-observation reduction for immutable arrays. No stores.
+//! Exact finite-observation reduction for total arrays with reads and stores.
 //!
 //! TRUSTED MODEL-EXTENSION RULE: observations of each total array at finitely
 //! many BV indices extend to a total array iff equal indices have equal values.
 //! Array equality is enforced on the COMPLETE typed index pool, including one
-//! witness for each false equality. A common zero default then extends every
-//! positive equality and preserves every negative equality. This is not a
+//! witness for each false equality and EVERY store index. Stores reduce by exact
+//! read-over-write; outside this pool no store changes any cell. A common zero
+//! default then extends every positive equality and preserves every negative equality. This is not a
 //! certificate; both reduction and independent original-array replay are trusted.
 use super::*;
 use hwverify_ir::{and, boolv, eq, ite, node, not, var};
@@ -62,8 +63,16 @@ fn validate(t: &Term) -> Res<()> {
         {
             return Ok(());
         }
+        if t.0.op == "store"
+            && a.len() == 3
+            && a[0].0.sort == t.0.sort
+            && a[1].0.sort == Sort::Bv(aw)
+            && a[2].0.sort == Sort::Bv(vw)
+        {
+            return Ok(());
+        }
         return Err(
-            "unsupported or malformed readonly array operation (only variables and ite)".into(),
+            "unsupported or malformed array operation (only variables, ite and store)".into(),
         );
     }
     if t.0.op == "select" {
@@ -130,6 +139,14 @@ impl Reduction {
         let v = if let Some(name) = t.0.op.strip_prefix('@') {
             self.charge(b)?;
             var(self.aliases.representative(name, b)?, t.0.sort.clone())
+        } else if t.0.op == "store" {
+            let base = self.canonical_array(&t.0.args[0], b, depth + 1)?;
+            self.charge(b)?;
+            node(
+                t.0.sort.clone(),
+                "store",
+                vec![base, t.0.args[1].clone(), t.0.args[2].clone()],
+            )
         } else {
             let x = self.canonical_array(&t.0.args[1], b, depth + 1)?;
             let y = self.canonical_array(&t.0.args[2], b, depth + 1)?;
@@ -188,6 +205,14 @@ impl Reduction {
             let y = self.read(&array.0.args[2], index, b, depth + 1)?;
             self.charge(b)?;
             ite(c, x, y)
+        } else if array.0.op == "store" {
+            let written = self.scalar(&array.0.args[1], b, depth + 1)?;
+            let queried = self.scalar(index, b, depth + 1)?;
+            let value = self.scalar(&array.0.args[2], b, depth + 1)?;
+            let prior = self.read(&array.0.args[0], index, b, depth + 1)?;
+            self.charge(b)?;
+            self.charge(b)?;
+            ite(eq(written, queried), value, prior)
         } else {
             self.fresh(Sort::Bv(vw), b)?
         };
@@ -257,6 +282,23 @@ fn replay(
                 b.tick(a.entries.len() as u64)?;
                 ValueModel::Array(a.clone())
             }
+        } else if t.0.op == "store" {
+            let (
+                ValueModel::Array(base),
+                ValueModel::Scalar(Scalar::Bv { value: index, .. }),
+                ValueModel::Scalar(Scalar::Bv { value, .. }),
+            ) = (&args[0], &args[1], &args[2])
+            else {
+                return Err("invalid store witness".into());
+            };
+            b.tick(base.entries.len() as u64 + 1)?;
+            let mut updated = base.clone();
+            if *value == 0 {
+                updated.entries.remove(index);
+            } else {
+                updated.entries.insert(*index, *value);
+            }
+            ValueModel::Array(updated)
         } else {
             let ValueModel::Scalar(Scalar::Bool(c)) = args[0] else {
                 return Err("invalid array ite witness".into());
@@ -352,7 +394,9 @@ pub(super) fn solve(formula: &Term, context: &Env, limits: Limits, hint: SearchH
                     r.forced.insert(name.into(), t.clone());
                 }
             }
-            if t.0.op == "select" {
+            // Store indices are required even if no read observes the store:
+            // positive extensional equalities must hold at all changed cells.
+            if t.0.op == "select" || t.0.op == "store" {
                 r.indices
                     .entry(t.0.args[0].0.sort.clone())
                     .or_default()
@@ -723,6 +767,126 @@ mod tests {
         }
         last.unwrap()
     }
+    fn write(a: Term, i: Term, v: Term) -> Term {
+        node(a.0.sort.clone(), "store", vec![a, i, v])
+    }
+    #[test]
+    fn store_only_equalities_observe_every_changed_cell() {
+        let a = mem("a");
+        check(
+            and(
+                eq(
+                    write(a.clone(), bv(1, 0), bv(1, 1)),
+                    write(a.clone(), bv(1, 1), bv(1, 1)),
+                ),
+                eq(
+                    write(a.clone(), bv(1, 0), bv(1, 0)),
+                    write(a, bv(1, 1), bv(1, 0)),
+                ),
+            ),
+            Env::new(),
+            Verdict::Unsat,
+        );
+    }
+    #[test]
+    fn stores_replay_zero_deletion_and_conditional_nested_writes() {
+        let (a, b) = (mem("a"), mem("b"));
+        let c = var("cond".into(), Sort::Bool);
+        let modified = ite(
+            c.clone(),
+            write(write(a.clone(), bv(1, 0), bv(1, 1)), bv(1, 0), bv(1, 0)),
+            b.clone(),
+        );
+        let q = and(
+            c,
+            and(
+                eq(a.clone(), b),
+                and(
+                    eq(read(a.clone(), bv(1, 0)), bv(1, 1)),
+                    eq(read(a, bv(1, 1)), bv(1, 0)),
+                ),
+            ),
+        );
+        let r = check(
+            q,
+            Env::from([
+                ("changed".into(), modified.clone()),
+                ("cell".into(), read(modified, bv(1, 0))),
+            ]),
+            Verdict::Sat,
+        );
+        assert!(r.array_context_values["changed"].entries.is_empty());
+        assert_eq!(r.context_values["cell"], Scalar::Bv { width: 1, value: 0 });
+        // Include independent array replay in the same whole-query work limit.
+        let ctx = Env::from([("changed".into(), write(mem("a"), bv(1, 0), bv(1, 1)))]);
+        for hint in [SearchHint::Sat, SearchHint::Unsat] {
+            let full = solve_with_hint(&boolv(true), &ctx, Limits::default(), hint);
+            assert_eq!(full.verdict, Verdict::Sat);
+            let limited = solve_with_hint(
+                &boolv(true),
+                &ctx,
+                Limits {
+                    max_work: full.stats.work - 1,
+                    ..Limits::default()
+                },
+                hint,
+            );
+            assert_eq!(limited.verdict, Verdict::Unknown);
+            assert!(!limited.original_formula_validated);
+            assert!(limited.array_context_values.is_empty());
+        }
+    }
+    #[test]
+    fn stores_cover_full_width_and_distinct_sorts() {
+        let a = var("a".into(), Sort::Mem(64, 64));
+        let b = var("b".into(), Sort::Mem(64, 1));
+        let wa = write(a, bv(64, u64::MAX), bv(64, u64::MAX));
+        let wb = write(b, bv(64, u64::MAX), bv(1, 1));
+        let r = check(
+            boolv(true),
+            Env::from([("wide".into(), wa), ("narrow".into(), wb)]),
+            Verdict::Sat,
+        );
+        assert_eq!(r.array_context_values["wide"].read(u64::MAX), u64::MAX);
+        assert_eq!(r.array_context_values["narrow"].read(u64::MAX), 1);
+    }
+    #[test]
+    fn store_limits_and_dead_malformed_children_fail_closed() {
+        let a = mem("a");
+        let malformed = node(Sort::Bv(1), "unsupported", vec![]);
+        let invalid = [
+            node(Sort::Mem(1, 1), "store", vec![a.clone(), bv(1, 0)]),
+            write(a.clone(), bv(1, 0), bv(2, 0)),
+            write(a.clone(), bv(1, 0), malformed),
+            write(var("wide".into(), Sort::Mem(65, 1)), bv(65, 0), bv(1, 0)),
+        ];
+        for bad in invalid {
+            check(
+                boolv(false),
+                Env::from([("dead".into(), bad)]),
+                Verdict::Unknown,
+            );
+        }
+        let q = eq(write(a.clone(), bv(1, 0), bv(1, 1)), a);
+        for limits in [
+            Limits {
+                max_work: 1,
+                ..Limits::default()
+            },
+            Limits {
+                max_terms: 8,
+                ..Limits::default()
+            },
+            Limits {
+                max_depth: 1,
+                ..Limits::default()
+            },
+        ] {
+            let r = solve_with_hint(&q, &Env::new(), limits, SearchHint::Unsat);
+            assert_eq!(r.verdict, Verdict::Unknown);
+            assert!(!r.original_formula_validated);
+        }
+    }
     #[test]
     fn equality_is_extensional_and_transitive() {
         let (a, b, c) = (mem("a"), mem("b"), mem("c"));
@@ -811,7 +975,7 @@ mod tests {
         assert_eq!(r.assignments.len(), 1);
     }
     #[test]
-    fn malformed_hidden_and_store_terms_are_rejected_before_optimization() {
+    fn malformed_hidden_terms_are_rejected_before_optimization() {
         let a = mem("a");
         let invalid = [
             node(Sort::Bv(1), "select", vec![a.clone(), bv(2, 0)]),
@@ -821,7 +985,7 @@ mod tests {
                 node(
                     Sort::Mem(1, 1),
                     "store",
-                    vec![a.clone(), bv(1, 0), bv(1, 0)],
+                    vec![a.clone(), bv(2, 0), bv(1, 0)],
                 ),
                 bv(1, 0),
             ),
@@ -955,7 +1119,39 @@ mod tests {
                                 ),
                             );
                         }
+                        let stored = write(a.clone(), x.clone(), read(b.clone(), y.clone()));
+                        let value = (bv_ >> yv) & 1;
+                        let updated = (av & !(1 << xv)) | (value << xv);
+                        let nested = write(
+                            stored.clone(),
+                            read(a.clone(), x.clone()),
+                            read(b.clone(), x.clone()),
+                        );
+                        let ni = (av >> xv) & 1;
+                        let nv = (bv_ >> xv) & 1;
+                        let nested_value = (updated & !(1 << ni)) | (nv << ni);
                         let cases = [
+                            (eq(stored.clone(), b.clone()), updated == bv_),
+                            (
+                                eq(read(stored, y.clone()), bv(1, 1)),
+                                ((updated >> yv) & 1) == 1,
+                            ),
+                            (eq(nested, a.clone()), nested_value == av),
+                            (
+                                eq(
+                                    ite(
+                                        eq(x.clone(), bv(1, 0)),
+                                        write(a.clone(), y.clone(), bv(1, 1)),
+                                        b.clone(),
+                                    ),
+                                    a.clone(),
+                                ),
+                                if xv == 0 {
+                                    (av | (1 << yv)) == av
+                                } else {
+                                    bv_ == av
+                                },
+                            ),
                             (eq(a.clone(), b.clone()), av == bv_),
                             (
                                 eq(read(a.clone(), x.clone()), read(a.clone(), y.clone())),

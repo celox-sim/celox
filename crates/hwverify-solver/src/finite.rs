@@ -1,4 +1,4 @@
-//! Opt-in, bounded decision procedure for quantifier-free Bool/BV and readonly-array IR.
+//! Opt-in, bounded decision procedure for quantifier-free Bool/BV and total-array IR.
 //!
 //! Terms are bit-blasted to definitional CNF and decided by a small CDCL solver.
 //! SAT assignments are independently evaluated on the ORIGINAL formula and all
@@ -194,7 +194,7 @@ impl Outcome {
             "search_slices":self.stats.search_slices,"search_yields":self.stats.search_yields,
             "clause_accounting":"aggregate allocated CNF/branch/learned clauses within the whole-query limit; sequential proof splits retain one immutable base and one reusable working CNF",
             "decisions":self.stats.decisions,"conflicts":self.stats.conflicts,"work":self.stats.work});
-        result["readonly_arrays"] = json!({            "readonly_array_rule":"Complete finite read congruence and extensional disequality witnesses; consistent observations extend to total arrays with common zero default. Rust reduction and original-array replay are trusted",            "array_assignments":self.array_assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),            "array_context_values":self.array_context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>()});
+        result["readonly_arrays"] = json!({            "readonly_array_rule":"Complete finite read/store-index congruence, exact read-over-write, and extensional disequality witnesses; consistent observations extend to total arrays with common zero default. Rust reduction and original-array replay are trusted",            "array_assignments":self.array_assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),            "array_context_values":self.array_context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>()});
         result
     }
 }

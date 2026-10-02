@@ -336,3 +336,12 @@ current CPU port-contract proofs are mandatory. This is a specialized read-only
 substitution rule with same-session verified handles, not a general reusable
 certificate framework. The finite-only gate also checks 13 fault controls and
 8,000 independently evaluated small-array obligations under unchanged budgets.
+
+The [writable-memory STORE milestone](audit/veryl_scaling/CPU-STORE-REUSE.md)
+adds opcode 5 retirement writes and same-cycle store-to-load write-through to a
+separate D/X/W fixture. Its single capacity-independent abstract ISA proof uses
+an evolving data array and immutable ROM, with 482 actual CPU scalar state bits
+plus a 7-bit proof-only immutable backing configuration and zero backing cells.
+Independently proved concrete reset/write/frame/read contracts justify checked
+step simulation at 4/16/64 words. Stores to unmapped addresses are ignored and
+unmapped reads stay zero. All previous readonly gates remain supported.

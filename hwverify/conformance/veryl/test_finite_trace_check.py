@@ -100,13 +100,25 @@ class FiniteTraceTests(unittest.TestCase):
                 self.assertIs(r['cases'][0]['feasible'], True)
                 self.assertIs(r['cases'][0]['violation_queries'][0]['sat'], violation)
 
-    def test_unsupported_memory_store_is_unknown_without_fallback(self):
+    def test_memory_store_transition_without_fallback(self):
+        d = fixture(); spec = d['specs']['Top']
+        spec['state'] = {'m': {'mem': [1, 2]}}
+        spec['operations']['emit'] = ['and',
+            ['eq', 'n.m', ['write', 's.m', ['bv', 1, 0], ['bv', 2, 1]]],
+            ['eq', 'no.x', ['read', 'n.m', ['bv', 1, 0]]]]
+        for expected, status, violation in ((1, 'passed', False), (0, 'failed', True)):
+            with self.subTest(expected=expected):
+                spec['examples']['case']['trace'][0]['observe']['x'] = ['bv', 2, expected]
+                r = self.check(d)
+                self.assertEqual(r['status'], status)
+                self.assertIs(r['cases'][0]['feasible'], True)
+                self.assertIs(r['cases'][0]['violation_queries'][0]['sat'], violation)
+
+    def test_unsupported_const_memory_is_unknown_without_fallback(self):
         d = fixture(); spec = d['specs']['Top']
         spec['state'] = {'m': {'mem': [1, 1]}}
-        # Keep a store in a whole-array transition equality: read-over-write can
-        # normalize away a store and would not exercise the unsupported boundary.
         spec['operations']['emit'] = ['and', spec['operations']['emit'],
-            ['eq', 'n.m', ['write', 's.m', ['bv', 1, 0], ['bv', 1, 1]]]]
+            ['eq', 'n.m', ['const_mem', 1, ['bv', 1, 1]]]]
         r = self.check(d)
         self.assertEqual(r['status'], 'unknown')
         self.assertIsNone(r['cases'][0]['valid'])
