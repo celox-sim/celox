@@ -203,3 +203,47 @@ fn eliminated_defaults_preserve_body_effects_and_unevaluated_contexts() {
         assert!(warnings(&code).is_empty(), "{query}");
     }
 }
+
+#[test]
+fn excluded_conditional_items_do_not_warn() {
+    for literal in [
+        "'{default: update(d, state)}",
+        "'{update(d, state) repeat 2}",
+        "'{d, d, default: update(d, state)}",
+    ] {
+        let base = source(literal, false);
+        let effectful = format!("always_comb {{ state = 0; values = {literal}; }}");
+        let pure = "always_comb { state = 0; values = '{d, d}; }";
+        for (condition, expected) in [("false", 0), ("true", 1)] {
+            let code = base.replace(
+                &effectful,
+                &format!("if {condition} : chosen {{ {effectful} }} else : other {{ {pure} }}"),
+            );
+            assert_eq!(
+                warnings(&code).len(),
+                expected,
+                "generate {condition}: {literal}"
+            );
+        }
+        for (attribute, other, expected) in [("ifdef", "ifndef", 0), ("ifndef", "ifdef", 1)] {
+            let code = base.replace(
+                &effectful,
+                &format!("#[{attribute}(CELOX_INACTIVE_PATTERN_TEST)]\n{effectful}\n#[{other}(CELOX_INACTIVE_PATTERN_TEST)]\n{pure}"),
+            );
+            assert_eq!(warnings(&code).len(), expected, "{attribute}: {literal}");
+        }
+    }
+}
+
+#[test]
+fn conditional_function_statements_require_retained_assignments() {
+    for (attribute, expected) in [("ifdef", 0), ("ifndef", 1)] {
+        let code = source("'{calculate(d), d}", false).replace(
+            "local_value = x + 8'd1;",
+            &format!(
+                "var local_array: logic<8>[2];\nlocal_value = x;\nlocal_array = '{{x, x}};\n#[{attribute}(CELOX_INACTIVE_PATTERN_TEST)]\nlocal_array = '{{x, x, default: update(x, local_value)}};\nlocal_value = local_array[0];"
+            ),
+        );
+        assert_eq!(warnings(&code).len(), expected, "{attribute}");
+    }
+}

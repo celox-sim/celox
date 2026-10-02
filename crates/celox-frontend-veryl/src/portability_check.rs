@@ -161,15 +161,6 @@ fn contains(outer: &TokenRange, inner: &TokenRange) -> bool {
         && inner.end.pos <= outer.end.pos
 }
 
-fn symbol_contains(id: veryl_analyzer::symbol::SymbolId, token: &TokenRange) -> bool {
-    use veryl_analyzer::symbol::SymbolKind;
-    veryl_analyzer::symbol_table::get(id).is_some_and(|symbol| match &symbol.kind {
-        SymbolKind::Module(module) => contains(&module.range, token),
-        SymbolKind::Function(function) => contains(&function.range, token),
-        _ => false,
-    })
-}
-
 struct ExpressionRange(TokenRange);
 
 impl VerylWalker for ExpressionRange {
@@ -212,6 +203,7 @@ fn check(
             sources,
             defines,
             represented: HashSet::default(),
+            retained_ranges: Vec::new(),
             module,
             diagnostics: &mut diagnostics,
             seen: &mut seen,
@@ -253,6 +245,7 @@ struct Checker<'a, 'b> {
     sources: &'a [ArrayItemSource],
     defines: &'a HashSet<veryl_parser::resource_table::StrId>,
     represented: HashSet<usize>,
+    retained_ranges: Vec<TokenRange>,
     module: &'a Module,
     diagnostics: &'b mut Vec<FrontendDiagnostic>,
     seen: &'b mut HashSet<(String, usize, usize)>,
@@ -348,6 +341,7 @@ impl Checker<'_, '_> {
     }
 
     fn expression(&mut self, expression: &Expression) {
+        self.retain_range(expression.comptime().token);
         self.array_item(expression);
         match expression {
             Expression::Term(factor) => match factor.as_ref() {
@@ -423,21 +417,28 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn retain_range(&mut self, token: TokenRange) {
+        if self.kind == Check::ArrayLiteralSideEffects {
+            self.retained_ranges.push(token);
+        }
+    }
+
     fn eliminated_items(&mut self) {
         if self.kind != Check::ArrayLiteralSideEffects {
             return;
         }
         for (index, source) in self.sources.iter().enumerate() {
             if self.represented.contains(&index)
-                || !(symbol_contains(self.module.signature.symbol, &source.token)
-                    || self
-                        .module
-                        .functions
-                        .values()
-                        .any(|function| symbol_contains(function.path.sig.symbol, &source.token)))
+                || !self
+                    .retained_ranges
+                    .iter()
+                    .any(|range| contains(range, &source.token))
             {
                 continue;
             }
+            // A source item must belong to a retained assignment or expression:
+            // lexical module/function containment also includes inactive
+            // conditional-compilation and generate branches.
             // An unused default can disappear entirely during array expansion.
             // Resolve its source calls against analyzer effect summaries and
             // any available specialized bodies instead of requiring surviving IR.
@@ -499,6 +500,9 @@ impl Checker<'_, '_> {
         for statement in statements {
             match statement {
                 Statement::Assign(x) => {
+                    // Array expansion preserves the original assignment span
+                    // even when it drops an unused default expression.
+                    self.retain_range(x.token);
                     self.expression(&x.expr);
                     self.destinations(&x.dst);
                 }
