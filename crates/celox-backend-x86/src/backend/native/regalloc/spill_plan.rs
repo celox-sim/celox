@@ -1359,8 +1359,10 @@ impl AllocationReadyQueue {
         let Some(previous) = self.scores[instruction].replace(score) else {
             return;
         };
-        self.ordered.remove(&(previous, instruction));
-        self.ordered.insert((score, instruction));
+        if previous != score {
+            self.ordered.remove(&(previous, instruction));
+            self.ordered.insert((score, instruction));
+        }
     }
 
     fn pop(
@@ -2594,7 +2596,15 @@ impl<'a> RemainingBlockUses<'a> {
             {
                 uses.next += 1;
             }
-            changed.push(value);
+            // candidate_score only observes use counts through last-use
+            // pressure (and whether a definition is live). Keep the full
+            // use/next-use state current above, but do not invalidate every
+            // ready consumer on decrements such as 100 -> 99. With F users,
+            // those notifications otherwise cause F^2 use-list visits.
+            // Live-out values never die within this block.
+            if uses.count <= 1 && !self.exit.contains_key(&VReg(value.0)) {
+                changed.push(value);
+            }
         }
         Ok(changed)
     }
@@ -3822,6 +3832,88 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_use_score_invalidations_are_bounded_for_shared_operands() {
+        for lanes in [1usize, 2, 128, 4096] {
+            for live_out in [false, true] {
+                let mut vregs = VRegAllocator::new();
+                let root = vregs.alloc();
+                let results = (0..lanes).map(|_| vregs.alloc()).collect::<Vec<_>>();
+                let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); lanes + 1]);
+                let mut block = MBlock::new(BlockId(0));
+                block.push(MInst::LoadImm {
+                    dst: root,
+                    value: 123,
+                });
+                for (i, &dst) in results.iter().enumerate() {
+                    block.push(MInst::AndImm {
+                        dst,
+                        src: root,
+                        imm: i as u64,
+                    });
+                }
+                if live_out {
+                    block.push(MInst::Jump { target: BlockId(1) });
+                    func.push_block(block);
+                    let mut exit = MBlock::new(BlockId(1));
+                    exit.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        src: root,
+                        size: OpSize::S64,
+                    });
+                    exit.push(MInst::Return);
+                    func.push_block(exit);
+                } else {
+                    block.push(MInst::Return);
+                    func.push_block(block);
+                }
+                let cfg = super::super::cfg::normalize(&mut func).unwrap();
+                let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+                let logical = LogicalValues::build(&func);
+                let costs = HashMap::default();
+                let mut remaining =
+                    RemainingBlockUses::build(&func, &next_use, &logical, 0, &costs, None).unwrap();
+                let value = logical.checked_of(root, Some(BlockId(0)), None).unwrap();
+                assert_eq!(remaining.is_live_out(value), live_out);
+                assert!(
+                    remaining
+                        .emit(0, &func.blocks[0].insts[0], &logical)
+                        .unwrap()
+                        .is_empty()
+                );
+                // Consume out of source order. Both counts and the next-use
+                // cursor must advance even when no score is invalidated.
+                let order = (1..=lanes).step_by(2).chain((2..=lanes).step_by(2));
+                let mut pending = (1..=lanes).collect::<BTreeSet<_>>();
+                let mut notifications = 0;
+                for source in order {
+                    pending.remove(&source);
+                    let changed = remaining
+                        .emit(source, &func.blocks[0].insts[source], &logical)
+                        .unwrap();
+                    let expected = if pending.len() <= 1 && !live_out {
+                        vec![value]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(
+                        changed, expected,
+                        "lanes={lanes}, live_out={live_out}, source={source}"
+                    );
+                    notifications += changed.len();
+                    assert_eq!(remaining.remaining_uses(value), pending.len());
+                    let uses = &remaining.remaining[&value];
+                    assert_eq!(
+                        uses.points.get(uses.next).map(|&(_, source)| source),
+                        pending.first().copied()
+                    );
+                }
+                assert_eq!(notifications, if live_out { 0 } else { lanes.min(2) });
             }
         }
     }

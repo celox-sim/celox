@@ -164,19 +164,50 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
             if plans.is_empty() {
                 break;
             }
-            let mut next_candidates = HashSet::default();
+            // Recognition proves capacity for each plan separately. Reserve
+            // the complete batch before allocating any IDs.
+            let mut block_limit = next_block;
+            let mut register_limit = next_register;
+            let mut batches = BTreeMap::<BlockId, Vec<SparseCasePlan>>::new();
             for plan in plans {
-                next_candidates.extend(apply_sparse_case_plan(
+                let decisions = if plan.direct_switch {
+                    0
+                } else {
+                    plan.boundaries.len()
+                };
+                let Some(block_end) = block_limit
+                    .checked_add(plan.reachable_arms.len())
+                    .and_then(|n| n.checked_add(decisions))
+                    .and_then(|n| n.checked_add(1))
+                else {
+                    continue;
+                };
+                let Some(register_end) = decisions
+                    .checked_mul(2)
+                    .and_then(|n| register_limit.checked_add(n))
+                else {
+                    continue;
+                };
+                block_limit = block_end;
+                register_limit = register_end;
+                batches.entry(plan.block_id).or_default().push(plan);
+            }
+            if batches.is_empty() {
+                break;
+            }
+            let mut next_candidates = HashSet::default();
+            for plans in batches.into_values() {
+                applied += plans.len();
+                next_candidates.extend(apply_sparse_case_batch(
                     eu,
-                    plan,
+                    plans,
                     &mut next_block,
                     &mut next_register,
                 ));
                 changed = true;
-                applied += 1;
-                if stats && applied.is_multiple_of(100) {
-                    tracing::debug!("[branchify-stats] sparse_case applied={applied}");
-                }
+            }
+            if stats {
+                tracing::debug!("[branchify-stats] sparse_case applied={applied}");
             }
             candidate_blocks = Some(next_candidates);
         }
@@ -240,7 +271,7 @@ fn find_sparse_case_plans(
                 nonmaximal_same_selector_muxes(eu, block, &local_defs, &def_sites, &use_counts);
             let dense_lookup_indices =
                 dense_constant_lookup_mux_indices(eu, block, &local_defs, &def_sites, &deferred);
-            let mut best: Option<SparseCasePlan> = None;
+            let mut candidates = Vec::new();
             for (root_index, inst) in block.instructions.iter().enumerate() {
                 if !matches!(inst, SIRInstruction::Mux(..))
                     || dense_lookup_indices.contains(&root_index)
@@ -263,26 +294,70 @@ fn find_sparse_case_plans(
                 ) else {
                     continue;
                 };
-                let replace = best.as_ref().is_none_or(|current| {
-                    case_key_count(&plan.stages) > case_key_count(&current.stages)
-                        || (case_key_count(&plan.stages) == case_key_count(&current.stages)
-                            && plan.stages.len() > current.stages.len())
-                        || (case_key_count(&plan.stages) == case_key_count(&current.stages)
-                            && plan.stages.len() == current.stages.len()
-                            && plan.profitability.avoided_cost()
-                                > current.profitability.avoided_cost())
-                });
-                if replace {
-                    best = Some(plan);
-                }
+                candidates.push(plan);
             }
-            if let Some(best) = best {
+            if !candidates.is_empty() {
                 planned_blocks.insert(block_id);
-                plans.push(best);
+                plans.extend(disjoint_sparse_case_plans(candidates));
             }
         }
     }
     plans
+}
+
+// Include every instruction that application can remove or move. Disjoint
+// intervals leave the other plan's prefix indices and retained definitions
+// intact. Overlapping plans are rediscovered after the selected rewrites.
+fn sparse_case_start(plan: &SparseCasePlan) -> usize {
+    plan.stages
+        .iter()
+        .map(|stage| stage.mux_index)
+        .chain(
+            plan.dead_defs
+                .iter()
+                .copied()
+                .filter(|&i| i <= plan.root_index),
+        )
+        .chain(
+            plan.reachable_arms
+                .iter()
+                .flat_map(|&arm| plan.arms[arm].sink_defs.iter().copied()),
+        )
+        .min()
+        .unwrap_or(plan.root_index)
+}
+
+fn disjoint_sparse_case_plans(mut candidates: Vec<SparseCasePlan>) -> Vec<SparseCasePlan> {
+    // Preserve the old best-plan preference before considering additional
+    // non-overlapping rewrites. Source order breaks otherwise equal ties.
+    candidates.sort_by(|a, b| {
+        case_key_count(&b.stages)
+            .cmp(&case_key_count(&a.stages))
+            .then_with(|| b.stages.len().cmp(&a.stages.len()))
+            .then_with(|| {
+                b.profitability
+                    .avoided_cost()
+                    .cmp(&a.profitability.avoided_cost())
+            })
+            .then_with(|| a.root_index.cmp(&b.root_index))
+    });
+    let mut selected = BTreeMap::<usize, SparseCasePlan>::new();
+    for plan in candidates {
+        let start = sparse_case_start(&plan);
+        if selected
+            .range(..=start)
+            .next_back()
+            .is_some_and(|(_, prior)| prior.root_index >= start)
+            || selected
+                .range(start..)
+                .next()
+                .is_some_and(|(&next, _)| next <= plan.root_index)
+        {
+            continue;
+        }
+        selected.insert(start, plan);
+    }
+    selected.into_values().collect()
 }
 
 fn nonmaximal_same_selector_muxes(
@@ -1667,12 +1742,84 @@ fn runtime_instruction_cost(
     }
 }
 
+fn apply_sparse_case_batch(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plans: Vec<SparseCasePlan>,
+    next_block: &mut usize,
+    next_register: &mut usize,
+) -> Vec<BlockId> {
+    let original = eu
+        .blocks
+        .remove(&plans[0].block_id)
+        .expect("sparse case batch must reference an existing block");
+    let mut instructions = original.instructions.into_iter();
+    let mut head_id = original.id;
+    let mut params = original.params;
+    let mut offset = 0;
+    let mut touched = Vec::new();
+    for mut plan in plans {
+        // Partition once in source order instead of cloning a shrinking
+        // whole-block prefix for every plan. The previous merge becomes this
+        // plan's head, preserving the result parameter and dominance chain.
+        debug_assert!(sparse_case_start(&plan) >= offset);
+        let end = plan.root_index + 1;
+        let segment = instructions.by_ref().take(end - offset).collect();
+        plan.block_id = head_id;
+        plan.root_index -= offset;
+        for stage in &mut plan.stages {
+            stage.mux_index -= offset;
+        }
+        // Definitions after the root are retained by application, even when
+        // local DCE also identified them as unused.
+        plan.dead_defs = plan
+            .dead_defs
+            .into_iter()
+            .filter(|&i| i < end)
+            .map(|i| i - offset)
+            .collect();
+        for &arm in &plan.reachable_arms {
+            for index in &mut plan.arms[arm].sink_defs {
+                *index -= offset;
+            }
+        }
+        eu.blocks.insert(
+            head_id,
+            BasicBlock {
+                id: head_id,
+                params,
+                instructions: segment,
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let (changed, merge_id) = apply_sparse_case_plan(eu, plan, next_block, next_register);
+        touched.extend(changed);
+        let merge = eu
+            .blocks
+            .remove(&merge_id)
+            .expect("application creates a merge block");
+        debug_assert!(merge.instructions.is_empty());
+        head_id = merge_id;
+        params = merge.params;
+        offset = end;
+    }
+    eu.blocks.insert(
+        head_id,
+        BasicBlock {
+            id: head_id,
+            params,
+            instructions: instructions.collect(),
+            terminator: original.terminator,
+        },
+    );
+    touched
+}
+
 fn apply_sparse_case_plan(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     plan: SparseCasePlan,
     next_block: &mut usize,
     next_register: &mut usize,
-) -> Vec<BlockId> {
+) -> (Vec<BlockId>, BlockId) {
     let original = eu
         .blocks
         .remove(&plan.block_id)
@@ -1793,7 +1940,7 @@ fn apply_sparse_case_plan(
     eu.blocks.insert(plan.block_id, head);
     eu.blocks.insert(merge_id, merge);
     eu.blocks.extend(generated);
-    touched
+    (touched, merge_id)
 }
 
 fn prune_dead_pure_instructions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
@@ -2291,6 +2438,205 @@ mod tests {
                 .iter()
                 .any(|inst| def_reg(inst) == Some(reg))
         })
+    }
+
+    fn serial_cases_fixture(
+        count: usize,
+        width: usize,
+    ) -> (
+        ExecutionUnit<RegionedAbsoluteAddr>,
+        RegisterId,
+        Vec<RegisterId>,
+    ) {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(width);
+        let mut factor = builder.immediate(64, 3);
+        let mut outputs = Vec::new();
+        for chain in 0..count {
+            let mut value = builder.expensive_value(17 + chain as u64, factor);
+            for key in [1, 3, 7, 11] {
+                let cond = builder.exact_condition(selector, key, BinaryOp::Eq);
+                let arm = builder.expensive_value(30 + key, factor);
+                value = builder.mux(cond, arm, value);
+            }
+            factor = builder.ident(value);
+            builder.observe(factor);
+            outputs.push(factor);
+        }
+        (builder.finish(vec![selector]), selector, outputs)
+    }
+
+    #[test]
+    fn batches_disjoint_cases_and_preserves_cross_segment_values_and_tail() {
+        for width in [4, 64] {
+            for count in [1, 8, 32] {
+                let (mut eu, selector, outputs) = serial_cases_fixture(count, width);
+                eu.blocks.get_mut(&BlockId(0)).unwrap().terminator =
+                    SIRTerminator::Jump(BlockId(1), Vec::new());
+                eu.blocks.insert(
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: Vec::new(),
+                        instructions: Vec::new(),
+                        terminator: SIRTerminator::Return,
+                    },
+                );
+                eu.verify();
+                let plans = find_sparse_case_plans(&eu, &HashMap::default(), None);
+                assert_eq!(
+                    plans.len(),
+                    count,
+                    "all disjoint cases should share one discovery"
+                );
+                let expected = (0..16)
+                    .flat_map(|input| outputs.iter().map(move |&output| (input, output)))
+                    .map(|(input, output)| evaluate(&eu, selector, input, output))
+                    .collect::<Vec<_>>();
+                let mut next_block = 2;
+                let mut next_register = eu.register_map.keys().map(|r| r.0).max().unwrap() + 1;
+                let touched =
+                    apply_sparse_case_batch(&mut eu, plans, &mut next_block, &mut next_register);
+                eu.verify();
+                let candidates = touched.into_iter().collect();
+                assert!(
+                    find_sparse_case_plans(&eu, &HashMap::default(), Some(&candidates)).is_empty()
+                );
+                assert!(!eu.blocks.values().any(|b| {
+                    b.instructions
+                        .iter()
+                        .any(|i| matches!(i, SIRInstruction::Mux(..)))
+                }));
+                let actual = (0..16)
+                    .flat_map(|input| outputs.iter().map(move |&output| (input, output)))
+                    .map(|(input, output)| evaluate(&eu, selector, input, output))
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_cases_are_rediscovered_without_stale_instruction_indices() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let factor = builder.immediate(64, 3);
+        let mut left = builder.expensive_value(17, factor);
+        let mut right = builder.expensive_value(19, factor);
+        for key in [1, 3, 7, 11] {
+            let cond = builder.exact_condition(selector, key, BinaryOp::Eq);
+            let a = builder.expensive_value(30 + key, factor);
+            let b = builder.expensive_value(40 + key, factor);
+            left = builder.mux(cond, a, left);
+            right = builder.mux(cond, b, right);
+        }
+        builder.observe(left);
+        builder.observe(right);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+        assert_eq!(
+            find_sparse_case_plans(&eu, &HashMap::default(), None).len(),
+            1
+        );
+        let expected = (0..16)
+            .map(|input| {
+                (
+                    evaluate(&eu, selector, input, left),
+                    evaluate(&eu, selector, input, right),
+                )
+            })
+            .collect::<Vec<_>>();
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+        eu.verify();
+        assert!(eu.blocks.len() > 1);
+        // Interleaving can leave a chain whose arms no longer satisfy the
+        // sinking proof. It must remain intact rather than reuse stale plans.
+        assert!(find_sparse_case_plans(&eu, &HashMap::default(), None).is_empty());
+        let actual = (0..16)
+            .map(|input| {
+                (
+                    evaluate(&eu, selector, input, left),
+                    evaluate(&eu, selector, input, right),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn shared_dead_prefix_is_removed_before_rediscovering_remaining_cases() {
+        let (mut eu, selector, outputs) = serial_cases_fixture(8, 4);
+        let unused = RegisterId(eu.register_map.keys().map(|r| r.0).max().unwrap() + 1);
+        eu.register_map.insert(
+            unused,
+            RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions.insert(
+            0,
+            SIRInstruction::Imm(unused, crate::ir::SIRValue::new(BigUint::from(123u64))),
+        );
+        eu.verify();
+        // All initial plans remove the same dead prefix, so only one is safe
+        // to apply from this snapshot. The others must be rediscovered.
+        assert_eq!(
+            find_sparse_case_plans(&eu, &HashMap::default(), None).len(),
+            1
+        );
+        let expected = (0..16)
+            .map(|input| evaluate(&eu, selector, input, outputs[7]))
+            .collect::<Vec<_>>();
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+        eu.verify();
+        assert!(!eu.blocks.values().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, SIRInstruction::Mux(..)))
+        }));
+        let actual = (0..16)
+            .map(|input| evaluate(&eu, selector, input, outputs[7]))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn batch_reserves_cumulative_block_id_capacity() {
+        let (mut eu, selector, outputs) = serial_cases_fixture(2, 4);
+        let sentinel = BlockId(usize::MAX - 10);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().terminator =
+            SIRTerminator::Jump(sentinel, Vec::new());
+        eu.blocks.insert(
+            sentinel,
+            BasicBlock {
+                id: sentinel,
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Return,
+            },
+        );
+        eu.verify();
+        assert_eq!(
+            find_sparse_case_plans(&eu, &HashMap::default(), None).len(),
+            2
+        );
+        let expected = (0..16)
+            .map(|input| evaluate(&eu, selector, input, outputs[1]))
+            .collect::<Vec<_>>();
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+        eu.verify();
+        let actual = (0..16)
+            .map(|input| evaluate(&eu, selector, input, outputs[1]))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(
+            eu.blocks.values().any(|b| b
+                .instructions
+                .iter()
+                .any(|i| matches!(i, SIRInstruction::Mux(..)))),
+            "only one rewrite fits in the remaining ID space"
+        );
     }
 
     #[test]
