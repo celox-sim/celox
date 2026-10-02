@@ -64,3 +64,54 @@ fn combinational_loop_is_rejected_by_post_pass_validation() {
     "#;
     build_veryl_adapter(&[(code, Path::new("test.veryl"))], "Top", false);
 }
+
+#[test]
+fn initial_outputs_are_readable_without_an_explicit_settle() {
+    let code = r#"
+        module Top (y: output logic<8>) {
+            assign y = 8'h89;
+        }
+    "#;
+    let mut sim = build_veryl_adapter(&[(code, Path::new("test.veryl"))], "Top", false);
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), 0x89u32.into());
+}
+
+#[test]
+fn empty_modify_still_reports_initial_fatal_diagnostics() {
+    let code = r#"
+        module Top {
+            always_comb { $assert(1'd0, "initial fatal from empty modify"); }
+        }
+    "#;
+    let mut sim = build_veryl_adapter(&[(code, Path::new("test.veryl"))], "Top", false);
+    assert_eq!(
+        sim.modify(|_| {}).unwrap_err(),
+        celox::RuntimeErrorCode::Runtime {
+            message: "initial fatal from empty modify".to_string(),
+            signals: Vec::new(),
+        },
+    );
+}
+
+#[test]
+fn reverse_loop_bounds_can_be_driven_before_the_first_settle() {
+    let code = r#"
+        module Top (start: input u32, count: input u32, y: output u32) {
+            always_comb {
+                y = 0;
+                for i in rev start..=count { y = i; }
+            }
+        }
+    "#;
+    let mut sim = build_veryl_adapter(&[(code, Path::new("test.veryl"))], "Top", false);
+    let start = sim.signal("start");
+    let count = sim.signal("count");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(start, 4u32);
+        io.set(count, 4u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 4u32.into());
+}

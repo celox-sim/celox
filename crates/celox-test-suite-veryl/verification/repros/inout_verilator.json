@@ -1,0 +1,62 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "compile function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal: Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:18:16: ../V3DfgSynthesize.cpp:358: Non-ReadOnly reference\n   18 |         update(q, q, original);\n      |                ^\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "verilator_inout_dfg_crash",
+        "category": "simulator_crash",
+        "phase": "compile",
+        "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Verilator 5.052",
+        "reason": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/inout_verilator.json",
+          "LIMITATIONS.md#verilator-inout-dfg-crash"
+        ]
+      },
+      "name": "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Functions",
+      "detail": "compile function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments: Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:22:28: ../V3DfgSynthesize.cpp:358: Non-ReadOnly reference\n   22 |         previous = advance(next, increment);\n      |                            ^~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "verilator_inout_dfg_crash",
+        "category": "simulator_crash",
+        "phase": "compile",
+        "observed_version": "Veryl d1f7025898b90dc5a8200e0b619b4b8f7bda357a; Verilator 5.052",
+        "reason": "Verilator 5.052 aborts compilation of these function inout calls with V3DfgSynthesize.cpp: Non-ReadOnly reference. Veryl analysis and SV emission succeed.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/inout_verilator.json",
+          "LIMITATIONS.md#verilator-inout-dfg-crash"
+        ]
+      },
+      "name": "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments",
+      "phase": "compile",
+      "status": "compile_error"
+    }
+  ],
+  "counts": {
+    "compile_error": 2,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "include_ignored": true,
+  "schema_version": 2,
+  "suite_version": "0.8.1",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "veryl_revision": "d1f7025898b90dc5a8200e0b619b4b8f7bda357a",
+  "command": "cargo run -p celox-test-suite-veryl --all-features --bin verify-verilator -- --filter inout_ --include-ignored --jobs 1"
+}

@@ -330,9 +330,12 @@ impl SLTToSIRLowerer {
                 builder.emit(SIRInstruction::Imm(reg, SIRValue::new(*v as u64)));
                 reg
             }
-            SLTLoopBound::Expr(node) => {
+            SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } => {
                 let reg = self.lower_inner(builder, *node, arena, cache, env, env.is_none());
-                let source_signed = self.get_bound_signed(*node, arena);
+                let source_signed = match bound {
+                    SLTLoopBound::TypedExpr { signed, .. } => *signed,
+                    _ => self.get_bound_signed(*node, arena),
+                };
                 let extend_signed = source_signed && signed;
                 let sized = self.cast_reg_width_ext(builder, reg, width, extend_signed);
                 if extend_signed == signed {
@@ -352,7 +355,7 @@ impl SLTToSIRLowerer {
                 let bits = usize::BITS as usize - v.leading_zeros() as usize;
                 bits.max(1)
             }
-            SLTLoopBound::Expr(_) => 0,
+            SLTLoopBound::Expr(_) | SLTLoopBound::TypedExpr { .. } => 0,
         }
     }
 
@@ -719,12 +722,19 @@ impl SLTToSIRLowerer {
         let mut counter_width = loop_width.max(1);
         counter_width = counter_width.max(Self::bound_width(start));
         counter_width = counter_width.max(Self::bound_width(end));
-        if let SLTLoopBound::Expr(node) = start {
+        if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = start {
             counter_width = counter_width.max(self.get_width(*node, arena));
         }
-        if let SLTLoopBound::Expr(node) = end {
+        if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = end {
             counter_width = counter_width.max(self.get_width(*node, arena));
         }
+
+        let continuation_bound = if reverse { start } else { end };
+        let comparison_signed = loop_signed
+            && match continuation_bound {
+                SLTLoopBound::Const(_) | SLTLoopBound::Expr(_) => loop_signed,
+                SLTLoopBound::TypedExpr { signed, .. } => *signed,
+            };
 
         let widen_inclusive = inclusive && !loop_signed;
         let compare_width = if widen_inclusive {
@@ -869,7 +879,7 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Binary(
                 in_range,
                 header_counter,
-                if loop_signed {
+                if comparison_signed {
                     BinaryOp::GeS
                 } else {
                     BinaryOp::GeU
@@ -891,12 +901,14 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Binary(
                 cond,
                 header_counter,
-                if loop_signed {
+                if comparison_signed {
                     if inclusive {
                         BinaryOp::LeS
                     } else {
                         BinaryOp::LtS
                     }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
                 } else {
                     BinaryOp::LtU
                 },
@@ -1015,7 +1027,7 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Binary(
                 in_range,
                 next_math,
-                if loop_signed {
+                if comparison_signed {
                     BinaryOp::GeS
                 } else {
                     BinaryOp::GeU
@@ -1115,12 +1127,14 @@ impl SLTToSIRLowerer {
             builder.emit(SIRInstruction::Binary(
                 in_range,
                 next_math,
-                if loop_signed {
+                if comparison_signed {
                     if inclusive {
                         BinaryOp::LeS
                     } else {
                         BinaryOp::LtS
                     }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
                 } else {
                     BinaryOp::LtU
                 },

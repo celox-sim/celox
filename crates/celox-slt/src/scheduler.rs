@@ -217,10 +217,14 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 continue_cond,
                 ..
             } => {
-                if let crate::SLTLoopBound::Expr(node) = start {
+                if let crate::SLTLoopBound::Expr(node)
+                | crate::SLTLoopBound::TypedExpr { node, .. } = start
+                {
                     work.push(*node);
                 }
-                if let crate::SLTLoopBound::Expr(node) = end {
+                if let crate::SLTLoopBound::Expr(node)
+                | crate::SLTLoopBound::TypedExpr { node, .. } = end
+                {
                     work.push(*node);
                 }
                 if let crate::SLTForFoldResult::Transient { initial, update } = result {
@@ -332,13 +336,13 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             let mut set = HashSet::default();
             match start {
                 crate::SLTLoopBound::Const(_) => {}
-                crate::SLTLoopBound::Expr(node) => {
+                crate::SLTLoopBound::Expr(node) | crate::SLTLoopBound::TypedExpr { node, .. } => {
                     set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
                 }
             }
             match end {
                 crate::SLTLoopBound::Const(_) => {}
-                crate::SLTLoopBound::Expr(node) => {
+                crate::SLTLoopBound::Expr(node) | crate::SLTLoopBound::TypedExpr { node, .. } => {
                     set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
                 }
             }
@@ -1287,10 +1291,14 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             continue_cond,
             ..
         } => {
-            if let crate::SLTLoopBound::Expr(node) = start {
+            if let crate::SLTLoopBound::Expr(node) | crate::SLTLoopBound::TypedExpr { node, .. } =
+                start
+            {
                 work.push(*node);
             }
-            if let crate::SLTLoopBound::Expr(node) = end {
+            if let crate::SLTLoopBound::Expr(node) | crate::SLTLoopBound::TypedExpr { node, .. } =
+                end
+            {
                 work.push(*node);
             }
             if let crate::SLTForFoldResult::Transient { initial, update } = result {

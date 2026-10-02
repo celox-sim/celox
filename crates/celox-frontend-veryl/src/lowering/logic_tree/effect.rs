@@ -136,7 +136,7 @@ fn collect_system_function_effect(
             return Ok(boundaries);
         }
         SystemFunctionKind::Bits(_)
-        | SystemFunctionKind::Size(_)
+        | SystemFunctionKind::Size(..)
         | SystemFunctionKind::Readmemh(_, _)
         | SystemFunctionKind::Finish => return Ok(BoundaryMap::default()),
         SystemFunctionKind::Display(_)
@@ -574,7 +574,7 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
                 expression_contains_runtime_effect(module, &input.0)
             }
             SystemFunctionKind::Bits(_)
-            | SystemFunctionKind::Size(_)
+            | SystemFunctionKind::Size(..)
             | SystemFunctionKind::Readmemh(_, _)
             | SystemFunctionKind::Finish => false,
         },
@@ -667,7 +667,7 @@ fn for_range_bounds(range: &ForRange) -> (&ForBound, &ForBound) {
 fn for_range_contains_runtime_effect(module: &Module, range: &ForRange) -> bool {
     let (start, end) = for_range_bounds(range);
     [start, end].into_iter().any(|bound| match bound {
-        ForBound::Const(_) => false,
+        ForBound::Const(..) => false,
         ForBound::Expression(expression) => expression_contains_runtime_effect(module, expression),
     })
 }
@@ -695,7 +695,7 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                     expression_contains_runtime_effect(module, &input.0)
                 }
                 SystemFunctionKind::Bits(_)
-                | SystemFunctionKind::Size(_)
+                | SystemFunctionKind::Size(..)
                 | SystemFunctionKind::Display(_)
                 | SystemFunctionKind::Write(_)
                 | SystemFunctionKind::Assert { .. }
@@ -1119,7 +1119,7 @@ fn collect_factor_effects(
             collect_function_call_effects(module, store, call, arena, collector)
         }
         Factor::SystemFunctionCall(call) => match &call.kind {
-            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => Ok(()),
+            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => Ok(()),
             SystemFunctionKind::Clog2(input)
             | SystemFunctionKind::Onehot(input)
             | SystemFunctionKind::Signed(input)
@@ -1140,6 +1140,7 @@ fn collect_function_body_effects(
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
+    let body = crate::lowering::function_return::implicit_return_body(body);
     let initial_local_store = local_store.fork();
     fn collect_statements(
         module: &Module,
@@ -2498,7 +2499,7 @@ fn collect_function_body_effects(
         // evaluator's break-aware loop state before exposing output-formal
         // previews to later actual destinations.
         let (_, _, break_aware_store) =
-            eval_function_body_return(module, &initial_local_store, body, ret_id, arena)?;
+            eval_function_body_return(module, &initial_local_store, &body, ret_id, arena)?;
         Ok(break_aware_store)
     } else {
         Ok(final_state.store)
@@ -2827,7 +2828,14 @@ fn collect_comb_effects_for(
         attach_loop_runner_to_first_observer(collector, observer_start, runner);
         return Ok(store);
     };
-    let Some(end) = const_for_bound_i64(end) else {
+    // Signed negative starts compare as large unsigned values when the
+    // continuation bound is unsigned. Keep that decision in the runtime loop
+    // instead of unrolling observable effects with a signed host range.
+    let bound_signed = match end {
+        ForBound::Const(_, signed) => *signed,
+        ForBound::Expression(expr) => crate::context_width::expression_signed(expr),
+    };
+    let Some(end) = const_for_bound_i64(end).filter(|_| bound_signed || start >= 0) else {
         let (loop_effects, observer_start) =
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(

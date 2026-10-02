@@ -91,15 +91,19 @@ module Top (
 module Top (
     d: input logic<8>[4],
     q: output logic<32>,
+    second: output logic<32>,
 ) {
     always_comb {
         q = $size(d);
+        second = $size(d, 2);
     }
 }
 "#, "Top");
 
         let q = sim.signal("q");
         assert_eq!(sim.get_as::<u32>(q), 4);
+        let second = sim.signal("second");
+        assert_eq!(sim.get_as::<u32>(second), 8);
     }
 
 
@@ -457,18 +461,24 @@ module Top (
     clk: input clock,
     d: input logic<10, 20>,
     q: output logic<32>,
+    second: output logic<32>,
 ) {
+    const SECOND_DIM: u32 = 2;
+
     always_ff (clk) {
         q = $size(d);
+        second = $size(d, SECOND_DIM);
     }
 }
 "#, "Top");
 
         let clk = sim.event("clk");
         let q = sim.signal("q");
+        let second = sim.signal("second");
 
         sim.tick(clk).unwrap();
         assert_eq!(sim.get_as::<u32>(q), 10);
+        assert_eq!(sim.get_as::<u32>(second), 20);
     }
 
 
@@ -479,18 +489,22 @@ module Top (
 module Top (
     clk: input clock,
     q: output logic<32>,
+    second: output logic<32>,
 ) {
     always_ff (clk) {
         q = $size(logic<10, 20>);
+        second = $size(logic<10, 20>, 2);
     }
 }
 "#, "Top");
 
         let clk = sim.event("clk");
         let q = sim.signal("q");
+        let second = sim.signal("second");
 
         sim.tick(clk).unwrap();
         assert_eq!(sim.get_as::<u32>(q), 10);
+        assert_eq!(sim.get_as::<u32>(second), 20);
     }
 
 
