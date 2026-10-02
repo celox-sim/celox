@@ -40,7 +40,10 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
                         .is_some_and(|(_, expr)| expression_has_side_effect(expr))
             }
             Factor::FunctionCall(call) => {
-                !call.outputs.is_empty() || call.inputs.values().any(expression_has_side_effect)
+                call.outputs
+                    .values()
+                    .any(|destinations| !destinations.is_empty())
+                    || call.inputs.values().any(expression_has_side_effect)
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,

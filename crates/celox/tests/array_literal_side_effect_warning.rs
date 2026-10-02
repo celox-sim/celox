@@ -247,3 +247,89 @@ fn conditional_function_statements_require_retained_assignments() {
         assert_eq!(warnings(&code).len(), expected, "{attribute}");
     }
 }
+
+// Check analyzer diagnostics directly: the comb lowerer currently rejects
+// empty output destinations on some paths, independently of this warning.
+fn analyzed_array_warnings(code: &str) -> Vec<FrontendDiagnostic> {
+    use veryl_analyzer::{Analyzer, Context, ir::Ir};
+    veryl_analyzer::symbol_table::clear();
+    veryl_analyzer::attribute_table::clear();
+    let metadata = veryl_metadata::Metadata::create_default("prj").unwrap();
+    let parser = veryl_parser::Parser::parse(code, &"").unwrap();
+    let analyzer = Analyzer::new(&metadata);
+    let mut errors = analyzer.analyze_pass1("prj", &parser.veryl);
+    errors.extend(Analyzer::analyze_post_pass1());
+    let mut context = Context::default();
+    let mut ir = Ir::default();
+    errors.extend(analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir)));
+    errors.extend(context.drain_errors());
+    errors.extend(Analyzer::analyze_post_pass2(&ir));
+    assert!(!errors.iter().any(|error| error.is_error()), "{errors:?}");
+    celox_frontend_veryl::check_array_literal_side_effects(
+        &ir,
+        [&parser.veryl],
+        &context.config.defines,
+    )
+}
+
+#[test]
+fn discarded_output_actuals_do_not_warn() {
+    for call in ["update(d, _)", "update(result: _, x: d)"] {
+        for literal in [
+            format!("'{{default: {call}}}"),
+            format!("'{{{call} repeat 2}}"),
+            format!("'{{d, d, default: {call}}}"),
+        ] {
+            assert!(
+                analyzed_array_warnings(&source(&literal, false)).is_empty(),
+                "{literal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn discarded_outputs_preserve_other_observable_effects() {
+    for call in ["update(update(d, state), _)", "update(result: state, x: d)"] {
+        for literal in [
+            format!("'{{default: {call}}}"),
+            format!("'{{d, d, default: {call}}}"),
+        ] {
+            assert_eq!(
+                analyzed_array_warnings(&source(&literal, false)).len(),
+                1,
+                "{literal}"
+            );
+        }
+    }
+    for literal in ["'{default: update(d, _)}", "'{d, d, default: update(d, _)}"] {
+        let code = source(literal, false).replace(
+            "result = x + 8'd1;",
+            "result = x + 8'd1; $display(\"value %d\", x);",
+        );
+        assert_eq!(analyzed_array_warnings(&code).len(), 1, "{literal}");
+    }
+}
+
+#[test]
+fn each_written_formal_is_matched_to_its_actual_destination() {
+    for (call, expected) in [
+        ("update(d, _, _)", 0),
+        ("update(d, _, state)", 1),
+        ("update(second: state, result: _, x: d)", 1),
+        ("update(second: _, result: state, x: d)", 1),
+    ] {
+        for literal in [
+            format!("'{{default: {call}}}"),
+            format!("'{{d, d, default: {call}}}"),
+        ] {
+            let code = source(&literal, false)
+                .replace(
+                    "result: output logic<8>)",
+                    "result: output logic<8>, second: output logic<8>)",
+                )
+                .replace("result = x + 8'd1;", "result = x + 8'd1; second = x;");
+            assert_eq!(analyzed_array_warnings(&code).len(), expected, "{literal}");
+        }
+    }
+}

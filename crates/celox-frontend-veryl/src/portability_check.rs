@@ -132,17 +132,15 @@ struct SourceEffects<'a> {
 
 impl VerylWalker for SourceEffects<'_> {
     fn identifier_factor(&mut self, factor: &ast::IdentifierFactor) {
-        if factor.identifier_factor_opt.as_ref().is_some_and(|opt| {
-            matches!(
-                opt.identifier_factor_opt_group.as_ref(),
-                ast::IdentifierFactorOptGroup::FunctionCall(_)
-            )
-        }) && let Ok(resolved) =
-            veryl_analyzer::symbol_table::resolve(factor.expression_identifier.as_ref())
+        if let Some(opt) = &factor.identifier_factor_opt
+            && let ast::IdentifierFactorOptGroup::FunctionCall(call) =
+                opt.identifier_factor_opt_group.as_ref()
+            && let Ok(resolved) =
+                veryl_analyzer::symbol_table::resolve(factor.expression_identifier.as_ref())
             && let veryl_analyzer::symbol::SymbolKind::Function(function) = &resolved.found.kind
         {
             self.observable |= function.has_side_effect_in(self.defines)
-                || !function.written_output_paths(self.defines).is_empty()
+                || source_call_has_copyout(function, &call.function_call, self.defines)
                 || self.module.functions.values().any(|body| {
                     body.path.sig.symbol == resolved.found.id
                         && crate::dynamic_for_check::function_has_observable_effect(
@@ -153,6 +151,45 @@ impl VerylWalker for SourceEffects<'_> {
         }
         walk_evaluated_identifier(self, factor);
     }
+}
+
+/// A written formal is observable only when its actual has a destination.
+/// Named arguments bind by name, independently of their source order.
+fn source_call_has_copyout(
+    function: &veryl_analyzer::symbol::FunctionProperty,
+    call: &ast::FunctionCall,
+    defines: &HashSet<veryl_parser::resource_table::StrId>,
+) -> bool {
+    let Some(args) = &call.function_call_opt else {
+        return false;
+    };
+    let items: Vec<_> = args.argument_list.as_ref().into();
+    let written = function.written_output_paths(defines);
+    items.iter().enumerate().any(|(index, item)| {
+        let (name, actual) = if let Some(named) = &item.argument_item_opt {
+            (
+                item.argument_expression
+                    .expression
+                    .unwrap_identifier()
+                    .map(|id| id.identifier().token.text),
+                named.expression.as_ref(),
+            )
+        } else {
+            (
+                function.ports.get(index).map(|port| port.name()),
+                item.argument_expression.expression.as_ref(),
+            )
+        };
+        let discarded = actual.unwrap_identifier().is_some_and(|id| {
+            veryl_parser::veryl_token::is_anonymous_token(&id.identifier().token)
+        });
+        !discarded
+            && name.is_some_and(|name| {
+                written
+                    .iter()
+                    .any(|path| path.paths.first().is_some_and(|root| root.base() == name))
+            })
+    })
 }
 
 fn contains(outer: &TokenRange, inner: &TokenRange) -> bool {
