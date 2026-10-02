@@ -407,9 +407,11 @@ pub(super) fn reject_silently_ignored_constructs(
         .clone()
         .into_iter()
         .filter_map(|child| match child {
-            RefNode::IndexedRange(_) | RefNode::NetLvalue(_) | RefNode::VariableLvalue(_) => {
-                Some(child)
-            }
+            RefNode::IndexedRange(_)
+            | RefNode::Select(_)
+            | RefNode::PartSelectRange(_)
+            | RefNode::NetLvalue(_)
+            | RefNode::VariableLvalue(_) => Some(child),
             RefNode::ParamAssignment(parameter) => parameter
                 .nodes
                 .2

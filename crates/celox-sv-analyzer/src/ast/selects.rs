@@ -99,6 +99,27 @@ fn constant_packed_indices_in_range(
     })
 }
 
+fn has_indexed_selection(node: RefNode<'_>) -> bool {
+    node.into_iter().any(|node| {
+        matches!(
+            node,
+            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_)
+        )
+    })
+}
+
+pub(super) fn bit_select_index(
+    expression: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
+    if dimensions.constant_indexed_base || has_indexed_selection(RefNode::Expression(expression)) {
+        indexed_select_base(RefNode::Expression(expression), syntax_tree, dimensions)
+    } else {
+        const_expr_from_expr(expression, syntax_tree)
+    }
+}
+
 pub(super) fn lvalue_from_select(
     name: String,
     select: &sv_parser::Select,
@@ -110,6 +131,9 @@ pub(super) fn lvalue_from_select(
     let indices = bit_selects
         .iter()
         .map(|bit_select| {
+            if has_indexed_selection(RefNode::Expression(&bit_select.nodes.1)) {
+                return bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions);
+            }
             let expr = expr_from_expression_with_types(
                 &bit_select.nodes.1,
                 syntax_tree,
@@ -257,7 +281,9 @@ pub(super) fn lvalue_from_constant_select(
     let indices = bit_selects
         .iter()
         .map(|bit_select| {
-            if packed_dimensions.constant_indexed_base {
+            if packed_dimensions.constant_indexed_base
+                || has_indexed_selection(RefNode::ConstantExpression(&bit_select.nodes.1))
+            {
                 indexed_select_base(
                     RefNode::ConstantExpression(&bit_select.nodes.1),
                     syntax_tree,
@@ -281,7 +307,9 @@ pub(super) fn lvalue_from_constant_select(
 
     if let Some(range) = &select.nodes.2 {
         let bound = |expression| {
-            if packed_dimensions.constant_indexed_base {
+            if packed_dimensions.constant_indexed_base
+                || has_indexed_selection(RefNode::ConstantExpression(expression))
+            {
                 indexed_select_base(
                     RefNode::ConstantExpression(expression),
                     syntax_tree,
@@ -425,17 +453,7 @@ pub(super) fn expr_select_from_select(
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
         .iter()
-        .map(|bit_select| {
-            if packed_dimensions.constant_indexed_base {
-                indexed_select_base(
-                    RefNode::Expression(&bit_select.nodes.1),
-                    syntax_tree,
-                    packed_dimensions,
-                )
-            } else {
-                const_expr_from_expr(&bit_select.nodes.1, syntax_tree)
-            }
-        })
+        .map(|bit_select| bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions))
         .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
         let name = if let Expr::Ident(name) = &base {
@@ -1157,7 +1175,9 @@ pub(super) fn part_select_bounds(
     dimensions: &PackedDimensions,
 ) -> Option<(ConstExpr, ConstExpr)> {
     let bound = |expression| {
-        if dimensions.constant_indexed_base {
+        if dimensions.constant_indexed_base
+            || has_indexed_selection(RefNode::ConstantExpression(expression))
+        {
             indexed_select_base(
                 RefNode::ConstantExpression(expression),
                 syntax_tree,

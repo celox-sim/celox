@@ -503,6 +503,66 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("selected_count")), 7u8.into());
     }
 
+    fn indexed_constants_work_in_ordinary_selection_indices(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [7:0] data, input logic replacement,
+                    output logic direct_bit, compound_bit, concat_bit, repeated_bit,
+                    output logic [1:0] range_value, repeated_value,
+                    output logic [7:0] net_written, procedural_written);
+                    localparam logic [7:4] P = 4'b1010;
+                    assign direct_bit = data[P[4 +: 2]];
+                    assign compound_bit = data[P[4 +: 2] + 1];
+                    assign concat_bit = {4'b0, data}[P[4 +: 2]];
+                    assign repeated_bit = {2{data}}[P[4 +: 2]];
+                    assign range_value = data[P[4 +: 2] + 1:P[4 +: 2]];
+                    assign repeated_value = {P[4 +: 2]{1'b1}};
+                    assign net_written[1:0] = data[1:0];
+                    assign net_written[P[4 +: 2]] = replacement;
+                    assign net_written[7:3] = data[7:3];
+                    always_comb begin
+                        procedural_written = data;
+                        procedural_written[P[4 +: 2]] = replacement;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_ordinary_indices.sv"))], "Top");
+        let data = sim.signal("data");
+        let replacement = sim.signal("replacement");
+        sim.modify(|io| { io.set(data, 0xa4u8); io.set(replacement, false); }).unwrap();
+        for name in ["direct_bit", "concat_bit", "repeated_bit"] {
+            assert_eq!(sim.get(sim.signal(name)), 1u8.into());
+        }
+        assert_eq!(sim.get(sim.signal("compound_bit")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("range_value")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("repeated_value")), 3u8.into());
+        for name in ["net_written", "procedural_written"] {
+            assert_eq!(sim.get(sim.signal(name)), 0xa0u8.into());
+        }
+    }
+
+    fn indexed_runtime_replications_preserve_attached_selections(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [7:0] data, output logic [15:0] plus, minus,
+                    output logic [7:0] ordinary, output logic bit_value);
+                    assign plus = {2{data}}[4 +: 12];
+                    assign minus = {2{data}}[15 -: 12];
+                    assign ordinary = {2{data}}[11:4];
+                    assign bit_value = {2{data}}[8];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("indexed_runtime_replication.sv"))], "Top");
+        let data = sim.signal("data");
+        sim.modify(|io| io.set(data, 0xabu8)).unwrap();
+        assert_eq!(sim.get(sim.signal("plus")), 0xabau16.into());
+        assert_eq!(sim.get(sim.signal("minus")), 0xabau16.into());
+        assert_eq!(sim.get(sim.signal("ordinary")), 0xbau8.into());
+        assert_eq!(sim.get(sim.signal("bit_value")), 1u8.into());
+    }
+
     fn indexed_generate_parameters_retain_local_metadata(sim) {
         @setup {
             let source = r#"
