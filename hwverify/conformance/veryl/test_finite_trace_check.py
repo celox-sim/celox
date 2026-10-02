@@ -76,9 +76,42 @@ class FiniteTraceTests(unittest.TestCase):
         self.assertEqual(r['status'], 'passed')
         self.assertEqual(r['cases'][0]['assertion_frames'], 0)
 
-    def test_unsupported_memory_is_unknown_without_fallback(self):
+    def test_unused_readonly_memory_is_supported_without_fallback(self):
         d = fixture(); d['specs']['Top']['state'] = {'m': {'mem': [1, 1]}}
-        self.assertEqual(self.check(d)['status'], 'unknown')
+        r = self.check(d)
+        self.assertEqual(r['status'], 'passed')
+        self.assertIs(r['cases'][0]['feasible'], True)
+        self.assertIs(r['cases'][0]['violation_queries'][0]['sat'], False)
+
+    def test_readonly_select_ite_and_equality_without_fallback(self):
+        d = fixture(); spec = d['specs']['Top']
+        spec['state'] = {'m': {'mem': [1, 2]}, 'alias': {'mem': [1, 2]}, 'choose': 'bool'}
+        spec['init'] = ['and', ['eq', 's.m', 's.alias'],
+                        ['eq', ['read', 's.m', ['bv', 1, 0]], ['bv', 2, 0]]]
+        spec['operations']['emit'] = ['eq', 'no.x',
+            ['read', ['ite', 's.choose', 's.m', 's.alias'], ['bv', 1, 0]]]
+        # Either ITE branch must read the initialized value through array equality.
+        # A wrong observation must remain a real counterexample, not an assumption.
+        for expected, status, violation in ((0, 'passed', False), (1, 'failed', True)):
+            with self.subTest(expected=expected):
+                spec['examples']['case']['trace'][0]['observe']['x'] = ['bv', 2, expected]
+                r = self.check(d)
+                self.assertEqual(r['status'], status)
+                self.assertIs(r['cases'][0]['feasible'], True)
+                self.assertIs(r['cases'][0]['violation_queries'][0]['sat'], violation)
+
+    def test_unsupported_memory_store_is_unknown_without_fallback(self):
+        d = fixture(); spec = d['specs']['Top']
+        spec['state'] = {'m': {'mem': [1, 1]}}
+        # Keep a store in a whole-array transition equality: read-over-write can
+        # normalize away a store and would not exercise the unsupported boundary.
+        spec['operations']['emit'] = ['and', spec['operations']['emit'],
+            ['eq', 'n.m', ['write', 's.m', ['bv', 1, 0], ['bv', 1, 1]]]]
+        r = self.check(d)
+        self.assertEqual(r['status'], 'unknown')
+        self.assertIsNone(r['cases'][0]['valid'])
+        self.assertIsNone(r['cases'][0]['feasible'])
+        self.assertEqual(r['checker_exit_code'], 3)
 
     def test_outer_quantifiers_rejected(self):
         d = fixture(); d['specs']['Top']['examples']['case']['quantifiers'] = [{'kind': 'forall', 'variables': {'a': {'bv': 2}}}]
