@@ -36,3 +36,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "packed_index_update"
+harness = false

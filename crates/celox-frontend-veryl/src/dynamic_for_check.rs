@@ -1507,6 +1507,31 @@ fn collect_statement_effects(
     effects
 }
 
+/// Effects visible outside a function, excluding writes to its local storage.
+pub(crate) fn function_has_observable_effect(
+    function: &veryl_analyzer::ir::Function,
+    module: &Module,
+) -> bool {
+    function.functions.iter().any(|body| {
+        let mut effects =
+            collect_statement_effects(&body.statements, module, &mut HashSet::default(), false);
+        effects.discard_function_locals(module);
+        effects.observable || !effects.writes.is_empty() || !effects.state_changes.is_empty()
+    })
+}
+
+/// Proven observable effects, including effects in called function bodies.
+/// Assignments to a callee's local variables do not make a pure call effectful.
+pub(crate) fn expression_has_observable_effect(expression: &Expression, module: &Module) -> bool {
+    // An output call is effectful even when its dynamic destination range
+    // cannot be resolved by the access-range analysis below.
+    if crate::ff::expression_has_side_effect(expression) {
+        return true;
+    }
+    let effects = collect_expression_effects(expression, module, &mut HashSet::default());
+    effects.observable || !effects.writes.is_empty() || !effects.state_changes.is_empty()
+}
+
 fn collect_expression_effects(
     expression: &Expression,
     module: &Module,
@@ -1657,9 +1682,9 @@ fn collect_system_function_effects(
     effects: &mut Effects,
 ) {
     match &call.kind {
-        SystemFunctionKind::Bits(input)
-        | SystemFunctionKind::Size(input, _)
-        | SystemFunctionKind::Clog2(input)
+        // Shape queries do not evaluate their operands, including calls.
+        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_, _) => {}
+        SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
         | SystemFunctionKind::Unsigned(input) => effects.append(collect_expression_effects(

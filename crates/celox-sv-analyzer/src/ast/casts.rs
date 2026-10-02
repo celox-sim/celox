@@ -126,6 +126,35 @@ pub(super) fn constant_cast_const_expr(
         const_env,
         type_aliases,
     )?;
+    cast_constant_operand(operand, &cast.nodes.0, syntax_tree, const_env, type_aliases)
+}
+
+pub(super) fn runtime_constant_cast_const_expr(
+    cast: &sv_parser::Cast,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
+    let operand = indexed_select_base(
+        RefNode::Expression(&cast.nodes.2.nodes.1),
+        syntax_tree,
+        dimensions,
+    )?;
+    cast_constant_operand(
+        operand,
+        &cast.nodes.0,
+        syntax_tree,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+    )
+}
+
+pub(super) fn cast_constant_operand(
+    operand: ConstExpr,
+    casting_type: &sv_parser::CastingType,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ConstExpr> {
     let parameter_types = parameter_types_from_const_env(const_env);
     let operand_type = infer_const_expr_type(&operand, &parameter_types)?;
     let literal = if let ConstExpr::Literal(literal) = &operand {
@@ -151,15 +180,15 @@ pub(super) fn constant_cast_const_expr(
             typecheck::parse_integral_literal(&operand_literal)
         })?
     };
-    let target_type = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
+    let target_type = cast_target_type(casting_type, syntax_tree, const_env, type_aliases)?;
     // A numeric size cast keeps the source expression's signedness; a type
     // cast takes the target type's signedness.
-    let signed =
-        if casting_type_is_numeric_size(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
-            literal.signed
-        } else {
-            target_type.signed
-        };
+    let signed = if casting_type_is_numeric_size(casting_type, syntax_tree, const_env, type_aliases)
+    {
+        literal.signed
+    } else {
+        target_type.signed
+    };
     let resized = match &operand {
         ConstExpr::Literal(value) => {
             resize_unbased_fill_literal_for_cast(value, target_type.width, signed).unwrap_or_else(
@@ -168,7 +197,7 @@ pub(super) fn constant_cast_const_expr(
         }
         _ => resize_integral_literal_for_cast(literal, target_type.width, signed),
     };
-    let resized = if cast_target_is_two_state(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
+    let resized = if cast_target_is_two_state(casting_type, syntax_tree, const_env, type_aliases) {
         two_state_integral_literal(&resized, target_type.width, signed)?
     } else {
         resized

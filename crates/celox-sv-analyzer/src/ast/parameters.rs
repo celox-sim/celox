@@ -54,14 +54,26 @@ pub(super) fn parameters_from_ref_node(
     // Restrict declaration-type queries to the header. Walking the complete
     // declaration also visits data types and ranges nested in initializers,
     // including the target of a size-function cast.
-    let type_node = match node.clone() {
+    let declaration_node = match node.clone() {
+        RefNode::ParameterPortDeclaration(
+            sv_parser::ParameterPortDeclaration::ParameterDeclaration(declaration),
+        ) => RefNode::ParameterDeclaration(declaration),
+        RefNode::ParameterPortDeclaration(
+            sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(declaration),
+        ) => RefNode::LocalParameterDeclaration(declaration),
+        RefNode::ParameterPortDeclaration(sv_parser::ParameterPortDeclaration::ParamList(
+            declaration,
+        )) => RefNode::DataType(&declaration.nodes.0),
+        node => node,
+    };
+    let type_node = match declaration_node {
         RefNode::ParameterDeclaration(sv_parser::ParameterDeclaration::Param(declaration)) => {
             RefNode::DataTypeOrImplicit(&declaration.nodes.1)
         }
         RefNode::LocalParameterDeclaration(sv_parser::LocalParameterDeclaration::Param(
             declaration,
         )) => RefNode::DataTypeOrImplicit(&declaration.nodes.1),
-        _ => node.clone(),
+        node => node,
     };
     if type_node.clone().into_iter().any(|child| {
         matches!(
@@ -93,6 +105,7 @@ pub(super) fn parameters_from_ref_node(
         matches!(
             child,
             RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(_))
+                | RefNode::DataType(_)
         )
     });
     let parameter_signed = parameter_width.map(|_| {
@@ -117,9 +130,39 @@ pub(super) fn parameters_from_ref_node(
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
             let mut const_env = base_const_env.clone();
             const_env.extend(const_env_from_parameters(parameters));
-            let mut value = param.nodes.2.as_ref().and_then(|(_, expr)| {
-                const_expr_from_constant_param_with_env(expr, syntax_tree, &const_env, type_aliases)
-            });
+            let mut value = if let Some((_, expr)) = &param.nodes.2 {
+                if expr.into_iter().any(|node| {
+                    matches!(
+                        node,
+                        RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
+                    )
+                }) {
+                    let mut dimensions = PackedDimensions::new(
+                        parameter_packed_dimensions(parameters),
+                        &const_env,
+                        type_aliases,
+                    );
+                    dimensions.parameter_values = parameter_value_env(parameters, &const_env);
+                    // Enum constants are unavailable during preliminary collection.
+                    // Leave unresolved values for the subsequent lowering pass;
+                    // final validation rejects anything that still cannot be lowered.
+                    selects::indexed_parameter_initializer(
+                        expr,
+                        syntax_tree,
+                        &dimensions,
+                        parameter_width,
+                    )
+                } else {
+                    const_expr_from_constant_param_with_env(
+                        expr,
+                        syntax_tree,
+                        &const_env,
+                        type_aliases,
+                    )
+                }
+            } else {
+                None
+            };
             value =
                 normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
             // Apply overrides as each declaration is collected so later
@@ -338,13 +381,13 @@ pub(super) fn enum_member_constants_from_module_node(
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
     let mut resolved_type_aliases = type_aliases.clone();
+    let mut parameters = Vec::new();
     for item in module_non_port_items(node.clone()) {
         let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
             continue;
         };
         let data = match declaration {
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
-                let mut parameters = Vec::new();
                 parameters_from_ref_node(
                     RefNode::LocalParameterDeclaration(&localparam.0),
                     syntax_tree,
@@ -360,7 +403,6 @@ pub(super) fn enum_member_constants_from_module_node(
                 continue;
             }
             sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                let mut parameters = Vec::new();
                 parameters_from_ref_node(
                     RefNode::ParameterDeclaration(&parameter.0),
                     syntax_tree,

@@ -16,8 +16,11 @@ pub(crate) enum StateBaseStrategy {
     R15,
     /// Borrow the FS base while generated code is running.
     #[cfg_attr(
-        not(any(all(target_os = "windows", target_arch = "x86_64"), test)),
-        expect(dead_code, reason = "constructed by Windows x86-64 target detection")
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained for image compatibility and emitter tests"
+        )
     )]
     Fs,
     /// Borrow the GS base while generated code is running.
@@ -104,14 +107,12 @@ impl X86Features {
         }
     }
 
-    /// Whether user-mode RDFSBASE/RDGSBASE/WRFSBASE/WRGSBASE instructions are
-    /// both implemented by the CPU and enabled by the operating system.
+    /// Addressing strategy whose state base remains valid throughout native execution.
     pub(crate) const fn state_base(self) -> StateBaseStrategy {
         self.state_base
     }
 
-    /// R15 is reserved as the state base on hosts where GS-base instructions
-    /// cannot be executed.
+    /// R15 is reserved when the host cannot safely borrow a segment base.
     pub(crate) const fn allocatable_register_count(self) -> usize {
         match self.state_base {
             StateBaseStrategy::Fs | StateBaseStrategy::Gs => 15,
@@ -225,30 +226,14 @@ fn detect_state_base_strategy() -> StateBaseStrategy {
     }
 }
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-fn detect_state_base_strategy() -> StateBaseStrategy {
-    const PF_RDWRFSGSBASE_AVAILABLE: u32 = 22;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn IsProcessorFeaturePresent(processor_feature: u32) -> i32;
-    }
-
-    // Windows x64 owns GS for the TEB. Keep it intact and borrow FS only when
-    // the OS explicitly reports the base instructions as executable.
-    // SAFETY: IsProcessorFeaturePresent accepts every u32 feature identifier
-    // and has no pointer arguments.
-    if unsafe { IsProcessorFeaturePresent(PF_RDWRFSGSBASE_AVAILABLE) } != 0 {
-        StateBaseStrategy::Fs
-    } else {
-        StateBaseStrategy::R15
-    }
-}
-
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64")
-)))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 const fn detect_state_base_strategy() -> StateBaseStrategy {
+    // Windows owns GS for the TEB and can reset FS.base when a thread is
+    // interrupted. PF_RDWRFSGSBASE_AVAILABLE only promises that the base
+    // instructions execute, not that a borrowed FS base survives scheduling.
+    // Keep state in a callee-saved GPR so even long native tick batches remain
+    // valid across preemption. This also stops advertising the FS image bit,
+    // causing previously cached FS-based images to be rejected on Windows.
     StateBaseStrategy::R15
 }
 

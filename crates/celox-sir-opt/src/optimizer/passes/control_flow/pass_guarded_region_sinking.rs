@@ -21,8 +21,8 @@ pub(in crate::optimizer) struct GuardedRegionSinkingPass;
 /// Recover effect/value regions which become visible only after native EUs
 /// have been merged into one CFG.
 ///
-/// This deliberately runs only the coupled-store and closed same-predicate
-/// planners. Replaying the complete source-EU pass after fusion would also
+/// This runs the coupled-store, closed same-predicate, guarded scan and direct
+/// packed-update planners. Replaying the complete source-EU pass after fusion would also
 /// perform unrelated edge sinking and repeated CFG repair.
 pub(in crate::optimizer) fn recover_merged_effect_regions(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
@@ -33,6 +33,8 @@ pub(in crate::optimizer) fn recover_merged_effect_regions(
     }
     form_coupled_store_regions(eu);
     form_same_predicate_regions(eu);
+    super::loop_reduction_guard::run(eu);
+    super::packed_index_update::run(eu);
 }
 
 #[derive(Clone)]
@@ -223,6 +225,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         if options.four_state || eu.verify_result().is_err() {
             return;
         }
+        super::loop_reduction_guard::run(eu);
         let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
             if options.optimize_options.diagnostics.verify_passes
                 && let Err(error) = eu.verify_result()
@@ -762,6 +765,35 @@ fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> 
             let merge_index = repair_merges[candidate_index]
                 .expect("indexed repair candidates have an admissible merge");
             let merge = cfg.block_ids[merge_index];
+            // Predicate facts describe necessary branch outcomes, not the
+            // complete path to the candidate (in particular, Switch arms are
+            // not represented). A dummy phi operand is safe only if every
+            // edge bypassing the candidate contradicts its required facts.
+            if cfg.predecessors[merge_index].iter().any(|&predecessor| {
+                if cfg.dominators.dominates(candidate_index, predecessor) {
+                    return false;
+                }
+                let contradicts = |edge_fact: Option<(RegisterId, bool)>| {
+                    candidate_facts.iter().any(|&(condition, required)| {
+                        facts[predecessor].contains(&(condition, !required))
+                            || edge_fact == Some((condition, !required))
+                    })
+                };
+                match &eu.blocks[&cfg.block_ids[predecessor]].terminator {
+                    SIRTerminator::Jump(..) => !contradicts(None),
+                    SIRTerminator::Branch {
+                        cond,
+                        true_block,
+                        false_block,
+                    } => {
+                        (true_block.0 == merge && !contradicts(Some((*cond, true))))
+                            || (false_block.0 == merge && !contradicts(Some((*cond, false))))
+                    }
+                    _ => true,
+                }
+            }) {
+                continue;
+            }
             if use_blocks.iter().any(|&block| {
                 !cfg.dominates(candidate, block)
                     && (!cfg.dominates(merge, block)
@@ -4512,8 +4544,19 @@ mod tests {
                         (false_block.0, false_block.1.clone())
                     }
                 }
-                SIRTerminator::Switch { .. } => {
-                    panic!("unexpected Switch in guarded-region test")
+                SIRTerminator::Switch {
+                    selector,
+                    cases,
+                    default,
+                } => {
+                    let selected = registers[selector];
+                    let target = cases
+                        .iter()
+                        .find(|case| {
+                            case.value.to_u64_digits().first().copied().unwrap_or(0) == selected
+                        })
+                        .map_or(*default, |case| case.target);
+                    (target, Vec::new())
                 }
                 SIRTerminator::Return => return ExecutionTrace { stores },
                 SIRTerminator::Error(code) => panic!("unexpected test error {code}"),
@@ -6316,6 +6359,83 @@ mod tests {
             eu.verify_result().unwrap();
             for condition in [0, 1] {
                 assert_eq!(execute(&before, condition, 7), execute(&eu, condition, 7));
+            }
+        }
+    }
+
+    #[test]
+    fn switch_arm_does_not_prove_shared_payload_is_unobservable_on_other_arms() {
+        // Both the selected case and the post-switch store need the square.
+        // Their common outer guard does not imply that this case was taken;
+        // the post-switch store must retain the square on the default edge.
+        let mut register_map = HashMap::default();
+        register_map.insert(RegisterId(0), bit(1));
+        for reg in 1..=4 {
+            register_map.insert(RegisterId(reg), bit(8));
+        }
+        let mut blocks = HashMap::default();
+        insert_block(
+            &mut blocks,
+            0,
+            vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+            vec![
+                SIRInstruction::Binary(RegisterId(3), RegisterId(1), BinaryOp::Mul, RegisterId(1)),
+                SIRInstruction::Imm(RegisterId(4), SIRValue::new(0u8)),
+            ],
+            SIRTerminator::Branch {
+                cond: RegisterId(0),
+                true_block: (BlockId(1), vec![]),
+                false_block: (BlockId(5), vec![]),
+            },
+        );
+        insert_block(
+            &mut blocks,
+            1,
+            vec![],
+            vec![],
+            SIRTerminator::Switch {
+                selector: RegisterId(2),
+                cases: vec![SIRSwitchCase {
+                    value: 0u8.into(),
+                    target: BlockId(2),
+                }],
+                default: BlockId(3),
+            },
+        );
+        for (block, source) in [(2, RegisterId(3)), (3, RegisterId(4)), (4, RegisterId(3))] {
+            insert_block(
+                &mut blocks,
+                block,
+                vec![],
+                vec![SIRInstruction::Store(
+                    address(if block == 4 { 81 } else { 80 }),
+                    SIROffset::Static(0),
+                    8,
+                    source,
+                    vec![],
+                    vec![],
+                )],
+                SIRTerminator::Jump(BlockId(if block == 4 { 5 } else { 4 }), vec![]),
+            );
+        }
+        insert_block(&mut blocks, 5, vec![], vec![], SIRTerminator::Return);
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+        sink_pure_values_with_predicate_repair(&mut eu);
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            for input in [0, 7, 255] {
+                for selector in [0, 1, 2, 255] {
+                    assert_eq!(
+                        execute_with_inputs(&before, condition, input, selector),
+                        execute_with_inputs(&eu, condition, input, selector)
+                    );
+                }
             }
         }
     }

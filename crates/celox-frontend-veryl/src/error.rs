@@ -56,6 +56,12 @@ impl From<celox_frontend_core::LoweringPhase> for LoweringPhase {
 /// source identities are discarded by lowering.
 #[derive(Error, Debug)]
 pub enum FrontendDiagnostic {
+    #[error("Array literal side-effect evaluation count is undefined: {detail}")]
+    UndefinedArrayLiteralEvaluationCount {
+        detail: String,
+        source_location: SourceLocation,
+    },
+
     #[error("Function output copy-out order is unspecified: {detail}")]
     UnspecifiedOutputCopyOrder {
         detail: String,
@@ -82,6 +88,16 @@ pub enum FrontendDiagnostic {
 }
 
 impl FrontendDiagnostic {
+    pub fn undefined_array_literal_evaluation_count(
+        token: &TokenRange,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::UndefinedArrayLiteralEvaluationCount {
+            detail: detail.into(),
+            source_location: SourceLocation::from_token(token),
+        }
+    }
+
     pub fn unspecified_output_copy_order(token: &TokenRange, detail: impl Into<String>) -> Self {
         Self::UnspecifiedOutputCopyOrder {
             detail: detail.into(),
@@ -116,7 +132,10 @@ impl FrontendDiagnostic {
 
     fn source_location(&self) -> &SourceLocation {
         match self {
-            Self::MutableForBound {
+            Self::UndefinedArrayLiteralEvaluationCount {
+                source_location, ..
+            }
+            | Self::MutableForBound {
                 source_location, ..
             }
             | Self::TimeAdvancingForBound {
@@ -135,6 +154,9 @@ impl FrontendDiagnostic {
 impl miette::Diagnostic for FrontendDiagnostic {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self {
+            Self::UndefinedArrayLiteralEvaluationCount { .. } => {
+                "undefined_array_literal_evaluation_count"
+            }
             Self::UnspecifiedOutputCopyOrder { .. } => "unspecified_output_copy_order",
             Self::MutableForBound { .. } => "mutable_for_bound",
             Self::TimeAdvancingForBound { .. } => "time_advancing_for_bound",
@@ -152,6 +174,9 @@ impl miette::Diagnostic for FrontendDiagnostic {
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self {
+            Self::UndefinedArrayLiteralEvaluationCount { .. } => {
+                "evaluate the expression into a temporary before the array literal, then use that value in default or repeat"
+            }
             Self::UnspecifiedOutputCopyOrder { .. } => {
                 "use distinct output destinations, then assign them to shared storage in the intended order after the call"
             }
@@ -174,6 +199,7 @@ impl miette::Diagnostic for FrontendDiagnostic {
     fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
         let location = self.source_location();
         let label = match self {
+            Self::UndefinedArrayLiteralEvaluationCount { .. } => "effectful default or repeat item",
             Self::UnspecifiedOutputCopyOrder { .. } => "overlapping output arguments in this call",
             _ => "loop with an unstable continuation bound",
         };

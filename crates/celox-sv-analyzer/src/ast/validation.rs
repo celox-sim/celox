@@ -379,7 +379,12 @@ pub(super) fn reject_silently_ignored_constructs(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    parameter_dimensions: &VariablePackedDimensions,
+    parameter_values: &HashMap<String, Expr>,
 ) -> Result<(), AnalyzerError> {
+    let mut indexed_dimensions =
+        PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
+    indexed_dimensions.parameter_values = parameter_values.clone();
     let is_module = matches!(node, RefNode::ModuleDeclarationAnsi(_));
     let generated_nodes: Vec<_> = if is_module {
         node.clone()
@@ -395,18 +400,70 @@ pub(super) fn reject_silently_ignored_constructs(
     } else {
         Vec::new()
     };
+    // These are the constant contexts that use selection-aware lowering.
+    // Other contexts (such as declaration ranges) still use the lightweight
+    // constant parser and must reject indexed selections rather than drop them.
+    let lowered_constant_indexed_ranges: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter_map(|child| match child {
+            RefNode::IndexedRange(_)
+            | RefNode::Select(_)
+            | RefNode::PartSelectRange(_)
+            | RefNode::NetLvalue(_)
+            | RefNode::VariableLvalue(_) => Some(child),
+            RefNode::ParamAssignment(parameter) => parameter
+                .nodes
+                .2
+                .as_ref()
+                .map(|(_, expression)| RefNode::ConstantParamExpression(expression)),
+            _ => None,
+        })
+        .flat_map(|root| root.into_iter())
+        .filter_map(|child| match child {
+            RefNode::ConstantIndexedRange(range) => Some(range),
+            _ => None,
+        })
+        .collect();
+    // Typed indexed lowering validates casts in bases, widths and supported
+    // parameter initializers. Keep the generic cast checks for other contexts.
+    let typed_indexed_casts: Vec<_> = node
+        .clone()
+        .into_iter()
+        .filter_map(|child| match child {
+            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => Some(child),
+            RefNode::ParamAssignment(parameter) => parameter
+                .nodes
+                .2
+                .as_ref()
+                .filter(|(_, expression)| {
+                    expression.into_iter().any(|child| {
+                        matches!(
+                            child,
+                            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_)
+                        )
+                    })
+                })
+                .map(|(_, expression)| RefNode::ConstantParamExpression(expression)),
+            _ => None,
+        })
+        .flat_map(|root| root.into_iter())
+        .filter(|child| matches!(child, RefNode::Cast(_) | RefNode::ConstantCast(_)))
+        .collect();
     for child in node.clone() {
         if generated_nodes.iter().any(|n| n == &child) {
             continue;
         }
         match child {
             RefNode::Cast(cast)
-                if !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+                if !typed_indexed_casts.contains(&RefNode::Cast(cast))
+                    && !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
             RefNode::ConstantCast(cast)
-                if !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+                if !typed_indexed_casts.contains(&RefNode::ConstantCast(cast))
+                    && !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
             }
@@ -578,10 +635,29 @@ pub(super) fn reject_silently_ignored_constructs(
                     "variable declaration initializer".to_string(),
                 ));
             }
-            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => {
+            RefNode::ParamAssignment(parameter) if parameter.nodes.2.as_ref().is_some_and(|(_, expression)| {
+                expression.into_iter().any(|child| matches!(child,
+                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)))
+                && selects::indexed_parameter_initializer(expression, syntax_tree, &indexed_dimensions, None).is_none()
+            }) => {
+                return Err(AnalyzerError::Unsupported("indexed parameter initializer".to_string()));
+            }
+            RefNode::IndexedRange(range) if
+                indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
+                    &indexed_dimensions)
+                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
+                || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
                 return Err(AnalyzerError::Unsupported(
                     "indexed part-select".to_string(),
                 ));
+            }
+            RefNode::ConstantIndexedRange(range) if
+                !lowered_constant_indexed_ranges.contains(&range)
+                || indexed_select_base(RefNode::ConstantExpression(&range.nodes.0), syntax_tree,
+                    &indexed_dimensions)
+                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
+                || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
+                return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
             }
             RefNode::DataTypeStructUnion(data)
                 if packed_structs::parse_type(data, syntax_tree, const_env, type_aliases).is_none() => {
@@ -753,11 +829,14 @@ pub(super) fn reject_silently_ignored_constructs(
     }
     if is_module {
         for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
+            let dimensions = item.dimensions(&indexed_dimensions);
             reject_silently_ignored_constructs(
                 RefNode::ModuleOrGenerateItem(item.node),
                 syntax_tree,
-                &item.env,
+                &dimensions.const_env,
                 type_aliases,
+                &dimensions,
+                &dimensions.parameter_values,
             )?;
         }
     }
@@ -820,4 +899,14 @@ fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) ->
             )
         }),
     }
+}
+
+fn positive_indexed_width(
+    width: &sv_parser::ConstantExpression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> bool {
+    indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)
+        .and_then(|width| eval_ast_const_expr(&width, &dimensions.const_env))
+        .is_some_and(|width| width > 0)
 }

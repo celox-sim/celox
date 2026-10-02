@@ -201,7 +201,13 @@ nix develop --command bash -c 'rustc --version; node --version; pnpm --version; 
 ```
 
 Commit `flake.lock` together with environment changes. When updating Rust,
-update the rust-overlay input if its locked revision predates the release.
+update the rust-overlay revision in `flake.nix` and regenerate `flake.lock`
+with `nix flake update rust-overlay` if its locked revision predates the release.
+Renovate groups the explicitly pinned rust-overlay revision with Rust version
+updates in one PR. Other Nix inputs remain manually managed. The CI lint job
+also evaluates the locked flake for both Linux architectures and builds its
+Rust toolchain check without allowing lockfile updates, so a Rust update that
+is not supported by the pinned overlay fails CI before merge.
 When updating pnpm, update `packageManager` in `package.json` and the pnpm
 lockfile as needed; no Nix version or hash update is required. Verify with
 `nix develop --command pnpm --version` (also from a workspace package directory).

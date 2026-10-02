@@ -27,7 +27,7 @@ use veryl_analyzer::ir::{
 };
 use veryl_analyzer::symbol::Affiliation;
 
-pub(super) fn expression_has_side_effect(expr: &Expression) -> bool {
+pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
     let input_has_side_effect =
         |input: &veryl_analyzer::ir::SystemFunctionInput| expression_has_side_effect(&input.0);
     match expr {
@@ -41,7 +41,10 @@ pub(super) fn expression_has_side_effect(expr: &Expression) -> bool {
                         .is_some_and(|(_, expr)| expression_has_side_effect(expr))
             }
             Factor::FunctionCall(call) => {
-                !call.outputs.is_empty() || call.inputs.values().any(expression_has_side_effect)
+                call.outputs
+                    .values()
+                    .any(|destinations| !destinations.is_empty())
+                    || call.inputs.values().any(expression_has_side_effect)
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => false,

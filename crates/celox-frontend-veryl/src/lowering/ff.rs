@@ -334,6 +334,7 @@ mod signed_div_rem_tests {
 }
 
 mod expression;
+pub(crate) use expression::expression_has_side_effect;
 mod function_call;
 
 pub enum Domain {

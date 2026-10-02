@@ -88,6 +88,14 @@ unpacked structures, and unions remain unsupported. Member access on function
 formals is also deferred. These forms must be diagnosed rather than silently
 lowered as accesses to the entire structure.
 
+The SystemVerilog frontend supports indexed part-selects (`+:` and `-:`)
+with a constant base and positive constant width, including parameter-specialized
+widths and generate indices. This covers Veryl's emitted step selections on
+packed vectors and indexed slices of unpacked arrays, for reads, procedural
+writes, and instance connections. Endpoints follow the declared index direction
+(IEEE 1800-2023 sections 11.5.1 and 7.4.6) before using the existing range
+flattening. Runtime bases and procedural loop-variable bases remain unsupported.
+
 The SystemVerilog frontend supports `$countones` in constant expressions,
 continuous assignments, combinational and clocked processes, and module port
 connections. Its argument keeps its own expression width, and its result is a

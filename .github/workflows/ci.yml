@@ -78,6 +78,16 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+
+      - name: Check locked Nix development environment
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        run: |
+          nix flake check --no-build --all-systems --no-update-lock-file
+          nix build --no-link --no-update-lock-file .#checks.x86_64-linux.rust-toolchain
+
       - uses: ./.github/actions/setup-rust
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
 

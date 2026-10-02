@@ -11,7 +11,17 @@ pub(super) fn size_system_function_expr_type(
     let sv_parser::ConstantPrimary::ConstantFunctionCall(call) = primary else {
         return None;
     };
-    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0 else {
+    size_system_function_call_type(&call.nodes.0, syntax_tree, const_env, type_aliases, None)
+}
+
+pub(super) fn size_system_function_call_type(
+    call: &sv_parser::FunctionSubroutineCall,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: Option<&PackedDimensions>,
+) -> Option<ExprType> {
+    let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0 else {
         return None;
     };
     let (name, r#type) = match &**system_call {
@@ -45,6 +55,18 @@ pub(super) fn size_system_function_expr_type(
             let argument = arguments[0].as_ref()?;
             if name != "$bits" && name != "$size" {
                 return None;
+            }
+            if let Some(dimensions) = dimensions
+                && let Some(ty) = size_function_expression_type(
+                    argument,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                    name == "$size",
+                    Some(dimensions),
+                )
+            {
+                return Some(ty);
             }
             // Function formals and locals shadow generated signal type markers.
             if let Some(dimensions) = containing_function_dimensions(
@@ -89,6 +111,7 @@ pub(super) fn size_system_function_expr_type(
                 const_env,
                 type_aliases,
                 name == "$size",
+                None,
             ) {
                 return Some(r#type);
             }
@@ -176,6 +199,7 @@ fn size_function_expression_type(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     first_dimension_only: bool,
+    dimensions: Option<&PackedDimensions>,
 ) -> Option<ExprType> {
     let mut packed_dimensions = containing_packed_dimensions(
         RefNode::Expression(argument),
@@ -194,6 +218,18 @@ fn size_function_expression_type(
         const_env,
         type_aliases,
     );
+    if let Some(dimensions) = dimensions {
+        packed_dimensions.extend(
+            dimensions
+                .iter()
+                .map(|(name, metadata)| (name.clone(), metadata.clone())),
+        );
+        packed_dimensions.parameter_values = dimensions.parameter_values.clone();
+        packed_dimensions.constant_indexed_base = dimensions.constant_indexed_base;
+        packed_dimensions
+            .function_return_types
+            .extend(dimensions.function_return_types.clone());
+    }
     let expression = expr_from_expression_with_types(argument, syntax_tree, &packed_dimensions)?;
     let width = if first_dimension_only {
         selected_expression_first_dimension_width(argument, syntax_tree, &packed_dimensions)
@@ -275,21 +311,19 @@ fn selected_expression_first_dimension_width(
     let dimensions = packed_dimensions.get(&name)?;
     let select = &hierarchical.nodes.2;
     if let Some(range) = &select.nodes.2 {
-        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
-        };
-        let bound = |expression| {
-            let expression = const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(expression),
-                syntax_tree,
-                &packed_dimensions.const_env,
-                &packed_dimensions.type_aliases,
-            )?;
-            eval_ast_const_expr(&expression, &packed_dimensions.const_env)
-        };
-        return usize::try_from(bound(&range.nodes.0)?.abs_diff(bound(&range.nodes.2)?))
-            .ok()?
-            .checked_add(1);
+        let (msb, lsb) = part_select_bounds(
+            &range.nodes.1,
+            syntax_tree,
+            Some(&name),
+            select.nodes.1.nodes.0.len(),
+            packed_dimensions,
+        )?;
+        return usize::try_from(
+            eval_ast_const_expr(&msb, &packed_dimensions.const_env)?
+                .abs_diff(eval_ast_const_expr(&lsb, &packed_dimensions.const_env)?),
+        )
+        .ok()?
+        .checked_add(1);
     }
     // Each index removes one declared dimension. Inspect the syntax before
     // flattening, which otherwise loses the remaining array shape.
@@ -859,4 +893,23 @@ impl Drop for ActiveFunctionReturnMetadataGuard {
             metadata.borrow_mut().remove(&self.scope_span);
         });
     }
+}
+
+pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
+    parameters
+        .iter()
+        .filter(|parameter| !parameter.packed_ranges.is_empty())
+        .map(|parameter| {
+            (
+                parameter.name.clone(),
+                VariableDimensions {
+                    packed: function_packed_dimension_widths(&parameter.packed_ranges),
+                    unpacked: Vec::new(),
+                    signed: parameter.declared_signed.unwrap_or(false),
+                    is_2state: parameter.declared_is_2state,
+                    members: Vec::new(),
+                },
+            )
+        })
+        .collect()
 }

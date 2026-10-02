@@ -25,6 +25,7 @@ pub(super) struct Item<'a> {
     pub node: &'a sv_parser::ModuleOrGenerateItem,
     pub env: HashMap<String, i128>,
     pub literals: HashMap<String, Expr>,
+    parameter_dimensions: VariablePackedDimensions,
     names: HashMap<String, String>,
     shadowed: HashSet<String>,
     scope: String,
@@ -84,6 +85,16 @@ impl Item<'_> {
                 }
             }
         }
+        for name in &self.shadowed {
+            local.remove(name);
+            signedness.remove(name);
+        }
+        local.extend(self.parameter_dimensions.clone());
+        signedness.extend(
+            self.parameter_dimensions
+                .iter()
+                .map(|(name, dimensions)| (name.clone(), dimensions.signed)),
+        );
         for (name, qualified) in &self.names {
             if let Some(value) = dimensions.get(qualified) {
                 local.insert(name.clone(), value.clone());
@@ -225,6 +236,7 @@ struct Scope {
     in_loop: bool,
     env: HashMap<String, i128>,
     literals: HashMap<String, Expr>,
+    parameters: Vec<Parameter>,
     names: HashMap<String, String>,
     shadowed: HashSet<String>,
 }
@@ -261,6 +273,7 @@ pub(super) fn items<'a>(
     let scope = Scope {
         env: env.clone(),
         literals,
+        parameters,
         ..Scope::default()
     };
     let mut ordinal = 0;
@@ -563,6 +576,9 @@ impl<'a> Elaborator<'a, '_> {
                         );
                         iteration.names.remove(&name);
                         iteration.shadowed.insert(name.clone());
+                        iteration
+                            .parameters
+                            .retain(|parameter| parameter.name() != name);
                         iteration.literals.remove(&name);
                         if !self.condition(
                             &generate.nodes.1.nodes.1.2.nodes.0,
@@ -611,6 +627,7 @@ impl<'a> Elaborator<'a, '_> {
             node: item,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
+            parameter_dimensions: parameter_packed_dimensions(&scope.parameters),
             names: scope.names.clone(),
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
@@ -795,6 +812,9 @@ impl<'a> Elaborator<'a, '_> {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&name);
+                scope
+                    .parameters
+                    .retain(|parameter| parameter.name() != name);
                 scope.names.remove(&name);
                 scope.shadowed.insert(name.clone());
                 pending.push((name, node.clone(), dependencies));
@@ -839,7 +859,8 @@ impl<'a> Elaborator<'a, '_> {
                 ));
             };
             let (name, node, _) = pending.remove(index);
-            let mut parameters = Vec::new();
+            let mut parameters = scope.parameters.clone();
+            let inherited_count = parameters.len();
             parameters_from_ref_node(
                 node,
                 self.tree,
@@ -851,10 +872,12 @@ impl<'a> Elaborator<'a, '_> {
             )?;
             let parameter = parameters
                 .into_iter()
+                .skip(inherited_count)
                 .find(|parameter| parameter.name() == name)
                 .ok_or_else(|| {
                     AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
                 })?;
+            scope.parameters.push(parameter.clone());
             bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
         }
         Ok(())
@@ -996,6 +1019,9 @@ impl<'a> Elaborator<'a, '_> {
                 }
                 scope.literals.remove(&signal.name);
                 scope.shadowed.insert(signal.name.clone());
+                scope
+                    .parameters
+                    .retain(|parameter| parameter.name() != signal.name);
                 scope.names.insert(
                     signal.name.clone(),
                     format!("{}.{}", scope.path, scope_component(&signal.name)),
