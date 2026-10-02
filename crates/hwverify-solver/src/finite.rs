@@ -134,7 +134,12 @@ pub struct Stats {
     pub control_case_work: Vec<u64>,
     pub control_preprocess_work: u64,
     pub asserted_definitions: usize,
+    pub guarded_equalities: usize,
+    pub guarded_rewrites: usize,
+    pub guarded_expansion_nodes: usize,
     pub lookup_rewrites: usize,
+    pub word_rewrites: usize,
+    pub word_expansion_nodes: usize,
     pub lookup_expansion_nodes: usize,
     pub base_cnf_reused: bool,
     pub terms: usize,
@@ -174,7 +179,9 @@ impl Outcome {
             "assignments":self.assignments.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "context_values":self.context_values.iter().map(|(k,v)|(k.clone(),v.json())).collect::<BTreeMap<_,_>>(),
             "terms":self.stats.terms,"variables":self.stats.variables,"clauses":self.stats.clauses,
+            "word_rewrites":self.stats.word_rewrites,"word_expansion_nodes":self.stats.word_expansion_nodes,
             "lookup_rewrites":self.stats.lookup_rewrites,"lookup_expansion_nodes":self.stats.lookup_expansion_nodes,
+            "guarded_equalities":self.stats.guarded_equalities,"guarded_rewrites":self.stats.guarded_rewrites,"guarded_expansion_nodes":self.stats.guarded_expansion_nodes,
             "asserted_definitions":self.stats.asserted_definitions,"base_cnf_reused":self.stats.base_cnf_reused,"base_clauses":self.stats.base_clauses,"peak_live_clauses":self.stats.peak_live_clauses,
             "split_alternatives":self.stats.split_alternatives,"split_completed":self.stats.split_completed,
             "split_unsat":self.stats.split_unsat,
@@ -388,6 +395,7 @@ struct Bits {
 #[derive(Default)]
 struct Aliases {
     definitions: HashMap<String, Term>,
+    guarded: HashMap<String, (Vec<Term>, Term)>,
     ids: HashMap<String, usize>,
     names: Vec<String>,
     parents: Vec<usize>,
@@ -505,11 +513,96 @@ impl Aliases {
                 self.definitions.insert(name, rhs);
             }
         }
+        // Mandatory implication paths yield conditional facts, never aliases.
+        // Keep guards as bounded vectors instead of constructing conjunctions.
+        let mut pending = vec![(formula.clone(), Vec::<Term>::new(), 0usize)];
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+        while let Some((term, guard, depth)) = pending.pop() {
+            b.tick(1)?;
+            if depth > b.limits.max_depth {
+                return Err("guarded definition depth exhausted".into());
+            }
+            if !seen.insert((term.clone(), guard.clone())) {
+                continue;
+            }
+            if seen.len() > b.limits.max_terms {
+                return Err("guarded definition terms exhausted".into());
+            }
+            match operation(&term)? {
+                Op::And => {
+                    pending.push((term.0.args[1].clone(), guard.clone(), depth + 1));
+                    pending.push((term.0.args[0].clone(), guard, depth + 1));
+                }
+                Op::Implies => {
+                    if guard.len() < 16 {
+                        let mut guards = guard;
+                        guards.push(term.0.args[0].clone());
+                        pending.push((term.0.args[1].clone(), guards, depth + 1));
+                    }
+                }
+                Op::Eq if !guard.is_empty() && matches!(term.0.args[0].0.sort, Sort::Bv(_)) => {
+                    match (operation(&term.0.args[0])?, operation(&term.0.args[1])?) {
+                        (Op::Variable(x), _) => candidates.push((x, guard, term.0.args[1].clone())),
+                        (_, Op::Variable(y)) => candidates.push((y, guard, term.0.args[0].clone())),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (name, guard, rhs) in candidates {
+            if self.guarded.len() >= 64 {
+                break;
+            }
+            let name = self.representative(&name, b)?;
+            if self.definitions.contains_key(&name) || self.guarded.contains_key(&name) {
+                continue;
+            }
+            let mut todo = vec![(rhs.clone(), 0usize)];
+            todo.extend(guard.iter().cloned().map(|g| (g, 0)));
+            let mut visited = HashSet::new();
+            let mut occurs = false;
+            while let Some((term, depth)) = todo.pop() {
+                b.tick(1)?;
+                if depth > b.limits.max_depth {
+                    return Err("guarded definition depth exhausted".into());
+                }
+                if !visited.insert(term.clone()) {
+                    continue;
+                }
+                if visited.len() > b.limits.max_terms {
+                    return Err("guarded definition terms exhausted".into());
+                }
+                if let Op::Variable(variable) = operation(&term)? {
+                    let representative = self.representative(&variable, b)?;
+                    if representative == name {
+                        occurs = true;
+                        break;
+                    }
+                    if let Some(definition) = self.definitions.get(&representative) {
+                        todo.push((definition.clone(), depth + 1));
+                    }
+                    if let Some((g, r)) = self.guarded.get(&representative) {
+                        todo.extend(g.iter().cloned().map(|g| (g, depth + 1)));
+                        todo.push((r.clone(), depth + 1));
+                    }
+                }
+                for argument in &term.0.args {
+                    todo.push((argument.clone(), depth + 1));
+                }
+            }
+            if !occurs {
+                self.guarded.insert(name, (guard, rhs));
+            }
+        }
         Ok(())
     }
 }
 struct Blast {
     lookup: lookup::Rewrite,
+    guarded_created: usize,
+    guarded_rewrites: usize,
     aliases: Aliases,
     memo: HashMap<Term, Bits>,
     gates: HashMap<(u8, Lit, Lit), Lit>,
@@ -522,6 +615,8 @@ impl Blast {
     fn new() -> Self {
         Self {
             lookup: lookup::Rewrite::default(),
+            guarded_created: 0,
+            guarded_rewrites: 0,
             aliases: Aliases::default(),
             memo: HashMap::new(),
             gates: HashMap::new(),
@@ -679,6 +774,110 @@ impl Blast {
         }
         Ok(less)
     }
+    fn substitute_guarded(
+        &mut self,
+        t: &Term,
+        replacements: &HashMap<String, Term>,
+        memo: &mut HashMap<Term, Term>,
+        b: &mut Budget,
+        depth: usize,
+    ) -> Res<Term> {
+        b.tick(1)?;
+        if depth > b.limits.max_depth {
+            return Err("guarded rewrite depth exhausted".into());
+        }
+        if let Some(value) = memo.get(t) {
+            return Ok(value.clone());
+        }
+        if self.guarded_created >= 4096 {
+            return Ok(t.clone());
+        }
+        if memo.len() >= b.limits.max_terms {
+            return Err("guarded rewrite term limit exhausted".into());
+        }
+        if let Op::Variable(name) = operation(t)? {
+            let representative = self.aliases.representative(&name, b)?;
+            if let Some(value) = replacements.get(&representative) {
+                return Ok(value.clone());
+            }
+            return Ok(t.clone());
+        }
+        let args =
+            t.0.args
+                .iter()
+                .map(|a| self.substitute_guarded(a, replacements, memo, b, depth + 1))
+                .collect::<Res<Vec<_>>>()?;
+        let value = if args == t.0.args || !self.guarded_room(b) {
+            t.clone()
+        } else {
+            self.charge_guarded(b)?;
+            hwverify_ir::node(t.0.sort.clone(), t.0.op.clone(), args)
+        };
+        memo.insert(t.clone(), value.clone());
+        Ok(value)
+    }
+    fn guarded_room(&self, b: &Budget) -> bool {
+        self.guarded_created < 4096
+            && self
+                .lookup
+                .source_nodes
+                .saturating_add(self.lookup.created)
+                .saturating_add(1)
+                <= b.limits.max_terms
+    }
+    fn charge_guarded(&mut self, b: &mut Budget) -> Res<()> {
+        b.tick(1)?;
+        self.guarded_created += 1;
+        // This shared source/expansion envelope also constrains lookup rewrites.
+        self.lookup.source_nodes += 1;
+        Ok(())
+    }
+    fn guarded_ite(&mut self, t: &Term, b: &mut Budget, depth: usize) -> Res<Option<Term>> {
+        if self.aliases.guarded.is_empty() || !self.guarded_room(b) {
+            return Ok(None);
+        }
+        let mut facts = HashSet::new();
+        let mut pending = vec![t.0.args[0].clone()];
+        while let Some(g) = pending.pop() {
+            b.tick(1)?;
+            if !facts.insert(g.clone()) {
+                continue;
+            }
+            if facts.len() > 64 {
+                return Ok(None);
+            }
+            if matches!(operation(&g)?, Op::And) {
+                pending.extend(g.0.args.iter().cloned());
+            }
+        }
+        let mut replacements = HashMap::new();
+        for (name, (guard, rhs)) in &self.aliases.guarded {
+            b.tick(1)?;
+            if guard.iter().all(|g| facts.contains(g)) {
+                replacements.insert(name.clone(), rhs.clone());
+            }
+        }
+        if replacements.is_empty() {
+            return Ok(None);
+        }
+        let yes = self.substitute_guarded(
+            &t.0.args[1],
+            &replacements,
+            &mut HashMap::new(),
+            b,
+            depth + 1,
+        )?;
+        if yes == t.0.args[1] || !self.guarded_room(b) {
+            return Ok(None);
+        }
+        self.charge_guarded(b)?;
+        self.guarded_rewrites += 1;
+        Ok(Some(hwverify_ir::ite(
+            t.0.args[0].clone(),
+            yes,
+            t.0.args[2].clone(),
+        )))
+    }
     fn term(&mut self, t: &Term, b: &mut Budget, depth: usize) -> Res<Bits> {
         b.tick(1)?;
         if depth > b.limits.max_depth {
@@ -690,7 +889,24 @@ impl Blast {
         if self.memo.len() >= b.limits.max_terms {
             return Err("finite solver term budget exhausted".into());
         }
+        let normalized = if matches!(t.0.sort, Sort::Bv(_)) {
+            self.lookup.normalize(t, b, depth)?
+        } else {
+            t.clone()
+        };
+        if normalized != *t {
+            let value = self.term(&normalized, b, depth + 1)?;
+            self.memo.insert(t.clone(), value.clone());
+            return Ok(value);
+        }
         let op = operation(t)?;
+        if matches!(op, Op::Ite) {
+            if let Some(rewritten) = self.guarded_ite(t, b, depth)? {
+                let value = self.term(&rewritten, b, depth + 1)?;
+                self.memo.insert(t.clone(), value.clone());
+                return Ok(value);
+            }
+        }
         if matches!(op, Op::Ite) && matches!(t.0.sort, Sort::Bv(_)) {
             if let Some(rewritten) = self.lookup.distribute(t, b)? {
                 let value = self.term(&rewritten, b, depth + 1)?;
@@ -1440,12 +1656,39 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         for term in context.values() {
             blast.term(term, &mut budget, 0)?;
         }
+        // Exact normalization may erase the last occurrence of a variable.
+        // Materialize missing ORIGINAL inputs after normal blasting, preserving
+        // the existing search order while keeping original SAT replay complete.
+        let mut source = vec![formula];
+        source.extend(context.values());
+        let mut seen = HashSet::new();
+        let mut variables = BTreeMap::new();
+        while let Some(term) = source.pop() {
+            budget.tick(1)?;
+            if !seen.insert(term.clone()) {
+                continue;
+            }
+            if let Some(name) = term.0.op.strip_prefix('@') {
+                if !blast.inputs.contains_key(name) {
+                    variables.insert(name.to_string(), term.clone());
+                }
+            }
+            source.extend(&term.0.args);
+        }
+        for term in variables.values() {
+            blast.term(term, &mut budget, 0)?;
+        }
         blast.clause(vec![root.bits[0]], &mut budget)?;
         Ok(())
     })();
     outcome.stats.asserted_definitions = blast.aliases.definitions.len();
+    outcome.stats.guarded_equalities = blast.aliases.guarded.len();
+    outcome.stats.guarded_rewrites = blast.guarded_rewrites;
+    outcome.stats.guarded_expansion_nodes = blast.guarded_created;
     outcome.stats.lookup_rewrites = blast.lookup.rewrites;
-    outcome.stats.lookup_expansion_nodes = blast.lookup.created;
+    outcome.stats.word_rewrites = blast.lookup.word_rewrites;
+    outcome.stats.word_expansion_nodes = blast.lookup.word_created;
+    outcome.stats.lookup_expansion_nodes = blast.lookup.created - blast.lookup.word_created;
     outcome.stats.terms = blast.memo.len();
     outcome.stats.variables = blast.vars;
     outcome.stats.clauses = blast.clauses.len();
@@ -2578,3 +2821,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod guarded_tests;

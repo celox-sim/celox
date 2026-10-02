@@ -219,7 +219,12 @@ fn merge_stats(out: &mut Stats, child: &Stats) {
     out.peak_live_clauses = out.peak_live_clauses.max(child.peak_live_clauses);
     out.base_cnf_reused |= child.base_cnf_reused;
     out.asserted_definitions += child.asserted_definitions;
+    out.guarded_equalities += child.guarded_equalities;
+    out.guarded_rewrites += child.guarded_rewrites;
+    out.guarded_expansion_nodes += child.guarded_expansion_nodes;
     out.lookup_rewrites += child.lookup_rewrites;
+    out.word_rewrites += child.word_rewrites;
+    out.word_expansion_nodes += child.word_expansion_nodes;
     out.lookup_expansion_nodes += child.lookup_expansion_nodes;
     out.decisions += child.decisions;
     out.conflicts += child.conflicts;

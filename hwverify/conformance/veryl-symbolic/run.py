@@ -48,6 +48,12 @@ OBLIGATIONS = {
 }
 
 
+EXISTENCE_OBLIGATIONS = {
+    'binding_nonempty', 'progress_nonvacuity', 'commit_reachable_in_relation',
+}
+EXPECTED_RESULTS = {name: 'sat' if name in EXISTENCE_OBLIGATIONS else 'unsat'
+                    for name in OBLIGATIONS}
+
 def validate_report(report, fault):
     obligations = report['obligations']
     names = [o['name'] for o in obligations]
@@ -57,6 +63,13 @@ def validate_report(report, fault):
         raise RuntimeError('UNKNOWN is not a success or a negative control')
     if report['engine_summary']['z3_queries'] != 0:
         raise RuntimeError('unexpected external solver use')
+    for obligation in obligations:
+        expected = ('sat' if fault and obligation['name'] == 'microstep_refinement'
+                    else EXPECTED_RESULTS[obligation['name']])
+        if obligation.get('solver_result') != expected:
+            raise RuntimeError(f"{obligation['name']}: missing or contradictory solver result")
+        if expected == 'sat' and obligation.get('finite', {}).get('original_formula_validated') is not True:
+            raise RuntimeError(f"{obligation['name']}: SAT lacks original-formula validation")
     failed = [o for o in obligations if o['status'] != 'passed']
     if fault:
         witnesses = [o for o in failed if o['name'] == 'microstep_refinement'

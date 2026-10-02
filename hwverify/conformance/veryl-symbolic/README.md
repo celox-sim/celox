@@ -60,6 +60,12 @@ this step after the original conformance suite and uploads its own evidence.
 For iteration, `run.py --out FRESH_DIR --widths 4 32` accepts explicit frontend,
 lifter and checker paths. `--faults` with no arguments runs only correct designs.
 
-The CI entry point also executes the scaling regression gate:18 correct/mutant
-component cases at16/32/64 sizes, plus the solver's bounded-search tests. See
-`audit/veryl_scaling` for the full study and the still-unresolved CPU8 work limit.
+The CI entry point also executes the scaling regression gates: 18 correct/mutant
+component cases at16/32/64 sizes and28 CPU-capacity cases at8/16/32/64 ROM/data
+words, retaining two GPRs. The separate register axis holds ROM/data at four words
+and exercises8/16/32 writable GPRs, with42 normal/mutant/reset cases and an
+independent concrete integer-ISA regression over the imported DUT.
+
+See `audit/veryl_scaling/README.md` and `audit/veryl_scaling/CPU-REGISTERS.md` for
+actual measurements, fixed budgets, semantic scope and reproduction. Neither
+axis implies combined maximum capacity/register coverage or RV32I support.
