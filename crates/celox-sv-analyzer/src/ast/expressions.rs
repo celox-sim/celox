@@ -191,41 +191,16 @@ fn expr_from_primary_with_types(
                 .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
                 .collect::<Option<Vec<_>>>()?;
             let base = (!parts.is_empty()).then_some(Expr::Concat(parts))?;
-            match concat.nodes.1.as_ref().map(|range| &range.nodes.1) {
-                None => Some(base),
-                Some(sv_parser::RangeExpression::PartSelectRange(range)) => {
-                    let sv_parser::PartSelectRange::ConstantRange(range) = &**range else {
-                        return None;
-                    };
-                    let msb = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&range.nodes.0),
-                        syntax_tree,
-                    )?;
-                    let lsb = const_expr_from_ref_node(
-                        RefNode::ConstantExpression(&range.nodes.2),
-                        syntax_tree,
-                    )?;
-                    Some(Expr::Select {
-                        expr: Box::new(base),
-                        msb,
-                        lsb,
-                        signed: false,
-                    })
-                }
-                Some(sv_parser::RangeExpression::Expression(bit)) => {
-                    let bit = const_expr_from_expr(bit, syntax_tree)?;
-                    Some(Expr::Select {
-                        expr: Box::new(base),
-                        msb: bit.clone(),
-                        lsb: bit,
-                        signed: false,
-                    })
-                }
-            }
+            selected_concatenation(
+                base,
+                concat.nodes.1.as_ref().map(|range| &range.nodes.1),
+                syntax_tree,
+                packed_dimensions,
+            )
         }
         sv_parser::Primary::MultipleConcatenation(concat) => {
             let (count, repeated) = &concat.nodes.0.nodes.0.nodes.1;
-            let count = const_expr_from_expr(count, syntax_tree)?;
+            let count = selects::bit_select_index(count, syntax_tree, packed_dimensions)?;
             let parts = repeated
                 .nodes
                 .0
@@ -235,12 +210,24 @@ fn expr_from_primary_with_types(
                 .into_iter()
                 .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
                 .collect::<Option<Vec<_>>>()?;
-            (!parts.is_empty()).then_some(Expr::RepeatConcat { count, parts })
+            let base = (!parts.is_empty()).then_some(Expr::RepeatConcat { count, parts })?;
+            selected_concatenation(
+                base,
+                concat.nodes.1.as_ref().map(|range| &range.nodes.1),
+                syntax_tree,
+                packed_dimensions,
+            )
         }
         sv_parser::Primary::FunctionSubroutineCall(call) => {
             expr_from_function_subroutine_call(call, syntax_tree, packed_dimensions)
         }
         sv_parser::Primary::Cast(cast) => {
+            if packed_dimensions.constant_indexed_base
+                && let Some(value) =
+                    runtime_constant_cast_const_expr(cast, syntax_tree, packed_dimensions)
+            {
+                return Some(const_expr_to_expr(value));
+            }
             let expr = expr_from_expression_with_types(
                 &cast.nodes.2.nodes.1,
                 syntax_tree,
@@ -305,13 +292,27 @@ pub(super) fn expr_from_function_subroutine_call(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
+    if packed_dimensions.constant_indexed_base
+        && let Some(ty) = dimensions::size_system_function_call_type(
+            call,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+            Some(packed_dimensions),
+        )
+    {
+        return Some(Expr::Literal(ty.width.to_string()));
+    }
     if let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 {
         let sv_parser::SystemTfCall::ArgExpression(call) = &**call else {
             return None;
         };
         let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
         let args = call.nodes.1.nodes.1.0.contents();
-        if typecheck::bit_vector_function_return_type(name, args.len()).is_none()
+        let constant_clog2 =
+            packed_dimensions.constant_indexed_base && name == "$clog2" && args.len() == 1;
+        if (!constant_clog2
+            && typecheck::bit_vector_function_return_type(name, args.len()).is_none())
             || call.nodes.1.nodes.1.1.is_some()
         {
             return None;
@@ -366,4 +367,28 @@ pub(super) fn expr_from_function_subroutine_call(
         }
     };
     Some(Expr::Call { name, args })
+}
+
+fn selected_concatenation(
+    base: Expr,
+    selection: Option<&sv_parser::RangeExpression>,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let (msb, lsb) = match selection {
+        None => return Some(base),
+        Some(sv_parser::RangeExpression::PartSelectRange(range)) => {
+            part_select_bounds(range, syntax_tree, None, 0, dimensions)?
+        }
+        Some(sv_parser::RangeExpression::Expression(bit)) => {
+            let bit = selects::bit_select_index(bit, syntax_tree, dimensions)?;
+            (bit.clone(), bit)
+        }
+    };
+    Some(Expr::Select {
+        expr: Box::new(base),
+        msb,
+        lsb,
+        signed: false,
+    })
 }

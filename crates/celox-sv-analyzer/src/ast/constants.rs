@@ -454,6 +454,13 @@ pub(super) fn const_expr_from_expr(
     expr: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
 ) -> Option<ConstExpr> {
+    // Indexed selects need the typed path, including when nested in call arguments.
+    if expr
+        .into_iter()
+        .any(|node| matches!(node, RefNode::IndexedRange(_)))
+    {
+        return None;
+    }
     match expr {
         sv_parser::Expression::Primary(primary) => const_expr_from_primary(primary, syntax_tree),
         sv_parser::Expression::Unary(unary) => {
@@ -754,6 +761,15 @@ pub(super) fn const_expr_from_ref_node_with_env(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
+    // Indexed selections require declared dimensions and typed selection
+    // lowering. Never let this lightweight parser replace them by the base.
+    if node
+        .clone()
+        .into_iter()
+        .any(|child| matches!(child, RefNode::ConstantIndexedRange(_)))
+    {
+        return None;
+    }
     match node {
         RefNode::ConstantExpression(expr) => match expr {
             sv_parser::ConstantExpression::ConstantPrimary(primary) => {
