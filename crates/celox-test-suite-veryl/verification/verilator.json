@@ -4137,6 +4137,22 @@
       "category": "ControlFlow",
       "detail": "",
       "expectation": "Simulation",
+      "name": "loop_idiom::test_guarded_packed_scan",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "loop_idiom::test_guarded_scan_preserves_independent_outputs",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "loop_idiom::test_recovered_bit_count_loop_semantics",
       "phase": "execute",
       "status": "passed"
@@ -6482,7 +6498,7 @@
     "emission_error": 0,
     "ignored": 82,
     "mismatch": 0,
-    "passed": 485,
+    "passed": 487,
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,

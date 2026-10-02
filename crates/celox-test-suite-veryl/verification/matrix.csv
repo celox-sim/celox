@@ -401,6 +401,8 @@ issue3_repro::test_comb_mux_i8_vs_i16_four_state,Regression,Simulation,unsupport
 linear_sorter_pull::test_sorter_empty_flag_single_push_pop,Regression,Simulation,passed,passed
 linear_sorter_pull::test_sorter_push_pop_empty,Regression,Simulation,passed,passed
 linear_sorter_pull::test_sorter_simultaneous_push_pop,Regression,Simulation,passed,passed
+loop_idiom::test_guarded_packed_scan,ControlFlow,Simulation,passed,passed
+loop_idiom::test_guarded_scan_preserves_independent_outputs,ControlFlow,Simulation,passed,passed
 loop_idiom::test_recovered_bit_count_loop_semantics,ControlFlow,Simulation,passed,passed
 multi_clock::test_clock_domain_crossing_pattern,Sequential,Simulation,passed,passed
 multi_clock::test_independent_clock_domains,Sequential,Simulation,passed,passed
