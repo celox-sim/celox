@@ -364,15 +364,22 @@ fn plan(
             return None;
         }
     }
-    // Recover the frontend's unsigned 64-bit bit offset. Both index and
-    // selector are nonnegative in the proven domain and the product fits.
-    let shift_type = eu.register_map.get(shift)?.clone();
-    if shift_type
-        != (RegisterType::Bit {
-            width: 64,
-            signed: false,
-        })
-        || eu.register_map.get(element_width) != Some(&shift_type)
+    // A two-state native offset may still have a logic type in merged SIR.
+    // Both inputs are nonnegative in the proven domain and the product fits
+    // an unsigned 64-bit offset without truncation or sign extension.
+    let is_offset = |reg| {
+        matches!(
+            eu.register_map.get(reg),
+            Some(
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                } | RegisterType::Logic { width: 64 }
+            )
+        )
+    };
+    if !is_offset(shift)
+        || !is_offset(element_width)
         || local.contains(element_width)
             && !matches!(defs.get(element_width), Some(SIRInstruction::Imm(..)))
     {
@@ -387,7 +394,10 @@ fn plan(
         element_mask: *element_mask,
         element_width: *element_width,
         value_type,
-        shift_type,
+        shift_type: RegisterType::Bit {
+            width: 64,
+            signed: false,
+        },
     })
 }
 
@@ -419,7 +429,8 @@ mod tests {
                     0 | 9 | 16 => bit(key_width),
                     3 | 5 | 7 | 12 | 27 => bit(key_width + 1),
                     4 | 6 | 13 | 29 => index_type.clone(),
-                    8 | 10 | 19 => bit(64),
+                    8 | 10 => bit(64),
+                    19 => RegisterType::Logic { width: 64 },
                     15 => bit(32),
                     17 => RegisterType::Logic { width: 1 },
                     18 | 28 => bit(1),
@@ -640,7 +651,7 @@ mod tests {
 
     #[test]
     fn rejects_incomplete_domains_effects_and_escaping_loop_values() {
-        let mut variants = (0..10).map(|_| fixture(8, 3, 32)).collect::<Vec<_>>();
+        let mut variants = (0..12).map(|_| fixture(8, 3, 32)).collect::<Vec<_>>();
         variants[0]
             .blocks
             .get_mut(&BlockId(0))
@@ -710,6 +721,16 @@ mod tests {
                 },
             );
         }
+        variants[10]
+            .register_map
+            .insert(RegisterId(19), RegisterType::Logic { width: 4 });
+        variants[11].register_map.insert(
+            RegisterId(10),
+            RegisterType::Bit {
+                width: 64,
+                signed: true,
+            },
+        );
         for mut eu in variants {
             eu.verify();
             let before = eu.clone();
