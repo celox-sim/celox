@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.0 (2026-10-02)
+
+## What's Changed
+* fix(ci): reserve build time in Heliodor suite timeout by @tignear in https://github.com/celox-sim/celox/pull/935
+* fix(sim): preserve four-state values through casts and concatenation by @tignear in https://github.com/celox-sim/celox/pull/939
+* feat(sv): support bit vector predicate functions by @tignear in https://github.com/celox-sim/celox/pull/940
+* fix(bench): unify Heliodor revision and publish successful runs by @tignear in https://github.com/celox-sim/celox/pull/943
+* chore(deps): update pnpm to v12.6.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/946
+* chore(deps): update dependency @napi-rs/cli to v3.10.5 by @renovate[bot] in https://github.com/celox-sim/celox/pull/945
+* fix(release): publish created tags after batched merges by @tignear in https://github.com/celox-sim/celox/pull/948
+* fix(bench): order Heliodor comparisons by measurement time by @tignear in https://github.com/celox-sim/celox/pull/949
+* fix(wasm): preserve independent chunks in wide slices by @tignear in https://github.com/celox-sim/celox/pull/941
+* feat(sv)!: support packed structs and member access by @tignear in https://github.com/celox-sim/celox/pull/942
+* test(veryl): extend reusable suite with upstream behavioral cases by @tignear in https://github.com/celox-sim/celox/pull/952
+* fix(ci): eliminate duplicate Rust tests and parallelize binding builds by @tignear in https://github.com/celox-sim/celox/pull/950
+* ci: queue benchmark runs while preserving latest PR priority by @tignear in https://github.com/celox-sim/celox/pull/954
+* ci(napi): validate publication sources and restrict cache writes by @tignear in https://github.com/celox-sim/celox/pull/955
+* fix(simulator): preserve wide shift counts and packed constant storage by @tignear in https://github.com/celox-sim/celox/pull/953
+* chore(deps): update updatecli/updatecli-action action to v3.8.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/958
+* feat(test-suite): tag expectations beyond SystemVerilog requirements by @tignear in https://github.com/celox-sim/celox/pull/959
+* chore(deps): update dependency vite to v8.3.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/962
+* feat(bench): cache native Heliodor compilations by @tignear in https://github.com/celox-sim/celox/pull/960
+* fix(veryl): preserve contextual widths and signed member reads by @tignear in https://github.com/celox-sim/celox/pull/966
+* chore(deps): update rust crate blake3 to v1.8.7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/969
+* chore(deps): update dependency monaco-editor to ^0.57.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/971
+* perf(sir): simplify guarded scans and packed array updates by @tignear in https://github.com/celox-sim/celox/pull/970
+* chore(deps): update vitest monorepo to v5.0.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/973
+* chore(deps): update pnpm to v12.7.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/975
+* fix(sir): preserve shared values across switch arms by @tignear in https://github.com/celox-sim/celox/pull/974
+* fix(x86): keep Windows JIT state valid across preemption by @tignear in https://github.com/celox-sim/celox/pull/976
+* feat(veryl): warn on side effects in array default and repeat items by @tignear in https://github.com/celox-sim/celox/pull/967
+* chore(deps): update rust to v1.99.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/963
+* feat(sv): support constant indexed selections emitted by Veryl by @tignear in https://github.com/celox-sim/celox/pull/964
+* fix(deps): keep Rust and Nix overlay updates aligned by @tignear in https://github.com/celox-sim/celox/pull/977
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.8.2...v0.9.0
+
 ## 0.8.2 (2026-09-28)
 
 ## What's Changed
