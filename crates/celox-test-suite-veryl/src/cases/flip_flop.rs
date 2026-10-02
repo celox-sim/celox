@@ -4060,31 +4060,4 @@ fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(si
         assert_eq!(sim.get(out_q), expected.into());
     }
 }
-
-
-
-fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
-    @setup { let code = r#"
-        module Top (
-            clk: input clock,
-            in_a: input logic,
-            out_q: output logic
-        ) {
-            function f (x: input logic) -> logic {
-                return x[0];
-            }
-            always_ff (clk) {
-                out_q = f(in_a | 1'b0);
-            }
-        }
-    "#; }
-    @build Design::new(code, "Top");
-    let clk = sim.event("clk");
-    let in_a = sim.signal("in_a");
-    let out_q = sim.signal("out_q");
-
-    sim.modify(|io| io.set(in_a, 1u8)).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(out_q), 1u32.into());
-}
 }

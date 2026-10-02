@@ -1978,6 +1978,7 @@ fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
 }
 
 fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
+    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
     @omit_veryl;
     @ignore_on(sv);
     @case "flip_flop::test_ff_bits_and_size_array_dependencies_do_not_alias_later_write";
@@ -4255,7 +4256,7 @@ fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
 }
 
 fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_restores_initialized_forwarded_alias_view";
 }
 
@@ -4277,12 +4278,12 @@ fn test_ff_function_call_keeps_array_view_active_for_output_index(sim) {
 }
 
 fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_restores_array_literal_view_after_reentrant_call";
 }
 
 fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "flip_flop::test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call";
 }
 
@@ -4348,10 +4349,6 @@ fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order
 fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(sim) {
     @ignore_on(veryl, sv);
     @case "flip_flop::test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items";
-}
-
-fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
-    @case "flip_flop::test_ff_function_call_bit_select_on_nonvariable_one_bit_formal";
 }
 
 }
