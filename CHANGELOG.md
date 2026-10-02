@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.1 (2026-10-02)
+
+## What's Changed
+* perf(sir): avoid repeated full scans in sparse-case discovery by @tignear in https://github.com/celox-sim/celox/pull/978
+* perf(x86): avoid redundant ready-candidate invalidation by @tignear in https://github.com/celox-sim/celox/pull/981
+* perf(sir): batch disjoint sparse-case rewrites by @tignear in https://github.com/celox-sim/celox/pull/982
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.9.0...v0.9.1
+
 ## 0.9.0 (2026-10-02)
 
 ## What's Changed
