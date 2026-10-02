@@ -8,6 +8,7 @@ use super::memory::block_opt;
 use crate::optimizer::pipeline::pass_manager;
 
 mod loop_reduction_guard;
+mod packed_index_update;
 pub(in crate::optimizer) mod pass_branchify_mux;
 pub(in crate::optimizer) mod pass_control_flow_simplify;
 pub(in crate::optimizer) mod pass_effect_case_dispatch;
