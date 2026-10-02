@@ -315,7 +315,7 @@ fn precompiled_runtime_restores_initial_state_and_settles_outputs() {
                 assign out = mem[0] + 8'd1;
             }}
         "#,
-        memory_path.display()
+        memory_path.to_string_lossy().replace('\\', "/")
     );
     let sim = Simulator::builder(&source, "Top").build().unwrap();
     let image = sim.shared_code().program_image().clone();

@@ -296,6 +296,31 @@ describe("E2E: external frontend artifact", () => {
 	});
 });
 
+describe("E2E: native execution across preemption", () => {
+	test("preserves simulation state during a long native tick batch", () => {
+		const sim = Simulator.fromSource<{ readonly count: bigint }>(
+			`module Counter (clk: input clock, count: output bit<32>) {
+    var value: bit<32>;
+    always_ff (clk) { value = value + 1; }
+    assign count = value;
+}`,
+			"Counter",
+		);
+		try {
+			// Run enough native code for scheduler preemption to occur.
+			// Windows can reset a borrowed FS base while this code is running;
+			// small batches usually finish before the resulting access violation.
+			const ticks = 1_000_000;
+			sim.tick(ticks);
+			expect(sim.dut.count).toBe(BigInt(ticks));
+			sim.tick();
+			expect(sim.dut.count).toBe(BigInt(ticks + 1));
+		} finally {
+			sim.dispose();
+		}
+	}, 15_000);
+});
+
 describe("E2E: Simulator.fromSource (event-based)", () => {
 	test("combinational adder: a + b = sum", () => {
 		interface AdderPorts {
