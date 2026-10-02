@@ -474,8 +474,7 @@ fn rejects_nonpositive_and_runtime_indexed_widths() {
         let error =
             Simulator::from_sv_sources(vec![(&source, Path::new("invalid_width.sv"))], "Top")
                 .build_cranelift()
-                .err()
-                .expect("invalid indexed width must be rejected")
+                .expect_err("invalid indexed width must be rejected")
                 .to_string();
         assert!(error.contains("indexed part-select"), "{error}");
     }
@@ -492,8 +491,7 @@ fn rejects_runtime_selected_bases() {
     let error =
         Simulator::from_sv_sources(vec![(source, Path::new("runtime_selected_base.sv"))], "Top")
             .build_cranelift()
-            .err()
-            .expect("selected runtime base must be rejected")
+            .expect_err("selected runtime base must be rejected")
             .to_string();
     assert!(error.contains("indexed part-select"), "{error}");
 }
@@ -509,8 +507,7 @@ fn rejects_selected_widths_that_are_nonpositive() {
             "Top",
         )
         .build_cranelift()
-        .err()
-        .expect("selected width must be positive")
+        .expect_err("selected width must be positive")
         .to_string();
         assert!(error.contains("indexed part-select"), "{error}");
     }
@@ -526,8 +523,7 @@ fn rejects_indexed_selections_in_unlowered_constant_contexts() {
             format!("module Top; localparam logic [7:0] P = 8'hab; {declaration} endmodule");
         Simulator::from_sv_sources(vec![(&source, Path::new("unlowered_constant.sv"))], "Top")
             .build_cranelift()
-            .err()
-            .expect("unlowered indexed constants must be rejected");
+            .expect_err("unlowered indexed constants must be rejected");
     }
 }
 
@@ -539,6 +535,5 @@ fn rejects_unresolved_indexed_parameter_initializers_after_collection() {
         "Top",
     )
     .build_cranelift()
-    .err()
-    .expect("an unused unresolved indexed initializer must be rejected");
+    .expect_err("an unused unresolved indexed initializer must be rejected");
 }
