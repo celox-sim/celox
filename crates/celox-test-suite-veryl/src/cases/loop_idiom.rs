@@ -96,6 +96,48 @@ fn test_guarded_scan_preserves_independent_outputs(sim) {
 }
 
 
+fn test_guarded_packed_scan(sim) {
+    @setup { let code = r#"
+        module Top (
+            entries: input logic<32>,
+            gate: input logic,
+            seed: input logic<32>,
+            result: output logic<32>,
+            partial: output logic<32>,
+        ) {
+            always_comb {
+                result = 32'd0;
+                partial = seed;
+                for i in 0..32 {
+                    result[i] = gate && entries[i];
+                }
+                for i in 0..16 {
+                    partial[i] = gate && entries[i];
+                }
+            }
+        }
+    "#; }
+    @build Design::new(code, "Top");
+    let entries = sim.signal("entries");
+    let gate = sim.signal("gate");
+    let seed = sim.signal("seed");
+    let result = sim.signal("result");
+    let partial = sim.signal("partial");
+    for mask in [0u32, 1, 0x8000_0024, u32::MAX] {
+        for initial in [0u32, 0xabcd_ffff, u32::MAX] {
+            sim.set(entries, mask);
+            sim.set(seed, initial);
+            for active in [0u8, 1, 0] {
+                sim.set(gate, active);
+                sim.eval_comb().unwrap();
+                let expected = if active != 0 { mask } else { 0 };
+                assert_eq!(sim.get(result), expected.into());
+                assert_eq!(sim.get(partial), ((initial & 0xffff_0000) | (expected & 0xffff)).into());
+            }
+        }
+    }
+}
+
 fn test_recovered_bit_count_loop_semantics(sim) {
 
     @setup { let code = CODE; }

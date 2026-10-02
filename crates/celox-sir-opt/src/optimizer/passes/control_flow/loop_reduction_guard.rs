@@ -83,6 +83,26 @@ pub(super) fn run(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> usize {
             ));
             active = dst;
         }
+        if eu.register_map.get(&active)
+            != Some(&RegisterType::Bit {
+                width: 1,
+                signed: false,
+            })
+        {
+            next_reg += 1;
+            let dst = RegisterId(next_reg);
+            eu.register_map.insert(
+                dst,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            preheader
+                .instructions
+                .push(SIRInstruction::Unary(dst, UnaryOp::ToTwoState, active));
+            active = dst;
+        }
         preheader.terminator = SIRTerminator::Branch {
             cond: active,
             true_block: (id, plan.initial),
@@ -190,7 +210,19 @@ fn plan(
             skipped.push(*output);
             continue;
         }
-        let (param, guard) = preserved(*output, &block.params, &defs, &local, &eu.register_map, 0)?;
+        let (param, guard) = preserved(*output, &block.params, &defs, &local, &eu.register_map, 0)
+            .or_else(|| {
+                block.params.iter().enumerate().find_map(|(index, param)| {
+                    if constants.get(initial.get(index)?) != Some(&0)
+                        || true_block.1.get(index) != Some(output)
+                        || eu.register_map.get(param) != eu.register_map.get(output)
+                    {
+                        return None;
+                    }
+                    zero_guard(*output, *param, &defs, &local, &eu.register_map, constants)
+                        .map(|guard| (*param, Some(guard)))
+                })
+            })?;
         let index = block.params.iter().position(|r| *r == param)?;
         // Prove the recurrence, not just the final iteration's result.
         if true_block.1.get(index) != Some(output) && true_block.1.get(index) != Some(&param) {
@@ -279,6 +311,90 @@ fn false_guard(
         }
     }
     None
+}
+
+// Packed RTL results often clear and then replace one bit per iteration.
+// An inactive predicate clears that bit rather than preserving an arbitrary
+// accumulator, but a zero seed stays zero throughout the entire scan.
+fn zero_guard(
+    output: RegisterId,
+    param: RegisterId,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    local: &HashSet<RegisterId>,
+    types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, u64>,
+) -> Option<RegisterId> {
+    let mut work = vec![output];
+    let mut visited = HashSet::default();
+    let mut candidates = Vec::new();
+    while let Some(value) = work.pop() {
+        if !visited.insert(value) {
+            continue;
+        }
+        if visited.len() > 4096 || candidates.len() > 32 {
+            return None;
+        }
+        if !local.contains(&value) {
+            if types.get(&value)?.width() == 1 && !constants.contains_key(&value) {
+                candidates.push(value);
+            }
+        } else if let Some(inst) = defs.get(&value) {
+            work.extend(instruction_uses(inst));
+        }
+    }
+    candidates.into_iter().find(|guard| {
+        zero_when_inactive(
+            output,
+            param,
+            *guard,
+            defs,
+            constants,
+            &mut HashMap::default(),
+            0,
+        )
+    })
+}
+
+fn zero_when_inactive(
+    value: RegisterId,
+    param: RegisterId,
+    guard: RegisterId,
+    defs: &HashMap<RegisterId, &SIRInstruction<RegionedAbsoluteAddr>>,
+    constants: &HashMap<RegisterId, u64>,
+    memo: &mut HashMap<RegisterId, bool>,
+    depth: usize,
+) -> bool {
+    if value == param || value == guard || constants.get(&value) == Some(&0) {
+        return true;
+    }
+    if let Some(result) = memo.get(&value) {
+        return *result;
+    }
+    if depth > 64 || memo.len() > 4096 {
+        return false;
+    }
+    let mut zero =
+        |source| zero_when_inactive(source, param, guard, defs, constants, memo, depth + 1);
+    let result = match defs.get(&value) {
+        Some(SIRInstruction::Unary(_, UnaryOp::Ident | UnaryOp::ToTwoState, source)) => {
+            zero(*source)
+        }
+        Some(SIRInstruction::Binary(_, lhs, BinaryOp::And | BinaryOp::LogicAnd, rhs)) => {
+            zero(*lhs) || zero(*rhs)
+        }
+        Some(SIRInstruction::Binary(
+            _,
+            lhs,
+            BinaryOp::Or | BinaryOp::LogicOr | BinaryOp::Xor,
+            rhs,
+        )) => zero(*lhs) && zero(*rhs),
+        Some(SIRInstruction::Binary(_, lhs, BinaryOp::Shl, _)) => zero(*lhs),
+        Some(SIRInstruction::Concat(_, sources)) => sources.iter().all(|source| zero(*source)),
+        Some(SIRInstruction::Mux(_, _, lhs, rhs)) => zero(*lhs) && zero(*rhs),
+        _ => false,
+    };
+    memo.insert(value, result);
+    result
 }
 
 #[cfg(test)]
@@ -450,6 +566,126 @@ mod tests {
         {
             true_block.1[1] = RegisterId(10); // The next iteration overwrites the accumulator without its guard.
         }
+        for mut eu in variants {
+            eu.verify();
+            let before = eu.clone();
+            assert_eq!(run(&mut eu), 0);
+            assert_eq!(eu, before);
+        }
+    }
+
+    fn packed_unit() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut eu = unit();
+        for id in 38..42 {
+            eu.register_map.insert(
+                RegisterId(id),
+                RegisterType::Bit {
+                    width: 8,
+                    signed: false,
+                },
+            );
+        }
+        if let SIRTerminator::Jump(_, args) =
+            &mut eu.blocks.get_mut(&BlockId(0)).unwrap().terminator
+        {
+            args[1] = RegisterId(0);
+        }
+        let instructions = &mut eu.blocks.get_mut(&BlockId(1)).unwrap().instructions;
+        let index = instructions
+            .iter()
+            .position(|inst| def_reg(inst) == Some(RegisterId(32)))
+            .unwrap();
+        instructions.splice(
+            index..=index,
+            [
+                SIRInstruction::Binary(
+                    RegisterId(38),
+                    RegisterId(11),
+                    BinaryOp::And,
+                    RegisterId(10),
+                ),
+                SIRInstruction::Unary(RegisterId(39), UnaryOp::Ident, RegisterId(30)),
+                SIRInstruction::Binary(
+                    RegisterId(40),
+                    RegisterId(39),
+                    BinaryOp::Shl,
+                    RegisterId(10),
+                ),
+                SIRInstruction::Binary(
+                    RegisterId(41),
+                    RegisterId(40),
+                    BinaryOp::And,
+                    RegisterId(10),
+                ),
+                SIRInstruction::Binary(
+                    RegisterId(32),
+                    RegisterId(38),
+                    BinaryOp::Or,
+                    RegisterId(41),
+                ),
+            ],
+        );
+        eu
+    }
+
+    #[test]
+    fn guards_zero_seeded_packed_recurrence() {
+        let mut eu = packed_unit();
+        eu.verify();
+        assert_eq!(run(&mut eu), 1);
+        eu.verify();
+        let SIRTerminator::Branch { false_block, .. } = &eu.blocks[&BlockId(0)].terminator else {
+            panic!("missing guard")
+        };
+        assert_eq!(false_block.1, vec![RegisterId(0), RegisterId(8)]);
+    }
+
+    #[test]
+    fn normalizes_logic_guard_for_two_state_branch() {
+        let mut eu = packed_unit();
+        eu.register_map
+            .insert(RegisterId(5), RegisterType::Logic { width: 1 });
+        if let SIRTerminator::Branch { false_block, .. } =
+            &mut eu.blocks.get_mut(&BlockId(1)).unwrap().terminator
+        {
+            false_block.1.truncate(1);
+        }
+        let exit = eu.blocks.get_mut(&BlockId(2)).unwrap();
+        exit.params.truncate(1);
+        exit.instructions.truncate(1);
+        eu.verify();
+        assert_eq!(run(&mut eu), 1);
+        eu.verify();
+        let entry = &eu.blocks[&BlockId(0)];
+        assert!(matches!(
+            entry.instructions.last(),
+            Some(SIRInstruction::Unary(_, UnaryOp::ToTwoState, RegisterId(5)))
+        ));
+    }
+
+    #[test]
+    fn rejects_nonzero_seed_and_unguarded_packed_payload() {
+        let mut variants = [packed_unit(), packed_unit()];
+        if let SIRTerminator::Jump(_, args) =
+            &mut variants[0].blocks.get_mut(&BlockId(0)).unwrap().terminator
+        {
+            args[1] = RegisterId(7);
+        }
+        let instructions = &mut variants[1]
+            .blocks
+            .get_mut(&BlockId(1))
+            .unwrap()
+            .instructions;
+        let index = instructions
+            .iter()
+            .position(|inst| def_reg(inst) == Some(RegisterId(30)))
+            .unwrap();
+        instructions[index] = SIRInstruction::Binary(
+            RegisterId(30),
+            RegisterId(5),
+            BinaryOp::LogicOr,
+            RegisterId(29),
+        );
         for mut eu in variants {
             eu.verify();
             let before = eu.clone();
