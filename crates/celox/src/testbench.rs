@@ -1078,6 +1078,7 @@ fn run_testbench_limited<B: SimBackend>(
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
+        scheduler_time: None,
         tick_limit,
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
@@ -1087,7 +1088,7 @@ fn run_testbench_limited<B: SimBackend>(
     } else {
         exec_testbench(sim, testbench, &mut ctx)
     };
-    if let Err(message) = sim.components.finish(ctx.current_time)
+    if let Err(message) = sim.components.finish(ctx.component_time())
         && !matches!(result, ExecResult::Fail(_))
     {
         result = ExecResult::Fail(message);
@@ -1170,6 +1171,8 @@ pub fn run_compiled_testbench_to_finish<B: SimBackend>(
 /// Reaching the limit is reported separately from the testbench result so a
 /// performance prefix cannot be mistaken for a completed test. Concurrent waits
 /// share clock edges; simultaneous rising edges count as one simulator tick.
+/// At the limit, pending falling edges and reset releases are drained without
+/// resuming initial processes or starting another rising tick.
 pub fn run_compiled_testbench_with_tick_limit<B: SimBackend>(
     sim: &mut Simulator<B>,
     tb: &CompiledTestbench<B>,
@@ -1222,6 +1225,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
+        scheduler_time: None,
         tick_limit: None,
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
@@ -1235,7 +1239,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         ExecResult::Fail(message) => Some(message),
         ExecResult::Continue | ExecResult::Break | ExecResult::Finished => None,
     };
-    if let Err(message) = sim.components.finish(ctx.current_time)
+    if let Err(message) = sim.components.finish(ctx.component_time())
         && error.is_none()
     {
         error = Some(message);
@@ -1251,9 +1255,22 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 struct DetailedExecContext {
     assertions: Vec<AssertionResult>,
     current_time: u64,
+    // Physical event time for concurrent processes; single-process runs use ticks.
+    scheduler_time: Option<u64>,
     tick_limit: Option<u64>,
     tick_limit_reached: bool,
     random: RandomTable,
+}
+
+impl DetailedExecContext {
+    fn component_time(&self) -> u64 {
+        self.scheduler_time.unwrap_or(self.current_time)
+    }
+
+    fn at_tick_limit(&self) -> bool {
+        self.tick_limit
+            .is_some_and(|limit| self.current_time >= limit)
+    }
 }
 
 fn assert_event_args(message: &Option<AssertMessage>) -> &[CompiledAssertArg] {
@@ -1634,13 +1651,21 @@ fn exec_testbench<B: SimBackend>(
     let mut now = 0;
     let mut task_context = Context::from_waker(Waker::noop());
     loop {
-        if ctx
-            .borrow()
-            .tick_limit
-            .is_some_and(|limit| ctx.borrow().current_time >= limit)
-        {
+        ctx.borrow_mut().scheduler_time = Some(now);
+        let draining = ctx.borrow().at_tick_limit();
+        if draining {
             ctx.borrow_mut().tick_limit_reached = true;
-            return ExecResult::Finished;
+            // Stop starting work, but finish edges/releases already scheduled
+            // by the final permitted tick before returning the simulator state.
+            if clocks.iter().all(|clock| clock.falling_edge.is_none())
+                && waits.iter().all(|wait| {
+                    wait.borrow()
+                        .as_ref()
+                        .is_none_or(|wait| wait.resume_at.is_none())
+                })
+            {
+                return ExecResult::Finished;
+            }
         }
         // Capture the baseline before runnable processes drive reset. Reset
         // assertions are signal writes AND events at this timestamp, even if
@@ -1690,7 +1715,7 @@ fn exec_testbench<B: SimBackend>(
         // Poll only ready processes, in declaration order, until their next
         // wait, completion, or a global stop. No simulator borrow crosses await.
         for ((process, wait), locals) in processes.iter_mut().zip(&waits).zip(&mut locals) {
-            if wait.borrow().is_some() {
+            if draining || wait.borrow().is_some() {
                 continue;
             }
             let Some(future) = process else { continue };
@@ -1739,7 +1764,7 @@ fn exec_testbench<B: SimBackend>(
         };
         let fired: Vec<_> = clocks
             .iter()
-            .filter(|clock| clock.next_edge == now && active(clock.event))
+            .filter(|clock| !draining && clock.next_edge == now && active(clock.event))
             .map(|clock| clock.event)
             .collect();
         if !fired.is_empty() || !falling.is_empty() || !reset_edges.borrow().is_empty() {
@@ -1790,7 +1815,7 @@ fn exec_testbench<B: SimBackend>(
         }
         let next_edge = clocks
             .iter()
-            .filter(|clock| active(clock.event))
+            .filter(|clock| !ctx.borrow().at_tick_limit() && active(clock.event))
             .map(|clock| clock.next_edge)
             .min();
         let next_falling = clocks.iter().filter_map(|clock| clock.falling_edge).min();
@@ -1798,11 +1823,18 @@ fn exec_testbench<B: SimBackend>(
             .iter()
             .filter_map(|wait| wait.borrow().as_ref().and_then(|wait| wait.resume_at))
             .min();
-        now = [next_edge, next_falling, next_resume]
+        if let Some(next) = [next_edge, next_falling, next_resume]
             .into_iter()
             .flatten()
             .min()
-            .expect("a live process has a pending wait");
+        {
+            now = next;
+        } else if ctx.borrow().at_tick_limit() {
+            ctx.borrow_mut().tick_limit_reached = true;
+            return ExecResult::Finished;
+        } else {
+            unreachable!("a live process has a pending wait");
+        }
     }
 }
 
@@ -2188,7 +2220,7 @@ fn exec_one_detailed<B: SimBackend>(
                 instance,
                 method,
                 &host_args,
-                ctx.current_time,
+                ctx.component_time(),
                 &mut sim.backend,
             ) {
                 Ok(value) => value,

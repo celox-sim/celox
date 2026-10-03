@@ -2865,6 +2865,35 @@ fn component_finish_hook_observes_final_testbench_time() {
         TestResult::Pass
     );
     assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10);
+    for period in [2, 10] {
+        let code = code
+            .replace(
+                "inst clk: $tb::clock_gen;",
+                &format!(
+                    "inst clk: $tb::clock_gen #(period: {period}); initial {{ clk.next(20); }}"
+                ),
+            )
+            .replace(
+                "$finish();",
+                &format!("$assert(component.time() == {}); $finish();", 10 * period),
+            );
+        let (_dir, metadata) = component_metadata();
+        assert_eq!(
+            Simulator::builder(&code, "t")
+                .with_metadata(metadata)
+                .run_test()
+                .unwrap(),
+            TestResult::Pass
+        );
+        assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10 * period);
+        let (_dir, metadata) = component_metadata();
+        let result = Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed, "{result:?}");
+        assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10 * period);
+    }
 }
 
 #[test]

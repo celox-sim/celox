@@ -434,3 +434,38 @@ fn clock_period_accepts_module_constant_array_element() {
         TestResult::Pass
     );
 }
+
+#[test]
+fn tick_limit_drains_falling_edges_and_reset_release_without_resuming_processes() {
+    let code = r#"
+    module FallingCounter (clk: input clock, count: output logic<8>) {
+        always_ff (clk) { count += 1; }
+    }
+    #[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 10);
+        inst rst: $tb::reset_gen(clk);
+        inst fast: $tb::clock_gen #(period: 2);
+        let inverted: clock = ~clk;
+        var count: logic<8>;
+        inst counter: FallingCounter (clk: inverted, count);
+        initial { fast.next(10); $assert(1'd0, "fast resumed past limit"); }
+        initial { rst.assert(1); $assert(1'd0, "resumed past limit"); }
+        initial { clk.next(2); $assert(1'd0, "resumed past limit"); }
+    }"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1);
+        assert_eq!(result.result, TestResult::Pass);
+        assert_eq!(result.ticks, 1);
+        assert!(result.tick_limit_reached);
+        assert_eq!(sim.get(sim.signal("clk")), 0u32.into());
+        assert_eq!(sim.get(sim.signal("fast")), 0u32.into());
+        assert_eq!(sim.get(sim.signal("rst")), 1u32.into());
+        assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+    check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulator::builder(code, "Top").build_native().unwrap());
+}
