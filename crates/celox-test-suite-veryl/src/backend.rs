@@ -69,6 +69,12 @@ pub trait Backend {
     fn read(&mut self, signal: &SignalPath) -> Result<(BigUint, BigUint)>;
     fn eval_comb(&mut self) -> Result<()>;
     fn tick(&mut self, event: &str) -> Result<()>;
+    /// Run a self-checking initial block to explicit `$finish`. Failed assertions,
+    /// missing completion, and execution errors must not return success.
+    /// Adapters without testbench execution fail explicitly.
+    fn run_testbench(&mut self) -> Result<()> {
+        Err("this adapter does not support native testbench execution".into())
+    }
 }
 
 /// Compiler callback used by every test. Capturing closures allow the caller to
@@ -170,6 +176,10 @@ impl Simulator {
 
     pub fn eval_comb(&mut self) -> Result<()> {
         self.backend.eval_comb()
+    }
+
+    pub fn run_testbench(&mut self) -> Result<()> {
+        self.backend.run_testbench()
     }
 
     pub fn tick(&mut self, event: Event) -> Result<()> {

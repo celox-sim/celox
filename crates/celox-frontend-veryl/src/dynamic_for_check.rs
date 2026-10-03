@@ -1300,6 +1300,18 @@ fn collect_statement_effects(
                     module,
                     active_functions,
                 ));
+                if let Some(destination) = &statement.hier_dst {
+                    collect_index_select_effects(
+                        &destination.index,
+                        &destination.select,
+                        module,
+                        active_functions,
+                        &mut effects,
+                    );
+                    effects.hierarchical_writes.push(
+                        super::testbench::hierarchical_destination_reference(destination),
+                    );
+                }
                 for destination in &statement.dst {
                     collect_destination_effects(
                         destination,
@@ -1516,7 +1528,10 @@ pub(crate) fn function_has_observable_effect(
         let mut effects =
             collect_statement_effects(&body.statements, module, &mut HashSet::default(), false);
         effects.discard_function_locals(module);
-        effects.observable || !effects.writes.is_empty() || !effects.state_changes.is_empty()
+        effects.observable
+            || !effects.writes.is_empty()
+            || !effects.hierarchical_writes.is_empty()
+            || !effects.state_changes.is_empty()
     })
 }
 
@@ -1529,7 +1544,10 @@ pub(crate) fn expression_has_observable_effect(expression: &Expression, module: 
         return true;
     }
     let effects = collect_expression_effects(expression, module, &mut HashSet::default());
-    effects.observable || !effects.writes.is_empty() || !effects.state_changes.is_empty()
+    effects.observable
+        || !effects.writes.is_empty()
+        || !effects.hierarchical_writes.is_empty()
+        || !effects.state_changes.is_empty()
 }
 
 fn collect_expression_effects(

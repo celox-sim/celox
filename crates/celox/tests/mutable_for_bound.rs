@@ -925,3 +925,31 @@ module t {
         .build()
         .expect("event writes to another unpacked element must remain valid");
 }
+
+#[test]
+fn hierarchical_assignment_to_continuation_bound_is_an_error() {
+    for bound in ["dut.mem[0]", "size"] {
+        let code = format!(
+            r#"
+module Memory (size: output logic<8>) {{
+    #[allow(unassign_variable)]
+    var mem: logic<8>[2];
+    assign size = mem[0];
+}}
+#[test(t)]
+module t {{
+    var size: logic<8>;
+    inst dut: Memory (size);
+    initial {{
+        dut.mem[0] = 4;
+        for _i in 0..{bound} {{
+            dut.mem[0] = 1;
+        }}
+        $finish();
+    }}
+}}
+"#
+        );
+        expect_mutable_bound_error(&code, "t");
+    }
+}

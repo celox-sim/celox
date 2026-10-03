@@ -12,8 +12,9 @@ use fxhash::{FxHashMap as HashMap, FxHashSet};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
-    FunctionCall, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind,
-    SystemFunctionOutput, TbMethod, TbMethodCall, VarId, VarIndex, VarSelect, VarSelectOp,
+    FunctionCall, HierAssignDestination, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput,
+    SystemFunctionKind, SystemFunctionOutput, TbMethod, TbMethodCall, VarId, VarIndex, VarSelect,
+    VarSelectOp,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
@@ -215,6 +216,18 @@ fn invalid_hierarchical_reference(
         ),
         Some(&reference.comptime.token),
     )
+}
+
+pub(crate) fn hierarchical_destination_reference(
+    destination: &HierAssignDestination,
+) -> HierVarRef {
+    HierVarRef {
+        inst_path: destination.inst_path.clone(),
+        var_path: destination.var_path.clone(),
+        index: destination.index.clone(),
+        select: destination.select.clone(),
+        comptime: destination.comptime.clone(),
+    }
 }
 
 pub(crate) fn resolve_hierarchical_reference<'a>(
@@ -682,6 +695,17 @@ fn collect_statement_reads(
                 collect_expression_reads(&assign.expr, funcs, active_functions, reads);
                 for dst in &assign.dst {
                     collect_target_reads(dst, funcs, active_functions, reads);
+                }
+                if let Some(destination) = &assign.hier_dst {
+                    // Keep the destination address and any read-modify-write
+                    // state alive even when its value is never asserted.
+                    reads.push(TestbenchRead::Hierarchical(Box::new(
+                        hierarchical_destination_reference(destination),
+                    )));
+                    for index in &destination.index.0 {
+                        collect_expression_reads(index, funcs, active_functions, reads);
+                    }
+                    collect_select_reads(&destination.select, funcs, active_functions, reads);
                 }
             }
             Statement::If(stmt) => {
@@ -1806,6 +1830,24 @@ impl ExprCompiler<'_> {
         self.resolve_target_parts(signal, info, &destination.index, &destination.select)
     }
 
+    fn resolve_hierarchical_target(
+        &self,
+        destination: &HierAssignDestination,
+    ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
+    {
+        let reference = hierarchical_destination_reference(destination);
+        let (address, info) = self.hierarchical_variable(&reference).ok()?;
+        self.resolve_target_parts(
+            SemanticSignal {
+                address,
+                width: info.width,
+            },
+            info,
+            &destination.index,
+            &destination.select,
+        )
+    }
+
     fn resolve_target_parts(
         &self,
         signal: SemanticSignal<StateAddr>,
@@ -1903,7 +1945,15 @@ impl ExprCompiler<'_> {
             return Ok(());
         };
 
-        for (dimension, index) in destination.index.0.iter().enumerate() {
+        Self::validate_target_bounds_parts(info, &destination.index, &destination.select)
+    }
+
+    fn validate_target_bounds_parts(
+        info: &VariableInfo,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Result<(), ParserError> {
+        for (dimension, index) in index.0.iter().enumerate() {
             let Some(&size) = info.array_dims.get(dimension) else {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",
@@ -1927,7 +1977,7 @@ impl ExprCompiler<'_> {
             }
         }
 
-        if destination.select.0.is_empty() && destination.select.1.is_none() {
+        if select.0.is_empty() && select.1.is_none() {
             return Ok(());
         }
 
@@ -1945,8 +1995,8 @@ impl ExprCompiler<'_> {
             })?;
         }
 
-        if let Some((op, range_expr)) = &destination.select.1 {
-            let Some(dimension) = destination.select.0.len().checked_sub(1) else {
+        if let Some((op, range_expr)) = &select.1 {
+            let Some(dimension) = select.0.len().checked_sub(1) else {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",
                     "part select is missing its anchor",
@@ -1963,7 +2013,7 @@ impl ExprCompiler<'_> {
             let scale = strides[dimension];
             let mut prefix_offset = 0usize;
             let mut prefix_is_static = true;
-            for (prefix_dimension, index) in destination.select.0[..dimension].iter().enumerate() {
+            for (prefix_dimension, index) in select.0[..dimension].iter().enumerate() {
                 if let Some(index) = Self::try_const_usize(index) {
                     let size = dims[prefix_dimension];
                     if index >= size {
@@ -2000,7 +2050,7 @@ impl ExprCompiler<'_> {
             let Some(range) = Self::try_const_usize(range_expr) else {
                 return Ok(());
             };
-            let anchor = Self::try_const_usize(destination.select.0.last().unwrap());
+            let anchor = Self::try_const_usize(select.0.last().unwrap());
             if !matches!(op, veryl_analyzer::ir::VarSelectOp::Colon) && range == 0 {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",
@@ -2119,7 +2169,7 @@ impl ExprCompiler<'_> {
                 ));
             }
         } else {
-            if destination.select.0.len() > dims.len() {
+            if select.0.len() > dims.len() {
                 return Err(ParserError::illegal_context(
                     "testbench selected destination",
                     "packed index count exceeds the variable's dimensions",
@@ -2128,7 +2178,7 @@ impl ExprCompiler<'_> {
             }
             let mut offset = 0usize;
             let mut is_static = true;
-            for (dimension, index) in destination.select.0.iter().enumerate() {
+            for (dimension, index) in select.0.iter().enumerate() {
                 if let Some(index) = Self::try_const_usize(index) {
                     let size = dims[dimension];
                     if index >= size {
@@ -2159,10 +2209,10 @@ impl ExprCompiler<'_> {
                     is_static = false;
                 }
             }
-            let selected_width = if destination.select.0.is_empty() {
+            let selected_width = if select.0.is_empty() {
                 total_width
             } else {
-                strides[destination.select.0.len() - 1]
+                strides[select.0.len() - 1]
             };
             if is_static
                 && offset
@@ -2637,14 +2687,18 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     }),
                 }
             }
-            Statement::Assign(a) => a.dst.first().and_then(|destination| {
-                let dst = ec.resolve_target(destination)?;
+            Statement::Assign(a) => {
+                let dst = if let Some(destination) = &a.hier_dst {
+                    ec.resolve_hierarchical_target(destination)?
+                } else {
+                    ec.resolve_target(a.dst.first()?)?
+                };
                 let dst_width = dst.width;
                 Some(GenericTestbenchStatement::Assign {
                     dst,
                     expr: ec.compile_with_width(&a.expr, dst_width),
                 })
-            }),
+            }
             Statement::Break => Some(GenericTestbenchStatement::Break),
             Statement::FunctionCall(fc) => self.convert_function_call(fc, ec, next_assert_site_id),
             _ => None,
@@ -2903,7 +2957,13 @@ fn reject_selected_destinations_in_expression_statements(
     for statement in statements {
         match statement {
             Statement::Assign(statement) => {
-                if statement.dst.iter().any(has_selected_testbench_destination) {
+                if statement.dst.iter().any(has_selected_testbench_destination)
+                    || statement.hier_dst.as_ref().is_some_and(|destination| {
+                        !destination.index.0.is_empty()
+                            || !destination.select.0.is_empty()
+                            || destination.select.1.is_some()
+                    })
+                {
                     return Err(ParserError::illegal_context(
                         "selected destination in expression testbench function",
                         "read-modify-write selected destinations are only supported for statement-level function calls",
@@ -3162,6 +3222,14 @@ fn validate_testbench_statements(
                 for destination in &statement.dst {
                     validate_testbench_destination(destination, lookup, source, active_functions)?;
                 }
+                if let Some(destination) = &statement.hier_dst {
+                    validate_testbench_hierarchical_destination(
+                        destination,
+                        lookup,
+                        source,
+                        active_functions,
+                    )?;
+                }
                 validate_testbench_expression(&statement.expr, lookup, source, active_functions)?
             }
             Statement::If(statement) => {
@@ -3330,6 +3398,42 @@ fn validate_testbench_statements(
             }
             Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_testbench_hierarchical_destination(
+    destination: &HierAssignDestination,
+    lookup: &FrontendLookup,
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
+    for expression in destination
+        .index
+        .0
+        .iter()
+        .chain(destination.select.0.iter())
+    {
+        validate_testbench_expression(expression, lookup, source, active_functions)?;
+    }
+    if let Some((_, expression)) = &destination.select.1 {
+        validate_testbench_expression(expression, lookup, source, active_functions)?;
+    }
+    let reference = hierarchical_destination_reference(destination);
+    let (_, info) = resolve_hierarchical_reference(lookup, &reference)?;
+    ExprCompiler::validate_target_bounds_parts(info, &destination.index, &destination.select)?;
+    let compiler = ExprCompiler {
+        lookup,
+        id_map: &source.id_map,
+        functions: &source.functions,
+        base_instance: lookup.root_instance_and_module().unwrap().0,
+    };
+    if compiler.resolve_hierarchical_target(destination).is_none() {
+        return Err(ParserError::illegal_context(
+            "hierarchical assignment destination",
+            "destination selection cannot be represented by the testbench runtime",
+            Some(&destination.token),
+        ));
     }
     Ok(())
 }
