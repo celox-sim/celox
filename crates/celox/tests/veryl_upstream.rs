@@ -36,13 +36,9 @@ all_backends! {
         @case "veryl_regressions::unary_minus_as_shift_amount";
     }
     fn struct_bit_field_rhs_no_spill(sim) {
-        // SV frontend issue #64: unsupported packed struct/union types.
-        @ignore_on(sv);
         @case "veryl_regressions::struct_bit_field_rhs_no_spill";
     }
     fn wide_struct_bit_field_rhs_no_spill(sim) {
-        // SV frontend issue #64 rejects packed struct/union types.
-        @ignore_on(sv);
         @case "veryl_regressions::wide_struct_bit_field_rhs_no_spill";
     }
     fn wide_ternary_narrow_branch_no_spill(sim) {
@@ -60,5 +56,24 @@ all_backends! {
         // SV frontend issue #64: unsupported cast expressions.
         @ignore_on(sv);
         @case "veryl_regressions::inlined_function_per_callsite_scratch_in_continuous_assign";
+    }
+}
+
+#[test]
+fn zero_dimensions_report_analyzer_diagnostics() {
+    for ty in ["logic<0>", "logic<8>[0]", "logic<2, 0>"] {
+        let source = format!("module Top (value: output {ty}) {{ assign value = '0; }}");
+        let error = celox::Simulator::builder(&source, "Top")
+            .build_interpreter()
+            .unwrap_err();
+        let celox::SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+            panic!("{ty}: expected analyzer rejection, got {error:?}");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, veryl_analyzer::AnalyzerError::ZeroSize { .. })),
+            "{ty}: expected ZeroSize, got {errors:?}"
+        );
     }
 }

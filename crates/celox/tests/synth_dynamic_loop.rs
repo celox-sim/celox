@@ -44,7 +44,7 @@ fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
 }
 
 fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -69,7 +69,7 @@ fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
 }
 
 fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -94,7 +94,7 @@ fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
 }
 
 fn test_i32_mul_step_overflow_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input signed logic<32>,
@@ -119,7 +119,7 @@ fn test_i32_mul_step_overflow_reports_true_loop(sim) {
 }
 
 fn test_i32_shl_step_overflow_reports_true_loop(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             start: input signed logic<32>,
@@ -248,7 +248,7 @@ fn test_runtime_bounds_stalled_step_with_break_guard_false_reports_true_loop(sim
 }
 
 fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "synth_dynamic_loop::test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds";
 }
 

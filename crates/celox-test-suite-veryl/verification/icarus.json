@@ -7377,7 +7377,7 @@
     },
     {
       "category": "Types",
-      "detail": "compile veryl_language::inside_outside_range_endpoints: Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:7: sorry: \"inside\" expressions not supported yet.\n",
+      "detail": "compile veryl_language::inside_outside_range_endpoints: Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:11: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:12: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:13: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:14: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:17: Syntax in assignment statement l-value.\n<case>/source_0.sv:17: error: Incomprehensible case expression.\n",
       "expectation": "Simulation",
       "name": "veryl_language::inside_outside_range_endpoints",
       "phase": "compile",
@@ -8047,6 +8047,16 @@
       ],
       "results": "repros/hierarchical_assignment_icarus.json",
       "note": "Only the two newly registered native testbench cases were run through the standard external adapter. All other observations, including failures and exclusions, are retained from earlier reports."
+    },
+    {
+      "date": "2026-10-03",
+      "suite_version": "0.9.1",
+      "cases": [
+        "veryl_language::parameter_expression_type_cast_widths",
+        "veryl_language::inside_outside_range_endpoints"
+      ],
+      "results": "repros/veryl_0_22_language_icarus.json",
+      "note": "Reran expression casts and runtime inclusive range bounds with Veryl 0.22. Icarus still rejects inside/case-inside syntax. All other results are retained observations, not new runs."
     }
   ],
   "inout_refresh": {

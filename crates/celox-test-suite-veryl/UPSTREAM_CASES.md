@@ -28,8 +28,8 @@ Source files at the pinned revision:
 | `nested_array_index_const_array` | simulator function of the same name | Repeated index transitions; both inner and outer reads |
 | `inst_port_default_value_connected_not_folded` | simulator function of the same name | Connected and omitted input in distinct instances |
 | `inlined_function_per_callsite_scratch_in_continuous_assign` | simulator function of the same name | Swapped inputs, zero, MSB, and all-one inputs; Rust `leading_zeros` oracle |
-| `inside_outside_range_endpoints` | `32_inside_outside.veryl` | All 256 input values; single value, half-open and inclusive ranges |
-| `parameter_expression_type_cast_widths` | `94_cast_by_expression.veryl` | Truncation boundaries and subtraction wrap; named logic types replace expression-cast syntax unavailable in Veryl 0.21 |
+| `inside_outside_range_endpoints` | `32_inside_outside.veryl` | All 256 input values; constant half-open/inclusive ranges and runtime inclusive bounds in inside/outside and case, including empty and singleton ranges |
+| `parameter_expression_type_cast_widths` | `94_cast_by_expression.veryl` | Truncation boundaries and subtraction wrap; Veryl 0.22 parenthesized expression casts checked against equivalent named logic types |
 | `packed_union_members_alias` | `41_union.veryl` | All 256 values through an 8-bit overlay and two packed structure members |
 
 The checked SystemVerilog requirements are IEEE 1800-2023 clause 11.4.10

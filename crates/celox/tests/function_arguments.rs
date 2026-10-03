@@ -40,10 +40,8 @@ fn test_comb_inout_statement_copies_input_before_mutating_formal(sim) {
     @case "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal";
 }
 
-// Veryl d1f70258 leaves state at 0 after the first tick (expected 7).
-// Retained in verification/repros/inout_backends.json in the shared suite.
 fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments";
 }
 
