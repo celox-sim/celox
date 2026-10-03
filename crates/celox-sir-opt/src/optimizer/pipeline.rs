@@ -68,6 +68,7 @@ mod tests {
             eval_apply_ffs: [(event, vec![unit(vec![commit.clone()]), unit(Vec::new())])]
                 .into_iter()
                 .collect(),
+            parallel_eval_comb_apply_ffs: Default::default(),
             eval_comb_apply_ffs: crate::HashMap::default(),
             eval_only_ffs: crate::HashMap::default(),
             apply_ffs: crate::HashMap::default(),

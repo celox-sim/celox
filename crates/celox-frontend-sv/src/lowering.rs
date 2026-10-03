@@ -723,6 +723,7 @@ pub fn schedule_sources(
         ignored_loops,
         true_loops,
         four_state,
+        0,
         trace_options,
         trace,
     )

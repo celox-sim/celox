@@ -32,6 +32,8 @@ pub struct SirProgram<EventAddr, StateAddr> {
     /// Native fast path in which required comb values and one FF event were
     /// scheduled and lowered through the same SIR builder.
     pub eval_comb_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
+    /// Optional partitioned alternative. Shares semantic state with the serial path.
+    pub parallel_eval_comb_apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     pub eval_only_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
 }
@@ -109,6 +111,11 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
             eval_apply_ffs: map_groups(self.eval_apply_ffs, &mut map_event, &mut map_state),
             eval_comb_apply_ffs: map_groups(
                 self.eval_comb_apply_ffs,
+                &mut map_event,
+                &mut map_state,
+            ),
+            parallel_eval_comb_apply_ffs: map_groups(
+                self.parallel_eval_comb_apply_ffs,
                 &mut map_event,
                 &mut map_state,
             ),
@@ -944,14 +951,16 @@ mod program_mapping_tests {
         };
         let program = SirProgram {
             eval_comb: vec![unit.clone()],
-            eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
+            eval_apply_ffs: [(1u32, vec![unit.clone()])].into_iter().collect(),
             eval_comb_apply_ffs: HashMap::default(),
+            parallel_eval_comb_apply_ffs: [(2u32, vec![unit])].into_iter().collect(),
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
         };
 
         let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);
         assert!(mapped.eval_apply_ffs.contains_key(&101));
+        assert_eq!(mapped.parallel_eval_comb_apply_ffs[&102], mapped.eval_comb);
         assert!(matches!(
             mapped.eval_comb[0].blocks[&BlockId(0)]
                 .instructions

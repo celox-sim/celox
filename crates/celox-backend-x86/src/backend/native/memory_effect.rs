@@ -102,6 +102,128 @@ impl MemoryEffects {
     }
 }
 
+/// Conservative physical SimState accesses of a final emitted function.
+/// Ranges are `(byte offset, byte length)`. Absence of this certificate means
+/// the caller must not execute the function concurrently with another function.
+#[derive(Debug, Default)]
+pub struct ParallelMemoryFootprint {
+    pub reads: Vec<(usize, usize)>,
+    pub writes: Vec<(usize, usize)>,
+}
+
+/// This whitelist is deliberately narrower than the optimizer's alias model.
+/// Indexed/pointer operations, sparse pseudos and error exits require separate
+/// emission contracts before they can participate in concurrent execution.
+/// New instruction kinds fail closed instead of inheriting a no-effect default.
+pub(crate) fn parallel_footprint(
+    func: &super::mir::MFunction,
+    arena_start: usize,
+    arena_end: usize,
+) -> Option<ParallelMemoryFootprint> {
+    let mut read = std::collections::BTreeSet::new();
+    let mut write = std::collections::BTreeSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MInst::Mov { .. }
+            | MInst::Mov32 { .. }
+            | MInst::LoadImm { .. }
+            | MInst::Scratch { .. }
+            | MInst::LoadConstantTableAddr { .. }
+            | MInst::Add { .. }
+            | MInst::Add32 { .. }
+            | MInst::Sub { .. }
+            | MInst::Sub32 { .. }
+            | MInst::Mul { .. }
+            | MInst::Mul32 { .. }
+            | MInst::UMulHi { .. }
+            | MInst::And { .. }
+            | MInst::And32 { .. }
+            | MInst::Or { .. }
+            | MInst::Or32 { .. }
+            | MInst::Xor { .. }
+            | MInst::Xor32 { .. }
+            | MInst::Shr { .. }
+            | MInst::Shl { .. }
+            | MInst::Sar { .. }
+            | MInst::MulImm { .. }
+            | MInst::MulImm32 { .. }
+            | MInst::AndImm { .. }
+            | MInst::AndImm32 { .. }
+            | MInst::OrImm { .. }
+            | MInst::ShrImm { .. }
+            | MInst::ShlImm { .. }
+            | MInst::SarImm { .. }
+            | MInst::AddImm { .. }
+            | MInst::SubImm { .. }
+            | MInst::Cmp { .. }
+            | MInst::CmpImm { .. }
+            | MInst::UDiv { .. }
+            | MInst::URem { .. }
+            | MInst::SDiv { .. }
+            | MInst::SRem { .. }
+            | MInst::BitNot { .. }
+            | MInst::Neg { .. }
+            | MInst::Popcnt { .. }
+            | MInst::Bsf { .. }
+            | MInst::Bsr { .. }
+            | MInst::BsrOr { .. }
+            | MInst::Pext { .. }
+            | MInst::Pdep { .. }
+            | MInst::Select { .. }
+            | MInst::CmpSelect { .. }
+            | MInst::CmpImmSelect { .. }
+            | MInst::GuardedCmpSelect { .. }
+            | MInst::Branch { .. }
+            | MInst::Jump { .. }
+            | MInst::Return
+            | MInst::BranchPred {
+                predicate:
+                    BranchPredicate::Compare { .. }
+                    | BranchPredicate::CompareImm { .. }
+                    | BranchPredicate::MemoryNonZero { .. },
+                ..
+            }
+            | MInst::Load { .. }
+            | MInst::Store { .. }
+            | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
+            | MInst::X86Simd(
+                X86SimdInst::Scratch128 { .. }
+                | X86SimdInst::Zero128 { .. }
+                | X86SimdInst::Pack128 { .. }
+                | X86SimdInst::Binary128 { .. }
+                | X86SimdInst::Load128 { .. }
+                | X86SimdInst::Store128 { .. },
+            ) => {}
+            _ => return None,
+        }
+        for (effects, output) in [(reads(inst), &mut read), (writes(inst), &mut write)] {
+            if effects.unknown_memory().is_some() {
+                return None;
+            }
+            for range in effects.ranges() {
+                if range.base == BaseReg::SimState {
+                    let offset = usize::try_from(range.offset).ok()?;
+                    offset.checked_add(range.byte_len)?;
+                    output.insert((offset, range.byte_len));
+                }
+                // StackFrame accesses are emitted into the private native arena.
+            }
+        }
+    }
+    // The emitter also uses this arena for spill, scratch and save operations
+    // absent from MIR. Its complete extent is included, not just MIR stores.
+    let len = arena_end.checked_sub(arena_start)?;
+    if len != 0 {
+        read.insert((arena_start, len));
+        write.insert((arena_start, len));
+    }
+    Some(ParallelMemoryFootprint {
+        reads: read.into_iter().collect(),
+        writes: write.into_iter().collect(),
+    })
+}
+
 /// Translate the compact MIR effect record without coupling celox-analysis to
 /// MIR types. The iterator contains at most three exact ranges and one unknown
 /// object and performs no allocation.
@@ -385,6 +507,63 @@ mod tests {
     use crate::native::mir::{
         BlockId, BranchPredicate, CmpKind, MemoryAliasRange, OpSize, PackedLaneCompareRhs, VReg,
     };
+
+    fn footprint_of(insts: Vec<MInst>) -> Option<ParallelMemoryFootprint> {
+        use crate::native::mir::{MBlock, MFunction};
+        let mut func = MFunction::new(Default::default(), vec![]);
+        func.blocks.push(MBlock {
+            id: BlockId(0),
+            phis: vec![],
+            insts,
+        });
+        parallel_footprint(&func, 1024, 1152)
+    }
+
+    #[test]
+    fn parallel_footprint_covers_machine_width_rmw_and_private_arena() {
+        let result = footprint_of(vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 7,
+                size: OpSize::S64,
+            },
+            MInst::AndStoreImm {
+                base: BaseReg::SimState,
+                offset: 20,
+                size: OpSize::S32,
+                imm: 1,
+            },
+            MInst::Return,
+        ])
+        .unwrap();
+        assert_eq!(result.reads, vec![(7, 8), (20, 4), (1024, 128)]);
+        assert_eq!(result.writes, vec![(20, 4), (1024, 128)]);
+    }
+
+    #[test]
+    fn parallel_footprint_rejects_unproved_addressing_and_effects() {
+        for inst in [
+            MInst::LoadIndexed {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                index: VReg(1),
+                scale: 1,
+                size: OpSize::S64,
+                alias_range: MemoryAliasRange::new(0, 64),
+            },
+            MInst::ReturnError { code: 1 },
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: -1,
+                size: OpSize::S64,
+            },
+        ] {
+            assert!(footprint_of(vec![inst]).is_none());
+        }
+    }
 
     #[test]
     fn memory_branch_keeps_the_folded_load_effect() {

@@ -26,6 +26,33 @@ fn location_hash(path: &Path) -> io::Result<String> {
 
 const MAGIC: &[u8] = b"CELOX-BUILD-CACHE-2\n";
 
+#[allow(clippy::disallowed_methods)] // CLI boundary for compiler cache configuration.
+fn hash_parallel_configuration(hash: &mut blake3::Hasher) {
+    let mut configured = false;
+    for name in [
+        "CELOX_PARALLEL",
+        "CELOX_PARALLEL_PARTITIONS",
+        "CELOX_PARALLEL_PARTITION",
+    ] {
+        let value = std::env::var_os(name);
+        configured |= value.is_some();
+        field(hash, name.as_bytes());
+        field(hash, &[u8::from(value.is_some())]);
+        if let Some(value) = value {
+            field(hash, value.as_encoded_bytes());
+        }
+    }
+    if configured {
+        // The default compile-time lane budget depends on CPU admission.
+        field(
+            hash,
+            &std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .to_le_bytes(),
+        );
+    }
+}
+
 pub(super) struct BuildCache {
     path: PathBuf,
     root: PathBuf,
@@ -315,6 +342,7 @@ impl BuildCache {
             &mut hash,
             format!("{:?}", celox::DiagnosticsOptions::from_env()).as_bytes(),
         );
+        hash_parallel_configuration(&mut hash);
         // Value uses ordered object keys, including metadata's HashMaps.
         // Lockfile's active lock_table is skipped by serde; projects() reads
         // that table in stable order, including refreshed dependency properties.

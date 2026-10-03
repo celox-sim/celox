@@ -22,6 +22,7 @@ pub fn schedule_symbolic_rtl(
         usize,
     )],
     four_state: bool,
+    parallel_lanes: usize,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
 ) -> Result<VerylScheduledRtlOutput, ParserError> {
@@ -55,6 +56,7 @@ pub fn schedule_symbolic_rtl(
         ignored_loops,
         true_loops,
         four_state,
+        parallel_lanes,
         trace_options,
         trace,
     )?;

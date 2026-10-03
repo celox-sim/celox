@@ -3,6 +3,9 @@
 //! Mirrors the structure of JitBackend but compiles through
 //! ISel → scalar MIR → regalloc → host emission instead of Cranelift.
 
+#[path = "parallel.rs"]
+mod parallel;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -102,7 +105,8 @@ pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
 ))]
 pub type NativeSimFunc = unsafe extern "C" fn(*mut u8) -> i64;
 
-/// Time spent inside generated native simulator functions.
+/// Time spent executing generated native simulator functions.
+/// Parallel calls include worker dispatch and synchronization, excluding pool creation.
 ///
 /// Timing is opt-in so normal simulation does not pay for host clock reads.
 /// A call may execute many ticks when the native tick loop is enabled.
@@ -552,6 +556,7 @@ fn codegen_message(message: impl Into<String>) -> SimulatorError {
 }
 
 struct CompiledNativeFunction {
+    parallel_access: Option<parallel::Access>,
     code: Vec<u8>,
     symbols: Vec<jit_mem::JitSymbol>,
     trace: Option<emit::NativeFunctionTrace>,
@@ -689,7 +694,7 @@ fn prepare_merged_sir(
         &mut sir_eu,
         layout,
         four_state,
-        label == "eval_comb_apply_ff",
+        label == "eval_comb_apply_ff" || label.starts_with("parallel_group/"),
         diagnostics,
         || cancelled(cancel),
     )
@@ -746,6 +751,9 @@ fn compile_unit_refs(
     if cancelled(cancel) {
         return Err(cancelled_error());
     }
+    if label == "eval_comb_apply_ff_parallel" {
+        return parallel::compile(units, layout, four_state, x86_options, diagnostics, cancel);
+    }
     let timing = x86_options.diagnostics.phase_timing;
     if units.is_empty() {
         // Empty function: just return 0
@@ -795,6 +803,18 @@ fn compile_unit_refs(
         });
         let symbols = perf_symbols_for_emit_result(label, &empty_result);
         return Ok(CompiledNativeFunction {
+            #[cfg(any(
+                feature = "x86_64-codegen",
+                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+            ))]
+            parallel_access: empty_result
+                .parallel_memory
+                .map(|m| parallel::Access::from_ranges(m.reads, m.writes)),
+            #[cfg(any(
+                feature = "arm64-codegen",
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            parallel_access: None,
             code: empty_result.code,
             symbols,
             trace,
@@ -884,6 +904,18 @@ fn compile_unit_refs(
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
     let required_state_size = emit_result.required_state_size as usize;
     Ok(CompiledNativeFunction {
+        #[cfg(any(
+            feature = "x86_64-codegen",
+            all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+        ))]
+        parallel_access: emit_result
+            .parallel_memory
+            .map(|m| parallel::Access::from_ranges(m.reads, m.writes)),
+        #[cfg(any(
+            feature = "arm64-codegen",
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        parallel_access: None,
         code: emit_result.code,
         symbols,
         trace,
@@ -1094,7 +1126,14 @@ fn collect_ff_compile_tasks_from<'a>(
     for (addr, units) in ff_map {
         let unit_refs = units.iter().collect::<Vec<_>>();
         let binding = format!("{label} trigger={}", sir.get_path(addr));
-        let index = if let Some(index) = tasks.iter().position(|task| task.units == unit_refs) {
+        // The parallel entry has a distinct emitter even when its input units
+        // happen to equal a serial task. Keep ordinary cross-label deduplication
+        // so serial builds do not acquire extra copies of identical functions.
+        let index = if let Some(index) = tasks.iter().position(|task| {
+            (task.label == "eval_comb_apply_ff_parallel")
+                == (label == "eval_comb_apply_ff_parallel")
+                && task.units == unit_refs
+        }) {
             tasks[index].bindings.push(binding);
             index
         } else {
@@ -1700,7 +1739,24 @@ fn compile_program(
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     let sir = laid_out;
     let layout = laid_out.layout();
-    let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
+    let (mut compile_tasks, mut task_bindings) = collect_ff_compile_tasks(sir);
+    if !options.x86_options.baseline
+        && cfg!(all(
+            target_arch = "x86_64",
+            target_os = "linux",
+            not(feature = "arm64-codegen")
+        ))
+        && !options.four_state
+        && layout.trace.is_none()
+    {
+        collect_ff_compile_tasks_from(
+            sir,
+            &sir.sir.parallel_eval_comb_apply_ffs,
+            "eval_comb_apply_ff_parallel",
+            &mut compile_tasks,
+            &mut task_bindings,
+        );
+    }
     let comb_blocks = sir
         .sir
         .eval_comb
@@ -1967,6 +2023,16 @@ fn compile_program(
         )?;
         task_offsets.insert(task_id, offset);
     }
+    for (&(label, addr), &parallel_task) in &task_bindings {
+        if label == "eval_comb_apply_ff_parallel" {
+            let serial_task = task_bindings[&("eval_comb_apply_ff", addr)];
+            image_symbols.push(NativeCodeSymbol {
+                offset: task_offsets[&parallel_task],
+                size: 1,
+                name: format!("{}{}", parallel::ENTRY_PREFIX, task_offsets[&serial_task]),
+            });
+        }
+    }
     // Bind semantic event identities to image-relative function offsets. The
     // precompiled runtime turns these into process-local pointers after it has
     // copied the image into executable memory.
@@ -2133,6 +2199,7 @@ pub struct NativeBackend {
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     execution_timing: Option<NativeExecutionTiming>,
+    parallel: parallel::Runtime,
 }
 
 fn write_bits_to_memory_from(
@@ -2339,6 +2406,7 @@ impl NativeBackend {
             runtime_event_buffer,
             comb_capture_enabled,
             execution_timing: None,
+            parallel: parallel::Runtime::default(),
         };
         backend.install_event_buffers();
         let compiled = Arc::clone(&backend.compiled);
@@ -2364,6 +2432,7 @@ impl NativeBackend {
             runtime_event_buffer,
             comb_capture_enabled,
             execution_timing: None,
+            parallel: parallel::Runtime::default(),
         }
     }
 
@@ -2461,6 +2530,7 @@ impl NativeBackend {
     /// differ, but semantic state and trigger IDs must remain identical.
     /// The image capacity must cover the new `native_memory_size` requirement.
     pub(crate) fn replace_shared_code(&mut self, shared: Arc<SharedNativeCode>) {
+        self.parallel.reset_code();
         let mem_size_words = shared.native_memory_size.div_ceil(8) + 1;
         if self.memory.len_words() < mem_size_words {
             self.memory.resize_zeroed_within_capacity(mem_size_words);
@@ -2658,6 +2728,9 @@ impl super::super::SimBackend for NativeBackend {
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
+        if let Some((_, result)) = self.parallel_run_many(event, 1) {
+            return result;
+        }
         self.call_func_timed(event.comb_apply_func)
     }
 
@@ -2666,12 +2739,17 @@ impl super::super::SimBackend for NativeBackend {
         event: NativeEventRef,
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
+        if count > 0
+            && let Some(result) = self.parallel_run_many(event, count)
+        {
+            return result;
+        }
         if self.compiled.options.native_tick_loop {
             self.call_func_many_timed(event.comb_apply_func, count)
         } else if count == 0 {
             (0, Ok(()))
         } else {
-            (1, self.call_func_timed(event.comb_apply_func))
+            (1, self.eval_comb_apply_ff_at(event))
         }
     }
 

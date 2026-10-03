@@ -112,7 +112,7 @@ impl SLTToSIRLowerer {
         }
     }
 
-    pub(super) fn node_children<A: Hash + Eq + Clone>(
+    pub(crate) fn node_children<A: Hash + Eq + Clone>(
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> Vec<NodeId> {

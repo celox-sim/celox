@@ -501,6 +501,8 @@ fn used_callee_saved(
 
 /// Result of code emission: raw machine code bytes.
 pub struct EmitResult {
+    /// Final instruction effects plus emitter-owned private storage. None forbids concurrency.
+    pub parallel_memory: Option<super::memory_effect::ParallelMemoryFootprint>,
     pub code: Vec<u8>,
     /// Length of executable text before any RIP-relative constant tables.
     pub text_size: usize,
@@ -1554,6 +1556,7 @@ fn emit_planned(
         }
     }
     Ok(EmitResult {
+        parallel_memory: None,
         code: result.inner.code_buffer,
         text_size,
         frame_size: spill_frame_size,

@@ -33,6 +33,7 @@ pub(crate) fn eliminate_dead_stores(
                 .sir
                 .eval_comb_apply_ffs
                 .values()
+                .chain(program.sir.parallel_eval_comb_apply_ffs.values())
                 .flat_map(|units| units.iter()),
         )
         .chain(

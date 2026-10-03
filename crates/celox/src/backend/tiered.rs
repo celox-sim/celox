@@ -60,6 +60,31 @@ use crate::{
     ir::{AbsoluteAddr, LaidOutProgram, SignalRef},
 };
 
+/// Bound speculative promotion capacity independently of partition count.
+/// Native code packs private arenas by their actual scratch size. A program
+/// exceeding this reservation declines promotion without moving the live image.
+fn parallel_promotion_slack_words(laid_out: &LaidOutProgram) -> usize {
+    laid_out
+        .sir
+        .parallel_eval_comb_apply_ffs
+        .values()
+        .map(|units| {
+            units
+                .iter()
+                .fold(0usize, |total, unit| {
+                    unit.register_map
+                        .values()
+                        .fold(total.saturating_add(4096), |n, ty| {
+                            n.saturating_add(ty.width().div_ceil(8).saturating_mul(4))
+                        })
+                })
+                .min(64 * 1024 * 1024)
+                / 8
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Whether this host's default compiled tier is the direct native backend
 /// (mirroring [`crate::DefaultBackend`]'s selection) rather than Cranelift.
 pub(crate) fn native_is_default_target() -> bool {
@@ -693,7 +718,8 @@ impl TieredBackend {
         ) {
             let len = interp.image_word_len();
             let slack = len.max(1024) / 8;
-            interp.reserve_image_capacity(len + slack.max(1024));
+            let parallel_slack = parallel_promotion_slack_words(laid_out);
+            interp.reserve_image_capacity(len + slack.max(1024) + parallel_slack);
         }
         let events = interp
             .id_to_event_slice()
@@ -822,7 +848,8 @@ impl TieredBackend {
         // the single-stage slack before the image can be observed.
         let len = interp.image_word_len();
         let slack = len.max(1024) / 4;
-        interp.reserve_image_capacity(len + slack.max(1024));
+        let parallel_slack = parallel_promotion_slack_words(laid_out);
+        interp.reserve_image_capacity(len + slack.max(1024) + parallel_slack);
         let events = interp
             .id_to_event_slice()
             .iter()

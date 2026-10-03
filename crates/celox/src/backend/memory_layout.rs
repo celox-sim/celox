@@ -191,6 +191,7 @@ pub(crate) fn collect_strided_array_layouts(
         .iter()
         .chain(program.sir.eval_apply_ffs.values().flatten())
         .chain(program.sir.eval_comb_apply_ffs.values().flatten())
+        .chain(program.sir.parallel_eval_comb_apply_ffs.values().flatten())
         .chain(program.sir.eval_only_ffs.values().flatten())
         .chain(program.sir.apply_ffs.values().flatten())
     {

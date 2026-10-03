@@ -602,6 +602,7 @@ fn compile_frontend_to_sir_with_layout_mode(
         ignored_loops,
         true_loops,
         four_state,
+        crate::diagnostics::parallel_partitions_from_env(),
         &frontend_trace_options,
         trace_out.is_some().then_some(&mut frontend_trace),
     )

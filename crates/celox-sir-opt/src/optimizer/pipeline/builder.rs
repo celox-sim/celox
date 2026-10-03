@@ -207,8 +207,15 @@ impl<'a> PipelineBuilder<'a> {
     /// Shared post-pipeline for both fused FF collections. All contained passes
     /// are immutable and can safely be reused across both collections.
     pub(super) fn fused_ff_post(&self) -> ExecutionUnitPassManager {
+        self.fused_ff_post_with_publication(false)
+    }
+
+    pub(super) fn fused_ff_post_with_publication(
+        &self,
+        publishes: bool,
+    ) -> ExecutionUnitPassManager {
         let mut passes = self.manager();
-        if self.on(SirPass::EliminateDeadWorkingStores) {
+        if !publishes && self.on(SirPass::EliminateDeadWorkingStores) {
             passes.add_pass(EliminateDeadWorkingStoresPass);
         }
         if self.on(SirPass::Reschedule) {

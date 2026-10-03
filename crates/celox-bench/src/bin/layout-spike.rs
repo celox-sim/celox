@@ -355,6 +355,7 @@ mod tests {
         SirProgram {
             eval_comb: Vec::new(),
             eval_apply_ffs: FxHashMap::default(),
+            parallel_eval_comb_apply_ffs: Default::default(),
             eval_comb_apply_ffs: FxHashMap::default(),
             eval_only_ffs: FxHashMap::default(),
             apply_ffs: FxHashMap::default(),

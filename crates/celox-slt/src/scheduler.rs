@@ -1,3 +1,6 @@
+#[path = "parallel_partition.rs"]
+mod parallel_partition;
+
 use crate::{
     HashMap, HashSet, LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError,
 };
@@ -2425,6 +2428,10 @@ pub trait ClockFfLowering<Addr> {
     type Error;
 
     fn summaries(&self) -> &[FfAccessSummary<Addr>];
+    /// Unknown adapters must conservatively keep observable work in order.
+    fn has_observable_effects(&self, _index: usize) -> bool {
+        true
+    }
     fn begin(
         &mut self,
         builder: &mut SIRBuilder<Addr>,
@@ -2449,6 +2456,7 @@ pub enum ClockSortError<Addr: Display + Debug + Eq + Hash + Clone, E> {
 }
 
 enum ScheduledWork {
+    ParallelBoundary,
     CombPath(usize),
     CombScc(Vec<usize>),
     /// A dependency-ordered run of state publications selected by one SLT
@@ -3283,6 +3291,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
     mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
+    parallel_lanes: usize,
 ) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
     let (input, ff_plan) = if let Some(ff_lowering) = ff.as_deref() {
         let mut plan = plan_ff_comb_schedule(&input, ff_lowering.summaries())
@@ -3414,8 +3423,10 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let fold_group_schedule_index = build_fold_group_schedule_index(&input, arena);
     let mut path_domains = logic_path_scheduling_domains(&input, &fold_group_schedule_index);
     path_domains.resize(n + ff_count, None);
+    let sccs = std::mem::take(&mut ctx.sccs);
+    drop(ctx);
     let (topological_sccs, component_by_path) =
-        stable_topological_sccs(ctx.sccs, &dependencies.users, &path_domains).ok_or(
+        stable_topological_sccs(sccs, &dependencies.users, &path_domains).ok_or(
             ClockSortError::Scheduler(SchedulerError::InvalidDependencyGraph),
         )?;
     let scheduled_work = schedule_logic_path_regions(
@@ -3429,9 +3440,112 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     .ok_or(ClockSortError::Scheduler(
         SchedulerError::InvalidDependencyGraph,
     ))?;
-    let adj = dependencies.users;
+
+    // Release the original planner's reverse edges and value facts before
+    // allocating the partition graph. Only forward edges remain necessary.
     drop(dependencies.predecessors);
     drop(values);
+
+    let scheduled_work = if parallel_lanes > 1 && !scheduled_work.is_empty() {
+        // Preserve SCCs as indivisible work items. Partitioning may reorder only
+        // independent work; the scheduler's complete dependency graph includes
+        // previous-value reads, publications and FF write order.
+        let mut work_of = vec![usize::MAX; n + ff_count];
+        let mut costs = Vec::with_capacity(scheduled_work.len());
+        let mut node_effects = vec![false; arena.len()];
+        for i in 0..arena.len() {
+            // General folds can raise non-progress errors as well as events.
+            // Fixed-trip ForFoldGroup nodes remain eligible for parallel work.
+            node_effects[i] = matches!(arena.get(NodeId(i)), SLTNode::ForFold { .. })
+                || crate::lower::SLTToSIRLowerer::node_children(NodeId(i), arena)
+                    .iter()
+                    .any(|child| node_effects[child.0]);
+        }
+        let effects = scheduled_work
+            .iter()
+            .map(|work| match work {
+                ScheduledWork::CombPath(p) => {
+                    let p = &input[*p];
+                    matches!(p.target, LogicPathTarget::CombCaptureEvent { .. })
+                        || !p.comb_capture_enable_sites.is_empty()
+                        || node_effects[p.expr.0]
+                        || p.pre_lower_nodes.iter().any(|id| node_effects[id.0])
+                }
+                ScheduledWork::Ff(i) => ff.as_deref().unwrap().has_observable_effects(*i),
+                ScheduledWork::CombScc(_) => true,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let access_words = |v: &VarAtomBase<Addr>| {
+            // Array summaries conservatively cover an entire object even for
+            // one indexed access. Do not price every RAM access as a full RAM
+            // sweep; use its element width for the static scheduling estimate.
+            unpacked_element_widths
+                .get(&v.id)
+                .copied()
+                .unwrap_or(v.access.msb - v.access.lsb + 1)
+                .div_ceil(64)
+                .max(1)
+        };
+        for (i, work) in scheduled_work.iter().enumerate() {
+            let nodes = match work {
+                ScheduledWork::CombPath(p) => vec![*p],
+                ScheduledWork::CombScc(paths) => paths.clone(),
+                ScheduledWork::Ff(f) => vec![n + f],
+                _ => unreachable!("guard regions are formed after partitioning"),
+            };
+            let mut cost = 0u64;
+            for node in nodes {
+                work_of[node] = i;
+                // Estimate scalar memory/operand work, not HDL instance count.
+                // Wide publications and FF actions with many accesses cost more.
+                cost = cost.saturating_add(if node < n {
+                    let path = &input[node];
+                    let words = path.target.var().map_or(1, access_words);
+                    (1 + path.sources.len() + path.previous_sources.len() + words) as u64
+                } else {
+                    let summary = &ff.as_deref().unwrap().summaries()[node - n];
+                    summary
+                        .reads
+                        .iter()
+                        .chain(&summary.writes)
+                        .fold(1u64, |c, v| c.saturating_add(access_words(v) as u64))
+                });
+            }
+            costs.push(cost.max(1));
+        }
+        let mut users = vec![Vec::new(); scheduled_work.len()];
+        for (a, row) in dependencies.users.iter().enumerate() {
+            for &b in row {
+                if work_of[a] != work_of[b] {
+                    users[work_of[a]].push(work_of[b]);
+                }
+            }
+        }
+        parallel_partition::fence_effects(&mut users, &effects);
+        for row in &mut users {
+            row.sort_unstable();
+            row.dedup();
+        }
+        let lanes = parallel_lanes.min(64);
+        let groups = parallel_partition::partition(&users, &costs, lanes);
+        tracing::debug!(
+            nodes = scheduled_work.len(),
+            groups = groups.len(),
+            lanes,
+            "automatic dependency-graph partition"
+        );
+        let mut work = scheduled_work.into_iter().map(Some).collect::<Vec<_>>();
+        let mut result = vec![ScheduledWork::ParallelBoundary];
+        for group in groups {
+            result.extend(group.into_iter().map(|i| work[i].take().unwrap()));
+            result.push(ScheduledWork::ParallelBoundary);
+        }
+        result
+    } else {
+        scheduled_work
+    };
+    let adj = dependencies.users;
     let scheduled_work = form_scheduled_guard_regions(scheduled_work, &input, arena, four_state);
 
     let mut builder = SIRBuilder::new();
@@ -3489,6 +3603,30 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     for work in scheduled_work {
         let singleton;
         let scc = match &work {
+            ScheduledWork::ParallelBoundary => {
+                flush_pending_fold_paths(
+                    &mut pending_fold_indices,
+                    &input,
+                    &fold_group_schedule_index,
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut lower_cache,
+                    &mut dep_memo,
+                    &mut inverse_dep_memo,
+                    unpacked_element_widths,
+                    four_state,
+                );
+                pending_fold_roots.clear();
+                if let Some(unit) = builder.flush_eu() {
+                    unit.verify_result()
+                        .expect("valid fused parallel partition before optimization");
+                    result_eus.push(unit);
+                }
+                lower_cache.clear();
+                continue;
+            }
+
             ScheduledWork::CombPath(path) => {
                 singleton = [*path];
                 singleton.as_slice()
@@ -3967,6 +4105,7 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
         unpacked_element_widths,
         first_runtime_error_code,
         None,
+        0,
     ) {
         Ok(result) => Ok(result),
         Err(ClockSortError::Scheduler(error)) => Err(error),
@@ -3997,6 +4136,33 @@ pub fn sort_clock<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         unpacked_element_widths,
         first_runtime_error_code,
         Some(ff),
+        0,
+    )
+}
+
+pub fn sort_clock_partitioned<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
+    ff: &mut dyn ClockFfLowering<Addr, Error = E>,
+    parallel_lanes: usize,
+) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
+    sort_impl(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        unpacked_element_widths,
+        first_runtime_error_code,
+        Some(ff),
+        parallel_lanes,
     )
 }
 

@@ -486,6 +486,13 @@ fn rewrite_analyzed_static_slots(
 pub(crate) fn promote_fused_comb_static_slots(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<bool, crate::OptimizationError> {
+    promote_fused_comb_static_slots_excluding(eu, &HashSet::default())
+}
+
+pub(crate) fn promote_fused_comb_static_slots_excluding(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    external_reads: &HashSet<AbsoluteAddr>,
+) -> Result<bool, crate::OptimizationError> {
     let cfg = SirCfg::analyze(eu).map_err(|error| {
         crate::OptimizationError::control_flow("fused comb static-slot promotion", error)
     })?;
@@ -496,7 +503,8 @@ pub(crate) fn promote_fused_comb_static_slots(
         .slots
         .iter()
         .filter(|slot| {
-            !slot.has_effectful_store
+            !external_reads.contains(&slot.fragment.addr.absolute_addr())
+                && !slot.has_effectful_store
                 && !slot.has_kill
                 && !slot.escapes
                 && !slot.live_in_entry
@@ -1529,6 +1537,17 @@ mod tests {
                 (RegisterId(3), bit(8)),
                 (RegisterId(4), bit(8)),
             ],
+        );
+
+        let mut published = eu.clone();
+        let external_reads = [addr.absolute_addr()].into_iter().collect();
+        assert!(
+            !promote_fused_comb_static_slots_excluding(&mut published, &external_reads).unwrap()
+        );
+        published.verify_result().unwrap();
+        assert_eq!(
+            published.blocks, eu.blocks,
+            "a later partition must still see both arm stores"
         );
 
         let mut promoted = eu.clone();

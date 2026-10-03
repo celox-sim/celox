@@ -201,3 +201,72 @@ mod host {
 
 #[cfg(feature = "host-runtime")]
 pub use host::DiagnosticsOptions;
+
+/// Environment adapter at the Celox facade; frontend and scheduler APIs receive
+/// an explicit lane budget and never inspect process-global configuration.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn parallel_partitions_from_env() -> usize {
+    if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        return 0;
+    }
+    let enabled = std::env::var("CELOX_PARALLEL").is_ok_and(|v| v != "off")
+        || std::env::var_os("CELOX_PARALLEL_PARTITION").is_some();
+    if !enabled {
+        return 0;
+    }
+    std::env::var("CELOX_PARALLEL_PARTITIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(32)
+        })
+        .clamp(1, 64)
+}
+
+/// Snapshot of the opt-in parallel experiment's environment adapter. Runtime
+/// instances capture it once, so changing process globals cannot reconfigure a
+/// live spin pool halfway through execution.
+#[derive(Clone)]
+pub(crate) struct ParallelEnvironment(crate::HashMap<String, String>);
+
+impl Default for ParallelEnvironment {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl ParallelEnvironment {
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn from_env() -> Self {
+        Self(
+            std::env::vars_os()
+                .filter_map(|(key, value)| {
+                    let key = key.into_string().ok()?;
+                    key.starts_with("CELOX_PARALLEL")
+                        .then(|| (key, value.to_string_lossy().into_owned()))
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn number(&self, name: &str, default: u64) -> u64 {
+        self.get(name)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    }
+}
+
+/// Explicit writer for machine-readable benchmark observations. Kept separate
+/// from normal library tracing; only opt-in measurement paths call this helper.
+pub(crate) fn write_parallel_observation(
+    writer: &mut impl std::io::Write,
+    args: std::fmt::Arguments<'_>,
+) {
+    let _ = writeln!(writer, "{args}");
+}

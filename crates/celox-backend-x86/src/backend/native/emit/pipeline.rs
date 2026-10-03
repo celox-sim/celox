@@ -333,7 +333,7 @@ fn emit_prepared_eu_inner(
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .expect("native simulation-state size overflow");
-    let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
+    let mut result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
         emit_with_plan_tick_loop(
             &mfunc,
             &ra.assignment,
@@ -351,6 +351,13 @@ fn emit_prepared_eu_inner(
             &ssa_destruction,
         )?
     };
+    if label.starts_with("parallel_group/") {
+        result.parallel_memory = super::super::memory_effect::parallel_footprint(
+            &mfunc,
+            state_size,
+            result.required_state_size as usize,
+        );
+    }
     if let Some(trace) = trace {
         trace.disassembly = disassemble_with_block_offsets(
             &result.code[..result.text_size],

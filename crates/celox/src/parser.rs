@@ -175,6 +175,7 @@ fn verify_program_sir(
         .chain(
             sir.eval_comb_apply_ffs
                 .values()
+                .chain(sir.parallel_eval_comb_apply_ffs.values())
                 .flatten()
                 .enumerate()
                 .map(|(unit, eu)| ("eval_comb_apply_ffs", unit, eu)),
@@ -567,6 +568,7 @@ pub fn parse(
             ignored_loops,
             true_loops,
             four_state,
+            crate::diagnostics::parallel_partitions_from_env(),
             &frontend_trace_options,
             trace.is_some().then_some(&mut frontend_trace),
         )
@@ -787,6 +789,7 @@ pub fn parse_with_external_hierarchy(
         ignored_loops,
         true_loops,
         four_state,
+        crate::diagnostics::parallel_partitions_from_env(),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
     )?;
@@ -911,6 +914,7 @@ mod fused_hint_tests {
             sir: SirProgram {
                 eval_comb: Vec::new(),
                 eval_apply_ffs: Default::default(),
+                parallel_eval_comb_apply_ffs: Default::default(),
                 eval_comb_apply_ffs: [
                     (event(0), vec![original.clone()]),
                     (event(1), vec![original.clone()]),

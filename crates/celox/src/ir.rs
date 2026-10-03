@@ -631,6 +631,7 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
         .iter()
         .chain(program.sir.eval_apply_ffs.values().flatten())
         .chain(program.sir.eval_comb_apply_ffs.values().flatten())
+        .chain(program.sir.parallel_eval_comb_apply_ffs.values().flatten())
         .chain(program.sir.eval_only_ffs.values().flatten())
         .chain(program.sir.apply_ffs.values().flatten())
     {
@@ -944,6 +945,7 @@ impl OptimizedSir {
 
         scan_units(&self.sir.eval_apply_ffs, &mut addrs);
         scan_units(&self.sir.eval_comb_apply_ffs, &mut addrs);
+        scan_units(&self.sir.parallel_eval_comb_apply_ffs, &mut addrs);
         scan_units(&self.sir.eval_only_ffs, &mut addrs);
         scan_units(&self.sir.apply_ffs, &mut addrs);
 
@@ -957,6 +959,7 @@ impl OptimizedSir {
             .eval_apply_ffs
             .values()
             .chain(self.sir.eval_comb_apply_ffs.values())
+            .chain(self.sir.parallel_eval_comb_apply_ffs.values())
             .chain(self.sir.eval_only_ffs.values())
         {
             for eu in units {

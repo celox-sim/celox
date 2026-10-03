@@ -113,6 +113,33 @@ fn cached(project: &Path, args: &[&str], status: &str, success: bool) -> String 
     output
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn invalidates_parallel_compilation_configuration() {
+    let project = project(SOURCE);
+    for (mode, lanes, status) in [
+        ("off", "2", "miss"),
+        ("auto", "2", "miss"),
+        ("auto", "8", "miss"),
+        ("auto", "2", "hit"),
+        ("off", "2", "hit"),
+    ] {
+        let output = run_with_env(
+            project.path(),
+            &["--build-cache-dir", "cache", "--compile-only"],
+            true,
+            &[
+                ("CELOX_PARALLEL", mode.as_ref()),
+                ("CELOX_PARALLEL_PARTITIONS", lanes.as_ref()),
+            ],
+        );
+        assert!(
+            output.contains(&format!("CELOX_BUILD_CACHE test=t status={status}")),
+            "{output}"
+        );
+    }
+}
+
 #[cfg(all(
     target_os = "linux",
     target_arch = "x86_64",

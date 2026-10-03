@@ -43,6 +43,7 @@ pub struct FusedFfAction {
     pub trigger: TriggerSet<SourceVarId>,
     pub summary: FfAccessSummary<RegionedAbsoluteAddrBase<SourceVarId>>,
     pub runtime: FfRuntimeRelocation,
+    pub has_observable_effects: bool,
 }
 
 /// Adapter hook for source-aware FF lowering used by shared-clock scheduling,
@@ -288,6 +289,7 @@ pub fn schedule_symbolic_rtl(
         usize,
     )],
     four_state: bool,
+    parallel_lanes: usize,
     trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, ParserError> {
@@ -654,8 +656,12 @@ pub fn schedule_symbolic_rtl(
         })
         .collect();
     let eval_comb = schduled.clone();
-    let mut eval_comb_apply_ffs = HashMap::default();
-    let mut fused_direct_ff_writes = HashMap::default();
+    let mut eval_comb_apply_ffs =
+        HashMap::<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>::default();
+    let mut parallel_eval_comb_apply_ffs =
+        HashMap::<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>::default();
+    let mut fused_direct_ff_writes =
+        HashMap::<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>::default();
     if let (
         Some(factory),
         Some((
@@ -669,17 +675,14 @@ pub fn schedule_symbolic_rtl(
         )),
     ) = (fused_ff_factory, fused_inputs)
     {
-        let mut fused_schedule_cache = HashMap::<
-            Vec<usize>,
-            (
-                Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-                Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-                Vec<VarAtomBase<RegionedAbsoluteAddr>>,
-            ),
-        >::default();
-        let schedule = |paths, actions| {
+        // Cache identities, not a second complete copy of every serial and
+        // parallel instruction stream. Clone only when another trigger really
+        // reuses this schedule. The boolean distinguishes an FF-only schedule
+        // from the pre-existing single-action fallback in eval_apply_ffs.
+        let mut fused_schedule_cache = HashMap::<Vec<usize>, (AbsoluteAddr, bool)>::default();
+        let schedule = |paths, actions, parallel| {
             let mut ff_lowering = factory.create(actions)?;
-            match scheduler::sort_clock(
+            match scheduler::sort_clock_partitioned(
                 paths,
                 &clock_arena,
                 &clock_ignored_loops,
@@ -689,6 +692,7 @@ pub fn schedule_symbolic_rtl(
                 &clock_unpacked_element_widths,
                 next_runtime_error_code,
                 ff_lowering.as_mut(),
+                if parallel { parallel_lanes } else { 0 },
             ) {
                 Ok(schedule) => Ok(schedule),
                 Err(scheduler::ClockSortError::Lowering(error)) => Err(error),
@@ -702,13 +706,15 @@ pub fn schedule_symbolic_rtl(
         };
         for (trigger, actions) in actions {
             let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
-            if let Some((ff_only, units, direct_ff_writes)) = fused_schedule_cache.get(&action_ids)
-            {
-                if let Some(ff_only) = ff_only {
-                    eval_apply_ffs.insert(trigger, ff_only.clone());
+            if let Some(&(previous, has_ff_only)) = fused_schedule_cache.get(&action_ids) {
+                if has_ff_only {
+                    eval_apply_ffs.insert(trigger, eval_apply_ffs[&previous].clone());
                 }
-                eval_comb_apply_ffs.insert(trigger, units.clone());
-                fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                if let Some(parallel) = parallel_eval_comb_apply_ffs.get(&previous).cloned() {
+                    parallel_eval_comb_apply_ffs.insert(trigger, parallel);
+                }
+                eval_comb_apply_ffs.insert(trigger, eval_comb_apply_ffs[&previous].clone());
+                fused_direct_ff_writes.insert(trigger, fused_direct_ff_writes[&previous].clone());
                 continue;
             }
             let fused_start = flatten_timing.then(std::time::Instant::now);
@@ -718,22 +724,27 @@ pub fn schedule_symbolic_rtl(
             // Keep the merged eval-then-apply fallback for adapters without
             // source-aware lowering and the existing single-action fast path.
             let ff_only = if actions.len() > 1 {
-                Some(schedule(Vec::new(), actions.clone())?.execution_units)
+                Some(schedule(Vec::new(), actions.clone(), false)?.execution_units)
             } else {
                 None
             };
-            let fused = schedule(clock_comb_blocks.clone(), actions)?;
+            let parallel = if parallel_lanes > 1 && !four_state {
+                Some(schedule(clock_comb_blocks.clone(), actions.clone(), true)?.execution_units)
+            } else {
+                None
+            };
+            let fused = schedule(clock_comb_blocks.clone(), actions, false)?;
             if let Some(start) = fused_start {
                 tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
             }
             let direct_ff_writes = fused.direct_ff_writes;
             let units = fused.execution_units;
-            fused_schedule_cache.insert(
-                action_ids,
-                (ff_only.clone(), units.clone(), direct_ff_writes.clone()),
-            );
+            fused_schedule_cache.insert(action_ids, (trigger, ff_only.is_some()));
             if let Some(ff_only) = ff_only {
                 eval_apply_ffs.insert(trigger, ff_only);
+            }
+            if let Some(parallel) = parallel {
+                parallel_eval_comb_apply_ffs.insert(trigger, parallel);
             }
             eval_comb_apply_ffs.insert(trigger, units);
             fused_direct_ff_writes.insert(trigger, direct_ff_writes);
@@ -805,6 +816,7 @@ pub fn schedule_symbolic_rtl(
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
+        parallel_eval_comb_apply_ffs,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
@@ -908,6 +920,7 @@ pub fn schedule_symbolic_rtl(
         .iter()
         .chain(sir.eval_apply_ffs.values().flatten())
         .chain(sir.eval_comb_apply_ffs.values().flatten())
+        .chain(sir.parallel_eval_comb_apply_ffs.values().flatten())
         .chain(sir.eval_only_ffs.values().flatten())
         .chain(sir.apply_ffs.values().flatten())
     {
@@ -1463,6 +1476,13 @@ fn build_fused_ff_actions(
                 trigger: trigger.clone(),
                 summary,
                 runtime: runtime_relocations[&instance_id].clone(),
+                has_observable_effects: module.eval_only_ff_blocks.get(trigger).is_none_or(|unit| {
+                    unit.blocks.values().any(|block| matches!(block.terminator, celox_sir::SIRTerminator::Error(_)))
+                        || unit.blocks.values().flat_map(|b| &b.instructions).any(|ins| matches!(ins,
+                        SIRInstruction::RuntimeEvent { .. } | SIRInstruction::CombCaptureEvent { .. }
+                        | SIRInstruction::CombCaptureEnableIfChanged { .. })
+                        || matches!(ins, SIRInstruction::Store(_, _, _, _, _, sites) if !sites.is_empty()))
+                }),
             };
             next_action_id += 1;
             let clock = AbsoluteAddr {

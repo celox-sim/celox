@@ -24,6 +24,7 @@ struct FfClockRecipe<'a> {
     declarations: Vec<&'a FfDeclaration>,
     summary: FfAccessSummary<FusedRegionedAddr>,
     runtime: FfRuntimeRelocation,
+    has_observable_effects: bool,
     veryl_to_source: &'a HashMap<VarId, SourceVarId>,
     source_to_veryl: HashMap<SourceVarId, VarId>,
 }
@@ -168,6 +169,10 @@ impl<'a> SharedClockLowering<'a> {
 
 impl scheduler::ClockFfLowering<FusedRegionedAddr> for SharedClockLowering<'_> {
     type Error = CoreParserError;
+
+    fn has_observable_effects(&self, index: usize) -> bool {
+        self.recipes[index].has_observable_effects
+    }
 
     fn summaries(&self) -> &[FfAccessSummary<FusedRegionedAddr>] {
         &self.summaries
@@ -346,6 +351,7 @@ impl FusedFfLoweringFactory for VerylFusedFfFactory<'_> {
                 declarations,
                 summary: action.summary,
                 runtime: action.runtime,
+                has_observable_effects: action.has_observable_effects,
                 veryl_to_source,
                 source_to_veryl,
             });

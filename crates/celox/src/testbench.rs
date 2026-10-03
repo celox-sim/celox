@@ -1039,6 +1039,7 @@ fn run_testbench_limited<B: SimBackend>(
         .then(|| crate::simulation::simulation_state(sim));
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
+        execution_phases: ExecutionPhases::from_env(),
         current_time: 0,
         tick_limit,
         tick_limit_reached: false,
@@ -1049,6 +1050,7 @@ fn run_testbench_limited<B: SimBackend>(
     } else {
         exec_detailed(sim, testbench.statements(), &mut ctx)
     };
+    ctx.execution_phases.finish(ctx.current_time);
     if let Err(message) = sim.components.finish(ctx.current_time)
         && !matches!(result, ExecResult::Fail(_))
     {
@@ -1182,6 +1184,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         .then(|| crate::simulation::simulation_state(sim));
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
+        execution_phases: ExecutionPhases::from_env(),
         current_time: 0,
         tick_limit: None,
         tick_limit_reached: false,
@@ -1192,6 +1195,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     } else {
         exec_detailed(sim, testbench.statements(), &mut ctx)
     };
+    ctx.execution_phases.finish(ctx.current_time);
     let mut error = match result {
         ExecResult::Fail(message) => Some(message),
         ExecResult::Continue | ExecResult::Break | ExecResult::Finished => None,
@@ -1209,7 +1213,116 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     }
 }
 
+// Experimental Linux-only interval measurements for precompiled performance runs.
+// Buffer observations until execution ends so output cannot perturb later windows.
+#[cfg(target_os = "linux")]
+struct ExecutionPhases {
+    every: u64,
+    start: std::time::Instant,
+    cpu_start: u64,
+    rows: Vec<(u64, u128, u64)>,
+    console: Vec<(u64, String)>,
+}
+
+#[cfg(target_os = "linux")]
+impl ExecutionPhases {
+    fn from_env() -> Self {
+        Self {
+            every: crate::diagnostics::ParallelEnvironment::from_env()
+                .number("CELOX_PARALLEL_PHASE_TICKS", 0),
+            start: std::time::Instant::now(),
+            cpu_start: Self::cpu_ns(),
+            rows: Vec::new(),
+            console: Vec::new(),
+        }
+    }
+
+    fn cpu_ns() -> u64 {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let mut time: libc::timespec = std::mem::zeroed();
+            if libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) == 0 {
+                return time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64;
+            }
+        }
+        0
+    }
+
+    fn cap(&self, count: u64, tick: u64) -> u64 {
+        if self.every == 0 {
+            count
+        } else {
+            count.min(self.every - tick % self.every)
+        }
+    }
+
+    fn record(&mut self, tick: u64) {
+        self.rows.push((
+            tick,
+            self.start.elapsed().as_nanos(),
+            Self::cpu_ns().saturating_sub(self.cpu_start),
+        ));
+    }
+
+    fn observe(&mut self, tick: u64) {
+        if self.every != 0 && tick.is_multiple_of(self.every) {
+            self.record(tick);
+        }
+    }
+
+    fn console(&mut self, tick: u64, message: &str) {
+        if self.every != 0 {
+            self.console.push((tick, message.to_owned()));
+        }
+    }
+
+    fn finish(&mut self, tick: u64) {
+        if self.every == 0 {
+            return;
+        }
+        if tick != 0 && self.rows.last().is_none_or(|row| row.0 != tick) {
+            self.record(tick);
+        }
+        for (tick, wall, cpu) in &self.rows {
+            crate::diagnostics::write_parallel_observation(
+                &mut std::io::stderr().lock(),
+                format_args!("CELOX_PARALLEL_PHASE tick={tick} wall_ns={wall} cpu_ns={cpu}"),
+            );
+        }
+        for (tick, message) in &self.console {
+            crate::diagnostics::write_parallel_observation(
+                &mut std::io::stderr().lock(),
+                format_args!("CELOX_PARALLEL_CONSOLE tick={tick} message={message:?}"),
+            );
+        }
+        self.every = 0;
+    }
+}
+
+// Keep ordinary testbench execution independent of unsupported platform clocks
+// (notably std::time::Instant on wasm32-unknown-unknown).
+#[cfg(not(target_os = "linux"))]
+struct ExecutionPhases;
+
+#[cfg(not(target_os = "linux"))]
+impl ExecutionPhases {
+    fn from_env() -> Self {
+        Self
+    }
+
+    fn cap(&self, count: u64, _tick: u64) -> u64 {
+        count
+    }
+
+    fn observe(&mut self, _tick: u64) {}
+
+    fn console(&mut self, _tick: u64, _message: &str) {}
+
+    fn finish(&mut self, _tick: u64) {}
+}
+
 struct DetailedExecContext {
+    execution_phases: ExecutionPhases,
     assertions: Vec<AssertionResult>,
     current_time: u64,
     tick_limit: Option<u64>,
@@ -1380,8 +1493,14 @@ fn drain_runtime_assertions<B: SimBackend>(
                     location: None,
                 });
             }
-            RuntimeEvent::Display { message } => forward_display(&message, true),
-            RuntimeEvent::Write { message } => forward_display(&message, false),
+            RuntimeEvent::Display { message } => {
+                ctx.execution_phases.console(ctx.current_time, &message);
+                forward_display(&message, true);
+            }
+            RuntimeEvent::Write { message } => {
+                ctx.execution_phases.console(ctx.current_time, &message);
+                forward_display(&message, false);
+            }
         }
     }
     DrainedAssertionEvents {
@@ -1438,7 +1557,7 @@ fn exec_one_detailed<B: SimBackend>(
                         if tick_limit_reached(ctx) {
                             return ExecResult::Finished;
                         }
-                        let mut batch = remaining;
+                        let mut batch = ctx.execution_phases.cap(remaining, ctx.current_time);
                         if let Some(limit) = ctx.tick_limit {
                             batch = batch.min(limit.saturating_sub(ctx.current_time));
                         }
@@ -1458,6 +1577,7 @@ fn exec_one_detailed<B: SimBackend>(
                             );
                         }
                         ctx.current_time = ctx.current_time.saturating_add(completed);
+                        ctx.execution_phases.observe(ctx.current_time);
                         remaining -= completed;
                         if let Err(e) = result {
                             let drained = drain_runtime_assertions(sim, ctx, None);
@@ -1501,7 +1621,7 @@ fn exec_one_detailed<B: SimBackend>(
                     if tick_limit_reached(ctx) {
                         return ExecResult::Finished;
                     }
-                    let mut batch = remaining;
+                    let mut batch = ctx.execution_phases.cap(remaining, ctx.current_time);
                     if let Some(limit) = ctx.tick_limit {
                         batch = batch.min(limit.saturating_sub(ctx.current_time));
                     }
@@ -1526,6 +1646,7 @@ fn exec_one_detailed<B: SimBackend>(
                         );
                     }
                     ctx.current_time = ctx.current_time.saturating_add(completed);
+                    ctx.execution_phases.observe(ctx.current_time);
                     remaining -= completed;
                     if let Err(e) = result {
                         let drained = drain_runtime_assertions(sim, ctx, None);
@@ -1586,6 +1707,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let rendered =
                 render_assert_message(sim, message, ctx.current_time).unwrap_or_default();
+            ctx.execution_phases.console(ctx.current_time, &rendered);
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }

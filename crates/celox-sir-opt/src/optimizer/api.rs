@@ -77,3 +77,11 @@ pub fn optimize_rooted_comb_memory(
         pass_vectorize_concat::remove_dead_definitions(eu);
     }
 }
+
+// Local partitioning experiment: retain publication observed by another unit.
+pub fn promote_partition_comb_static_slots(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    external_reads: &crate::HashSet<AbsoluteAddr>,
+) -> Result<bool, crate::OptimizationError> {
+    pass_global_store_load_forwarding::promote_fused_comb_static_slots_excluding(eu, external_reads)
+}

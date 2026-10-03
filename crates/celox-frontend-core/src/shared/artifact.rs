@@ -53,6 +53,7 @@ impl ScheduledRtl {
             .values_mut()
             .flatten()
             .chain(self.sir.eval_comb_apply_ffs.values_mut().flatten())
+            .chain(self.sir.parallel_eval_comb_apply_ffs.values_mut().flatten())
             .chain(self.sir.eval_only_ffs.values_mut().flatten())
             .chain(self.sir.apply_ffs.values_mut().flatten())
             .chain(self.sir.eval_comb.iter_mut())

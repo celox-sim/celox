@@ -85,6 +85,7 @@ pub(super) fn canonicalize_required(program: &mut OptimizationContext<'_>) {
     // where all optional SIR transforms are disabled.
     move_sparse_commits_to_event_tail(&mut program.sir.eval_apply_ffs);
     move_sparse_commits_to_event_tail(&mut program.sir.eval_comb_apply_ffs);
+    move_sparse_commits_to_event_tail(&mut program.sir.parallel_eval_comb_apply_ffs);
 }
 
 pub(super) fn optimize_with_options(
@@ -172,6 +173,28 @@ pub(super) fn optimize_with_options(
     let comb_ff_late_passes = pipeline_builder.fused_comb_ff_late(program);
     let ff_post_passes = pipeline_builder.fused_ff_post();
     let comb_passes = pipeline_builder.combinational(program);
+    // The alternate path publishes state at every partition boundary.
+    let parallel_post_passes = pipeline_builder.fused_ff_post_with_publication(true);
+    optimize_unit_groups_cached(
+        &mut program.sir.parallel_eval_comb_apply_ffs,
+        &comb_ff_passes,
+        &options,
+    );
+    optimize_unit_groups_cached(
+        &mut program.sir.parallel_eval_comb_apply_ffs,
+        &comb_ff_late_passes,
+        &options,
+    );
+    optimize_unified_commit_groups(
+        &mut program.sir.parallel_eval_comb_apply_ffs,
+        on(SirPass::CommitSinking),
+        on(SirPass::InlineCommitForwarding),
+    );
+    optimize_unit_groups_cached(
+        &mut program.sir.parallel_eval_comb_apply_ffs,
+        &parallel_post_passes,
+        &options,
+    );
 
     let ff_eu_count: usize = program.sir.eval_apply_ffs.values().map(Vec::len).sum();
     let comb_ff_eu_count: usize = program.sir.eval_comb_apply_ffs.values().map(Vec::len).sum();

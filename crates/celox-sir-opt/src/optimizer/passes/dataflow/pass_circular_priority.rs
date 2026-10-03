@@ -302,6 +302,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
                 cfg.block_ids[natural_loop.header],
                 &loop_blocks,
                 &definitions,
+                &use_blocks,
                 &mut constant_cache,
                 &self.bit_array_elements,
                 &self.array_shapes,
@@ -1057,6 +1058,7 @@ fn recognize_sparse_bitmap_loop(
     header: BlockId,
     loop_blocks: &HashSet<BlockId>,
     definitions: &HashMap<RegisterId, Definition>,
+    use_blocks: &HashMap<RegisterId, HashSet<BlockId>>,
     constant_cache: &mut HashMap<RegisterId, Option<bool>>,
     bit_array_elements: &HashMap<AbsoluteAddr, usize>,
     array_shapes: &HashMap<AbsoluteAddr, ArrayShape>,
@@ -1065,6 +1067,24 @@ fn recognize_sparse_bitmap_loop(
         return None;
     }
     let header_block = &eu.blocks[&header];
+    // The empty-mask path bypasses the header entirely. Direct uses of its
+    // definitions after the loop would lose their dominating definition;
+    // loop parameters also change meaning when only selected lanes execute.
+    // Values passed through exit block parameters remain safe: those uses
+    // belong to the header terminator and have explicit bypass arguments.
+    if header_block
+        .params
+        .iter()
+        .copied()
+        .chain(header_block.instructions.iter().filter_map(def_reg))
+        .any(|value| {
+            use_blocks
+                .get(&value)
+                .is_some_and(|users| users.iter().any(|&user| user != header))
+        })
+    {
+        return None;
+    }
     let header_index = cfg.block_index(header)?;
     let outside = cfg.predecessors[header_index]
         .iter()
@@ -4862,6 +4882,51 @@ mod tests {
                 .map(|block| (block.id, block))
                 .collect(),
             register_map: builder.types,
+        }
+    }
+
+    #[test]
+    fn sparse_bitmap_bypass_preserves_loop_definitions_used_after_exit() {
+        for escape_parameter in [false, true] {
+            let mut unit = sparse_bitmap_loop_fixture();
+            let escaped = if escape_parameter {
+                unit.blocks[&BlockId(1)].params[1]
+            } else {
+                let value = RegisterId(unit.register_map.keys().map(|r| r.0).max().unwrap() + 1);
+                unit.register_map.insert(value, unsigned_type(1));
+                unit.blocks
+                    .get_mut(&BlockId(1))
+                    .unwrap()
+                    .instructions
+                    .push(SIRInstruction::Imm(value, SIRValue::new(0u8)));
+                value
+            };
+            unit.blocks
+                .get_mut(&BlockId(2))
+                .unwrap()
+                .instructions
+                .push(SIRInstruction::Store(
+                    address(7),
+                    SIROffset::Static(0),
+                    unit.register_map[&escaped].width(),
+                    escaped,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            unit.verify_result().unwrap();
+            let original = unit.clone();
+            let pass = CircularPriorityPass {
+                bit_array_elements: (0..4)
+                    .map(|raw| (address(raw).absolute_addr(), 16))
+                    .collect(),
+                array_shapes: HashMap::default(),
+            };
+            pass.run(&mut unit, &PassOptions::default());
+            unit.verify_result().unwrap();
+            assert_eq!(
+                unit, original,
+                "bypassing the header would skip an escaping definition"
+            );
         }
     }
 

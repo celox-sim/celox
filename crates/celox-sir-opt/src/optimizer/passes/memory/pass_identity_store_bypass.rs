@@ -134,10 +134,14 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
         &aliases,
         &metadata,
         four_state,
+        false,
         &mut valid,
     );
     for units in program.sir.eval_comb_apply_ffs.values() {
-        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
+        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, false, &mut valid);
+    }
+    for units in program.sir.parallel_eval_comb_apply_ffs.values() {
+        retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, true, &mut valid);
     }
     program
         .layout_requirements
@@ -162,7 +166,12 @@ pub(crate) fn remove_final_identity_alias_stores(
         &metadata,
         four_state,
     );
-    for units in program.sir.eval_comb_apply_ffs.values_mut() {
+    for units in program
+        .sir
+        .eval_comb_apply_ffs
+        .values_mut()
+        .chain(program.sir.parallel_eval_comb_apply_ffs.values_mut())
+    {
         remove_proven_alias_stores(units, validated_aliases, &metadata, four_state);
     }
 }
@@ -172,10 +181,23 @@ fn retain_aliases_valid_for_units(
     aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
+    partitioned: bool,
     valid: &mut HashSet<AbsoluteAddr>,
 ) {
     let facts = collect_global_facts(units, metadata, four_state);
     valid.retain(|alias| {
+        // Partition boundaries can turn an inlined value into a publication
+        // loaded after its identity source has changed. The original globally
+        // unread-alias proof no longer applies to such readers. Keep their
+        // separate homes until we have a cross-partition lifetime proof.
+        if partitioned
+            && facts
+                .accesses
+                .get(alias)
+                .is_some_and(|access| access.reads != 0)
+        {
+            return false;
+        }
         aliases
             .get(alias)
             .is_some_and(|canonical| proven_alias_store(&facts, *alias, *canonical).is_some())
@@ -2289,6 +2311,42 @@ mod tests {
         assert_eq!(
             units[0].blocks[&BlockId(0)].instructions,
             vec![load(0, source, 8)]
+        );
+    }
+
+    #[test]
+    fn partition_publication_outlives_its_identity_source() {
+        let source = address(0);
+        let destination = address(1);
+        let units = vec![
+            single_block_unit(
+                vec![load(0, source, 8), store(destination, 0, 8)],
+                &[(0, 8)],
+            ),
+            single_block_unit(
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(99u8)),
+                    store(source, 0, 8),
+                ],
+                &[(0, 8)],
+            ),
+            single_block_unit(vec![load(0, destination, 8)], &[(0, 8)]),
+        ];
+        let metadata = metadata(&[(source, 8), (destination, 8)]);
+        let aliases = [(destination.absolute_addr(), source.absolute_addr())]
+            .into_iter()
+            .collect();
+        let mut valid = [destination.absolute_addr()].into_iter().collect();
+        // The exact copy is still present, but a later partition needs its
+        // saved value after the source has changed. It needs a separate home.
+        retain_aliases_valid_for_units(&units, &aliases, &metadata, false, true, &mut valid);
+        assert!(valid.is_empty());
+
+        let mut valid = [destination.absolute_addr()].into_iter().collect();
+        retain_aliases_valid_for_units(&units[..2], &aliases, &metadata, false, true, &mut valid);
+        assert!(
+            valid.contains(&destination.absolute_addr()),
+            "unread aliases remain eligible"
         );
     }
 
