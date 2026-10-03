@@ -36,7 +36,7 @@ veryl-analyzer        = { workspace = true }
 veryl-metadata        = { workspace = true }
 veryl-parser          = { workspace = true }
 veryl-path            = { workspace = true }
-veryl-component-sys   = { version = "0.1.1", optional = true }
+veryl-component-sys   = { version = "0.1.2", optional = true }
 libloading            = { version = "0.9", optional = true }
 celox-analysis        = { workspace = true }
 celox-backend-wasm    = { workspace = true }

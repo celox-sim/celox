@@ -3108,3 +3108,39 @@ fn test_runtime_if_in_initial_is_left_for_testbench_runner() {
         TestResult::Pass,
     );
 }
+
+#[test]
+fn test_for_loop_constant_bound_preserves_signedness() {
+    let code = r#"
+        #[test(t)]
+        module t #(
+            param UNSIGNED_END: u32 = 2,
+            param SIGNED_END: i32 = 2,
+        ) {
+            var start: i32;
+            var dynamic_end: u32;
+            var count: u32;
+            initial {
+                start = -2;
+                dynamic_end = 2;
+                count = 0;
+                for _i in start..UNSIGNED_END { count += 1; }
+                $assert(count == 0);
+                for _i in start..=UNSIGNED_END { count += 1; }
+                $assert(count == 0);
+                for _i in start..dynamic_end { count += 1; }
+                $assert(count == 0);
+                for _i in start..SIGNED_END { count += 1; }
+                $assert(count == 4);
+                count = 0;
+                for _i in rev start..UNSIGNED_END { count += 1; }
+                $assert(count == 4);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass
+    );
+}

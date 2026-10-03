@@ -2266,10 +2266,14 @@ fn capture_contains_nested_snapshot(node: NodeId, arena: &SLTNodeArena<AbsoluteA
                 continue_cond,
                 ..
             } => {
-                if let celox_slt::SLTLoopBound::Expr(node) = start {
+                if let celox_slt::SLTLoopBound::Expr(node)
+                | celox_slt::SLTLoopBound::TypedExpr { node, .. } = start
+                {
                     work.push(*node);
                 }
-                if let celox_slt::SLTLoopBound::Expr(node) = end {
+                if let celox_slt::SLTLoopBound::Expr(node)
+                | celox_slt::SLTLoopBound::TypedExpr { node, .. } = end
+                {
                     work.push(*node);
                 }
                 if let celox_slt::SLTForFoldResult::Transient { initial, update } = result {

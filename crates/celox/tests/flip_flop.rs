@@ -4462,8 +4462,11 @@ fn test_ff_case_range_snapshots_pure_lower_bound() {
         .trace_pre_optimized_sir()
         .build_with_trace();
     let sir = result.trace.format_pre_optimized_sir().unwrap();
+    // Veryl 0.22 can retain the range arithmetic instead of folding it.
+    // In either form its value must be captured before the upper-bound effect.
     let lower = sir
-        .find("SIRValue(0x82)")
+        .find(" Mul ")
+        .or_else(|| sir.find("SIRValue(0x82)"))
         .unwrap_or_else(|| panic!("pure lower-bound value:\n{sir}"));
     let upper = sir.find("RuntimeEvent(").expect("effectful upper bound");
 

@@ -499,10 +499,10 @@ fn collect_comb_path_stats(
             ..
         } => {
             stats.for_folds += 1;
-            if let SLTLoopBound::Expr(node) = start {
+            if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = start {
                 collect_comb_path_stats(*node, arena, visited, stats);
             }
-            if let SLTLoopBound::Expr(node) = end {
+            if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = end {
                 collect_comb_path_stats(*node, arena, visited, stats);
             }
             if let SLTForFoldResult::Transient { initial, update } = result {
@@ -549,7 +549,7 @@ fn collect_comb_path_stats(
 
 fn const_for_bound_i64(bound: &ForBound) -> Option<i64> {
     match bound {
-        ForBound::Const(v) => (*v).try_into().ok(),
+        ForBound::Const(v, _) => (*v).try_into().ok(),
         ForBound::Expression(expr) => eval_constexpr(expr)?.to_i64(),
     }
 }
@@ -1500,6 +1500,30 @@ fn extract_store_updates(
     Ok(updates)
 }
 
+// Keep the bound's own type separate from the signed induction variable.
+// Legacy SLT constants use the induction-variable signedness; an unsigned
+// Veryl constant must therefore remain a typed expression.
+fn constant_for_bound(
+    value: usize,
+    signed: bool,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<SLTLoopBound, ParserError> {
+    if signed {
+        Ok(SLTLoopBound::Const(value))
+    } else {
+        let width = (usize::BITS as usize - value.leading_zeros() as usize).max(32);
+        Ok(SLTLoopBound::TypedExpr {
+            node: arena.alloc(SLTNode::Constant(
+                BigUint::from(value),
+                BigUint::from(0u8),
+                width,
+                false,
+            ))?,
+            signed: false,
+        })
+    }
+}
+
 fn eval_for_bound(
     module: &Module,
     store: &SymbolicStore<VarId>,
@@ -1514,8 +1538,8 @@ fn eval_for_bound(
     ParserError,
 > {
     match bound {
-        ForBound::Const(v) => Ok((
-            SLTLoopBound::Const(*v),
+        ForBound::Const(v, signed) => Ok((
+            constant_for_bound(*v, *signed, arena)?,
             HashSet::default(),
             BoundaryMap::default(),
         )),
@@ -1527,7 +1551,14 @@ fn eval_for_bound(
                 .max(32);
             let ((node, sources), bounds) =
                 eval_expression(module, store, expr, arena, Some(width))?;
-            Ok((SLTLoopBound::Expr(node), sources, bounds))
+            Ok((
+                SLTLoopBound::TypedExpr {
+                    node,
+                    signed: crate::context_width::expression_signed(expr),
+                },
+                sources,
+                bounds,
+            ))
         }
     }
 }
@@ -1546,8 +1577,8 @@ fn eval_for_bound_effectful(
     ParserError,
 > {
     match bound {
-        ForBound::Const(value) => Ok((
-            SLTLoopBound::Const(*value),
+        ForBound::Const(value, signed) => Ok((
+            constant_for_bound(*value, *signed, arena)?,
             HashSet::default(),
             BoundaryMap::default(),
         )),
@@ -1557,7 +1588,14 @@ fn eval_for_bound_effectful(
                 .max(32);
             let ((node, sources), boundaries) =
                 eval_expression_effectful(module, store, expression, arena, Some(width))?;
-            Ok((SLTLoopBound::Expr(node), sources, boundaries))
+            Ok((
+                SLTLoopBound::TypedExpr {
+                    node,
+                    signed: crate::context_width::expression_signed(expression),
+                },
+                sources,
+                boundaries,
+            ))
         }
     }
 }
@@ -1571,7 +1609,7 @@ enum LoopBoundStatus {
 
 fn loop_bound_status(bound: &ForBound, width: usize, signed: bool) -> Option<LoopBoundStatus> {
     let value = match bound {
-        ForBound::Const(v) => BigInt::from(*v),
+        ForBound::Const(v, _) => BigInt::from(*v),
         ForBound::Expression(expr) => {
             if !expr.comptime().is_const {
                 return None;
@@ -4108,7 +4146,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_written_accesses_reflects_constant_indeterminate_ternary_folding() {
+    fn test_collect_written_accesses_retains_constant_indeterminate_ternary_arms() {
         let code = r#"
             #[allow(unassign_variable)]
             module Top (
@@ -4152,13 +4190,13 @@ mod tests {
         let mut written = HashMap::default();
         collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
 
-        for name in ["ternary_then", "z_ternary_then"] {
-            let id = var_id_of(&module, &[name]);
-            assert!(!written.contains_key(&id), "{name}");
-        }
+        // Veryl 0.22 preserves both arms when an indeterminate condition
+        // cannot be folded. Collect potential writes from each retained arm.
         for name in [
+            "ternary_then",
             "ternary_else",
             "short_circuit_rhs",
+            "z_ternary_then",
             "z_ternary_else",
             "z_short_circuit_rhs",
         ] {
@@ -4543,17 +4581,37 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_constant_for_bound_keeps_its_type() {
+        let mut arena = SLTNodeArena::default();
+        assert!(matches!(
+            super::constant_for_bound(2, true, &mut arena).unwrap(),
+            super::SLTLoopBound::Const(2),
+        ));
+        let super::SLTLoopBound::TypedExpr {
+            node,
+            signed: false,
+        } = super::constant_for_bound(2, false, &mut arena).unwrap()
+        else {
+            panic!("unsigned constant bound must retain signedness");
+        };
+        assert!(
+            matches!(arena.get(node), SLTNode::Constant(value, _, 32, false)
+            if *value == BigUint::from(2u32))
+        );
+    }
+
+    #[test]
     fn loop_bound_status_allows_exclusive_upper_sentinel() {
         assert_eq!(
-            super::loop_bound_status(&ForBound::Const(255), 8, false),
+            super::loop_bound_status(&ForBound::Const(255, true), 8, false),
             Some(super::LoopBoundStatus::FitsLoopType)
         );
         assert_eq!(
-            super::loop_bound_status(&ForBound::Const(256), 8, false),
+            super::loop_bound_status(&ForBound::Const(256, true), 8, false),
             Some(super::LoopBoundStatus::ExclusiveUpperSentinel)
         );
         assert_eq!(
-            super::loop_bound_status(&ForBound::Const(257), 8, false),
+            super::loop_bound_status(&ForBound::Const(257, true), 8, false),
             Some(super::LoopBoundStatus::OutOfRange)
         );
     }
