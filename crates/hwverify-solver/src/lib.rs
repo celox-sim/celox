@@ -18,3 +18,5 @@ mod proof_bundle;
 pub use proof_bundle::{ProofBundle, RewritePlan, SequentHandle};
 
 mod automatic;
+
+mod equality_sharing;

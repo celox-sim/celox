@@ -365,3 +365,9 @@ See [automatic proofs](AUTOMATIC-PROOFS.md) for the checked boundary, explicit
 aggregate budgets, strict shared mode, held-out evaluation, and limitations.
 The [phase-1 publication record](audit/automatic_proof/PHASE1-PUBLICATION.md)
 includes complete paired replay evidence and the remaining RV32I Unknown scope.
+
+The next checked-sharing increment reuses freshly proved compound equalities
+under exact guards; see [equality sharing](EQUALITY-SHARING.md) for its bounded
+scope, evidence, and remaining Unknown cases.
+Its [phase-2 publication record](audit/equality_sharing/publication/README.md)
+includes complete replay evidence and the mandatory diagnostic CI scope.

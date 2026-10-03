@@ -2,10 +2,13 @@
 //!
 //! This module cannot mint a proof handle. All proposed equalities, rewritten
 //! obligations and both sides of every split are checked by `ProofBundle`.
-use crate::{Check, CutBudgetMode, ProofBundle, SequentHandle};
+use crate::{equality_sharing::EqualityPool, Check, CutBudgetMode, ProofBundle, SequentHandle};
 use hwverify_ir::*;
 use serde_json::{json, Value};
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 type Frontier = (Option<Vec<(Term, Term)>>, Option<Term>);
 
@@ -96,8 +99,54 @@ impl Planner {
             }
         }
     }
-    fn frontier(&mut self, lhs: &Term, rhs: &Term, guards: &[(Term, bool)]) -> Res<Frontier> {
-        let mut todo = vec![(lhs.clone(), rhs.clone(), 0usize)];
+    /// A bounded search view only. Execution freshly checks its equivalence
+    /// under the exact branch antecedent before using any changed expression.
+    fn view(&mut self, root: &Term, guards: &[(Term, bool)]) -> Res<Term> {
+        let mut todo = vec![(root.clone(), false, 0usize)];
+        let mut memo: HashMap<Term, Term> = HashMap::new();
+        while let Some((term, exit, depth)) = todo.pop() {
+            self.tick()?;
+            if depth > 256 {
+                return Err("automatic cofactor depth limit".into());
+            }
+            if memo.contains_key(&term) {
+                continue;
+            }
+            let selected = self.selected(&term, guards)?;
+            if exit {
+                let args = selected
+                    .0
+                    .args
+                    .iter()
+                    .map(|t| memo[t].clone())
+                    .collect::<Vec<_>>();
+                let value = if args == selected.0.args {
+                    selected.clone()
+                } else {
+                    node(selected.0.sort.clone(), selected.0.op.clone(), args)
+                };
+                memo.insert(term, value);
+            } else {
+                todo.push((term, true, depth));
+                todo.extend(
+                    selected
+                        .0
+                        .args
+                        .iter()
+                        .map(|t| (t.clone(), false, depth + 1)),
+                );
+            }
+        }
+        Ok(memo.remove(root).unwrap())
+    }
+    fn frontier(
+        &mut self,
+        lhs: &Term,
+        rhs: &Term,
+        guards: &[(Term, bool)],
+        pool: &EqualityPool,
+    ) -> Res<Frontier> {
+        let mut todo = vec![(self.view(lhs, guards)?, self.view(rhs, guards)?, 0usize)];
         let mut seen = HashSet::new();
         let mut cuts: Vec<(Term, Term)> = vec![];
         let mut split = None;
@@ -114,6 +163,22 @@ impl Planner {
             }
             if a.0.sort != b.0.sort {
                 return Ok((None, split));
+            }
+            let (bridge, visits) = pool.path(&b, &a, guards);
+            self.work += visits;
+            self.tick()?;
+            if bridge.is_some() {
+                if cuts.iter().any(|(from, to)| *from == b && *to != a) {
+                    return Ok((None, split));
+                }
+                if !cuts.iter().any(|(from, to)| *from == b && *to == a) {
+                    cuts.push((b, a));
+                }
+                if cuts.len() > MAX_CUTS {
+                    return Ok((None, split));
+                }
+                matched = true;
+                continue;
             }
             // Split a mismatching mux before proposing an equality across its
             // branches. This avoids assuming that an inactive input is used.
@@ -143,8 +208,9 @@ impl Planner {
                 }
             }
         }
-        // A frontier entirely consisting of leaf renamings is useful only when
-        // at least one operator is shared; an entire goal is never its own cut.
+        // Ordinary frontier cuts require a shared operator. A whole-goal
+        // bridge is allowed only as a proposal backed by asserted facts; its
+        // live handle still requires independent fresh proof.
         Ok((
             if matched || cuts.is_empty() {
                 Some(cuts)
@@ -154,8 +220,14 @@ impl Planner {
             split,
         ))
     }
-    fn build(&mut self, lhs: &Term, rhs: &Term, guards: &mut Vec<(Term, bool)>) -> Res<Plan> {
-        let (cuts, split) = self.frontier(lhs, rhs, guards)?;
+    fn build(
+        &mut self,
+        lhs: &Term,
+        rhs: &Term,
+        guards: &mut Vec<(Term, bool)>,
+        pool: &EqualityPool,
+    ) -> Res<Plan> {
+        let (cuts, split) = self.frontier(lhs, rhs, guards, pool)?;
         let prefer_split = split.is_some()
             && cuts
                 .as_ref()
@@ -173,9 +245,9 @@ impl Planner {
             if let Some(guard) = split {
                 if !guards.iter().any(|(g, _)| *g == guard) {
                     guards.push((guard.clone(), true));
-                    let positive = self.build(lhs, rhs, guards)?;
+                    let positive = self.build(lhs, rhs, guards, pool)?;
                     guards.last_mut().unwrap().1 = false;
-                    let negative = self.build(lhs, rhs, guards)?;
+                    let negative = self.build(lhs, rhs, guards, pool)?;
                     guards.pop();
                     return Ok(Plan::Split(guard, Box::new(positive), Box::new(negative)));
                 }
@@ -189,39 +261,83 @@ impl Planner {
     }
 }
 
-fn execute(bundle: &mut ProofBundle<'_>, plan: &Plan, pre: Term, goal: Term) -> Res<SequentHandle> {
+fn execute(
+    bundle: &mut ProofBundle<'_>,
+    plan: &Plan,
+    pre: Term,
+    goal: Term,
+    guards: &mut Vec<(Term, bool)>,
+    pool: &mut EqualityPool,
+) -> Res<SequentHandle> {
     match plan {
-        Plan::Leaf(cuts) if cuts.is_empty() => bundle.prove("automatic residual", pre, goal),
         Plan::Leaf(cuts) => {
-            let mut handles = vec![];
-            for (from, to) in cuts {
-                handles.push(bundle.prove(
-                    "automatic frontier equality",
+            let started = Instant::now();
+            let mut cofactor = Planner {
+                started,
+                ..Default::default()
+            };
+            let viewed = cofactor.view(&goal, guards);
+            pool.record_cofactor(cofactor.work, false);
+            bundle.charge_search(started, cofactor.work as u64)?;
+            let viewed = viewed?;
+            let normalization = if viewed != goal {
+                let equivalent = bundle.prove(
+                    "automatic guarded cofactor equivalence",
                     pre.clone(),
-                    eq(from.clone(), to.clone()),
-                )?);
+                    eq(goal.clone(), viewed.clone()),
+                )?;
+                pool.record_cofactor(0, true);
+                Some(bundle.prepare_rewrite(pre.clone(), goal, &[equivalent], false)?)
+            } else {
+                None
+            };
+            let result = if cuts.is_empty() {
+                bundle.prove("automatic residual", pre, viewed)?
+            } else {
+                let mut handles = vec![];
+                for (from, to) in cuts {
+                    handles.push(pool.prove(
+                        bundle,
+                        pre.clone(),
+                        from.clone(),
+                        to.clone(),
+                        guards,
+                    )?);
+                }
+                let rewritten = bundle.prepare_rewrite(pre, viewed, &handles, false)?;
+                let proved = bundle.prove(
+                    "automatic rewritten goal",
+                    rewritten.pre().clone(),
+                    rewritten.post().clone(),
+                )?;
+                bundle.finish_rewrite(rewritten, &proved)?
+            };
+            if let Some(plan) = normalization {
+                bundle.finish_rewrite(plan, &result)
+            } else {
+                Ok(result)
             }
-            let rewritten = bundle.prepare_rewrite(pre, goal, &handles, false)?;
-            let result = bundle.prove(
-                "automatic rewritten goal",
-                rewritten.pre().clone(),
-                rewritten.post().clone(),
-            )?;
-            bundle.finish_rewrite(rewritten, &result)
         }
         Plan::Split(guard, positive, negative) => {
+            guards.push((guard.clone(), true));
             let yes = execute(
                 bundle,
                 positive,
                 and(pre.clone(), guard.clone()),
                 goal.clone(),
+                guards,
+                pool,
             )?;
+            guards.last_mut().unwrap().1 = false;
             let no = execute(
                 bundle,
                 negative,
                 and(pre.clone(), not(guard.clone())),
                 goal.clone(),
+                guards,
+                pool,
             )?;
+            guards.pop();
             bundle.join(pre, goal, guard.clone(), &yes, &no)
         }
     }
@@ -253,11 +369,13 @@ impl Check {
         let started = Instant::now();
         let mut tail = &original;
         let mut prefix_count = 0;
+        let mut prefixes = vec![];
         while tail.0.op == "and" && tail.0.args.len() == 2 {
             prefix_count += 1;
             if prefix_count > 128 {
                 return Ok((false, Value::Null));
             }
+            prefixes.push(tail.0.args[0].clone());
             tail = &tail.0.args[1];
         }
         if tail.0.op != "not" || tail.0.args.len() != 1 {
@@ -271,7 +389,13 @@ impl Check {
             started,
             ..Default::default()
         };
-        let plan = match planner.build(&goal.0.args[0], &goal.0.args[1], &mut vec![]) {
+        let pre = prefixes
+            .into_iter()
+            .reduce(and)
+            .unwrap_or_else(|| boolv(true));
+        let mut pool = EqualityPool::new(pre);
+        planner.work += pool.scan_work;
+        let plan = match planner.build(&goal.0.args[0], &goal.0.args[1], &mut vec![], &pool) {
             Ok(plan) if planner.cuts > 0 || planner.leaves > 1 => plan,
             Ok(_) => {
                 return Ok((
@@ -292,7 +416,7 @@ impl Check {
             bundle.charge_search(started, planner.work as u64 + prefix_count)?;
             let pre = bundle.original_pre().clone();
             let goal = bundle.original_goal().clone();
-            let h = execute(&mut bundle, &plan, pre, goal)?;
+            let h = execute(&mut bundle, &plan, pre, goal, &mut vec![], &mut pool)?;
             bundle.finish(&h)
         })();
         if self.reports.len() != before + 1 {
@@ -300,6 +424,7 @@ impl Check {
         }
         let report = self.reports.last_mut().unwrap();
         report["automatic_plan"] = stats.clone();
+        report["equality_sharing"] = pool.stats();
         if let Err(error) = result {
             report["automatic_plan_error"] = json!(error);
         }
@@ -351,7 +476,12 @@ mod tests {
         let goal = &bad.0.args[1].0.args[0];
         let mut planner = Planner::default();
         let plan = planner
-            .build(&goal.0.args[0], &goal.0.args[1], &mut vec![])
+            .build(
+                &goal.0.args[0],
+                &goal.0.args[1],
+                &mut vec![],
+                &EqualityPool::new(boolv(true)),
+            )
             .unwrap();
         assert!(matches!(plan, Plan::Split(_, _, _)));
         assert_eq!(planner.leaves, 2);
@@ -361,13 +491,20 @@ mod tests {
     fn entire_goal_is_not_its_own_cut_and_search_is_bounded() {
         let mut planner = Planner::default();
         assert!(
-            matches!(planner.build(&v("a"),&v("b"),&mut vec![]).unwrap(),Plan::Leaf(c) if c.is_empty())
+            matches!(planner.build(&v("a"),&v("b"),&mut vec![], &EqualityPool::new(boolv(true))).unwrap(),Plan::Leaf(c) if c.is_empty())
         );
         let mut planner = Planner {
             work: MAX_PLAN_WORK,
             ..Default::default()
         };
-        assert!(planner.build(&sum("a"), &sum("b"), &mut vec![]).is_err());
+        assert!(planner
+            .build(
+                &sum("a"),
+                &sum("b"),
+                &mut vec![],
+                &EqualityPool::new(boolv(true))
+            )
+            .is_err());
     }
     #[test]
     fn fresh_kernel_accepts_correct_plan_and_replays_complement_mutation() {

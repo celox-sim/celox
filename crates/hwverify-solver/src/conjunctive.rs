@@ -451,7 +451,10 @@ impl Check {
                     let search_ms = (automatic_search["search_seconds"].as_f64().unwrap_or(0.0)
                         * 1000.0)
                         .ceil() as u64;
-                    limits.timeout_ms = limits.timeout_ms.saturating_sub(search_ms);
+                    limits.timeout_ms = limits
+                        .timeout_ms
+                        .min(timeouts.child)
+                        .saturating_sub(search_ms);
                     self.query_limited(
                         child_name,
                         bad_child,
