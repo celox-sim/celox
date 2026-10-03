@@ -47,6 +47,7 @@ struct Planner {
     leaves: usize,
     cuts: usize,
     word_cutpoint_frontiers: usize,
+    guarded_word_expansions: usize,
 }
 impl Default for Planner {
     fn default() -> Self {
@@ -56,6 +57,7 @@ impl Default for Planner {
             leaves: 0,
             cuts: 0,
             word_cutpoint_frontiers: 0,
+            guarded_word_expansions: 0,
         }
     }
 }
@@ -63,7 +65,7 @@ impl Planner {
     fn stats(&self, prefix_work: u64, accepted: bool, reason: Option<String>) -> Value {
         json!({"version":1,"heuristic":"bounded-structural-frontier-and-mux-splits",
             "search_work":self.work as u64+prefix_work,"search_work_unit":"planner visits; structural comparisons are not constant-time",
-            "search_seconds":self.started.elapsed().as_secs_f64(),"leaves":self.leaves,"equalities":self.cuts,"word_cutpoint_frontiers":self.word_cutpoint_frontiers,
+            "search_seconds":self.started.elapsed().as_secs_f64(),"leaves":self.leaves,"equalities":self.cuts,"word_cutpoint_frontiers":self.word_cutpoint_frontiers,"guarded_word_expansions":self.guarded_word_expansions,
             "accepted":accepted,"reason":reason,"max_search_work":MAX_PLAN_WORK,"max_search_ms":MAX_SEARCH_MS,
             "max_cuts_per_leaf":MAX_CUTS,"max_split_depth":MAX_SPLIT_DEPTH,"max_leaves":MAX_LEAVES,
             "trusted":false,"source_names_used":false,"saved_hints_used":false})
@@ -180,6 +182,36 @@ impl Planner {
                     return Ok((None, split));
                 }
                 matched = true;
+                continue;
+            }
+            // Open a named word only through an asserted, guarded equality.
+            // This merely aligns operator structure; the equality must still
+            // obtain a live handle before any substitution is consumed.
+            let mut expanded = false;
+            for (from, target, left) in [(&a, &b, true), (&b, &a, false)] {
+                let (replacement, work) = pool.expansion(from, target, guards);
+                self.work += work;
+                self.tick()?;
+                if let Some(to) = replacement {
+                    if cuts.iter().any(|(f, _)| f == from) {
+                        continue;
+                    }
+                    if cuts.len() >= MAX_CUTS {
+                        return Ok((None, split));
+                    }
+                    cuts.push((from.clone(), to.clone()));
+                    self.guarded_word_expansions += 1;
+                    todo.push(if left {
+                        (to, b.clone(), depth + 1)
+                    } else {
+                        (a.clone(), to, depth + 1)
+                    });
+                    matched = true;
+                    expanded = true;
+                    break;
+                }
+            }
+            if expanded {
                 continue;
             }
             // Split a mismatching mux before proposing an equality across its
@@ -503,6 +535,29 @@ mod tests {
         assert!(matches!(plan, Plan::Split(_, _, _)));
         assert_eq!(planner.leaves, 2);
         assert_eq!(planner.cuts, 6);
+    }
+    #[test]
+    fn asserted_word_definition_exposes_a_nontrivial_frontier() {
+        let left = add(v("a"), v("b"));
+        let right = node(Sort::Bv(8), "bvxor", vec![v("c"), v("d")]);
+        let product = |t| node(Sort::Bv(8), "bvmul", vec![t, v("factor")]);
+        let pre = and(
+            eq(v("encoded"), product(left.clone())),
+            eq(left, right.clone()),
+        );
+        let mut planner = Planner::default();
+        let plan = planner
+            .build(
+                &v("encoded"),
+                &product(right),
+                &mut vec![],
+                &EqualityPool::new(pre),
+            )
+            .unwrap();
+        assert!(matches!(plan, Plan::Leaf(cuts) if cuts.len() == 2));
+        assert_eq!(planner.guarded_word_expansions, 1);
+        assert_eq!(planner.leaves, 1);
+        assert!(planner.work < MAX_PLAN_WORK);
     }
     #[test]
     fn entire_goal_is_not_its_own_cut_and_search_is_bounded() {

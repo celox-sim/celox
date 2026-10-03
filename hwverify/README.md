@@ -378,3 +378,9 @@ the full hint-free result remain Unknown. Its generic regression gates and the
 separate Rust-Unknown/concrete-counterexample mutation evidence are documented.
 The [phase-3 publication record](audit/word_frontier/publication/README.md)
 preserves those exact boundaries and the complete nonbinary replay inventory.
+
+[Checked guarded word expansion](audit/guarded_expansion/README.md) lets the
+automatic planner expose asserted word definitions using fresh equality handles.
+Two independent generic families gain coverage, with 18 original-formula SAT
+mutants in the fixed gate. The selected hint-free RV32I result remains 431/436;
+the five Unknowns and their guard-selection barrier are documented explicitly.
