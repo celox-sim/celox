@@ -1,0 +1,13 @@
+// Native authoring of a real RV operand-delivery lemma and its guarded use.
+// x_pre/x_post and the checked projection "local" come from the existing
+// current-design proof program. Other checked steps are retained unchanged.
+lemmas "RV operand delivery" {
+  target x_operand1 {
+    lemma delivery {
+      context true;
+      guard x_pre;
+      claim x_post;
+    }
+    use equality: local(context: pre);
+  }
+}

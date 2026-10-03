@@ -1,14 +1,14 @@
 {
   "base_commit": "6d3de84c83a293254f5d7e0b2b952a1c1fd30994",
-  "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
-  "scope": "Shared typed proof-program candidate API and diagnostics; no .hwv candidate surface or automatic heuristic changes.",
+  "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
+  "scope": "Native .hwv authoring over the shared typed candidate API; live query-index diagnostics and exact original-context identity; no automatic heuristic changes.",
   "manual_migrated": {
     "status": "stuttering_refinement_verified",
     "children_verified": 436,
     "unknown_children": [],
     "other_global_obligations_passed": 7,
     "finite_work": 3132146969,
-    "report_sha256": "f066200e2b7976eeec78986c3eb041e805b478ab15460a7552eaeac29cd77e14"
+    "report_sha256": "cf5c1c983a774f442c6e8c57156d78fd2dc0047ae1dbe165b03a61a8c57c5ff3"
   },
   "manual_legacy_comparison": {
     "status": "stuttering_refinement_verified",
@@ -37,7 +37,7 @@
     ],
     "other_global_obligations_passed": 7,
     "finite_work": 3076007506,
-    "report_sha256": "9bff0acf6164cf5f2a982dfc3ba3ac047525d52ef1a3a3e5bec455693b4d17fe"
+    "report_sha256": "c7cb4581cc075cbecd1e380274a338f18bcee3d6f676305b42afd672b2cb4f85"
   },
   "original_queries_byte_identical_hintfree": 437,
   "source_model_and_environment_fields_unchanged": true,
@@ -49,10 +49,10 @@
       "status": "passed",
       "positive_passed": 11,
       "mutants_original_replayed": 18,
-      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6"
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16"
     },
     "phase2": {
-      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
       "status": "passed_with_diagnostic_unknowns",
       "verified_covered_positives": 9,
       "validated_original_counterexamples": 19,
@@ -60,13 +60,13 @@
     },
     "phase3": {
       "status": "passed",
-      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
       "positive_controls_verified": 6,
       "original_formula_sat_mutants": 12
     },
     "guarded_expansion": {
       "status": "passed",
-      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+      "checker_sha256": "cdb764ba590f2cd841cde40e8ee5ac436f94590c902590bd100a6a5e56ca8a16",
       "positive_controls_verified": 12,
       "original_formula_sat_mutants": 36
     },
@@ -75,19 +75,39 @@
     }
   },
   "validation_logs_sha256": {
-    "reviewed-workspace-tests.log": "4b61aa4d13d9d5936790a8536cd4638cfc4141a30d5d17f94a91658d02b6f9e1",
-    "reviewed-clippy.log": "0333a987b1b426171d5d57eda225bbf86e29f890e3a75bfb74f7b1473a0c6169",
-    "reviewed-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "reviewed-python-tests.log": "165bd5d0151f66177c3b546c249b71ffe713de5ff4017170027281781d8092e9"
+    "native-release-workspace-tests.log": "28d6956a73b638a034a84f5c6e756527a1ea8c3b1cff0dea4fb0c8d3d6ca182e",
+    "native-clippy.log": "3d59f4fd94c8ee259988e83ddc5d65bd1bf1d7f75b43d812c5681acb05b5f26f",
+    "native-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "native-python-tests.log": "e933077d5ce48f154baf954676f35f3a4fb3f35204fd9aa65788878a071f683e",
+    "native-tests.log": "929fac1de1358b89a8315a720d38b5f155a94d8621ea62559b874cab1deb8a6b",
+    "native-debug-stack-recheck.log": "5f303456dc35c282e3b1def68480213f284bd64b0451e56e236df70ef351038a"
   },
   "python_tests_passed": 172,
-  "rust_workspace_tests": "passed",
+  "rust_workspace_tests": "release --workspace --locked passed",
   "strict_clippy": "passed",
   "formatting": "passed",
-  "hosted_full665_and_fresh_RTL_import": "required on the new PR; not claimed by local archived-contract reruns",
+  "hosted_full665_and_fresh_RTL_import": "required on updated PR3 head; not claimed by local archived-contract reruns",
   "saved_reports_are_authority": false,
   "evidence": "Complete local query/log trees in /workspace/lemma-candidates; hosted CI uploads complete fresh artifacts. No duplicate large archive committed.",
   "publication_base": "8682f0f2f89c6791cc6f2d4e8f90ebd6235ddf8f",
   "publication_base_tree_equals_tested_base": true,
-  "legacy_comparison_note": "Legacy comparison run preceded the final diagnostic-only root-usefulness adjustment; all 1032 SMT files match the final migrated run."
+  "legacy_comparison_note": "Native manual run has all 1032 SMT files byte-identical to the prior API run, which matched the legacy manual run; all have the same finite work.",
+  "prior_api_checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+  "manual_native": {
+    "status": "stuttering_refinement_verified",
+    "children_verified": 436,
+    "unknown_children": [],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3132146969,
+    "report_sha256": "cf5c1c983a774f442c6e8c57156d78fd2dc0047ae1dbe165b03a61a8c57c5ff3"
+  },
+  "native_input_sha256": "9727b2b8806a1d70bbbadfac54e22ad00a1cae7390d7379fa633ab2a71611022",
+  "native_model_fields_unchanged": true,
+  "native_program_metadata_identical_except_two_source_locations": true,
+  "native_cli_and_interface": "passed; includes source-linked type/cycle/guard errors, prime/binder lowering, label collisions, stale context, real RV overlay preservation",
+  "review_fixes": [
+    "candidate/use diagnostics attribute live query indices, never labels",
+    "original model environment compared exactly before matching a query"
+  ],
+  "debug_profile_note": "Default debug test-thread stack overflowed in existing split_budgets_are_whole_query_not_per_branch; that exact debug test passed with RUST_MIN_STACK=16777216. Release workspace passed with default stack. No solver budget or code adjustment."
 }

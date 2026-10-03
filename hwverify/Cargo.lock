@@ -492,6 +492,7 @@ version = "0.13.0"
 dependencies = [
  "hwverify-ir",
  "hwverify-solver",
+ "hwverify-syntax",
  "serde_json",
 ]
 

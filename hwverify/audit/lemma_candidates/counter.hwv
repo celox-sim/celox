@@ -1,0 +1,33 @@
+design "Counter with native lemma proposals" {
+  input rst: bool;
+  reset_input rst;
+  spec {
+    state x: bv<8>;
+    reset { x = 0u8; }
+    next { x = s.x + 1u8; }
+    outputs { can_step = true; }
+  }
+  impl {
+    state x: bv<8>;
+    reset { x = 0u8; }
+    next { x = s.x + 1u8; }
+    outputs { commit = true; }
+  }
+  binding impl.x == spec.x;
+  commit commit;
+  can_step can_step;
+  progress { enabled true; rank 0u8; }
+  proof {
+    forall word: bv<8>;
+    target counter_step {
+      rhs spec.x';
+      lemma step {
+        context true;
+        guard pre;
+        claim impl.x' == spec.x';
+      }
+      use done: step(context: pre);
+      result done;
+    }
+  }
+}

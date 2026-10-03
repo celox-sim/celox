@@ -25,8 +25,8 @@ struct Program {
 pub struct ProofPrograms {
     mode: CutBudgetMode,
     context: Env,
+    original_context: Env,
     environment: Env,
-    formals: BTreeSet<String>,
     programs: Vec<Program>,
 }
 
@@ -137,7 +137,7 @@ fn dependencies(step: &Value) -> Res<BTreeSet<String>> {
         "negative",
     ] {
         // Candidate source is a nonsemantic location label, never a handle.
-        if key == "source" && step["op"] == "candidate" {
+        if key == "source" && matches!(step["op"].as_str(), Some("candidate" | "use_candidate")) {
             continue;
         }
         if let Some(v) = step.get(key) {
@@ -172,7 +172,16 @@ fn validate_dependencies(steps: &[Value]) -> Res<()> {
             let cycle = path[start..]
                 .iter()
                 .chain(std::iter::once(&i))
-                .map(|n| format!("/steps/{n} ({})", steps[*n]["id"].as_str().unwrap()))
+                .map(|n| {
+                    format!(
+                        "/steps/{n} ({}) at {}",
+                        steps[*n]["id"].as_str().unwrap(),
+                        steps[*n]
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .unwrap_or("JSON source")
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" -> ");
             return Err(format!(
@@ -232,10 +241,10 @@ fn validate_dependencies(steps: &[Value]) -> Res<()> {
     }
     Ok(())
 }
-fn failed_diagnostic(report: &Value, label: &str, sat: &str) -> Value {
+fn failed_diagnostic(report: &Value, index: &Value, sat: &str) -> Value {
     let query = report["children"]
         .as_array()
-        .and_then(|a| a.iter().find(|q| q["proof_label"] == label));
+        .and_then(|a| index.as_u64().and_then(|i| a.get(i as usize)));
     match query {
         Some(q)
             if q["solver_result"] == "sat" && q["finite"]["original_formula_validated"] == true =>
@@ -256,7 +265,6 @@ fn failed_diagnostic(report: &Value, label: &str, sat: &str) -> Value {
 fn annotate_candidates(report: &Value, result: &str, candidates: &mut [Value], uses: &mut [Value]) {
     let closed = report["status"] == "passed";
     let graph = report["proof_graph"].as_array();
-    let queries = report["children"].as_array();
     let mut needed = BTreeSet::new();
     let mut pending = report["root"].as_u64().into_iter().collect::<Vec<_>>();
     while let Some(id) = pending.pop() {
@@ -273,15 +281,15 @@ fn annotate_candidates(report: &Value, result: &str, candidates: &mut [Value], u
         }
     }
     for candidate in candidates {
-        let label = candidate["proof_label"].as_str().unwrap();
+        let query = candidate["query_index"].as_u64();
         if candidate["state"] == "proposed" {
-            candidate["validity"] = failed_diagnostic(report, label, "lemma_counterexample");
+            candidate["validity"] =
+                failed_diagnostic(report, &candidate["query_index"], "lemma_counterexample");
             continue;
         }
-        let query = queries.and_then(|a| a.iter().position(|q| q["proof_label"] == label));
         let node = graph.and_then(|g| {
             g.iter().find(|n| {
-                n.get("query_index").and_then(Value::as_u64) == query.map(|i| i as u64)
+                n.get("query_index").and_then(Value::as_u64) == query
                     && n.get("query_index").is_some()
             })
         });
@@ -320,7 +328,7 @@ fn annotate_candidates(report: &Value, result: &str, candidates: &mut [Value], u
         if usage["state"] == "checking_guard" {
             usage["state"] = failed_diagnostic(
                 report,
-                usage["proof_label"].as_str().unwrap(),
+                &usage["query_index"],
                 "use_context_does_not_establish_guard",
             );
         }
@@ -408,8 +416,8 @@ impl ProofPrograms {
         Ok(Self {
             mode,
             context: full_context,
+            original_context: context.clone(),
             environment,
-            formals,
             programs,
         })
     }
@@ -455,12 +463,18 @@ impl ProofPrograms {
                     for dep in &candidate.depends_on {
                         existing(&handles, &json!(dep))?;
                     }
-                    candidate
-                        .lower(&env)
-                        .map_err(|e| format!("candidate {id}: {e}"))?;
+                    candidate.lower(&env).map_err(|e| {
+                        format!(
+                            "{} candidate {id}: {e}",
+                            candidate.source.as_deref().unwrap_or("")
+                        )
+                    })?;
                 }
                 "use_candidate" => {
-                    keys(step, &["op", "id", "candidate", "context"], &[])?;
+                    keys(step, &["op", "id", "candidate", "context"], &["source"])?;
+                    if let Some(source) = step.get("source") {
+                        text(source)?;
+                    }
                     existing(&handles, &step["candidate"])?;
                     boolean(&step["context"], &env)?;
                 }
@@ -571,11 +585,7 @@ impl ProofPrograms {
     ) -> Res<bool> {
         // Context identity is checked before even matching a target. Formals only
         // extend the original environment with fresh universally free variables.
-        if original_context
-            .iter()
-            .any(|(k, v)| self.context.get(k) != Some(v))
-            || self.context.len() != original_context.len() + self.formals.len()
-        {
+        if original_context != &self.original_context {
             return Err("stale proof-program context".into());
         }
         let mut tail = original_bad;
@@ -627,7 +637,7 @@ impl ProofPrograms {
                         "location":format!("program:{}/step:{id}",program.id),
                         "frame":"current_query", "depends_on":candidate.depends_on,
                         "state":"proposed","validity":"not_checked", "claim_true":null,
-                        "usefulness":"not_applied", "proof_label":label,
+                        "usefulness":"not_applied", "proof_label":label,"query_index":bundle.diagnostic_query_count(),
                         "guard_feasibility":"not_checked", "reachable_from_reset":"not_checked"}));
                         let handle =
                             bundle.prove(&label, typed.antecedent(), typed.claim().clone())?;
@@ -641,7 +651,7 @@ impl ProofPrograms {
                         let lemma = existing(&handles, &step["candidate"])?;
                         let context = boolean(&step["context"], &env)?;
                         let label = format!("{}_{}_guard_at_use", program.id, id);
-                        uses.push(json!({"id":id,"candidate":step["candidate"],"state":"checking_guard","proof_label":label}));
+                        uses.push(json!({"id":id,"candidate":step["candidate"],"state":"checking_guard","proof_label":label,"query_index":bundle.diagnostic_query_count(),"source":step.get("source")}));
                         let premise = bundle.prove(&label, context, lemma.pre().clone())?;
                         let applied = bundle.apply(lemma, &premise)?;
                         uses.last_mut().unwrap()["state"] = json!("applied");

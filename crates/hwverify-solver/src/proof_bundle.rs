@@ -197,6 +197,11 @@ impl<'a> ProofBundle<'a> {
         bundle.write_statement(name, original_bad)?;
         Ok(bundle)
     }
+    /// Position of the next live primitive query, for diagnostics only.
+    /// This number cannot be imported or used to manufacture a proof handle.
+    pub fn diagnostic_query_count(&self) -> usize {
+        self.queries.len()
+    }
     pub fn original_pre(&self) -> &Term {
         &self.pre
     }

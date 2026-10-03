@@ -8,40 +8,20 @@ pub fn check(doc: &Value, z3: String, out: PathBuf) -> Res<Value> {
     check_design(&design, z3, out)
 }
 
-/// Verify a fully validated model. A frontend cannot manufacture this type.
-pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
+/// Exact current/next model environment; shared by authoring validation and live execution.
+fn proof_context(design: &Design) -> Res<(Env, Env, Env)> {
     let doc = design.document();
     let mut l = Lower {
         rules: design.machine_normalization().clone(),
     };
-    let i = design.inputs().clone();
+    let i = design.inputs();
     let rst = i[text(&doc["reset_input"])?].clone();
     let spec = design.spec();
-    let implementation = design.implementation();
-    let (s, sr, sn, so) = (
-        spec.state.clone(),
-        spec.reset.clone(),
-        spec.next.clone(),
-        spec.outputs.clone(),
-    );
-    let (t, tr, tn, io) = (
-        implementation.state.clone(),
-        implementation.reset.clone(),
-        implementation.next.clone(),
-        implementation.outputs.clone(),
-    );
-    let c = require_bool(
-        io.get(text(&doc["commit"])?)
-            .ok_or("missing commit output")?
-            .clone(),
-    )?;
-    let can_step = require_bool(
-        so.get(text(&doc["can_step"])?)
-            .ok_or("missing spec can_step output")?
-            .clone(),
-    )?;
-    let r = require_bool(l.expr(&doc["binding"], &relation_env(&s, &t, &Env::new()))?)?;
-    let rr = require_bool(l.expr(&doc["binding"], &relation_env(&sr, &tr, &Env::new()))?)?;
+    let imp = design.implementation();
+    let (s, sr, sn) = (&spec.state, &spec.reset, &spec.next);
+    let (t, tr, tn) = (&imp.state, &imp.reset, &imp.next);
+    let c = require_bool(imp.outputs[text(&doc["commit"])?].clone())?;
+    let r = require_bool(l.expr(&doc["binding"], &relation_env(s, t, &Env::new()))?)?;
     let next_s = sn
         .iter()
         .map(|(n, v)| {
@@ -63,7 +43,7 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
         &doc["binding"],
         &relation_env(&next_s, &next_t, &Env::new()),
     )?)?;
-    let mut ctx = relation_env(&s, &t, &i);
+    let mut ctx = relation_env(s, t, i);
     ctx.extend(
         next_s
             .iter()
@@ -77,6 +57,52 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
     ctx.insert("commit".into(), c.clone());
     ctx.insert("binding_before".into(), r.clone());
     ctx.insert("binding_after".into(), rn.clone());
+    Ok((next_s, next_t, ctx))
+}
+/// Type-check proof proposals without running or accepting a solver proof.
+pub fn validate_proof_metadata(design: &Design) -> Res<()> {
+    if let Some(metadata) = design.document().get("proof_programs") {
+        let (_, _, ctx) = proof_context(design)?;
+        crate::proof_program::ProofPrograms::from_json(metadata, &ctx)?;
+    }
+    Ok(())
+}
+
+/// Verify a fully validated model. A frontend cannot manufacture this type.
+pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
+    let doc = design.document();
+    let mut l = Lower {
+        rules: design.machine_normalization().clone(),
+    };
+    let i = design.inputs().clone();
+    let rst = i[text(&doc["reset_input"])?].clone();
+    let spec = design.spec();
+    let implementation = design.implementation();
+    let (s, sr, sn, so) = (
+        spec.state.clone(),
+        spec.reset.clone(),
+        spec.next.clone(),
+        spec.outputs.clone(),
+    );
+    let (t, tr, io) = (
+        implementation.state.clone(),
+        implementation.reset.clone(),
+        implementation.outputs.clone(),
+    );
+    let c = require_bool(
+        io.get(text(&doc["commit"])?)
+            .ok_or("missing commit output")?
+            .clone(),
+    )?;
+    let can_step = require_bool(
+        so.get(text(&doc["can_step"])?)
+            .ok_or("missing spec can_step output")?
+            .clone(),
+    )?;
+    let r = require_bool(l.expr(&doc["binding"], &relation_env(&s, &t, &Env::new()))?)?;
+    let rr = require_bool(l.expr(&doc["binding"], &relation_env(&sr, &tr, &Env::new()))?)?;
+    let (next_s, next_t, mut ctx) = proof_context(design)?;
+    let rn = ctx["binding_after"].clone();
     // Proof metadata is untrusted search input. Resolve every expression in
     // this exact Design context before any solver query can succeed.
     let proof_programs = doc
