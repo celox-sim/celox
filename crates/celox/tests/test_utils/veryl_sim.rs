@@ -161,8 +161,8 @@ fn take_runtime_error() -> Result<(), RuntimeErrorCode> {
 
 pub struct VerylSimAdapter {
     sim: VerylSim,
-    /// The constructor settles once so undriven outputs are readable. Keep its
-    /// diagnostics until either the caller observes them or drives an input.
+    /// Evaluation is deferred until the first observation or explicit settle.
+    /// Keep initial diagnostics until the caller observes them or drives input.
     initial_diagnostics_pending: bool,
     /// Signal name table: VerylSignalRef(i) → names[i]
     names: Vec<String>,
@@ -217,15 +217,15 @@ impl VerylSimAdapter {
             f(&mut ctx);
         }
         if input_written && self.initial_diagnostics_pending {
-            // The constructor settled with provisional input values. Replace
-            // those diagnostics with a forced settle after the first write;
+            // A previous read may have settled provisional input values.
+            // Replace those diagnostics with a settle after the first write;
             // constant processes must run again even though they do not depend
             // on the input that changed.
             assert_buffer::reset();
             self.initial_diagnostics_pending = false;
             self.sim.mark_comb_dirty();
-            self.sim.ensure_comb_updated();
         }
+        self.sim.ensure_comb_updated();
         self.finish_runtime_operation()
     }
 
@@ -393,8 +393,10 @@ pub fn build_veryl_adapter(
         panic!("veryl-simulator build_ir failed: {e:?}");
     });
 
-    let mut sim = VerylSim::new(sim_ir, None);
-    sim.ensure_comb_updated();
+    // Do not execute the design with provisional zero inputs. In particular,
+    // an unsigned reverse loop may not terminate before its bounds are driven.
+    // Veryl's get/get_var already settle lazily; modify/eval_comb do so explicitly.
+    let sim = VerylSim::new(sim_ir, None);
 
     VerylSimAdapter {
         sim,

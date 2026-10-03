@@ -2524,7 +2524,12 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             ec: &ExprCompiler<'_>,
         ) -> GenericLoopBound<ExprBytecode<StateLocation<StateAddr>>> {
             match bound {
-                ForBound::Const(x) => GenericLoopBound::Static(*x),
+                ForBound::Const(x, true) => GenericLoopBound::Static(*x),
+                ForBound::Const(x, false) => GenericLoopBound::Dynamic {
+                    expr: ExprBytecode::new(vec![TbOpcode::ConstU64(*x as u64)]),
+                    width: (usize::BITS as usize - x.leading_zeros() as usize).max(32),
+                    signed: false,
+                },
                 ForBound::Expression(expr) => GenericLoopBound::Dynamic {
                     expr: ec.compile(expr.as_ref()),
                     width: ec.root_context(expr).width,

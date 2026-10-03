@@ -140,10 +140,10 @@ impl SLTToSIRLowerer {
                 ..
             } => {
                 let mut children = Vec::new();
-                if let SLTLoopBound::Expr(node) = start {
+                if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = start {
                     children.push(*node);
                 }
-                if let SLTLoopBound::Expr(node) = end {
+                if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = end {
                     children.push(*node);
                 }
                 if let crate::SLTForFoldResult::Transient { initial, update } = result {

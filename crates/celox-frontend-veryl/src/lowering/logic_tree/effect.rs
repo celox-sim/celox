@@ -667,7 +667,7 @@ fn for_range_bounds(range: &ForRange) -> (&ForBound, &ForBound) {
 fn for_range_contains_runtime_effect(module: &Module, range: &ForRange) -> bool {
     let (start, end) = for_range_bounds(range);
     [start, end].into_iter().any(|bound| match bound {
-        ForBound::Const(_) => false,
+        ForBound::Const(..) => false,
         ForBound::Expression(expression) => expression_contains_runtime_effect(module, expression),
     })
 }
@@ -2828,7 +2828,14 @@ fn collect_comb_effects_for(
         attach_loop_runner_to_first_observer(collector, observer_start, runner);
         return Ok(store);
     };
-    let Some(end) = const_for_bound_i64(end) else {
+    // Signed negative starts compare as large unsigned values when the
+    // continuation bound is unsigned. Keep that decision in the runtime loop
+    // instead of unrolling observable effects with a signed host range.
+    let bound_signed = match end {
+        ForBound::Const(_, signed) => *signed,
+        ForBound::Expression(expr) => crate::context_width::expression_signed(expr),
+    };
+    let Some(end) = const_for_bound_i64(end).filter(|_| bound_signed || start >= 0) else {
         let (loop_effects, observer_start) =
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(

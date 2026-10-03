@@ -1840,7 +1840,7 @@ fn dynamic_bounds(range: &ForRange) -> impl Iterator<Item = &Expression> {
     };
     [start, end].into_iter().filter_map(|bound| match bound {
         ForBound::Expression(expression) => Some(expression.as_ref()),
-        ForBound::Const(_) => None,
+        ForBound::Const(..) => None,
     })
 }
 
@@ -1863,7 +1863,7 @@ mod tests {
             var_name: StrId::default(),
             var_type: Type::default(),
             range: ForRange::Forward {
-                start: ForBound::Const(0),
+                start: ForBound::Const(0, true),
                 end: ForBound::Expression(Box::new(Expression::Term(Box::new(Factor::Unknown(
                     Comptime::default(),
                 ))))),
@@ -1919,7 +1919,7 @@ mod tests {
             var_name: StrId::default(),
             var_type: Type::default(),
             range: ForRange::Forward {
-                start: ForBound::Const(0),
+                start: ForBound::Const(0, true),
                 end: ForBound::Expression(Box::new(bound)),
                 inclusive: false,
                 step: 1,
@@ -1987,7 +1987,7 @@ mod tests {
             var_name: StrId::default(),
             var_type: Type::default(),
             range: ForRange::Forward {
-                start: ForBound::Const(0),
+                start: ForBound::Const(0, true),
                 end: ForBound::Expression(Box::new(bound)),
                 inclusive: false,
                 step: 1,
@@ -2056,7 +2056,7 @@ mod tests {
             var_name: StrId::default(),
             var_type: Type::default(),
             range: ForRange::Forward {
-                start: ForBound::Const(0),
+                start: ForBound::Const(0, true),
                 end: ForBound::Expression(Box::new(bound)),
                 inclusive: false,
                 step: 1,

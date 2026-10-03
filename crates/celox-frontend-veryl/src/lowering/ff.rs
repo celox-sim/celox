@@ -43,15 +43,15 @@ mod loop_bound_status_tests {
     #[test]
     fn allows_exclusive_upper_sentinel() {
         assert_eq!(
-            FfParser::loop_bound_status(&ForBound::Const(255), 8, false),
+            FfParser::loop_bound_status(&ForBound::Const(255, true), 8, false),
             Some(LoopBoundStatus::FitsLoopType)
         );
         assert_eq!(
-            FfParser::loop_bound_status(&ForBound::Const(256), 8, false),
+            FfParser::loop_bound_status(&ForBound::Const(256, true), 8, false),
             Some(LoopBoundStatus::ExclusiveUpperSentinel)
         );
         assert_eq!(
-            FfParser::loop_bound_status(&ForBound::Const(257), 8, false),
+            FfParser::loop_bound_status(&ForBound::Const(257, true), 8, false),
             Some(LoopBoundStatus::OutOfRange)
         );
     }
@@ -1278,7 +1278,7 @@ impl<'a> FfParser<'a> {
 
     fn loop_bound_status(bound: &ForBound, width: usize, signed: bool) -> Option<LoopBoundStatus> {
         let value = match bound {
-            ForBound::Const(v) => BigInt::from(*v),
+            ForBound::Const(v, _) => BigInt::from(*v),
             ForBound::Expression(expr) => {
                 if !expr.comptime().is_const {
                     return None;
@@ -1328,7 +1328,7 @@ impl<'a> FfParser<'a> {
 
     fn loop_bound_width(&self, bound: &ForBound, signed: bool) -> Option<usize> {
         match bound {
-            ForBound::Const(v) => {
+            ForBound::Const(v, _) => {
                 let value = BigInt::from(*v);
                 Some(if signed {
                     if value.sign() == Sign::Minus {
@@ -1509,7 +1509,7 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
         match bound {
-            ForBound::Const(v) => {
+            ForBound::Const(v, _) => {
                 let reg = ir_builder.alloc_bit(width, signed);
                 ir_builder.emit(SIRInstruction::Imm(reg, SIRValue::new(*v as u64)));
                 Ok(reg)
@@ -1609,6 +1609,14 @@ impl<'a> FfParser<'a> {
                     Self::bound_const_value(start),
                     Self::bound_const_value(end),
                 ),
+            };
+        // The emitted int counter compares against the continuation bound's
+        // type, which may be unsigned even when the counter is signed.
+        let continuation_bound = if reverse { start_bound } else { end_bound };
+        let comparison_signed = loop_signed
+            && match continuation_bound {
+                ForBound::Const(_, signed) => *signed,
+                ForBound::Expression(expr) => crate::context_width::expression_signed(expr),
             };
         let loop_var_name = veryl_parser::resource_table::get_str_value(stmt.var_name)
             .unwrap_or_else(|| "<unknown>".to_string());
@@ -1810,12 +1818,14 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 cond_reg,
                 start_reg,
-                if loop_signed {
+                if comparison_signed {
                     if inclusive {
                         BinaryOp::LeS
                     } else {
                         BinaryOp::LtS
                     }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
                 } else {
                     BinaryOp::LtU
                 },
@@ -1870,7 +1880,7 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 in_range,
                 header_counter,
-                if loop_signed {
+                if comparison_signed {
                     BinaryOp::GeS
                 } else {
                     BinaryOp::GeU
@@ -1888,12 +1898,14 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 cond_reg,
                 header_counter,
-                if loop_signed {
+                if comparison_signed {
                     if inclusive {
                         BinaryOp::LeS
                     } else {
                         BinaryOp::LtS
                     }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
                 } else {
                     BinaryOp::LtU
                 },
@@ -2139,12 +2151,14 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 in_range_reg,
                 next_reg,
-                if loop_signed {
+                if comparison_signed {
                     if inclusive {
                         BinaryOp::LeS
                     } else {
                         BinaryOp::LtS
                     }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
                 } else {
                     BinaryOp::LtU
                 },
@@ -2201,7 +2215,7 @@ impl<'a> FfParser<'a> {
             ir_builder.emit(SIRInstruction::Binary(
                 in_range_reg,
                 next_reg,
-                if loop_signed {
+                if comparison_signed {
                     BinaryOp::GeS
                 } else {
                     BinaryOp::GeU
@@ -2463,7 +2477,7 @@ impl<'a> FfParser<'a> {
 
     fn bound_const_value(bound: &ForBound) -> Option<usize> {
         match bound {
-            ForBound::Const(v) => Some(*v),
+            ForBound::Const(v, _) => Some(*v),
             ForBound::Expression(expr) => eval_constexpr(expr)?.to_usize(),
         }
     }

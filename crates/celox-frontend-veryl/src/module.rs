@@ -2445,10 +2445,10 @@ fn collect_glue_sources_with_window(
             continue_cond,
             ..
         } => {
-            if let SLTLoopBound::Expr(node) = start {
+            if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = start {
                 collect_glue_sources_with_window(*node, None, arena, set);
             }
-            if let SLTLoopBound::Expr(node) = end {
+            if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = end {
                 collect_glue_sources_with_window(*node, None, arena, set);
             }
             if let celox_slt::SLTForFoldResult::Transient { initial, update } = result {

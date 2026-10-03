@@ -648,10 +648,14 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                 continue_cond,
                 ..
             } => {
-                if let celox_slt::SLTLoopBound::Expr(node) = start {
+                if let celox_slt::SLTLoopBound::Expr(node)
+                | celox_slt::SLTLoopBound::TypedExpr { node, .. } = start
+                {
                     collect_inputs_with_window(*node, None, arena, set, visited);
                 }
-                if let celox_slt::SLTLoopBound::Expr(node) = end {
+                if let celox_slt::SLTLoopBound::Expr(node)
+                | celox_slt::SLTLoopBound::TypedExpr { node, .. } = end
+                {
                     collect_inputs_with_window(*node, None, arena, set, visited);
                 }
                 if let celox_slt::SLTForFoldResult::Transient { initial, update } = result {

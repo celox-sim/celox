@@ -213,7 +213,7 @@ impl<'a> FfParser<'a> {
                     | ForRange::Stepped { start, end, .. } => (start, end),
                 };
                 [start, end].into_iter().any(|bound| match bound {
-                    ForBound::Const(_) => false,
+                    ForBound::Const(..) => false,
                     ForBound::Expression(expr) => {
                         self.expression_needs_assignment_snapshot_inner(expr, visiting)
                     }
@@ -552,7 +552,7 @@ impl<'a> FfParser<'a> {
                     | ForRange::Stepped { start, end, .. } => (start, end),
                 };
                 let bound_effect = [start, end].into_iter().any(|bound| match bound {
-                    ForBound::Const(_) => false,
+                    ForBound::Const(..) => false,
                     ForBound::Expression(expr) => {
                         self.expression_has_runtime_effect_inner(expr, visiting)
                     }
@@ -3451,7 +3451,7 @@ impl<'a> FfParser<'a> {
                     | ForRange::Stepped { start, end, .. } => (start, end),
                 };
                 [start, end].into_iter().any(|bound| match bound {
-                    ForBound::Const(_) => false,
+                    ForBound::Const(..) => false,
                     ForBound::Expression(expr) => {
                         self.expression_writes_any_inner(expr, candidates, visiting)
                     }

@@ -513,7 +513,9 @@ where
                     SLTLoopBound::Const(value) => {
                         (usize::BITS as usize - value.leading_zeros() as usize).max(1)
                     }
-                    SLTLoopBound::Expr(child) => require_nonzero_child(*child, role)?,
+                    SLTLoopBound::Expr(child) | SLTLoopBound::TypedExpr { node: child, .. } => {
+                        require_nonzero_child(*child, role)?
+                    }
                 };
                 counter_width = counter_width.max(width);
             }
@@ -851,10 +853,10 @@ where
             continue_cond,
             ..
         } => {
-            if let SLTLoopBound::Expr(node) = start {
+            if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = start {
                 visit(*node)?;
             }
-            if let SLTLoopBound::Expr(node) = end {
+            if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = end {
                 visit(*node)?;
             }
             if let crate::SLTForFoldResult::Transient { initial, update } = result {
