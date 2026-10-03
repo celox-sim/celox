@@ -154,6 +154,13 @@ impl Plan {
     }
 }
 
+/// Read-only planning for editor requests. These queries confer no proof authority.
+/// Uses the exact same guard-preserving decomposition as live refinement checking.
+pub fn implication_queries(pre: Term, post: Term) -> Res<Vec<Term>> {
+    let plan = Plan::new(pre, post)?;
+    Ok((0..plan.parts.len()).map(|i| plan.query(i)).collect())
+}
+
 fn validated_children(names: &[String], reports: &[Value]) -> Res<bool> {
     if names.len() != reports.len()
         || names.iter().collect::<BTreeSet<_>>().len() != names.len()

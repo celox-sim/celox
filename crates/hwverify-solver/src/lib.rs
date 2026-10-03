@@ -9,7 +9,7 @@ mod quantified;
 pub use quantified::*;
 
 mod conjunctive;
-pub use conjunctive::primitive_query_reports;
+pub use conjunctive::{implication_queries, primitive_query_reports};
 
 mod checked_congruence;
 pub use checked_congruence::CutBudgetMode;

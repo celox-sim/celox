@@ -1,0 +1,27 @@
+{
+  "name": "hwverify",
+  "displayName": "hwverify",
+  "description": "Editing and explicit checked lemma proofs for hwverify .hwv files",
+  "version": "0.1.0",
+  "publisher": "hwverify-local",
+  "license": "UNLICENSED",
+  "engines": {"vscode": "^1.100.0"},
+  "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "capabilities": {"untrustedWorkspaces": {"supported": false}},
+  "activationEvents": ["onLanguage:hwverify"],
+  "contributes": {
+    "languages": [{"id": "hwverify", "aliases": ["hwverify"], "extensions": [".hwv"], "configuration": "./language-configuration.json"}],
+    "commands": [
+      {"command": "hwverify.check", "title": "hwverify: Check Target or Lemma"},
+      {"command": "hwverify.associate", "title": "hwverify: Associate Lemma Sidecar with Model"},
+      {"command": "hwverify.clearBase", "title": "hwverify: Clear Associated Model"}
+    ],
+    "configuration": {"title": "hwverify", "properties": {
+      "hwverify.python": {"type": "string", "default": "python3", "scope": "machine", "description": "Python 3.10+ executable"},
+      "hwverify.server": {"type": "string", "default": "", "scope": "machine", "description": "Absolute path to hwverify/editor/server.py"},
+      "hwverify.worker": {"type": "string", "default": "", "scope": "machine", "description": "Absolute path to target/release/hwverify-editor"}
+    }}
+  },
+  "dependencies": {"vscode-languageclient": "9.0.1"}
+}

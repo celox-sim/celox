@@ -1,0 +1,152 @@
+//! Isolated, finite-only editor worker. One request, no persistent proof handles.
+use hwverify_ir::Design;
+use hwverify_syntax::{parse_document, SyntaxError};
+use serde_json::{json, Value};
+use std::{
+    fs,
+    io::{self, Read},
+    path::Path,
+};
+
+fn diagnostic(e: SyntaxError) -> Value {
+    json!({"uri":e.filename,"message":e.message,"span":e.span.map(|s|json!({"start":s.start,"end":s.end,"line":s.line,"column":s.column}))})
+}
+fn parse(source: &str, uri: &str) -> Result<Value, Value> {
+    if source.trim_start().starts_with('{') {
+        let doc = hwverify_syntax::parse_json(source.as_bytes())
+            .map_err(|e| json!({"uri":uri,"message":e}))?;
+        if doc["kind"] == "specification" {
+            return Err(json!({"uri":uri,"message":"associate a design, not a specification"}));
+        }
+        Design::from_json(&doc).map_err(|e| json!({"uri":uri,"message":e.to_string()}))?;
+        return Ok(doc);
+    }
+    let parsed = parse_document(source, uri).map_err(diagnostic)?;
+    if parsed.canonical["version"] == 4 {
+        parsed.validate_scoped_specification().map_err(diagnostic)?;
+    } else if parsed.canonical["kind"] == "specification" {
+        parsed.validate_specification().map_err(diagnostic)?;
+    } else {
+        parsed.validate().map_err(diagnostic)?;
+    }
+    Ok(parsed.canonical)
+}
+fn run(request: &Value) -> Result<Value, Value> {
+    let uri = request["uri"]
+        .as_str()
+        .ok_or(json!({"message":"missing URI"}))?;
+    let source = request["text"]
+        .as_str()
+        .ok_or(json!({"message":"missing text"}))?;
+    let doc = if let Some(base) = request.get("base") {
+        let base_uri = base["uri"]
+            .as_str()
+            .ok_or(json!({"message":"missing base URI"}))?;
+        // The server supplies a private, identity-checked file snapshot for disk
+        // models, avoiding a second enormous JSON encoding of generated designs.
+        let base_text = if let Some(text) = base["text"].as_str() {
+            text.to_owned()
+        } else {
+            fs::read_to_string(
+                base["path"]
+                    .as_str()
+                    .ok_or(json!({"message":"missing base snapshot"}))?,
+            )
+            .map_err(|e| json!({"uri":base_uri,"message":e.to_string()}))?
+        };
+        let mut doc = parse(&base_text, base_uri)?;
+        doc["proof_programs"] =
+            hwverify_syntax::merge_lemma_source(source, uri, doc.get("proof_programs"))
+                .map_err(diagnostic)?;
+        doc
+    } else {
+        parse(source, uri)?
+    };
+    if doc["kind"] == "specification" {
+        if request["operation"] == "prove" {
+            return Err(
+                json!({"uri":uri,"message":"explicit lemma execution currently requires a design"}),
+            );
+        }
+        return Ok(json!({"diagnostics":[],"proof_programs":null,"binding":null}));
+    }
+    let design = Design::from_json(&doc).map_err(|e| json!({"uri":uri,"message":e.to_string()}))?;
+    hwverify_verify::validate_proof_metadata(&design)
+        .map_err(|e| json!({"uri":uri,"message":e}))?;
+    if request["operation"] != "prove" {
+        return Ok(
+            json!({"diagnostics":[],"proof_programs":doc.get("proof_programs"),"binding":doc.get("binding")}),
+        );
+    }
+    let step = match request.get("step") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(step)) => Some(step.as_str()),
+        _ => return Err(json!({"uri":uri,"message":"step must be a declaration name"})),
+    };
+    let branch = match request.get("branch") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(json!({"uri":uri,"message":"branch must be a nonnegative integer"}))?,
+        ),
+    };
+    let out = Path::new(
+        request["out"]
+            .as_str()
+            .ok_or(json!({"message":"missing evidence output"}))?,
+    );
+    fs::create_dir_all(out).map_err(|e| json!({"message":e.to_string()}))?;
+    let result = hwverify_verify::check_editor_request(
+        &design,
+        request["program"]
+            .as_str()
+            .ok_or(json!({"message":"missing target"}))?,
+        step,
+        branch,
+        out.into(),
+    )
+    .map_err(|e| json!({"uri":uri,"message":e}))?;
+    let mut witnesses = serde_json::Map::new();
+    if let Some(reports) = result["reports"].as_array() {
+        for report in reports {
+            for child in report["children"].as_array().into_iter().flatten() {
+                if child["solver_result"] == "sat"
+                    && child["finite"]["original_formula_validated"] == true
+                {
+                    if let Some(name) = child["name"].as_str() {
+                        let path = out.join(format!("{name}.finite.json"));
+                        if let Ok(bytes) = fs::read(path) {
+                            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                                witnesses.insert(name.into(),json!({"context":v["context_values"],"assignments":v["assignments"],"original_formula_validated":true}));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(
+        json!({"diagnostics":[],"proof":result,"witnesses":witnesses,"proof_programs":doc["proof_programs"],"binding":doc["binding"]}),
+    )
+}
+fn main() {
+    // Reproducible editor settings; no inherited automatic search or raised budget.
+    for (key, _) in std::env::vars().filter(|(k, _)| k.starts_with("HWVERIFY_")) {
+        std::env::remove_var(key);
+    }
+    std::env::set_var("HWVERIFY_SOLVER", "finite");
+    let mut bytes = vec![];
+    let response = match io::stdin()
+        .take(64 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+    {
+        Ok(_) if bytes.len() <= 64 * 1024 * 1024 => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(request) => run(&request).unwrap_or_else(|e| json!({"diagnostics":[e]})),
+            Err(e) => json!({"diagnostics":[{"message":e.to_string()}]}),
+        },
+        _ => json!({"diagnostics":[{"message":"editor request exceeds 64 MiB or cannot be read"}]}),
+    };
+    println!("{response}");
+}

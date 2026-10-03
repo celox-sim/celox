@@ -4,3 +4,5 @@
 
 __pycache__/
 *.pyc
+/editor/vscode/node_modules/
+/editor/vscode/*.vsix

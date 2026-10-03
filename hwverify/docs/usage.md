@@ -80,3 +80,73 @@ Keep generated runs outside tracked evidence directories. Publish new release
 archives as release assets only when needed; ordinary source and test changes
 belong in Git. Existing sealed evidence is indexed separately and is never proof
 authority for a new run.
+
+## Editor and language server
+
+The initial editor integration supports Linux/macOS, Python 3.10+ and VS Code
+1.100+. Build the isolated Rust worker and install the pinned client dependencies:
+
+```sh
+cargo build --release --locked --bin hwverify-editor
+cd editor/vscode
+npm ci --ignore-scripts
+cd ../..
+code --extensionDevelopmentPath="$PWD/editor/vscode" "$PWD"
+```
+
+In the opened Extension Development Host, set these **User** settings to absolute
+paths, then reload that window. The extension runs only in a trusted workspace.
+
+```json
+{
+  "hwverify.python": "python3",
+  "hwverify.server": "/absolute/path/to/hwverify/editor/server.py",
+  "hwverify.worker": "/absolute/path/to/hwverify/target/release/hwverify-editor"
+}
+```
+
+Open [`counter.hwv`](../audit/lemma_candidates/counter.hwv). Name, type and width
+errors appear as you edit; these debounced checks do not run a solver. Definition,
+completion and hover use the current unsaved buffer. Click **Check target** above
+`counter_step`, or use **hwverify: Check Target or Lemma** in the command palette.
+Leave the branch field empty for this example. **Check prefix through step**
+checks the program through that lemma, including earlier instructions; it does
+not certify the unexecuted remainder. The progress notification can cancel the
+request. Results appear in the **hwverify proof results** output channel, with
+source diagnostics and lemma hovers showing validity, guard use, declared
+context/dependencies and source-variable counterexamples.
+
+For a standalone `lemmas` file, use **hwverify: Associate Lemma Sidecar with Model**
+to select the underlying `.hwv` design or canonical JSON model. Association is
+session-local and must be selected again after reopening the document. Unsaved
+associated models take precedence over disk. Disk changes, closing an unsaved
+model, changing dependencies, and replacing the worker invalidate stored status.
+Navigation across a sidecar/model boundary supports `.hwv` state/input declarations;
+JSON models support validation and proof execution but not cross-file definition
+locations. Navigation is conservative lexical assistance during incomplete edits;
+ambiguous definitions are omitted. Rust parsing and validation decide validity.
+
+Proof execution is explicit, finite-only and uses the normal budgets. It checks
+one matching target or a program prefix, not the whole design or its global
+obligations. A target with multiple matching decomposition branches requires an
+explicit zero-based index; successful checking of one branch does not prove the
+other branches. Targets must match an exact current query RHS (which can differ
+from the unsplit next-state expression after guarded decomposition).
+Specifications receive editing diagnostics; explicit native-lemma execution
+currently requires a design. Worker concurrency is limited to two; edit analysis has a 20-second wall limit
+and explicit proof execution a 120-second wall limit. Exceeding either limit
+retains no verdict. LSP messages and individual worker requests are limited to
+64 MiB; larger disk models use streamed, hash-checked private snapshots.
+There is no persistent proof cache: status is bound
+to the complete document, model bytes, version and worker hash, and every proof
+request recreates all handles. Unknown, cancellation, stale results and saved
+reports never supply a trusted handle. See [lemma status meanings](lemmas.md#editor-proof-status).
+
+Other LSP clients can launch `python3 editor/server.py --worker /absolute/path/to/hwverify-editor`.
+The server uses stdio framing, UTF-16 positions and incremental text synchronization.
+`workspace/executeCommand` accepts `hwverify.setBase` with
+`[{"uri":"file:///lemmas.hwv","baseUri":"file:///model.json"}]` (null clears it), or
+`hwverify.prove` with `[{"uri":"file:///design.hwv","program":"counter_step"}]` and
+optional `step` and `branch`. Standard `$/cancelRequest`, shutdown and exit are
+supported. Returned identities and reports are diagnostic data, not proof APIs.
+Run the real-worker protocol regressions with `python3 -m unittest editor.test_server -v`.

@@ -1,5 +1,6 @@
 [package]
 name = "hwverify-rs"
+default-run = "hwverify-rs"
 version.workspace = true
 edition.workspace = true
 

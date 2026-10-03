@@ -180,3 +180,29 @@ python3 -m audit.lemma_candidates.migrate old-design.json new-design.json
 
 No large evidence archive is added to the repository. Hosted CI retains complete
 fresh artifacts through its existing upload steps.
+
+## Editor proof status
+
+The [editor setup](usage.md#editor-and-language-server) adds explicit target and
+lemma-prefix actions to `.hwv` files. A lemma hover shows its declared context,
+guard, claim and dependencies; declarations alone are not available proofs.
+`pre` includes the exact selected branch assumptions. Only a freshly proved
+candidate whose entire antecedent follows at the use site can be applied.
+
+| Editor outcome | Meaning |
+|---|---|
+| Not checked | No current result for this declaration and document version |
+| Proved; target closed | The candidate participates in the checked target's root proof |
+| Proved but inapplicable | The claim was proved, but the use context failed to establish its antecedent/guard |
+| Established but unused | A complete target proof exists without this candidate in its root dependency graph |
+| Proved; target not closed / prefix not evaluated | The selected work did not certify the whole target; usefulness is not yet established |
+| Lemma counterexample | A source-validated assignment refutes that auxiliary lemma sequent |
+| Unknown budget | No proof handle exists; dependent steps cannot use the candidate |
+
+Counterexamples show original input/state aliases such as `impl.x`, `spec.x` and
+`i.rst` at the failed source declaration. A guard counterexample describes a
+failed use, not necessarily a false lemma or a bug in the target. These states
+are not asserted reachable from reset. The displayed lowered query uses source
+aliases and may be truncated for size; it is explanatory output, never evidence
+accepted by the checker. Editing any source or associated model invalidates
+these statuses, including when the edit is unsaved.
