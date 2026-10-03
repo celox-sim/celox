@@ -8,6 +8,23 @@
 #include "vpi_bits.hpp"
 
 static bool dirty = true;
+static bool testbench_finished = false;
+
+// Only the emitted finish operation calls this task. HDL stdout is never
+// interpreted as a completion signal.
+static PLI_INT32 mark_finish(PLI_BYTE8*) {
+    testbench_finished = true;
+    return 0;
+}
+
+static PLI_INT32 end_testbench(p_cb_data) {
+    if (!testbench_finished) {
+        std::cerr << "native testbench exited without reaching $finish" << std::endl;
+        vpip_set_return_value(1);
+    }
+    // Never overwrite a failure status from $fatal with success.
+    return 0;
+}
 static std::string pending;
 static PLI_INT32 commands(p_cb_data);
 
@@ -93,10 +110,25 @@ static PLI_INT32 start(p_cb_data) {
     for (int i = 0; i < info.argc; ++i) {
         if (std::string(info.argv[i]) == "+suite_two_state") initialize(nullptr);
     }
+    for (int i = 0; i < info.argc; ++i) {
+        if (std::string(info.argv[i]) == "+suite_testbench") {
+            s_cb_data cb{};
+            cb.reason = cbEndOfSimulation;
+            cb.cb_rtn = end_testbench;
+            vpi_register_cb(&cb);
+            return 0;
+        }
+    }
     return commands(nullptr);
 }
 
 static void register_suite() {
+    s_vpi_systf_data finish{};
+    finish.type = vpiSysTask;
+    finish.tfname = const_cast<char*>("$celox_suite_finish");
+    finish.calltf = mark_finish;
+    vpi_register_systf(&finish);
+
     s_cb_data cb{};
     cb.reason = cbStartOfSimulation;
     cb.cb_rtn = start;

@@ -993,13 +993,14 @@ pub(crate) fn run_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
 ) -> TestResult {
-    run_testbench_limited(sim, testbench, None).result
+    run_testbench_limited(sim, testbench, None, false).result
 }
 
 fn run_testbench_limited<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
     tick_limit: Option<u64>,
+    require_finish: bool,
 ) -> LimitedTestbenchResult {
     let test_name = root_testbench_name(sim);
     let use_4state = sim.backend.layout().four_state;
@@ -1064,6 +1065,7 @@ fn run_testbench_limited<B: SimBackend>(
                 .unwrap_or_else(|| "assertion failed".to_string())
         })
         .collect::<Vec<_>>();
+    let finished = matches!(result, ExecResult::Finished);
     let result = match result {
         ExecResult::Fail(message) => {
             if failed_messages.is_empty() {
@@ -1077,10 +1079,12 @@ fn run_testbench_limited<B: SimBackend>(
             }
         }
         ExecResult::Continue | ExecResult::Break | ExecResult::Finished => {
-            if failed_messages.is_empty() {
-                TestResult::Pass
-            } else {
+            if !failed_messages.is_empty() {
                 TestResult::Fail(failed_messages.join("\n"))
+            } else if require_finish && !finished {
+                TestResult::Fail("testbench returned without reaching $finish".to_string())
+            } else {
+                TestResult::Pass
             }
         }
     };
@@ -1111,6 +1115,18 @@ pub fn run_compiled_testbench<B: SimBackend>(
     run_testbench(sim, tb)
 }
 
+/// Execute a compiled testbench, requiring explicit completion via `$finish`.
+///
+/// Unlike [`run_compiled_testbench`], falling through the initial block is a
+/// failure. Assertion and execution failures remain failures even if `$finish`
+/// is reached. Use this for self-checking tests that require a completion marker.
+pub fn run_compiled_testbench_to_finish<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    tb: &CompiledTestbench<B>,
+) -> TestResult {
+    run_testbench_limited(sim, tb, None, true).result
+}
+
 /// Execute at most `tick_limit` simulator ticks from a compiled testbench.
 ///
 /// Reaching the limit is reported separately from the testbench result so a
@@ -1120,7 +1136,7 @@ pub fn run_compiled_testbench_with_tick_limit<B: SimBackend>(
     tb: &CompiledTestbench<B>,
     tick_limit: u64,
 ) -> LimitedTestbenchResult {
-    run_testbench_limited(sim, tb, Some(tick_limit))
+    run_testbench_limited(sim, tb, Some(tick_limit), false)
 }
 
 /// Run the testbench and return assertion results observed before the test

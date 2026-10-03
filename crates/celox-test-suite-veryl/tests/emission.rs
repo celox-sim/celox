@@ -37,3 +37,21 @@ module Top (
     assert!(sv[0].0.contains("negedge i_clk"));
     assert!(sv[0].0.contains("posedge i_rst"));
 }
+
+#[test]
+fn verification_emission_includes_native_top_and_fatal_assertions() {
+    let source = "#[test(Top)] module Top { initial { $assert(1'd1); $finish(); } }";
+    let sources = [(source, Path::new("native.veryl"))];
+    let default = emit_veryl_sources(&sources);
+    assert!(!default.is_testbench());
+    assert!(!default.as_sv_sources()[0].0.contains("module Top;"));
+
+    let emitted = celox_test_suite_veryl::emit::emit_verification_sources(&sources, "Top");
+    assert!(emitted.is_testbench());
+    let sv = emitted.as_sv_sources()[0].0;
+    assert!(sv.contains("`define __veryl_test_prj_Top__"));
+    assert!(sv.contains("module Top;"));
+    assert!(sv.contains("`CELOX_SUITE_ASSERT(1'd1)"));
+    assert!(sv.contains("else $fatal(1,"));
+    assert!(sv.contains("`CELOX_SUITE_FINISH();"));
+}

@@ -1,5 +1,5 @@
-// Line protocol for the independent Veryl suite. HDL stdout is kept separate
-// from replies, which always begin with "@suite ".
+// Interactive replies begin with "@suite ". Native testbench completion is
+// checked through simulator state and reported through the process exit status.
 #include "Vdut.h"
 #include "verilated.h"
 #include "verilated_vpi.h"
@@ -16,6 +16,26 @@ int main(int argc, char** argv) {
     context.commandArgs(argc, argv);
     context.randReset(0);
     Vdut dut{&context};
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "+suite_testbench") {
+            while (!context.gotFinish()) {
+                dut.eval();
+#if VM_TIMING
+                if (!dut.eventsPending()) break;
+                context.time(dut.nextTimeSlot());
+#else
+                break;
+#endif
+            }
+            const bool completed = context.gotFinish();
+            dut.final();
+            if (!completed) {
+                std::cerr << "native testbench exited without reaching $finish" << std::endl;
+                return 1;
+            }
+            return 0;
+        }
+    }
     // Drive the first batch before evaluating. Zero-initialized runtime loop
     // bounds/steps may be invalid until the test supplies its inputs.
     bool dirty = true;
