@@ -3,7 +3,7 @@ use std::{cmp::Reverse, collections::hash_map::Entry};
 use celox_design::{InitialStateData, InitialStateValue, ModuleId};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    Declaration, HierVarRef, Module, Statement, SystemFunctionKind, SystemFunctionOutput,
+    Declaration, ForRange, HierVarRef, Module, Statement, SystemFunctionKind, SystemFunctionOutput,
 };
 
 use crate::{HashMap, LoweringPhase, ParserError, ScheduledRtl};
@@ -82,6 +82,11 @@ fn prepare_statements(
                 prepare_statements(&statement.false_side, lookup, source, active, prepared)?;
             }
             Statement::For(statement) => {
+                // Only skip a proven empty range. Runtime bounds still need
+                // their memory files prepared before testbench execution.
+                if statically_empty_range(&statement.range) {
+                    continue;
+                }
                 prepare_statements(&statement.body, lookup, source, active, prepared)?;
             }
             Statement::Case(statement) => {
@@ -103,6 +108,42 @@ fn prepare_statements(
         }
     }
     Ok(())
+}
+
+fn statically_empty_range(range: &ForRange) -> bool {
+    let (ForRange::Forward {
+        start,
+        end,
+        inclusive,
+        ..
+    }
+    | ForRange::Reverse {
+        start,
+        end,
+        inclusive,
+        ..
+    }
+    | ForRange::Stepped {
+        start,
+        end,
+        inclusive,
+        ..
+    }) = range;
+    let mut context = veryl_analyzer::Context::default();
+    let (Some(start), Some(end)) = (start.eval_value(&mut context), end.eval_value(&mut context))
+    else {
+        return false;
+    };
+    // The runtime loop uses an SV int. Outside its nonnegative range,
+    // usize ordering can disagree with the signed runtime comparison.
+    if start > i32::MAX as usize || end > i32::MAX as usize {
+        return false;
+    }
+    if *inclusive {
+        start > end
+    } else {
+        start >= end
+    }
 }
 
 /// Resolve memory initialization against concrete instances, after the neutral

@@ -1,0 +1,14 @@
+module Child {
+    #[allow(unassign_variable)]
+    var mem: logic<8>[2];
+}
+#[test(Top)]
+module Top {
+    inst dut: Child;
+    initial {
+        dut.mem[0] = 2;
+        for i in 0..dut.mem[0] { dut.mem[1] = i as u8; }
+        $assert(dut.mem[1] == 1);
+        $finish();
+    }
+}
