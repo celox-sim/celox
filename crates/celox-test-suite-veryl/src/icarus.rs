@@ -27,11 +27,12 @@ impl Icarus {
             )?;
         }
         let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::emit::emit_veryl_sources(&sources)
+            crate::emit::emit_verification_sources(&sources, &design.top)
         }))
         .map_err(|error| {
             crate::verification::EmissionError(crate::verification::panic_message(error.as_ref()))
         })?;
+        let testbench = emitted.is_testbench();
         let edges = emitted
             .event_edges(&design.top)
             .cloned()
@@ -49,7 +50,14 @@ impl Icarus {
         write_if_changed(&directory.join("harness.cpp"), include_bytes!("icarus.cpp"))?;
         let build_log = File::create(directory.join("build.log"))?;
         let status = Command::new("timeout")
-            .args(["120s", "iverilog", "-g2012", "-gstrict-expr-width", "-s"])
+            .args([
+                "120s",
+                "iverilog",
+                "-g2012",
+                "-gstrict-expr-width",
+                "-DCELOX_SUITE_ICARUS",
+                "-s",
+            ])
             .arg(&design.top)
             .arg("-o")
             .arg(directory.join("model.vvp"))
@@ -88,8 +96,16 @@ impl Icarus {
         if !design.four_state {
             command.arg("+suite_two_state");
         }
+        if testbench {
+            command.arg("+suite_testbench");
+        }
+        let spawn = if testbench {
+            ProcessBackend::spawn_testbench
+        } else {
+            ProcessBackend::spawn
+        };
         Ok(Self {
-            process: ProcessBackend::spawn(command, &directory, design.top.clone(), edges)?,
+            process: spawn(command, &directory, design.top.clone(), edges)?,
             four_state: design.four_state,
         })
     }
@@ -149,6 +165,9 @@ fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) -> boo
 }
 
 impl Backend for Icarus {
+    fn run_testbench(&mut self) -> Result<()> {
+        self.process.run_testbench()
+    }
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         self.process.write(signal, payload, mask)
     }

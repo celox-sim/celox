@@ -34,13 +34,15 @@ fn hierarchical_readmemh_runs_in_statement_order_across_branches_and_clock_edges
                 var word: logic<8>;
                 var sampled: logic<8>;
                 var load: logic;
+                var limit: u32;
                 inst dut: Memory (clk, word, sampled);
                 initial {{
                     $assert(word == 0);
                     load = 0;
                     if load {{ $readmemh("{second}", dut.mem); }}
                     $assert(word == 0);
-                    for i in 0..2 {{
+                    limit = 2;
+                    for i in 0..limit {{
                         if i == 0 {{ $readmemh("{first}", dut.mem); }}
                         else {{ $readmemh("{second}", dut.mem); }}
                         clk.next();
@@ -213,6 +215,12 @@ fn hierarchical_readmemh_honors_constant_branches_and_loops(sim) {
                 inst dut: Memory (word);
                 initial {{
                     if 1'd0 {{ $readmemh("missing.hex", dut.mem); }}
+                    for _i in 0..0 {{ $readmemh("missing.hex", dut.mem); }}
+                    for _i in rev 2..1 {{ $readmemh("missing.hex", dut.mem); }}
+                    for _i in 2..=1 {{ $readmemh("missing.hex", dut.mem); }}
+                    for _i in 2..1 step *= 2 {{ $readmemh("missing.hex", dut.mem); }}
+                    for _i in 1..=1 {{ $readmemh("{path}", dut.mem); }}
+                    $assert(word == 8'hab);
                     for i in 0..2 {{
                         if i == 1 {{ $readmemh("{path}", dut.mem); }}
                     }}

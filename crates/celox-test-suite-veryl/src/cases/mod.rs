@@ -80,6 +80,7 @@ mod four_state;
 mod four_state_expression_semantics;
 mod function_arguments;
 mod generic_identity;
+mod hierarchical_assignment;
 mod hierarchy;
 mod interface;
 mod issue3_repro;
@@ -122,6 +123,7 @@ mod wide_operators;
 mod wide_shift_mem;
 
 pub(super) const GROUPS: &[&[crate::TestCase]] = &[
+    hierarchical_assignment::CASES,
     advanced_interface::CASES,
     array_literal::CASES,
     basic::CASES,

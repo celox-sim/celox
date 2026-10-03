@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchical_assignment::disjoint_loop",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "hierarchical_assignment::selections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 2,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite_version": "0.9.1",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

@@ -27,11 +27,12 @@ impl Verilator {
             )?;
         }
         let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::emit::emit_veryl_sources(&sources)
+            crate::emit::emit_verification_sources(&sources, &design.top)
         }))
         .map_err(|error| {
             crate::verification::EmissionError(crate::verification::panic_message(error.as_ref()))
         })?;
+        let testbench = emitted.is_testbench();
         let mut paths = Vec::new();
         let edges = emitted
             .event_edges(&design.top)
@@ -98,7 +99,15 @@ impl Verilator {
 
         let mut command = Command::new("timeout");
         command.arg("30s").arg(directory.join("obj/Vdut"));
-        Ok(Self(ProcessBackend::spawn(
+        if testbench {
+            command.arg("+suite_testbench");
+        }
+        let spawn = if testbench {
+            ProcessBackend::spawn_testbench
+        } else {
+            ProcessBackend::spawn
+        };
+        Ok(Self(spawn(
             command,
             &directory,
             format!("TOP.{}", design.top),
@@ -176,6 +185,9 @@ fn is_diagnostic_context(line: &str) -> bool {
 }
 
 impl Backend for Verilator {
+    fn run_testbench(&mut self) -> Result<()> {
+        self.0.run_testbench()
+    }
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         if mask != BigUint::default() {
             return Err("Verilator cannot drive X/Z".into());
