@@ -150,3 +150,39 @@ The server uses stdio framing, UTF-16 positions and incremental text synchroniza
 optional `step` and `branch`. Standard `$/cancelRequest`, shutdown and exit are
 supported. Returned identities and reports are diagnostic data, not proof APIs.
 Run the real-worker protocol regressions with `python3 -m unittest editor.test_server -v`.
+
+
+### Extension Host integration tests
+
+The required editor CI gate also uses Microsoft's official
+[`@vscode/test-electron` runner](https://code.visualstudio.com/api/working-with-extensions/testing-extension#advanced-setup-your-own-runner),
+pinned to 2.5.2, with VS Code 1.100.3. The runner creates a disposable workspace
+from the real counter example and an isolated user profile configured for the
+real Python server and Rust worker. Tests run through VS Code's Extension Host
+and language-provider APIs: activation, unsaved Unicode edits, diagnostics and
+clearing, definition/completion/hover, CodeLens registration, the checked proof
+command/result, actual bounded Unknown, cancellation and stale-result rejection.
+They do not simulate mouse/keyboard interaction or assert rendered pixels.
+
+```sh
+cargo build --release --locked --bin hwverify-editor
+npm ci --prefix editor/vscode --ignore-scripts
+# Linux, with Xvfb and Electron's GTK/NSS/GBM/audio dependencies installed:
+xvfb-run -a npm test --prefix editor/vscode
+# On a desktop with a display, the same official runner can be launched directly:
+npm test --prefix editor/vscode
+```
+
+The first run downloads the pinned VS Code build from Microsoft's distribution
+service. Missing display dependencies or a failed download cause a failing test;
+CI never silently skips this gate. Fast protocol and client-wiring tests remain
+separate. The runner uses its standard isolated test-host flags, including its
+own Electron sandbox flags; these do not change the production extension's
+workspace-trust requirement.
+
+Extension consumers can invoke `hwverify.prove` with explicit `branch: 0` (or
+`branch: null` for a unique match) to avoid the branch-selection dialog and receive
+the diagnostic result. The activated extension also exposes
+`checkProof(options, cancellationToken)` for clients providing their own UI; it
+uses the same live language client and checked backend. Neither entry point
+accepts saved reports as proof authority.

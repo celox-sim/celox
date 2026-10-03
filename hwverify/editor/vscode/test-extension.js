@@ -48,9 +48,10 @@ async function run() {
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'extension.js'), 'utf8'), sandbox);
   const extension = sandbox.module.exports;
-  await extension.activate({subscriptions: []});
+  const api = await extension.activate({subscriptions: []});
+  assert.equal(typeof api.checkProof, 'function');
   assert(instance.options.documentSelector.some(x => x.language === 'json'));
-  await commands.get('hwverify.check')();
+  assert.equal((await commands.get('hwverify.check')()).diagnosticOnly, true);
   let proof = calls.find(x => x[0] === 'workspace/executeCommand' && x[1].command === 'hwverify.prove');
   assert.equal(proof[2], token);
   assert.equal(proof[1].arguments[0].step, 'step');
@@ -59,6 +60,10 @@ async function run() {
   proof = calls.filter(x => x[0] === 'workspace/executeCommand' && x[1].command === 'hwverify.prove').at(-1);
   assert.equal(proof[1].arguments[0].branch, 2);
   assert.equal(options.branch, undefined);
+  branch = undefined;
+  assert.equal((await commands.get('hwverify.prove')({...options, branch: 0})).diagnosticOnly, true);
+  assert.equal((await api.checkProof(options, token)).diagnosticOnly, true);
+  assert.equal(calls.filter(x => x[0] === 'workspace/executeCommand').at(-1)[2], token);
   await commands.get('hwverify.associate')();
   assert(calls.some(x => x[1]?.arguments?.[0]?.baseUri === 'file:///base.hwv'));
   await commands.get('hwverify.clearBase')();

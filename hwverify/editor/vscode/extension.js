@@ -23,6 +23,7 @@ async function activate(context) {
       synchronize: {fileEvents: watcher}, middleware: {executeCommand: (command, args, next) => command === 'hwverify.prove' ? prove(args[0]) : next(command, args)}});
   await client.start();
   client.onNotification('hwverify/statusChanged', () => {});
+  const checkProof = (options, token) => client.sendRequest('workspace/executeCommand', {command: 'hwverify.prove', arguments: [options]}, token);
   // Own the command so CodeLens and the palette both get cancellable progress.
   prove = async (options) => {
     if (!options) {
@@ -35,18 +36,21 @@ async function activate(context) {
       options = selected.options;
     }
     // Optional branch selection is explicit; never silently prove a different branch.
-    const branch = await vscode.window.showInputBox({prompt: 'Branch index (zero-based); leave empty for a uniquely matching target', validateInput: x => x === '' || /^\d+$/.test(x) ? undefined : 'Enter a nonnegative integer'});
-    if (branch === undefined) return;
     options = {...options};
-    if (branch !== '') options.branch = Number(branch);
-    await vscode.window.withProgress({location: vscode.ProgressLocation.Notification, title: 'hwverify: checking fresh proof', cancellable: true}, async (_, token) => {
+    if (!Object.prototype.hasOwnProperty.call(options, 'branch')) {
+      const branch = await vscode.window.showInputBox({prompt: 'Branch index (zero-based); leave empty for a uniquely matching target', validateInput: x => x === '' || /^\d+$/.test(x) ? undefined : 'Enter a nonnegative integer'});
+      if (branch === undefined) return;
+      if (branch !== '') options.branch = Number(branch);
+    }
+    return vscode.window.withProgress({location: vscode.ProgressLocation.Notification, title: 'hwverify: checking fresh proof', cancellable: true}, async (_, token) => {
       try {
-        const result = await client.sendRequest('workspace/executeCommand', {command: 'hwverify.prove', arguments: [options]}, token);
+        const result = await checkProof(options, token);
         output.clear();
         output.appendLine('Snapshot diagnostics only; no cached result is proof authority.');
         output.appendLine('Counterexamples may concern an auxiliary lemma or guard, not the target or reset reachability.');
         output.appendLine(JSON.stringify({documentVersion: result.documentVersion, identity: result.identity, requestIdentity: result.requestIdentity, diagnostics: result.diagnostics, scope: result.proof?.scope, branch: result.proof?.branch, matchingBranches: result.proof?.matching_branches, error: result.proof?.error, query: result.proof?.query, queryDisplayTruncated: result.proof?.query_display_truncated, targets: result.proof?.reports.map(r => r.lemma_candidates), witnesses: result.witnesses}, null, 2));
         output.show(true);
+        return result;
       } catch (error) {
         if (!token.isCancellationRequested) vscode.window.showErrorMessage(`hwverify: ${error.message}`);
       }
@@ -66,6 +70,8 @@ async function activate(context) {
   };
   context.subscriptions.push(vscode.commands.registerCommand('hwverify.associate', () => associate(false)));
   context.subscriptions.push(vscode.commands.registerCommand('hwverify.clearBase', () => associate(true)));
+  // Diagnostic-only extension API for clients that supply their own cancellation UI.
+  return {checkProof};
 }
 async function deactivate() { if (client) await client.dispose(); }
 module.exports = {activate, deactivate};
