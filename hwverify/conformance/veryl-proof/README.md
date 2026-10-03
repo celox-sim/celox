@@ -130,7 +130,7 @@ inout bindings, function snapshot substitution, formal-width constant context,
 first-dimension `$size`, direct runtime `$onehot`/`$clog2` acceptance, and numeric
 cast signedness. The runtime-function patch is an explicit frontend extension;
 constant-only contexts remain rejected. See
-[`../../audit/veryl_proof_independent`](../../audit/veryl_proof_independent/README.md)
+[`../../audit/veryl_proof_independent`](../../audit/README.md)
 for separate investigations and compiler/formula boundary checks.
 
 Celox code uses its MIT/Apache-2.0 licenses; the Veryl analyzer and imported suite
