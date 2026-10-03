@@ -355,3 +355,13 @@ plus a 7-bit proof-only immutable backing configuration and zero backing cells.
 Independently proved concrete reset/write/frame/read contracts justify checked
 step simulation at 4/16/64 words. Stores to unmapped addresses are ignored and
 unmapped reads stay zero. All previous readonly gates remain supported.
+
+### Automatic finite proof discovery
+
+An opt-in bounded planner can discover structural equality cuts and exhaustive
+mux branches without source-specific proof programs. Use
+`HWVERIFY_SOLVER=finite HWVERIFY_AUTOMATIC_PROOFS=independent_lemmas`.
+See [automatic proofs](AUTOMATIC-PROOFS.md) for the checked boundary, explicit
+aggregate budgets, strict shared mode, held-out evaluation, and limitations.
+The [phase-1 publication record](audit/automatic_proof/PHASE1-PUBLICATION.md)
+includes complete paired replay evidence and the remaining RV32I Unknown scope.

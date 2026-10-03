@@ -51,6 +51,8 @@ jobs:
         run: ./conformance/veryl-symbolic/run_ci.sh "$RUNNER_TEMP/veryl-symbolic"
       - name: Verify selected RV32I architecture, memory, latency and mutations
         run: ./conformance/veryl-symbolic/run_rv32i_ci.sh "$RUNNER_TEMP/selected-rv32i"
+      - name: Verify fixed automatic-proof held-outs and original-formula mutants
+        run: ./conformance/veryl-symbolic/run_automatic_ci.sh "$RUNNER_TEMP/automatic-proof"
       - name: Upload whole-corpus proof audit and coverage dispositions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -73,5 +75,13 @@ jobs:
         with:
           name: selected-rv32i-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selected-rv32i/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload automatic-proof fixed-matrix evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: automatic-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/automatic-proof/
           if-no-files-found: error
           retention-days: 14

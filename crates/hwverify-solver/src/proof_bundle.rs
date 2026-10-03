@@ -252,6 +252,12 @@ impl<'a> ProofBundle<'a> {
             ..self.limits.clone()
         })
     }
+    /// Account for bounded search performed before opening this live bundle.
+    /// This can only debit resources; it cannot manufacture a sequent.
+    pub(crate) fn charge_search(&mut self, started: Instant, work: u64) -> Res<()> {
+        self.start = self.start.min(started);
+        self.charge(work)
+    }
     fn charge(&mut self, work: u64) -> Res<()> {
         self.work = self.work.saturating_add(work);
         if self.mode == CutBudgetMode::SharedQuery {

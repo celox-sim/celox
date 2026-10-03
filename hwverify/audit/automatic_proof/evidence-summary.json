@@ -1,0 +1,758 @@
+{
+  "status": "passed",
+  "phase": "final_source_revalidation",
+  "candidate_sha256": "ac01cbc93c37e92d3344493ae65c8118aef0e0af3be41168ec6534c04c80a96a",
+  "baseline_sha256": "8769eb2a9e860b6e6504152ac44cc20b1324296a6736b0b0cf00a1ed77d06709",
+  "positive_instances": 11,
+  "unknown_to_verified": 9,
+  "coverage_gains_excluding_alpha_control": 8,
+  "distinct_positive_families": 6,
+  "alpha_name_independence_positive": 1,
+  "mutants_replay_validated": 18,
+  "default_limits_unchanged": true,
+  "per_query": {
+    "max_work": 100000000,
+    "max_clauses": 1000000,
+    "timeout_ms": 10000
+  },
+  "mode": "independent_lemmas",
+  "single_query_speedup_claim": false,
+  "concrete_generator_tests": 4,
+  "paired_json_inputs_identical": true,
+  "baseline_summary_paths": [
+    "/workspace/scratch/07f10565586c/automatic-proof-baseline-w32/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-baseline-controls32/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-baseline-shifts64/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-baseline-heldout24/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-baseline-alpha24/summary.json"
+  ],
+  "candidate_summary_paths": [
+    "/workspace/scratch/07f10565586c/automatic-proof-final-w32/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-final-shifts64/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-final-heldout24/summary.json",
+    "/workspace/scratch/07f10565586c/automatic-proof-final-alpha24/summary.json"
+  ],
+  "evaluation_source_sha256": {
+    "generate.py": "ecbaebdf4be1b7fa664c5f3d7d90023938269fb2605936b520c951c7867b96bf",
+    "run.py": "877295577a54815a7acec7e579281da368ad38f41cf20810700dfab30652539e",
+    "test_generate.py": "e78eae627b155ae636bafbcaf65fbe93e2da0376d751fc46f0c05069a417f2df",
+    "README.md": "c38673615897f481132b2bee4d572a9d27e49a89119f62876d9491e5aa221e2e"
+  },
+  "results": [
+    {
+      "width": 32,
+      "case": "wrapped_multiplier",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/wrapped_multiplier/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 6,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 261,
+        "bundle_work_including_validation_and_derived_steps": 1098,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 32,
+      "case": "double_guard_mac",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/double_guard_mac/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 8,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 438,
+        "bundle_work_including_validation_and_derived_steps": 2214,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 32,
+      "case": "wrapped_barrel_shift",
+      "alpha_renaming_control": false,
+      "baseline": "stuttering_refinement_verified",
+      "candidate": "stuttering_refinement_verified",
+      "gain": false,
+      "mutant": false,
+      "original_formula_validated": false,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/wrapped_barrel_shift/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 28877360,
+        "emission_work_including_original_attempts": 52,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 32,
+      "case": "postscaled_multiplier",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/postscaled_multiplier/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 6,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 281,
+        "bundle_work_including_validation_and_derived_steps": 1188,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 32,
+      "case": "operand_isolation",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/operand_isolation/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 7,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 285,
+        "bundle_work_including_validation_and_derived_steps": 1531,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 32,
+      "case": "double_guard_barrel_shift",
+      "alpha_renaming_control": false,
+      "baseline": "stuttering_refinement_verified",
+      "candidate": "stuttering_refinement_verified",
+      "gain": false,
+      "mutant": false,
+      "original_formula_validated": false,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/double_guard_barrel_shift/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 60550320,
+        "emission_work_including_original_attempts": 62,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 32,
+      "case": "wrapped_multiplier_wrong_result",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/wrapped_multiplier_wrong_result/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 379476,
+        "emission_work_including_original_attempts": 54,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "wrapped_multiplier_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/wrapped_multiplier_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 381327,
+        "emission_work_including_original_attempts": 57,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "double_guard_mac_wrong_result",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/double_guard_mac_wrong_result/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 626827,
+        "emission_work_including_original_attempts": 64,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "double_guard_mac_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/double_guard_mac_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 628633,
+        "emission_work_including_original_attempts": 67,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "wrapped_barrel_shift_wrong_result",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/wrapped_barrel_shift_wrong_result/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 131240,
+        "emission_work_including_original_attempts": 54,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "wrapped_barrel_shift_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/wrapped_barrel_shift_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 132918,
+        "emission_work_including_original_attempts": 57,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "postscaled_multiplier_wrong_result",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/postscaled_multiplier_wrong_result/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 461028,
+        "emission_work_including_original_attempts": 58,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "postscaled_multiplier_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/postscaled_multiplier_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 462835,
+        "emission_work_including_original_attempts": 61,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "operand_isolation_wrong_result",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/operand_isolation_wrong_result/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 246087,
+        "emission_work_including_original_attempts": 51,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "operand_isolation_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/operand_isolation_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 247724,
+        "emission_work_including_original_attempts": 54,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "double_guard_barrel_shift_wrong_result",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/double_guard_barrel_shift_wrong_result/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 212567,
+        "emission_work_including_original_attempts": 64,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 32,
+      "case": "double_guard_barrel_shift_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-w32/double_guard_barrel_shift_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 214318,
+        "emission_work_including_original_attempts": 67,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 64,
+      "case": "wrapped_barrel_shift",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-shifts64/wrapped_barrel_shift/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 6,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 261,
+        "bundle_work_including_validation_and_derived_steps": 1098,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 64,
+      "case": "double_guard_barrel_shift",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-shifts64/double_guard_barrel_shift/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 8,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 438,
+        "bundle_work_including_validation_and_derived_steps": 2214,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 64,
+      "case": "wrapped_barrel_shift_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": null,
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-shifts64/wrapped_barrel_shift_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 505320,
+        "emission_work_including_original_attempts": 57,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 64,
+      "case": "double_guard_barrel_shift_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": null,
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-shifts64/double_guard_barrel_shift_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 834448,
+        "emission_work_including_original_attempts": 67,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 24,
+      "case": "double_guard_mac",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-heldout24/double_guard_mac/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 8,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 438,
+        "bundle_work_including_validation_and_derived_steps": 2214,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 24,
+      "case": "operand_isolation",
+      "alpha_renaming_control": false,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-heldout24/operand_isolation/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 7,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 285,
+        "bundle_work_including_validation_and_derived_steps": 1531,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 24,
+      "case": "double_guard_mac_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": null,
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-heldout24/double_guard_mac_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 344004,
+        "emission_work_including_original_attempts": 67,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 24,
+      "case": "operand_isolation_complement_wrong",
+      "alpha_renaming_control": false,
+      "baseline": null,
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-heldout24/operand_isolation_complement_wrong/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 136514,
+        "emission_work_including_original_attempts": 54,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 24,
+      "case": "wrapped_multiplier__alpha_7301",
+      "alpha_renaming_control": true,
+      "baseline": "unknown",
+      "candidate": "stuttering_refinement_verified",
+      "gain": true,
+      "mutant": false,
+      "original_formula_validated": null,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-alpha24/wrapped_multiplier__alpha_7301/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 6,
+        "finite_work_including_original_attempts": 200000002,
+        "emission_work_including_original_attempts": 261,
+        "bundle_work_including_validation_and_derived_steps": 1098,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [
+          {
+            "status": "unknown",
+            "work": 100000001
+          }
+        ],
+        "sat_queries": []
+      }
+    },
+    {
+      "width": 24,
+      "case": "wrapped_multiplier_wrong_result__alpha_7301",
+      "alpha_renaming_control": true,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-alpha24/wrapped_multiplier_wrong_result__alpha_7301/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 209440,
+        "emission_work_including_original_attempts": 54,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    },
+    {
+      "width": 24,
+      "case": "wrapped_multiplier_complement_wrong__alpha_7301",
+      "alpha_renaming_control": true,
+      "baseline": "counterexample",
+      "candidate": "counterexample",
+      "gain": false,
+      "mutant": true,
+      "original_formula_validated": true,
+      "candidate_report": "/workspace/scratch/07f10565586c/automatic-proof-final-alpha24/wrapped_multiplier_complement_wrong__alpha_7301/report.json",
+      "candidate_evidence": {
+        "primitive_queries": 1,
+        "finite_work_including_original_attempts": 210757,
+        "emission_work_including_original_attempts": 57,
+        "bundle_work_including_validation_and_derived_steps": 0,
+        "bundle_work_overlaps_primitive_work": true,
+        "original_attempts": [],
+        "sat_queries": [
+          {
+            "name": "microstep_refinement",
+            "original_formula_validated": true
+          }
+        ]
+      }
+    }
+  ]
+}

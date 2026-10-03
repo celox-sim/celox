@@ -251,6 +251,7 @@ impl Check {
         // Reject an invalid/non-finite opt-in before ANY backend invocation,
         // including nonvacuity/example queries preceding the inductive query.
         crate::conjunctive::enabled()?;
+        crate::automatic::mode()?;
         let bounded = budget.is_some();
         if bounded && !finite_only() {
             return Err("bounded query cannot invoke an external solver".into());

@@ -232,7 +232,7 @@ impl Check {
         post: Term,
         context: &Env,
     ) -> Res<()> {
-        let enabled = enabled()?;
+        let enabled = enabled()? || crate::automatic::mode()?.is_some();
         self.query_implication_mode(name, pre, post, context, enabled)
     }
 
@@ -312,6 +312,18 @@ impl Check {
         mut callback: Option<&mut QueryCallback<'_>>,
     ) -> Res<()> {
         let (enabled, timeouts, after_unknown) = settings;
+        let automatic_mode = crate::automatic::mode()?;
+        if callback.is_some()
+            && automatic_mode.is_some_and(|mode| {
+                (mode == crate::CutBudgetMode::IndependentLemmas) != after_unknown
+            })
+        {
+            return Err(
+                "automatic proof budget mode must match the explicit proof callback".into(),
+            );
+        }
+        let after_unknown =
+            after_unknown || automatic_mode == Some(crate::CutBudgetMode::IndependentLemmas);
         let overall_start = Instant::now();
         let bad = and(pre.clone(), not(post.clone()));
         if enabled && !crate::finite_only() {
@@ -375,7 +387,7 @@ impl Check {
                 None
             };
             let before = self.reports.len();
-            let handled = if let Some(hook) = callback.as_deref_mut() {
+            let mut handled = if let Some(hook) = callback.as_deref_mut() {
                 match hook(self, child_name, &bad_child, context) {
                     Ok(handled) => handled,
                     Err(error)
@@ -393,6 +405,17 @@ impl Check {
             } else {
                 false
             };
+            let mut automatic_search = Value::Null;
+            if !handled {
+                if let Some(mode) = automatic_mode {
+                    (handled, automatic_search) = self.query_automatic_proof_detailed(
+                        child_name,
+                        bad_child.clone(),
+                        context,
+                        mode,
+                    )?;
+                }
+            }
             if handled {
                 if after_unknown
                     && self
@@ -416,6 +439,33 @@ impl Check {
                 }
                 if let Some(original) = original_child.clone() {
                     self.reports.push(original);
+                } else if automatic_mode == Some(crate::CutBudgetMode::SharedQuery)
+                    && !automatic_search.is_null()
+                {
+                    // An abandoned search still consumes the strict shared
+                    // query budget before the ordinary finite fallback.
+                    let mut limits = crate::finite::Limits::default();
+                    limits.max_work = limits
+                        .max_work
+                        .saturating_sub(automatic_search["search_work"].as_u64().unwrap_or(0));
+                    let search_ms = (automatic_search["search_seconds"].as_f64().unwrap_or(0.0)
+                        * 1000.0)
+                        .ceil() as u64;
+                    limits.timeout_ms = limits.timeout_ms.saturating_sub(search_ms);
+                    self.query_limited(
+                        child_name,
+                        bad_child,
+                        false,
+                        &child_context,
+                        crate::QueryOptions {
+                            timeout_ms: limits.timeout_ms,
+                            ..Default::default()
+                        },
+                        Some(crate::z3::QueryBudget {
+                            limits,
+                            allow_kernel: false,
+                        }),
+                    )?;
                 } else {
                     self.query_with_timeout(
                         child_name,
@@ -424,6 +474,9 @@ impl Check {
                         &child_context,
                         timeouts.child,
                     )?;
+                }
+                if !automatic_search.is_null() {
+                    self.reports.last_mut().unwrap()["automatic_search_attempt"] = automatic_search;
                 }
             }
             if handled {
