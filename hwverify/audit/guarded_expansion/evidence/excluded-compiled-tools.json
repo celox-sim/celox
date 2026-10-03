@@ -1,0 +1,32 @@
+[
+  {
+    "path": "/workspace/next-proof/expansion-fixed-baseline/width24-alpha25109/checker",
+    "size": 4758176,
+    "sha256": "6f13a6c3475ca47465462251b6efd8f3df4cd538c31e9a718cb48b040666d694"
+  },
+  {
+    "path": "/workspace/next-proof/expansion-fixed-baseline/width24-alphaNone/checker",
+    "size": 4758176,
+    "sha256": "6f13a6c3475ca47465462251b6efd8f3df4cd538c31e9a718cb48b040666d694"
+  },
+  {
+    "path": "/workspace/next-proof/expansion-fixed-baseline/width32-alphaNone/checker",
+    "size": 4758176,
+    "sha256": "6f13a6c3475ca47465462251b6efd8f3df4cd538c31e9a718cb48b040666d694"
+  },
+  {
+    "path": "/workspace/next-proof/expansion-fixed-candidate/width24-alpha25109/checker",
+    "size": 4762608,
+    "sha256": "5a0f2fe1544b15c012578f79794f961611e83eeb2dc9aa879ca616bde8e090d9"
+  },
+  {
+    "path": "/workspace/next-proof/expansion-fixed-candidate/width24-alphaNone/checker",
+    "size": 4762608,
+    "sha256": "5a0f2fe1544b15c012578f79794f961611e83eeb2dc9aa879ca616bde8e090d9"
+  },
+  {
+    "path": "/workspace/next-proof/expansion-fixed-candidate/width32-alphaNone/checker",
+    "size": 4762608,
+    "sha256": "5a0f2fe1544b15c012578f79794f961611e83eeb2dc9aa879ca616bde8e090d9"
+  }
+]

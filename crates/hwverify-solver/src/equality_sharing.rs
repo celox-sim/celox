@@ -175,6 +175,35 @@ impl EqualityPool {
         }
         (None, work)
     }
+    /// Untrusted one-step expansion candidate. Guards remain exact source
+    /// guards and are discharged again by the live proof path at execution.
+    pub(crate) fn expansion(
+        &self,
+        from: &Term,
+        target: &Term,
+        guards: &[(Term, bool)],
+    ) -> (Option<Term>, usize) {
+        let mut work = 0;
+        if !from.0.op.starts_with('@')
+            || !matches!(from.0.sort, Sort::Bv(_))
+            || target.0.args.is_empty()
+        {
+            return (None, work);
+        }
+        for &(index, forward) in self.adjacency.get(from).into_iter().flatten() {
+            work += 1;
+            let fact = &self.facts[index];
+            let next = if forward { &fact.right } else { &fact.left };
+            if next.0.op == target.0.op
+                && next.0.sort == target.0.sort
+                && next.0.args.len() == target.0.args.len()
+                && self.active(fact, guards, &mut work)
+            {
+                return (Some(next.clone()), work);
+            }
+        }
+        (None, work)
+    }
     fn edge(
         &mut self,
         bundle: &mut ProofBundle<'_>,
@@ -301,6 +330,32 @@ mod tests {
             word("bvxor", v("c"), v("d")),
             word("bvsub", v("e"), v("f")),
         )
+    }
+    #[test]
+    fn word_expansion_requires_matching_structure_and_exact_active_guards() {
+        let g = var("gate".into(), Sort::Bool);
+        let definition = word("bvmul", v("a"), v("b"));
+        let target = word("bvmul", v("c"), v("d"));
+        let pool = EqualityPool::new(node(
+            Sort::Bool,
+            "=>",
+            vec![g.clone(), eq(v("value"), definition.clone())],
+        ));
+        assert!(pool.expansion(&v("value"), &target, &[]).0.is_none());
+        assert!(pool
+            .expansion(&v("value"), &target, &[(g.clone(), false)])
+            .0
+            .is_none());
+        assert_eq!(
+            pool.expansion(&v("value"), &target, &[(g.clone(), true)]).0,
+            Some(definition)
+        );
+        assert!(pool
+            .expansion(&v("value"), &word("bvadd", v("c"), v("d")), &[(g, true)])
+            .0
+            .is_none());
+        let negative = EqualityPool::new(not(eq(v("value"), target.clone())));
+        assert!(negative.expansion(&v("value"), &target, &[]).0.is_none());
     }
     #[test]
     fn paths_are_bidirectional_guarded_and_ignore_negative_facts() {

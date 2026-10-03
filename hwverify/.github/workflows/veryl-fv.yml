@@ -61,6 +61,11 @@ jobs:
         run: |
           python3 -m unittest audit.word_frontier.test_generate audit.word_frontier.test_ci
           python3 -m audit.word_frontier.ci --checker target/release/hwverify-rs --expected-checker-sha256 "$(sha256sum target/release/hwverify-rs | cut -d' ' -f1)" --out "$RUNNER_TEMP/word-frontier"
+      - name: Verify guarded word expansion and reject escaped guards
+        run: |
+          cargo test --release --locked -p hwverify-solver equality_sharing::tests
+          python3 -m unittest audit.guarded_expansion.test_generate audit.guarded_expansion.test_ci
+          python3 -m audit.guarded_expansion.ci --checker target/release/hwverify-rs --expected-checker-sha256 "$(sha256sum target/release/hwverify-rs | cut -d' ' -f1)" --out "$RUNNER_TEMP/guarded-expansion"
       - name: Upload whole-corpus proof audit and coverage dispositions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -107,5 +112,13 @@ jobs:
         with:
           name: word-frontier-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/word-frontier/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload guarded word expansion evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: guarded-expansion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/guarded-expansion/
           if-no-files-found: error
           retention-days: 14

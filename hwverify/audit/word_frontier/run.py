@@ -10,7 +10,7 @@ from audit.equality_sharing.ci import FLAGS, LIMITS, audit_report, digest, evalu
 from audit.word_frontier.generate import FAMILIES, alpha_rename, cases
 
 
-def run(checker, out, width, alpha_seed=None, names=(), expected_sha256=None):
+def run(checker, out, width, alpha_seed=None, names=(), expected_sha256=None, case_generator=cases, positive_names=FAMILIES):
     checker = checker.resolve(strict=True)
     sha = digest(checker.read_bytes())
     require(expected_sha256 is None or sha == expected_sha256, 'wrong checker hash')
@@ -29,9 +29,9 @@ def run(checker, out, width, alpha_seed=None, names=(), expected_sha256=None):
                'proof_authority': 'fresh live checker only; reports are audit diagnostics',
                'all_loaded_local_evaluation_source_sha256': fingerprints, 'rows': []}
     started = time.monotonic()
-    for doc in cases(width):
+    for doc in case_generator(width):
         if names and doc['name'] not in names: continue
-        role = 'limitation_positive' if doc['name'] in FAMILIES else 'negative'
+        role = 'limitation_positive' if doc['name'] in positive_names else 'negative'
         if alpha_seed is not None: doc = alpha_rename(doc, alpha_seed)
         directory = out / doc['name']; directory.mkdir()
         payload = (json.dumps(doc, indent=2)+'\n').encode()
