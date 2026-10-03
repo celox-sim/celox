@@ -27,6 +27,12 @@ use num_traits::ToPrimitive as _;
 use rand::{RngExt as _, SeedableRng as _};
 use rand_pcg::Pcg64;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    cell::RefCell,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 
 // ── Public types ───────────────────────────────────────────────────────
 
@@ -641,6 +647,38 @@ fn exec_for_loop<B: SimBackend>(
     reverse: bool,
     mut exec_body: impl FnMut(&mut Simulator<B>) -> ExecResult,
 ) -> ExecResult {
+    let sim = RefCell::new(sim);
+    let mut future = std::pin::pin!(exec_for_loop_async(
+        &sim,
+        loop_var,
+        start,
+        end,
+        inclusive,
+        step,
+        step_op,
+        reverse,
+        || std::future::ready(exec_body(&mut sim.borrow_mut())),
+    ));
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => result,
+        Poll::Pending => unreachable!("synchronous loop body cannot suspend"),
+    }
+}
+
+async fn exec_for_loop_async<B: SimBackend, F: Future<Output = ExecResult>>(
+    sim: &RefCell<&mut Simulator<B>>,
+    loop_var: &Option<(SignalRef, usize, bool)>,
+    start: &LoopBound,
+    end: &LoopBound,
+    inclusive: bool,
+    step: usize,
+    step_op: Option<Op>,
+    reverse: bool,
+    mut exec_body: impl FnMut() -> F,
+) -> ExecResult {
     let continuation_bound = if reverse { start } else { end };
     let (bound_width, bound_signed) = match continuation_bound {
         LoopBound::Static(value) => (
@@ -685,11 +723,11 @@ fn exec_for_loop<B: SimBackend>(
         }
     };
 
-    let mut start = match eval_loop_bound(sim, start) {
+    let mut start = match eval_loop_bound(&mut sim.borrow_mut(), start) {
         Ok(v) => v,
         Err(error) => return ExecResult::Fail(error.to_string()),
     };
-    let mut end = match eval_loop_bound(sim, end) {
+    let mut end = match eval_loop_bound(&mut sim.borrow_mut(), end) {
         Ok(v) => v,
         Err(error) => return ExecResult::Fail(error.to_string()),
     };
@@ -740,11 +778,11 @@ fn exec_for_loop<B: SimBackend>(
     if has_unsigned_wide || has_signed_wide {
         let start = as_bigint_bound(&start).expect("big loop bound");
         let end = as_bigint_bound(&end).expect("big loop bound");
-        let mut step_body = |sim: &mut Simulator<B>, i: BigInt| -> ExecResult {
+        let mut step_body = |i: BigInt| {
             if let Some((sig, width, _)) = loop_var {
-                sim_set_bigint(sim, *sig, *width, i);
+                sim_set_bigint(&mut sim.borrow_mut(), *sig, *width, i);
             }
-            exec_body(sim)
+            exec_body()
         };
         if reverse {
             if inclusive {
@@ -758,7 +796,7 @@ fn exec_for_loop<B: SimBackend>(
                             (*width, *signed)
                         });
                     let current = truncate_bigint_to_width(end, width, signed);
-                    let result = step_body(sim, current.clone());
+                    let result = step_body(current.clone()).await;
                     if matches!(result, ExecResult::Break) {
                         return ExecResult::Continue;
                     }
@@ -787,7 +825,7 @@ fn exec_for_loop<B: SimBackend>(
                         (*width, *signed)
                     });
                 let current = truncate_bigint_to_width(start, width, signed);
-                let result = step_body(sim, current.clone());
+                let result = step_body(current.clone()).await;
                 if matches!(result, ExecResult::Break) {
                     return ExecResult::Continue;
                 }
@@ -833,18 +871,18 @@ fn exec_for_loop<B: SimBackend>(
                 truncate_i128_to_width(value, *width, *signed)
             })
         };
-        let mut step_body = |sim: &mut Simulator<B>, i: i128| -> ExecResult {
+        let mut step_body = |i: i128| {
             if let Some((sig, width, _)) = loop_var {
-                sim_set_i128(sim, *sig, *width, i);
+                sim_set_i128(&mut sim.borrow_mut(), *sig, *width, i);
             }
-            exec_body(sim)
+            exec_body()
         };
 
         let step_i = step as i128;
         if reverse {
             let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
             while in_range(i, start) {
-                let r = step_body(sim, i);
+                let r = step_body(i).await;
                 if matches!(r, ExecResult::Break) {
                     return ExecResult::Continue;
                 }
@@ -860,7 +898,7 @@ fn exec_for_loop<B: SimBackend>(
         } else if let Some(op) = step_op {
             let mut i = truncate_counter(start);
             while in_range(i, end) {
-                let r = step_body(sim, i);
+                let r = step_body(i).await;
                 if matches!(r, ExecResult::Break) {
                     return ExecResult::Continue;
                 }
@@ -889,7 +927,7 @@ fn exec_for_loop<B: SimBackend>(
         } else {
             let mut i = truncate_counter(start);
             while in_range(i, end) {
-                let r = step_body(sim, i);
+                let r = step_body(i).await;
                 if matches!(r, ExecResult::Break) {
                     return ExecResult::Continue;
                 }
@@ -915,17 +953,17 @@ fn exec_for_loop<B: SimBackend>(
         })
     };
 
-    let mut step_body = |sim: &mut Simulator<B>, i: usize| -> ExecResult {
+    let mut step_body = |i: usize| {
         if let Some((sig, _, _)) = loop_var {
-            sim_set_u64(sim, *sig, i as u64);
+            sim_set_u64(&mut sim.borrow_mut(), *sig, i as u64);
         }
-        exec_body(sim)
+        exec_body()
     };
 
     if reverse {
         let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
         while i >= start {
-            let r = step_body(sim, i);
+            let r = step_body(i).await;
             if matches!(r, ExecResult::Break) {
                 return ExecResult::Continue;
             }
@@ -941,7 +979,7 @@ fn exec_for_loop<B: SimBackend>(
     } else if let Some(op) = step_op {
         let mut i = truncate_counter(start);
         while if inclusive { i <= end } else { i < end } {
-            let r = step_body(sim, i);
+            let r = step_body(i).await;
             if matches!(r, ExecResult::Break) {
                 return ExecResult::Continue;
             }
@@ -970,7 +1008,7 @@ fn exec_for_loop<B: SimBackend>(
     } else {
         let mut i = truncate_counter(start);
         while if inclusive { i <= end } else { i < end } {
-            let r = step_body(sim, i);
+            let r = step_body(i).await;
             if matches!(r, ExecResult::Break) {
                 return ExecResult::Continue;
             }
@@ -1047,7 +1085,7 @@ fn run_testbench_limited<B: SimBackend>(
     let mut result = if sim.components.finish_requested() {
         ExecResult::Finished
     } else {
-        exec_detailed(sim, testbench.statements(), &mut ctx)
+        exec_testbench(sim, testbench, &mut ctx)
     };
     if let Err(message) = sim.components.finish(ctx.current_time)
         && !matches!(result, ExecResult::Fail(_))
@@ -1095,7 +1133,7 @@ fn run_testbench_limited<B: SimBackend>(
     }
 }
 
-/// Compile the root module's initial block into an executable native testbench.
+/// Compile the elaborated initial processes into an executable native testbench.
 pub fn compile_initial_testbench<B: SimBackend>(
     sim: &Simulator<B>,
 ) -> Option<CompiledTestbench<B>> {
@@ -1117,7 +1155,7 @@ pub fn run_compiled_testbench<B: SimBackend>(
 
 /// Execute a compiled testbench, requiring explicit completion via `$finish`.
 ///
-/// Unlike [`run_compiled_testbench`], falling through the initial block is a
+/// Unlike [`run_compiled_testbench`], all processes falling through is a
 /// failure. Assertion and execution failures remain failures even if `$finish`
 /// is reached. Use this for self-checking tests that require a completion marker.
 pub fn run_compiled_testbench_to_finish<B: SimBackend>(
@@ -1130,7 +1168,8 @@ pub fn run_compiled_testbench_to_finish<B: SimBackend>(
 /// Execute at most `tick_limit` simulator ticks from a compiled testbench.
 ///
 /// Reaching the limit is reported separately from the testbench result so a
-/// performance prefix cannot be mistaken for a completed test.
+/// performance prefix cannot be mistaken for a completed test. Concurrent waits
+/// share clock edges; simultaneous rising edges count as one simulator tick.
 pub fn run_compiled_testbench_with_tick_limit<B: SimBackend>(
     sim: &mut Simulator<B>,
     tb: &CompiledTestbench<B>,
@@ -1190,7 +1229,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     let result = if sim.components.finish_requested() {
         ExecResult::Finished
     } else {
-        exec_detailed(sim, testbench.statements(), &mut ctx)
+        exec_testbench(sim, testbench, &mut ctx)
     };
     let mut error = match result {
         ExecResult::Fail(message) => Some(message),
@@ -1390,6 +1429,378 @@ fn drain_runtime_assertions<B: SimBackend>(
     }
 }
 
+// Futures retain each process's control stack (including evaluated loop bounds)
+// while no simulator borrow is held. Only this deterministic scheduler polls
+// them; no threads, executor, or background work are involved.
+struct ProcessWait<Event> {
+    clock: Event,
+    remaining: u64,
+    period: u64,
+    resume_at: Option<u64>,
+    reset: Option<(SignalRef, Option<Event>, u8)>,
+}
+
+fn exec_process<'a, B: SimBackend>(
+    sim: &'a RefCell<&mut Simulator<B>>,
+    ctx: &'a RefCell<&mut DetailedExecContext>,
+    wait: &'a RefCell<Option<ProcessWait<B::Event>>>,
+    stmts: &'a [TestbenchStatement<B>],
+) -> Pin<Box<dyn Future<Output = ExecResult> + 'a>> {
+    Box::pin(async move {
+        for stmt in stmts {
+            let result = match stmt {
+                GenericTestbenchStatement::ClockNext {
+                    clock_event,
+                    count,
+                    period,
+                } => {
+                    let count = match eval_clock_count(&mut sim.borrow_mut(), count) {
+                        Ok(count) => count,
+                        Err(error) => return ExecResult::Fail(error.to_string()),
+                    };
+                    *wait.borrow_mut() = (count != 0).then_some(ProcessWait {
+                        clock: *clock_event,
+                        remaining: count,
+                        reset: None,
+                        period: *period,
+                        resume_at: None,
+                    });
+                    std::future::poll_fn(|_| {
+                        if wait.borrow().is_none() {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    ExecResult::Continue
+                }
+                GenericTestbenchStatement::ResetAssert {
+                    reset_signal,
+                    reset_event,
+                    clock_event,
+                    duration,
+                    assert_value,
+                    deassert_value,
+                    period,
+                } => {
+                    let duration = match eval_clock_count(&mut sim.borrow_mut(), duration) {
+                        Ok(count) => count.max(1),
+                        Err(error) => return ExecResult::Fail(error.to_string()),
+                    };
+                    sim_set_u64(&mut sim.borrow_mut(), *reset_signal, (*assert_value).into());
+                    *wait.borrow_mut() = Some(ProcessWait {
+                        clock: *clock_event,
+                        remaining: duration,
+                        period: *period,
+                        resume_at: None,
+                        reset: Some((*reset_signal, *reset_event, *deassert_value)),
+                    });
+                    std::future::poll_fn(|_| {
+                        if wait.borrow().is_none() {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    ExecResult::Continue
+                }
+                GenericTestbenchStatement::If {
+                    expr,
+                    then_block,
+                    else_block,
+                } => {
+                    let condition = {
+                        let mut sim = sim.borrow_mut();
+                        if let Err(error) = sim.eval_comb() {
+                            return ExecResult::Fail(format!("eval_comb: {error}"));
+                        }
+                        !eval_expr(&mut sim, expr).is_zero()
+                    };
+                    exec_process(
+                        sim,
+                        ctx,
+                        wait,
+                        if condition { then_block } else { else_block },
+                    )
+                    .await
+                }
+                GenericTestbenchStatement::For {
+                    loop_var,
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                    step_op,
+                    reverse,
+                    body,
+                } => {
+                    exec_for_loop_async(
+                        sim,
+                        loop_var,
+                        start,
+                        end,
+                        *inclusive,
+                        *step,
+                        *step_op,
+                        *reverse,
+                        || exec_process(sim, ctx, wait, body),
+                    )
+                    .await
+                }
+                _ => exec_one_detailed(&mut sim.borrow_mut(), stmt, &mut ctx.borrow_mut()),
+            };
+            if !matches!(result, ExecResult::Continue) {
+                return result;
+            }
+        }
+        ExecResult::Continue
+    })
+}
+
+struct ProcessClock<Event> {
+    event: Event,
+    period: u64,
+    next_edge: u64,
+    falling_edge: Option<u64>,
+}
+
+fn exec_testbench<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    testbench: &CompiledTestbench<B>,
+    ctx: &mut DetailedExecContext,
+) -> ExecResult {
+    let blocks: Vec<_> = testbench
+        .processes()
+        .filter(|block| !block.is_empty())
+        .collect();
+    if blocks.len() <= 1 {
+        return exec_detailed(sim, testbench.statements(), ctx);
+    }
+    // The compiler's function slots are shared by inline call sites. Keep
+    // only these temporaries private; design variables remain shared between
+    // initial processes and all RTL. Capture masks as well as payloads.
+    let initial_locals: Vec<_> = testbench
+        .private_signals()
+        .iter()
+        .map(|&signal| sim.backend.get_four_state(signal))
+        .collect();
+    let mut locals = vec![initial_locals; blocks.len()];
+    let sim = RefCell::new(sim);
+    let ctx = RefCell::new(ctx);
+    let waits: Vec<_> = blocks.iter().map(|_| RefCell::new(None)).collect();
+    let mut processes: Vec<_> = blocks
+        .iter()
+        .zip(&waits)
+        .map(|(block, wait)| Some(exec_process(&sim, &ctx, wait, block)))
+        .collect();
+    let mut clocks: Vec<ProcessClock<B::Event>> = Vec::new();
+    let mut now = 0;
+    let mut task_context = Context::from_waker(Waker::noop());
+    loop {
+        if ctx
+            .borrow()
+            .tick_limit
+            .is_some_and(|limit| ctx.borrow().current_time >= limit)
+        {
+            ctx.borrow_mut().tick_limit_reached = true;
+            return ExecResult::Finished;
+        }
+        // A waiter resumes at the end of its last cycle. Collect all edge
+        // polarities for this timestamp before evaluating clocked logic.
+        let falling: Vec<_> = clocks
+            .iter_mut()
+            .filter_map(|clock| {
+                if clock.falling_edge == Some(now) {
+                    clock.falling_edge = None;
+                    Some(clock.event)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for wait in &waits {
+            let mut wait = wait.borrow_mut();
+            if let Some(pending) = wait.as_ref()
+                && pending.resume_at == Some(now)
+            {
+                if let Some((signal, _, value)) = pending.reset {
+                    sim_set_u64(&mut sim.borrow_mut(), signal, value.into());
+                }
+                *wait = None;
+            }
+        }
+        // Poll only ready processes, in declaration order, until their next
+        // wait, completion, or a global stop. No simulator borrow crosses await.
+        for ((process, wait), locals) in processes.iter_mut().zip(&waits).zip(&mut locals) {
+            if wait.borrow().is_some() {
+                continue;
+            }
+            let Some(future) = process else { continue };
+            for (&signal, (value, mask)) in testbench.private_signals().iter().zip(locals.iter()) {
+                sim.borrow_mut()
+                    .set_four_state(signal, value.clone(), mask.clone());
+            }
+            let result = future.as_mut().poll(&mut task_context);
+            for (&signal, value) in testbench.private_signals().iter().zip(locals.iter_mut()) {
+                *value = sim.borrow().backend.get_four_state(signal);
+            }
+            match result {
+                Poll::Ready(ExecResult::Continue | ExecResult::Break) => *process = None,
+                Poll::Ready(result) => return result,
+                Poll::Pending => debug_assert!(wait.borrow().is_some()),
+            }
+        }
+        if processes.iter().all(Option::is_none) {
+            return ExecResult::Continue;
+        }
+        for wait in &waits {
+            if let Some(wait) = wait.borrow().as_ref()
+                && wait.remaining != 0
+            {
+                if let Some(clock) = clocks
+                    .iter_mut()
+                    .find(|clock| clock.event.id() == wait.clock.id())
+                {
+                    clock.next_edge = clock.next_edge.max(now);
+                } else {
+                    clocks.push(ProcessClock {
+                        event: wait.clock,
+                        period: wait.period.max(2),
+                        next_edge: now,
+                        falling_edge: None,
+                    });
+                }
+            }
+        }
+        let active = |event: B::Event| {
+            waits.iter().any(|wait| {
+                wait.borrow()
+                    .as_ref()
+                    .is_some_and(|wait| wait.remaining != 0 && wait.clock.id() == event.id())
+            })
+        };
+        let fired: Vec<_> = clocks
+            .iter()
+            .filter(|clock| clock.next_edge == now && active(clock.event))
+            .map(|clock| clock.event)
+            .collect();
+        if !fired.is_empty() || !falling.is_empty() {
+            let resets: Vec<_> = waits
+                .iter()
+                .filter_map(|wait| wait.borrow().as_ref()?.reset.map(|(_, event, _)| event))
+                .collect();
+            let events: Vec<_> = falling
+                .iter()
+                .map(|&event| (event, 0))
+                .chain(fired.iter().map(|&event| (event, 1)))
+                .collect();
+            let result = step_process_events(
+                &mut sim.borrow_mut(),
+                &events,
+                &resets,
+                now,
+                !fired.is_empty(),
+                &mut ctx.borrow_mut(),
+            );
+            if !matches!(result, ExecResult::Continue) {
+                return result;
+            }
+            for clock in &mut clocks {
+                if fired.iter().any(|event| event.id() == clock.event.id()) {
+                    let Some(next) = now.checked_add(clock.period) else {
+                        return ExecResult::Fail("testbench clock time overflow".into());
+                    };
+                    clock.next_edge = next;
+                    clock.falling_edge = Some(now + clock.period - clock.period / 2);
+                }
+            }
+            for wait in &waits {
+                if let Some(wait) = wait.borrow_mut().as_mut()
+                    && wait.remaining != 0
+                    && let Some(clock) = clocks
+                        .iter()
+                        .find(|clock| clock.event.id() == wait.clock.id())
+                    && fired.iter().any(|event| event.id() == wait.clock.id())
+                {
+                    wait.remaining -= 1;
+                    if wait.remaining == 0 {
+                        wait.resume_at = Some(clock.next_edge);
+                    }
+                }
+            }
+        }
+        let next_edge = clocks
+            .iter()
+            .filter(|clock| active(clock.event))
+            .map(|clock| clock.next_edge)
+            .min();
+        let next_falling = clocks.iter().filter_map(|clock| clock.falling_edge).min();
+        let next_resume = waits
+            .iter()
+            .filter_map(|wait| wait.borrow().as_ref().and_then(|wait| wait.resume_at))
+            .min();
+        now = [next_edge, next_falling, next_resume]
+            .into_iter()
+            .flatten()
+            .min()
+            .expect("a live process has a pending wait");
+    }
+}
+
+fn step_process_events<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    events: &[(B::Event, u8)],
+    resets: &[Option<B::Event>],
+    time: u64,
+    rising: bool,
+    ctx: &mut DetailedExecContext,
+) -> ExecResult {
+    let mut state = sim
+        .component_simulation
+        .take()
+        .unwrap_or_else(|| crate::simulation::simulation_state(sim));
+    if sim.dirty
+        && let Err(error) = sim.eval_comb()
+    {
+        sim.component_simulation = Some(state);
+        return ExecResult::Fail(format!("eval_comb: {error}"));
+    }
+    state.synchronize_event_values(&sim.backend);
+    for reset in resets {
+        sim.components
+            .begin_reset_cycles(reset.map(|event| event.id()));
+    }
+    // Submit all simultaneous edges before stepping: every clocked process
+    // samples pre-edge values, before any nonblocking assignment is committed.
+    for &(event, value) in events {
+        state.schedule(
+            event,
+            sim.backend.resolve_signal(&event.addr()),
+            time,
+            value,
+        );
+    }
+    let result = state.step(sim);
+    sim.components.end_reset_cycles();
+    sim.component_simulation = Some(state);
+    if rising {
+        ctx.current_time = ctx.current_time.saturating_add(1);
+    }
+    let drained = drain_runtime_assertions(sim, ctx, None);
+    if let Some(message) = drained.fatal_message {
+        return ExecResult::Fail(message);
+    }
+    if let Err(error) = result {
+        return ExecResult::Fail(error.to_string());
+    }
+    if sim.components.finish_requested() {
+        return ExecResult::Finished;
+    }
+    ExecResult::Continue
+}
+
 /// Like [`exec`] but collects assertion results into `ctx` instead of
 /// short-circuiting on the first failure.
 fn exec_detailed<B: SimBackend>(
@@ -1429,62 +1840,61 @@ fn exec_one_detailed<B: SimBackend>(
         return ExecResult::Finished;
     }
     match stmt {
-        GenericTestbenchStatement::ClockNext { clock_event, count } => {
-            match eval_clock_count(sim, count) {
-                Ok(n) => {
-                    let progress_every = sim.diagnostics.testbench_progress_every;
-                    let mut remaining = n;
-                    while remaining != 0 {
-                        if tick_limit_reached(ctx) {
-                            return ExecResult::Finished;
-                        }
-                        let mut batch = remaining;
-                        if let Some(limit) = ctx.tick_limit {
-                            batch = batch.min(limit.saturating_sub(ctx.current_time));
-                        }
-                        if let Some(every) = progress_every.filter(|every| *every != 0) {
-                            batch = batch.min(every - ctx.current_time % every);
-                        }
-                        let (completed, result) = if sim.components.has_scheduled_components() {
-                            (1, tick_component_clock(sim, *clock_event, ctx.current_time))
-                        } else {
-                            let (completed, result) =
-                                sim.tick_deferred_comb_many(*clock_event, batch);
-                            (completed, result.map_err(|error| error.to_string()))
-                        };
-                        if completed == 0 || completed > batch {
-                            return ExecResult::Fail(
-                                "backend made invalid progress in a deferred tick batch".into(),
-                            );
-                        }
-                        ctx.current_time = ctx.current_time.saturating_add(completed);
-                        remaining -= completed;
-                        if let Err(e) = result {
-                            let drained = drain_runtime_assertions(sim, ctx, None);
-                            if let Some(message) = drained.fatal_message {
-                                return ExecResult::Fail(message);
-                            }
-                            return ExecResult::Fail(e);
-                        }
-                        if let Some(every) = progress_every
-                            && every != 0
-                            && ctx.current_time.is_multiple_of(every)
-                        {
-                            tracing::debug!("[testbench-progress] tick={}", ctx.current_time);
-                        }
+        GenericTestbenchStatement::ClockNext {
+            clock_event, count, ..
+        } => match eval_clock_count(sim, count) {
+            Ok(n) => {
+                let progress_every = sim.diagnostics.testbench_progress_every;
+                let mut remaining = n;
+                while remaining != 0 {
+                    if tick_limit_reached(ctx) {
+                        return ExecResult::Finished;
+                    }
+                    let mut batch = remaining;
+                    if let Some(limit) = ctx.tick_limit {
+                        batch = batch.min(limit.saturating_sub(ctx.current_time));
+                    }
+                    if let Some(every) = progress_every.filter(|every| *every != 0) {
+                        batch = batch.min(every - ctx.current_time % every);
+                    }
+                    let (completed, result) = if sim.components.has_scheduled_components() {
+                        (1, tick_component_clock(sim, *clock_event, ctx.current_time))
+                    } else {
+                        let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                        (completed, result.map_err(|error| error.to_string()))
+                    };
+                    if completed == 0 || completed > batch {
+                        return ExecResult::Fail(
+                            "backend made invalid progress in a deferred tick batch".into(),
+                        );
+                    }
+                    ctx.current_time = ctx.current_time.saturating_add(completed);
+                    remaining -= completed;
+                    if let Err(e) = result {
                         let drained = drain_runtime_assertions(sim, ctx, None);
                         if let Some(message) = drained.fatal_message {
                             return ExecResult::Fail(message);
                         }
-                        if sim.components.finish_requested() {
-                            return ExecResult::Finished;
-                        }
+                        return ExecResult::Fail(e);
                     }
-                    ExecResult::Continue
+                    if let Some(every) = progress_every
+                        && every != 0
+                        && ctx.current_time.is_multiple_of(every)
+                    {
+                        tracing::debug!("[testbench-progress] tick={}", ctx.current_time);
+                    }
+                    let drained = drain_runtime_assertions(sim, ctx, None);
+                    if let Some(message) = drained.fatal_message {
+                        return ExecResult::Fail(message);
+                    }
+                    if sim.components.finish_requested() {
+                        return ExecResult::Finished;
+                    }
                 }
-                Err(error) => ExecResult::Fail(error.to_string()),
+                ExecResult::Continue
             }
-        }
+            Err(error) => ExecResult::Fail(error.to_string()),
+        },
         GenericTestbenchStatement::ResetAssert {
             reset_signal,
             reset_event,
@@ -1492,6 +1902,7 @@ fn exec_one_detailed<B: SimBackend>(
             duration,
             assert_value,
             deassert_value,
+            ..
         } => match eval_clock_count(sim, duration) {
             Ok(duration) => {
                 let duration = duration.max(1);

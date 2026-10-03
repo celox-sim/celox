@@ -653,5 +653,38 @@
         "signed_divrem::signed_divrem_i128"
       ]
     }
+  },
+  {
+    "id": "veryl_native_clock_components",
+    "category": "emitter_panic",
+    "phase": "emission",
+    "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+    "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/concurrent_initial_verilator.json",
+      "verification/repros/concurrent_initial_icarus.json",
+      "LIMITATIONS.md#veryl-native-clock-components"
+    ],
+    "cases": {
+      "verilator": [
+        "concurrent_initial::clock_periods",
+        "concurrent_initial::control_flow",
+        "concurrent_initial::hierarchy",
+        "concurrent_initial::mixed_edges",
+        "concurrent_initial::reset",
+        "concurrent_initial::shared_clock",
+        "concurrent_initial::simultaneous_edges"
+      ],
+      "icarus": [
+        "concurrent_initial::clock_periods",
+        "concurrent_initial::control_flow",
+        "concurrent_initial::hierarchy",
+        "concurrent_initial::mixed_edges",
+        "concurrent_initial::reset",
+        "concurrent_initial::shared_clock",
+        "concurrent_initial::simultaneous_edges"
+      ]
+    }
   }
 ]

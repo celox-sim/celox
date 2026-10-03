@@ -1,0 +1,33 @@
+{
+  "case": "concurrent_initial::mixed_edges",
+  "veryl_version": "0.22.0",
+  "expected": {
+    "x": 1,
+    "y": 2
+  },
+  "celox": {
+    "interpreter": {
+      "x": 1,
+      "y": 2
+    }
+  },
+  "veryl_native_runner": {
+    "backend": "cc",
+    "aot_c_async": false,
+    "status": "fail",
+    "diagnostic": "x=3 y=2"
+  },
+  "standard": "IEEE 1800-2023 4.9.4 Nonblocking assignment: compute right-hand values when scheduling the NBA update; simultaneous edges sample pre-update values.",
+  "independent_check": {
+    "source": "concurrent_initial_mixed_edges.sv",
+    "scope": "Minimal SV corroboration of the simultaneous rising/inverted-clock edge at time 3, with known initial values. This is not a successful translation of the full Veryl fixture.",
+    "icarus": {
+      "command": "iverilog -g2012 -s Top -o run.vvp concurrent_initial_mixed_edges.sv && vvp run.vvp",
+      "result": "PASS x=1 y=2"
+    },
+    "verilator": {
+      "command": "verilator --binary --timing --assert -Wno-fatal --top-module Top concurrent_initial_mixed_edges.sv && obj_dir/VTop",
+      "result": "PASS x=1 y=2"
+    }
+  }
+}

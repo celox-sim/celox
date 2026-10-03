@@ -18,7 +18,7 @@ pub(crate) fn prepare_testbench_memories(
     source: &crate::VerylTestbenchSource,
 ) -> Result<PreparedReadmem, ParserError> {
     let mut prepared = PreparedReadmem::default();
-    if let Some(statements) = &source.initial_statements {
+    for statements in source.initial_blocks() {
         prepare_statements(
             statements,
             lookup,
@@ -44,16 +44,7 @@ fn prepare_statements(
                     let Entry::Vacant(entry) = prepared.entry(call.comptime.token) else {
                         continue;
                     };
-                    let instance = lookup
-                        .root_instance_and_module()
-                        .ok_or_else(|| {
-                            ParserError::illegal_context(
-                                "$readmemh destination",
-                                "root instance was not found",
-                                Some(&call.comptime.token),
-                            )
-                        })?
-                        .0;
+                    let instance = source.base_instance(lookup);
                     let (address, width, data) =
                         read_hierarchical_memory(filename, reference, lookup, instance)?;
                     let InitialStateData::Writes(writes) = data else {

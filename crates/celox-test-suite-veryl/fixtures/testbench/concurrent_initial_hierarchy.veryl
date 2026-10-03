@@ -1,0 +1,24 @@
+#[test(Helper)]
+module Helper {
+    inst clk: $tb::clock_gen;
+    var observed: logic<8>;
+    initial {
+        observed = 0;
+        for _i in 0..3 {
+            clk.next(1);
+            observed += 1;
+        }
+    }
+}
+#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    inst left: Helper;
+    inst right: Helper;
+    initial {
+        clk.next(4);
+        $assert(left.observed == 8'd3);
+        $assert(right.observed == 8'd3);
+        $finish();
+    }
+}

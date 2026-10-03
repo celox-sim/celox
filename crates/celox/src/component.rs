@@ -73,7 +73,7 @@ struct LiveComponent {
 pub(crate) struct ComponentRuntime {
     components: Vec<LiveComponent>,
     last_trace_values: Vec<(num_bigint::BigUint, num_bigint::BigUint)>,
-    active_reset_event: Option<usize>,
+    active_reset_events: Vec<usize>,
     injected: InjectedComponents,
 }
 
@@ -338,7 +338,7 @@ impl ComponentRuntime {
     ) -> Result<Vec<ComponentWrite>, String> {
         self.components.clear();
         self.last_trace_values.clear();
-        self.active_reset_event = None;
+        self.active_reset_events.clear();
         let mut initialized = Vec::with_capacity(descriptors.len());
         let mut initial_writes = Vec::new();
         let mut driven_outputs = HashMap::<SignalRef, Vec<ComponentOutputDriver>>::default();
@@ -716,8 +716,8 @@ impl ComponentRuntime {
         event_id: usize,
         time: u64,
     ) -> Result<Vec<ComponentWrite>, String> {
-        let active_reset_event = self.active_reset_event;
-        self.fire_matching(time, |component| {
+        let active_reset_events = std::mem::take(&mut self.active_reset_events);
+        let result = self.fire_matching(time, |component| {
             let triggered = component
                 .events
                 .iter()
@@ -725,24 +725,26 @@ impl ComponentRuntime {
             let reset = if triggered.reset {
                 None
             } else {
-                active_reset_event.and_then(|reset_event_id| {
-                    component
-                        .events
-                        .iter()
-                        .find(|event| event.reset && event.event_id == reset_event_id)
-                })
+                component
+                    .events
+                    .iter()
+                    .find(|event| event.reset && active_reset_events.contains(&event.event_id))
             };
             let event = reset.unwrap_or(triggered);
             Some((event.port, event.reset))
-        })
+        });
+        self.active_reset_events = active_reset_events;
+        result
     }
 
     pub(crate) fn begin_reset_cycles(&mut self, reset_event_id: Option<usize>) {
-        self.active_reset_event = reset_event_id;
+        if let Some(id) = reset_event_id {
+            self.active_reset_events.push(id);
+        }
     }
 
     pub(crate) fn end_reset_cycles(&mut self) {
-        self.active_reset_event = None;
+        self.active_reset_events.clear();
     }
 
     fn fire_matching(

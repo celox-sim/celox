@@ -1,0 +1,15 @@
+#[test(Top)]
+module Top {
+    inst slow: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    var observed: logic;
+    initial {
+        slow.next(1);
+        $assert(observed == 1'd1);
+        $finish();
+    }
+    initial {
+        fast.next(3);
+        observed = 1'd1;
+    }
+}

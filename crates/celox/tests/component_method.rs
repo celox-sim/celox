@@ -1812,6 +1812,7 @@ fn synchronous_reset_without_runtime_reset_event_still_binds() {
                 reset_event: None,
                 clock_event: *clock_event,
                 duration: duration.clone(),
+                period: 2,
                 assert_value: *assert_value,
                 deassert_value: *deassert_value,
             }),
@@ -2864,4 +2865,94 @@ fn component_finish_hook_observes_final_testbench_time() {
         TestResult::Pass
     );
     assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10);
+}
+
+#[test]
+fn concurrent_initial_reset_windows_reach_both_components() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            inst left_rst: $tb::reset_gen(clk);
+            inst right_rst: $tb::reset_gen(clk);
+            var left_q: logic<8>;
+            var right_q: logic<8>;
+            inst left: $comp::celox_reset (clk, rst: left_rst, q: left_q);
+            inst right: $comp::celox_reset (clk, rst: right_rst, q: right_q);
+            initial {
+                clk.next(4);
+                $assert(left_q == 101);
+                $assert(right_q == 101);
+                $finish();
+            }
+            initial { left_rst.assert(3); $assert(left_q == 3); }
+            initial { right_rst.assert(3); $assert(right_q == 3); }
+        }
+    "#;
+    for native in [true, false] {
+        let (_dir, metadata) = component_metadata();
+        let builder = Simulator::builder(code, "t").with_metadata(metadata);
+        let result = if native {
+            builder.run_test()
+        } else {
+            builder.run_test_cranelift()
+        };
+        assert_eq!(result.unwrap(), TestResult::Pass);
+    }
+}
+
+#[test]
+fn concurrent_initial_component_finish_stops_other_waiters() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var q: logic<8>;
+            inst component: $comp::celox_clocked #(STEP: 0) (clk, d, q);
+            initial { clk.next(100); $assert(0, "waiter outlived component finish"); }
+            initial { clk.next(1); component.stop(); $assert(0); }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn child_initial_resolves_its_component_method_instance() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(Helper)] module Helper {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var q: logic<8>;
+            inst component: $comp::celox_clocked #(STEP: 0) (clk, d, q);
+            initial { component.drive(8'h5a); $assert(q == 8'h5a); }
+        }
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            inst left: Helper;
+            inst right: Helper;
+            initial {
+                clk.next(1);
+                $assert(left.q == 8'h5a);
+                $assert(right.q == 8'h5a);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }

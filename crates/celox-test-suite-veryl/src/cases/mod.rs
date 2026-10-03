@@ -64,6 +64,7 @@ mod comb_observer;
 mod compare_matrix;
 mod concat_operators;
 mod concatenation;
+mod concurrent_initial;
 mod context_width;
 mod counter;
 mod data_access;
@@ -123,6 +124,7 @@ mod wide_operators;
 mod wide_shift_mem;
 
 pub(super) const GROUPS: &[&[crate::TestCase]] = &[
+    concurrent_initial::CASES,
     hierarchical_assignment::CASES,
     advanced_interface::CASES,
     array_literal::CASES,

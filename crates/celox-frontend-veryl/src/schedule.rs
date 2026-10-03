@@ -1,4 +1,4 @@
-use veryl_analyzer::ir::Declaration;
+use veryl_analyzer::{ir::Declaration, symbol::Affiliation};
 
 use super::{
     VerylIdMap, VerylScheduledRtlOutput, VerylTestbenchSource, artifact::VerylSymbolicRtl,
@@ -32,6 +32,18 @@ pub fn schedule_symbolic_rtl(
     } = source;
     let root_id = symbolic.root_id;
     let root = module_ir.get(&root_id).copied();
+    let initial_block_lengths = root
+        .map(|module| {
+            module
+                .declarations
+                .iter()
+                .filter_map(|declaration| match declaration {
+                    Declaration::Initial(initial) => Some(initial.statements.len()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let initial_statements = root.and_then(|module| {
         let statements = module
             .declarations
@@ -60,6 +72,7 @@ pub fn schedule_symbolic_rtl(
     )?;
     super::readmem::elaborate_hierarchical_initial_memories(&module_ir, &mut output.scheduled)?;
     let lookup = &output.scheduled.frontend_lookup;
+    let mut child_sources = Vec::new();
     let mut components = Vec::new();
     let mut component_bindings = Vec::new();
     let mut component_names = HashSet::default();
@@ -72,6 +85,39 @@ pub fn schedule_symbolic_rtl(
         let Some(module) = module_ir.get(module_id) else {
             continue;
         };
+        if !path.0.is_empty() {
+            let blocks: Vec<_> = module
+                .declarations
+                .iter()
+                .filter_map(|declaration| match declaration {
+                    Declaration::Initial(initial) => Some(initial.statements.clone()),
+                    _ => None,
+                })
+                .collect();
+            if blocks.iter().any(|block| !block.is_empty()) {
+                child_sources.push(VerylTestbenchSource {
+                    id_map: VerylIdMap {
+                        module_variables: source_id_maps
+                            .get(module_id)
+                            .map(|variables| (*module_id, variables.clone()))
+                            .into_iter()
+                            .collect(),
+                    },
+                    initial_block_lengths: blocks.iter().map(Vec::len).collect(),
+                    initial_statements: Some(blocks.into_iter().flatten().collect()),
+                    instance: Some(instance_id),
+                    function_locals: module
+                        .variables
+                        .iter()
+                        .filter_map(|(&id, variable)| {
+                            (variable.affiliation == Affiliation::Function).then_some(id)
+                        })
+                        .collect(),
+                    functions: module.functions.clone(),
+                    ..Default::default()
+                });
+            }
+        }
         let (mut instance_components, mut instance_bindings) = super::component::collect(
             module,
             instance_id,
@@ -88,6 +134,20 @@ pub fn schedule_symbolic_rtl(
             module_variables: source_id_maps,
         },
         initial_statements,
+        initial_block_lengths,
+        instance: None,
+        child_sources,
+        function_locals: root
+            .map(|module| {
+                module
+                    .variables
+                    .iter()
+                    .filter_map(|(&id, variable)| {
+                        (variable.affiliation == Affiliation::Function).then_some(id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         functions,
         components,
         component_bindings,

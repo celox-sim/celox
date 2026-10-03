@@ -184,17 +184,21 @@ fn bind_statement<B: SimBackend>(
     statement: SemanticStatement<AbsoluteAddr>,
 ) -> Option<ExecutableStatement<B::Event, SignalRef>> {
     match statement {
-        GenericTestbenchStatement::ClockNext { clock_event, count } => {
-            Some(GenericTestbenchStatement::ClockNext {
-                clock_event: backend.resolve_event_opt(&clock_event)?,
-                count: bind_clock_count(backend, count)?,
-            })
-        }
+        GenericTestbenchStatement::ClockNext {
+            clock_event,
+            count,
+            period,
+        } => Some(GenericTestbenchStatement::ClockNext {
+            clock_event: backend.resolve_event_opt(&clock_event)?,
+            count: bind_clock_count(backend, count)?,
+            period,
+        }),
         GenericTestbenchStatement::ResetAssert {
             reset_signal,
             reset_event,
             clock_event,
             duration,
+            period,
             assert_value,
             deassert_value,
         } => Some(GenericTestbenchStatement::ResetAssert {
@@ -202,6 +206,7 @@ fn bind_statement<B: SimBackend>(
             reset_event: reset_event.and_then(|event| backend.resolve_event_opt(&event)),
             clock_event: backend.resolve_event_opt(&clock_event)?,
             duration: bind_clock_count(backend, duration)?,
+            period,
             assert_value,
             deassert_value,
         }),
@@ -349,6 +354,39 @@ pub fn bind_testbench_program<B: SimBackend>(
     program: TestbenchProgram<AbsoluteAddr>,
     rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
+    let lengths = program.process_lengths().to_vec();
+    if lengths
+        .iter()
+        .try_fold(0usize, |sum, n| sum.checked_add(*n))?
+        != program.statements().len()
+    {
+        return None;
+    }
+    let mut private_signals = Vec::new();
+    for address in program.private_variables() {
+        let signal = backend.resolve_signal(address);
+        if let Some(array) = signal.array_layout {
+            // Bind each array plane separately: padding and mask-plane strides
+            // need not match a scalar signal's adjacent value/mask layout.
+            for index in 0..array.element_count {
+                let element = SignalRef {
+                    offset: signal.offset + index * array.element_stride,
+                    width: array.element_width,
+                    is_4state: false,
+                    array_layout: None,
+                };
+                private_signals.push(element);
+                if signal.is_4state && backend.layout().four_state {
+                    private_signals.push(SignalRef {
+                        offset: element.offset + array.plane_size,
+                        ..element
+                    });
+                }
+            }
+        } else {
+            private_signals.push(signal);
+        }
+    }
     let random_seed = program.configured_random_seed();
     let components = program.components().to_vec();
     let component_libraries = program.component_libraries().to_vec();
@@ -364,12 +402,19 @@ pub fn bind_testbench_program<B: SimBackend>(
         .into_iter()
         .map(|statement| bind_statement(backend, statement))
         .collect::<Option<Vec<_>>>()?;
+    let mut statements = statements.into_iter();
+    let processes = lengths
+        .into_iter()
+        .map(|n| statements.by_ref().take(n).collect())
+        .collect();
     Some(
-        ExecutableTestbench::new_with_random_seed(statements, random_seed).with_component_runtime(
-            components,
-            component_libraries,
-            component_file_base,
-            component_bindings,
-        ),
+        ExecutableTestbench::from_processes(processes, random_seed)
+            .with_private_signals(private_signals)
+            .with_component_runtime(
+                components,
+                component_libraries,
+                component_file_base,
+                component_bindings,
+            ),
     )
 }
