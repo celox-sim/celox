@@ -8,16 +8,51 @@ pub(super) fn branch_is_profitable(
     plan: &BranchifyPlan,
     def_blocks: &HashMap<RegisterId, BlockId>,
     def_pos: &HashMap<RegisterId, usize>,
+    live_through_chunks: Option<u128>,
 ) -> bool {
-    branch_profitability(eu, block, plan, def_blocks, def_pos).proves_expected_benefit()
+    // Restoring definitions to the head can only reduce skipped arm work.
+    // Reject an unprofitable upper bound before walking/copying the block.
+    // Without a cached suffix cost, zero remains a valid lower bound on
+    // introduced work; the full check below still calculates the exact cost.
+    let arm_cost = |defs: &[usize]| {
+        defs.iter()
+            .map(|&idx| branchified_instruction_cost(&block.instructions[idx], &eu.register_map))
+            .sum()
+    };
+    let result_chunks = if plan.preserve_result {
+        eu.register_map
+            .get(&plan.dst)
+            .map(|ty| ty.width().div_ceil(64).max(1))
+            .unwrap_or(1) as u128
+    } else {
+        0
+    };
+    let upper_bound = BranchProfitability {
+        true_arm_cost: arm_cost(&plan.true_defs),
+        false_arm_cost: arm_cost(&plan.false_defs),
+        removed_mux_cost: branchified_instruction_cost(
+            &block.instructions[plan.mux_idx],
+            &eu.register_map,
+        ),
+        probability: static_true_probability(block, def_pos, plan.cond),
+        control_cost: BRANCH_CONTROL_COST,
+        phi_copy_cost: result_chunks.saturating_mul(PHI_COPY_COST_PER_CHUNK),
+        live_through_cost: live_through_chunks
+            .unwrap_or(0)
+            .saturating_mul(LIVE_THROUGH_COST_PER_CHUNK),
+    };
+    upper_bound.proves_expected_benefit()
+        && branch_profitability(eu, block, plan, def_blocks, def_pos, live_through_chunks)
+            .proves_expected_benefit()
 }
 
-fn branch_profitability(
+pub(super) fn branch_profitability(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block: &BasicBlock<RegionedAbsoluteAddr>,
     plan: &BranchifyPlan,
     def_blocks: &HashMap<RegisterId, BlockId>,
     def_pos: &HashMap<RegisterId, usize>,
+    cached_live_through_chunks: Option<u128>,
 ) -> BranchProfitability {
     let remove_defs = removable_defs_after_head_restore(block, plan, def_blocks);
     let arm_cost = |defs: &[usize]| {
@@ -26,19 +61,6 @@ fn branch_profitability(
             .map(|&idx| branchified_instruction_cost(&block.instructions[idx], &eu.register_map))
             .sum::<u128>()
     };
-    let suffix = block
-        .instructions
-        .iter()
-        .enumerate()
-        .skip(plan.mux_idx + 1)
-        .filter(|(idx, _)| !remove_defs.contains(idx))
-        .map(|(_, inst)| inst.clone())
-        .collect::<Vec<_>>();
-    let mut live_through = block_live_ins(&suffix, &terminator_uses(&block.terminator));
-    live_through.retain(|value| *value != plan.dst);
-    live_through.sort_unstable();
-    live_through.dedup();
-
     let chunks_for = |value: RegisterId| {
         eu.register_map
             .get(&value)
@@ -50,7 +72,22 @@ fn branch_profitability(
     } else {
         0
     };
-    let live_through_chunks = live_through.into_iter().map(chunks_for).sum::<u128>();
+    let live_through_chunks = cached_live_through_chunks.unwrap_or_else(|| {
+        let suffix = block
+            .instructions
+            .iter()
+            .enumerate()
+            .skip(plan.mux_idx + 1)
+            .filter(|(idx, _)| !remove_defs.contains(idx))
+            .map(|(_, inst)| inst.clone())
+            .collect::<Vec<_>>();
+        let mut live_through = block_live_ins(&suffix, &terminator_uses(&block.terminator));
+        live_through.retain(|value| *value != plan.dst);
+        live_through.sort_unstable();
+        live_through.dedup();
+
+        live_through.into_iter().map(chunks_for).sum::<u128>()
+    });
 
     BranchProfitability {
         true_arm_cost: arm_cost(&plan.true_defs),

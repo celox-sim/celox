@@ -1,12 +1,12 @@
-use std::{cmp::Reverse, collections::hash_map::Entry};
+use std::collections::hash_map::Entry;
 
-use celox_design::{InitialStateData, InitialStateValue, ModuleId};
+use celox_design::InitialStateData;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    Declaration, ForRange, HierVarRef, Module, Statement, SystemFunctionKind, SystemFunctionOutput,
+    ForRange, HierVarRef, Statement, SystemFunctionKind, SystemFunctionOutput,
 };
 
-use crate::{HashMap, LoweringPhase, ParserError, ScheduledRtl};
+use crate::{HashMap, LoweringPhase, ParserError};
 
 pub(crate) type PreparedReadmem = HashMap<
     veryl_parser::token_range::TokenRange,
@@ -18,7 +18,7 @@ pub(crate) fn prepare_testbench_memories(
     source: &crate::VerylTestbenchSource,
 ) -> Result<PreparedReadmem, ParserError> {
     let mut prepared = PreparedReadmem::default();
-    if let Some(statements) = &source.initial_statements {
+    for statements in source.initial_blocks() {
         prepare_statements(
             statements,
             lookup,
@@ -44,16 +44,7 @@ fn prepare_statements(
                     let Entry::Vacant(entry) = prepared.entry(call.comptime.token) else {
                         continue;
                     };
-                    let instance = lookup
-                        .root_instance_and_module()
-                        .ok_or_else(|| {
-                            ParserError::illegal_context(
-                                "$readmemh destination",
-                                "root instance was not found",
-                                Some(&call.comptime.token),
-                            )
-                        })?
-                        .0;
+                    let instance = source.base_instance(lookup);
                     let (address, width, data) =
                         read_hierarchical_memory(filename, reference, lookup, instance)?;
                     let InitialStateData::Writes(writes) = data else {
@@ -144,106 +135,6 @@ fn statically_empty_range(range: &ForRange) -> bool {
     } else {
         start >= end
     }
-}
-
-/// Resolve memory initialization against concrete instances, after the neutral
-/// scheduler has assigned state identities to every child variable.
-pub(crate) fn elaborate_hierarchical_initial_memories(
-    modules: &HashMap<ModuleId, &Module>,
-    scheduled: &mut ScheduledRtl,
-) -> Result<(), ParserError> {
-    let lookup = &scheduled.frontend_lookup;
-    let root_module = lookup.root_instance_and_module().map(|(_, id)| id);
-    let hierarchical_modules = modules
-        .iter()
-        .filter_map(|(&id, module)| {
-            let has_memory = module.declarations.iter().any(|declaration| {
-                matches!(declaration, Declaration::Initial(initial)
-                    if has_hierarchical_readmem(&initial.statements))
-            });
-            (Some(id) != root_module && has_memory).then_some(id)
-        })
-        .collect::<crate::HashSet<_>>();
-    if hierarchical_modules.is_empty() {
-        return Ok(());
-    }
-    let mut instances = lookup
-        .instance_ids
-        .iter()
-        .filter(|(_, id)| {
-            lookup
-                .instance_module
-                .get(id)
-                .is_some_and(|module| hierarchical_modules.contains(module))
-        })
-        .collect::<Vec<_>>();
-    // A parent's initialization can overwrite its children's initial values.
-    instances.sort_by_key(|(path, _)| (Reverse(path.0.len()), path.0.clone()));
-    let mut prepared: HashMap<ModuleId, Vec<(HierVarRef, InitialStateData)>> = HashMap::default();
-    for (_, &instance_id) in instances {
-        let Some(&module_id) = lookup.instance_module.get(&instance_id) else {
-            continue;
-        };
-        let Some(module) = modules.get(&module_id) else {
-            continue;
-        };
-        if let Entry::Vacant(entry) = prepared.entry(module_id) {
-            let mut values = Vec::new();
-            for declaration in &module.declarations {
-                let Declaration::Initial(initial) = declaration else {
-                    continue;
-                };
-                if !has_hierarchical_readmem(&initial.statements) {
-                    continue;
-                }
-                let mut context = veryl_analyzer::Context::default();
-                context.variables = module.variables.clone();
-                for statement in &initial.statements {
-                    super::module::visit_initial_statement(
-                        statement,
-                        &mut context,
-                        &mut |filename, output, _| {
-                            let SystemFunctionOutput::Hier(reference) = output else {
-                                return Ok(());
-                            };
-                            let (_, _, data) =
-                                read_hierarchical_memory(filename, reference, lookup, instance_id)?;
-                            values.push(((**reference).clone(), data));
-                            Ok(())
-                        },
-                    )?;
-                }
-            }
-            entry.insert(values);
-        }
-        for (reference, data) in &prepared[&module_id] {
-            let (address, _) = super::testbench::resolve_hierarchical_reference_from(
-                lookup,
-                instance_id,
-                reference,
-            )?;
-            scheduled.design.initial_state.push(InitialStateValue {
-                address,
-                data: data.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn has_hierarchical_readmem(statements: &[Statement]) -> bool {
-    statements.iter().any(|statement| match statement {
-        Statement::SystemFunctionCall(call) => matches!(
-            &call.kind,
-            SystemFunctionKind::Readmemh(_, SystemFunctionOutput::Hier(_))
-        ),
-        Statement::If(statement) => {
-            has_hierarchical_readmem(&statement.true_side)
-                || has_hierarchical_readmem(&statement.false_side)
-        }
-        Statement::For(statement) => has_hierarchical_readmem(&statement.body),
-        _ => false,
-    })
 }
 
 fn read_hierarchical_memory(

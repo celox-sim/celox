@@ -1359,11 +1359,11 @@ pub(super) enum ShiftDir {
     ArithRight,
 }
 
-/// Runtime multi-word shift via select chain + cross-chunk carry.
+/// Runtime multi-word shift via a word-level barrel network and bit carry.
 ///
-/// For each output chunk, a select chain picks the source chunk based on
-/// `shift_amt >> 6` (word offset), then applies the intra-chunk bit shift
-/// with carry from the adjacent chunk.
+/// Each word-offset bit selects one power-of-two displacement, bounding the
+/// generated word-selection work by O(n log n) instead of comparing every
+/// output word against every source word twice.
 fn lower_wide_runtime_shift(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -1436,125 +1436,87 @@ pub(super) fn lower_wide_runtime_shift_chunks(
         zero
     };
 
+    // Left shifts cannot bring a source word above the result width into the
+    // result. Right shifts may select any source word, including when the
+    // destination is narrower than the input.
+    let span = if matches!(dir, ShiftDir::Left) {
+        n_chunks
+    } else {
+        n_src.max(n_chunks)
+    };
+    let mut shifted_words = (0..span)
+        .map(|index| src_chunks.get(index).map_or(fill, |chunk| chunk.0))
+        .collect::<Vec<_>>();
+    let mut distance = 1usize;
+    while distance < span {
+        let selected_bit = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, selected_bit, chunk_shift, distance as u64);
+        let mut next_words = Vec::with_capacity(span);
+        for index in 0..span {
+            let source = match dir {
+                ShiftDir::Left => index.checked_sub(distance),
+                ShiftDir::Right | ShiftDir::ArithRight => index.checked_add(distance),
+            };
+            let shifted = source
+                .and_then(|source| shifted_words.get(source))
+                .copied()
+                .unwrap_or(fill);
+            let unchanged = shifted_words[index];
+            if shifted == unchanged {
+                next_words.push(unchanged);
+            } else {
+                let selected = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select {
+                    dst: selected,
+                    cond: selected_bit,
+                    true_val: shifted,
+                    false_val: unchanged,
+                });
+                next_words.push(selected);
+            }
+        }
+        shifted_words = next_words;
+        distance = distance.checked_mul(2).unwrap_or(span);
+    }
+
+    // Bits above the barrel network's range must not wrap the shift amount.
+    // This also handles non-power-of-two word counts and sign-fill for SAR.
+    let limit = ctx.alloc_vreg(SpillDesc::remat(span as u64));
+    block.push(MInst::LoadImm {
+        dst: limit,
+        value: span as u64,
+    });
+    let out_of_range = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Cmp {
+        dst: out_of_range,
+        lhs: chunk_shift,
+        rhs: limit,
+        kind: CmpKind::GeU,
+    });
+    for word in &mut shifted_words {
+        if *word != fill {
+            let selected = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Select {
+                dst: selected,
+                cond: out_of_range,
+                true_val: fill,
+                false_val: *word,
+            });
+            *word = selected;
+        }
+    }
+
     let mut dst_chunks = Vec::with_capacity(n_chunks);
     for i in 0..n_chunks {
-        // Select the "main" source chunk via word_offset.
-        // For SHL: src_index = i - word_offset → select where j + word_offset == i
-        // For SHR/SAR: src_index = i + word_offset → select where j == i + word_offset
-        let main_chunk = {
-            let mut val = fill;
-            for j in (0..n_src).rev() {
-                // Compute the effective index this source chunk maps to
-                let j_vreg = ctx.alloc_vreg(SpillDesc::remat(j as u64));
-                block.push(MInst::LoadImm {
-                    dst: j_vreg,
-                    value: j as u64,
-                });
-                let eff_idx = ctx.alloc_vreg(SpillDesc::transient());
-                match dir {
-                    ShiftDir::Left => {
-                        // src[j] goes to dst[j + word_offset]
-                        block.push(MInst::Add {
-                            dst: eff_idx,
-                            lhs: j_vreg,
-                            rhs: chunk_shift,
-                        });
-                    }
-                    ShiftDir::Right | ShiftDir::ArithRight => {
-                        // src[j + word_offset] goes to dst[j], i.e., src[j] goes to dst[j - word_offset]
-                        // Check: j >= word_offset, then eff = j - word_offset
-                        // Simpler: for dst[i], source is src[i + word_offset]
-                        // So we select j if j == i + word_offset
-                        block.push(MInst::Sub {
-                            dst: eff_idx,
-                            lhs: j_vreg,
-                            rhs: chunk_shift,
-                        });
-                    }
-                }
-                let i_vreg = ctx.alloc_vreg(SpillDesc::remat(i as u64));
-                block.push(MInst::LoadImm {
-                    dst: i_vreg,
-                    value: i as u64,
-                });
-                let is_match = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Cmp {
-                    dst: is_match,
-                    lhs: eff_idx,
-                    rhs: i_vreg,
-                    kind: CmpKind::Eq,
-                });
-                let selected = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Select {
-                    dst: selected,
-                    cond: is_match,
-                    true_val: src_chunks[j].0,
-                    false_val: val,
-                });
-                val = selected;
-            }
-            val
+        let main_chunk = shifted_words[i];
+        let carry_index = match dir {
+            ShiftDir::Left => i.checked_sub(1),
+            ShiftDir::Right | ShiftDir::ArithRight => i.checked_add(1),
         };
-
-        // Select the "carry" source chunk (adjacent in shift direction)
-        let carry_chunk = {
-            let mut val = fill;
-            for j in (0..n_src).rev() {
-                let j_vreg = ctx.alloc_vreg(SpillDesc::remat(j as u64));
-                block.push(MInst::LoadImm {
-                    dst: j_vreg,
-                    value: j as u64,
-                });
-                let eff_idx = ctx.alloc_vreg(SpillDesc::transient());
-                let carry_i = match dir {
-                    ShiftDir::Left => {
-                        // carry comes from chunk below: i-1
-                        if i == 0 { usize::MAX } else { i - 1 }
-                    }
-                    ShiftDir::Right | ShiftDir::ArithRight => {
-                        // carry comes from chunk above: i+1
-                        i + 1
-                    }
-                };
-                match dir {
-                    ShiftDir::Left => {
-                        block.push(MInst::Add {
-                            dst: eff_idx,
-                            lhs: j_vreg,
-                            rhs: chunk_shift,
-                        });
-                    }
-                    ShiftDir::Right | ShiftDir::ArithRight => {
-                        block.push(MInst::Sub {
-                            dst: eff_idx,
-                            lhs: j_vreg,
-                            rhs: chunk_shift,
-                        });
-                    }
-                }
-                let ci_vreg = ctx.alloc_vreg(SpillDesc::remat(carry_i as u64));
-                block.push(MInst::LoadImm {
-                    dst: ci_vreg,
-                    value: carry_i as u64,
-                });
-                let is_match = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Cmp {
-                    dst: is_match,
-                    lhs: eff_idx,
-                    rhs: ci_vreg,
-                    kind: CmpKind::Eq,
-                });
-                let selected = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Select {
-                    dst: selected,
-                    cond: is_match,
-                    true_val: src_chunks[j].0,
-                    false_val: val,
-                });
-                val = selected;
-            }
-            val
-        };
+        let carry_chunk = carry_index
+            .and_then(|index| shifted_words.get(index))
+            .copied()
+            .unwrap_or(fill);
 
         // Apply intra-chunk shift: result = (main_chunk SHIFT bit_shift) | (carry_chunk INVSHIFT inv_bit_shift)
         // (debug removed)

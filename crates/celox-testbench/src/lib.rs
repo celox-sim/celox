@@ -147,12 +147,15 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     ClockNext {
         clock_event: Event,
         count: ClockCount<Expression>,
+        /// Relative clock period for concurrent scheduling, clamped to at least two.
+        period: u64,
     },
     ResetAssert {
         reset_signal: Signal,
         reset_event: Option<Event>,
         clock_event: Event,
         duration: ClockCount<Expression>,
+        period: u64,
         assert_value: u8,
         deassert_value: u8,
     },
@@ -266,6 +269,8 @@ pub type SemanticComponentBinding<A> =
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchProgram<A> {
     statements: Vec<SemanticStatement<A>>,
+    process_lengths: Vec<usize>,
+    private_variables: Vec<A>,
     random_seed: Option<u64>,
     components: Vec<TestbenchComponent>,
     component_libraries: Vec<ComponentLibrary>,
@@ -277,6 +282,8 @@ impl<A> Default for TestbenchProgram<A> {
     fn default() -> Self {
         Self {
             statements: Vec::new(),
+            process_lengths: Vec::new(),
+            private_variables: Vec::new(),
             random_seed: None,
             components: Vec::new(),
             component_libraries: Vec::new(),
@@ -289,6 +296,8 @@ impl<A> Default for TestbenchProgram<A> {
 impl<A> TestbenchProgram<A> {
     pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
         Self {
+            process_lengths: vec![statements.len()],
+            private_variables: Vec::new(),
             statements,
             random_seed: None,
             components: Vec::new(),
@@ -296,6 +305,28 @@ impl<A> TestbenchProgram<A> {
             component_file_base: None,
             component_bindings: Vec::new(),
         }
+    }
+
+    /// Build independently scheduled initial processes in declaration order.
+    pub fn from_processes(processes: Vec<Vec<SemanticStatement<A>>>) -> Self {
+        let lengths = processes.iter().map(Vec::len).collect();
+        let mut program = Self::new(processes.into_iter().flatten().collect());
+        program.process_lengths = lengths;
+        program
+    }
+
+    /// Temporaries whose values belong to each independently suspended process.
+    pub fn with_private_variables(mut self, variables: Vec<A>) -> Self {
+        self.private_variables = variables;
+        self
+    }
+
+    pub fn private_variables(&self) -> &[A] {
+        &self.private_variables
+    }
+
+    pub fn process_lengths(&self) -> &[usize] {
+        &self.process_lengths
     }
 
     pub fn with_random_seed(mut self, random_seed: u64) -> Self {
@@ -520,6 +551,8 @@ pub type ExecutableComponentBinding<Event, Signal> = ComponentBinding<Event, Sig
 
 pub struct ExecutableTestbench<Event, Signal> {
     statements: Vec<ExecutableStatement<Event, Signal>>,
+    process_lengths: Vec<usize>,
+    private_signals: Vec<Signal>,
     random_seed: Option<u64>,
     components: Vec<TestbenchComponent>,
     component_libraries: Vec<ComponentLibrary>,
@@ -537,6 +570,8 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
         random_seed: Option<u64>,
     ) -> Self {
         Self {
+            process_lengths: vec![statements.len()],
+            private_signals: Vec::new(),
             statements,
             random_seed,
             components: Vec::new(),
@@ -558,6 +593,35 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
         self.component_file_base = file_base;
         self.component_bindings = bindings;
         self
+    }
+
+    /// Preserve process boundaries after binding a semantic program.
+    pub fn from_processes(
+        processes: Vec<Vec<ExecutableStatement<Event, Signal>>>,
+        random_seed: Option<u64>,
+    ) -> Self {
+        let lengths = processes.iter().map(Vec::len).collect();
+        let mut program =
+            Self::new_with_random_seed(processes.into_iter().flatten().collect(), random_seed);
+        program.process_lengths = lengths;
+        program
+    }
+
+    pub fn with_private_signals(mut self, signals: Vec<Signal>) -> Self {
+        self.private_signals = signals;
+        self
+    }
+
+    pub fn private_signals(&self) -> &[Signal] {
+        &self.private_signals
+    }
+
+    pub fn processes(&self) -> impl Iterator<Item = &[ExecutableStatement<Event, Signal>]> {
+        self.process_lengths.iter().scan(0, |offset, &length| {
+            let start = *offset;
+            *offset += length;
+            Some(&self.statements[start..*offset])
+        })
     }
 
     pub fn statements(&self) -> &[ExecutableStatement<Event, Signal>] {
@@ -786,6 +850,7 @@ mod tests {
             then_block: vec![SemanticStatement::ClockNext {
                 clock_event: 2,
                 count: ClockCount::Static(1),
+                period: 2,
             }],
             else_block: vec![SemanticStatement::Finish],
         };

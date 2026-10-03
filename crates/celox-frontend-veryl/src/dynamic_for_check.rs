@@ -72,13 +72,30 @@ use crate::{
     VerylTestbenchSource, bitaccess::eval_var_select,
 };
 
-fn root_source_var(
+fn owner_source_var(
     scheduled: &ScheduledRtl,
     source: &VerylTestbenchSource,
     var: VarId,
 ) -> Option<crate::SourceVarId> {
-    let (_, module) = scheduled.frontend_lookup.root_instance_and_module()?;
+    let instance = source.base_instance(&scheduled.frontend_lookup);
+    let module = *scheduled.frontend_lookup.instance_module.get(&instance)?;
     source.id_map.source_var(module, var)
+}
+
+fn owner_named_variable<'a>(
+    scheduled: &'a ScheduledRtl,
+    source: &VerylTestbenchSource,
+    name: &str,
+) -> Option<(StateAddr, &'a crate::VariableInfo)> {
+    let lookup = &scheduled.frontend_lookup;
+    let instance = source.base_instance(lookup);
+    let module = lookup.instance_module.get(&instance)?;
+    let id = lookup
+        .module_var_path_index
+        .get(module)?
+        .get(&vec![name.to_string()])?
+        .as_ref()?;
+    lookup.instance_variable(instance, *id)
 }
 
 fn source_name(id: StrId) -> String {
@@ -156,7 +173,7 @@ pub fn check_dynamic_for_bounds(ir: &Ir) -> Vec<FrontendDiagnostic> {
 
 /// Resolves testbench time-advancing effects after hierarchy flattening.
 ///
-/// At this point every root variable and event domain has a concrete state
+/// At this point every instance variable and event domain has a concrete state
 /// identity, and the scheduled SIR contains the transitive FF/comb work for
 /// each event. This lets a loop that advances time either receive a targeted
 /// warning or pass cleanly instead of warning about every `clock.next()`.
@@ -317,6 +334,7 @@ fn check_elaborated_for(
         &bound_effects.hierarchical_reads,
         &immediate_writes,
         scheduled,
+        source,
         &mut unknown,
     ) || (!body_effects.hierarchical_writes.is_empty()
         && local_reads_conflict(
@@ -360,11 +378,16 @@ fn check_elaborated_for(
         return;
     }
 
-    let writes =
-        collect_state_change_writes(&body_effects.state_changes, scheduled, hints, &mut unknown);
+    let writes = collect_state_change_writes(
+        &body_effects.state_changes,
+        scheduled,
+        source,
+        hints,
+        &mut unknown,
+    );
     let mut conflict = false;
     for read in &bound_effects.reads {
-        let Some(source_id) = root_source_var(scheduled, source, read.id) else {
+        let Some(source_id) = owner_source_var(scheduled, source, read.id) else {
             unknown.get_or_insert_with(|| {
                 format!(
                     "bound variable `{}` could not be mapped after elaboration",
@@ -373,7 +396,10 @@ fn check_elaborated_for(
             });
             continue;
         };
-        let Some((address, _)) = scheduled.frontend_lookup.root_variable(source_id) else {
+        let Some((address, _)) = scheduled
+            .frontend_lookup
+            .instance_variable(source.base_instance(&scheduled.frontend_lookup), source_id)
+        else {
             unknown.get_or_insert_with(|| {
                 format!(
                     "bound variable `{}` could not be projected after elaboration",
@@ -396,6 +422,7 @@ fn check_elaborated_for(
         &bound_effects.hierarchical_reads,
         &writes,
         scheduled,
+        source,
         &mut unknown,
     ) {
         conflict = true;
@@ -430,7 +457,7 @@ fn collect_immediate_state_writes(
 ) -> Vec<StateWrite> {
     let mut writes = Vec::new();
     for access in accesses.iter().filter(|access| !access.deferred) {
-        let Some(source_id) = root_source_var(scheduled, source, access.id) else {
+        let Some(source_id) = owner_source_var(scheduled, source, access.id) else {
             unknown.get_or_insert_with(|| {
                 format!(
                     "body variable `{}` could not be mapped after elaboration",
@@ -439,7 +466,10 @@ fn collect_immediate_state_writes(
             });
             continue;
         };
-        let Some((address, _)) = scheduled.frontend_lookup.root_variable(source_id) else {
+        let Some((address, _)) = scheduled
+            .frontend_lookup
+            .instance_variable(source.base_instance(&scheduled.frontend_lookup), source_id)
+        else {
             unknown.get_or_insert_with(|| {
                 format!(
                     "body variable `{}` could not be projected after elaboration",
@@ -457,8 +487,9 @@ fn collect_immediate_state_writes(
         );
     }
     for reference in hierarchical {
-        match super::testbench::resolve_hierarchical_reference(
+        match super::testbench::resolve_hierarchical_reference_from(
             &scheduled.frontend_lookup,
+            source.base_instance(&scheduled.frontend_lookup),
             reference,
         ) {
             Ok((address, info)) => {
@@ -494,8 +525,11 @@ fn local_reads_conflict(
     unknown: &mut Option<String>,
 ) -> bool {
     for read in reads {
-        let resolved = root_source_var(scheduled, source, read.id)
-            .and_then(|id| scheduled.frontend_lookup.root_variable(id));
+        let resolved = owner_source_var(scheduled, source, read.id).and_then(|id| {
+            scheduled
+                .frontend_lookup
+                .instance_variable(source.base_instance(&scheduled.frontend_lookup), id)
+        });
         let Some((address, _)) = resolved else {
             unknown.get_or_insert_with(|| {
                 format!(
@@ -518,11 +552,13 @@ fn hierarchical_reads_conflict(
     references: &[veryl_analyzer::ir::HierVarRef],
     writes: &[StateWrite],
     scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
     unknown: &mut Option<String>,
 ) -> bool {
     for reference in references {
-        let (address, info) = match super::testbench::resolve_hierarchical_reference(
+        let (address, info) = match super::testbench::resolve_hierarchical_reference_from(
             &scheduled.frontend_lookup,
+            source.base_instance(&scheduled.frontend_lookup),
             reference,
         ) {
             Ok(resolved) => resolved,
@@ -553,6 +589,7 @@ fn hierarchical_reads_conflict(
 fn collect_state_change_writes(
     changes: &[StateChange],
     scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
     hints: &FusedSirOptimizationHints,
     unknown: &mut Option<String>,
 ) -> Vec<StateWrite> {
@@ -561,8 +598,7 @@ fn collect_state_change_writes(
         match *change {
             StateChange::Clock(clock) => {
                 let clock_name = source_name(clock);
-                let Some((event, info)) =
-                    scheduled.frontend_lookup.root_named_variable(&clock_name)
+                let Some((event, info)) = owner_named_variable(scheduled, source, &clock_name)
                 else {
                     unknown.get_or_insert_with(|| {
                         format!("clock `{clock}` could not be resolved after elaboration")
@@ -575,7 +611,7 @@ fn collect_state_change_writes(
             StateChange::Reset { reset, clock } => {
                 let reset_name = source_name(reset);
                 let Some((reset_signal, reset_info)) =
-                    scheduled.frontend_lookup.root_named_variable(&reset_name)
+                    owner_named_variable(scheduled, source, &reset_name)
                 else {
                     unknown.get_or_insert_with(|| {
                         format!("reset `{reset}` could not be resolved after elaboration")
@@ -586,7 +622,7 @@ fn collect_state_change_writes(
 
                 let clock_name = source_name(clock);
                 let Some((clock_event, clock_info)) =
-                    scheduled.frontend_lookup.root_named_variable(&clock_name)
+                    owner_named_variable(scheduled, source, &clock_name)
                 else {
                     unknown.get_or_insert_with(|| {
                         format!("reset clock `{clock}` could not be resolved after elaboration")

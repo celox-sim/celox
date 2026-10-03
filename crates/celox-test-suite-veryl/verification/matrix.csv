@@ -100,6 +100,16 @@ concatenation::test_lhs_concatenation_execution,Operators,Simulation,passed,pass
 concatenation::test_replication_concatenation_execution,Operators,Simulation,passed,passed
 concatenation::test_rhs_concatenation_execution,Operators,Simulation,passed,passed
 concatenation::test_rhs_mixed_concatenation_execution,Operators,Simulation,passed,passed
+concurrent_initial::clock_periods,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::control_flow,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::gated_drive,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::hierarchy,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::mixed_edges,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::reset,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::reset_between_edges,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::reset_only_clock,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::shared_clock,ControlFlow,Simulation,ignored,ignored
+concurrent_initial::simultaneous_edges,ControlFlow,Simulation,ignored,ignored
 context_width::test_addition_different_widths,Types,Simulation,passed,passed
 context_width::test_comparison_different_widths,Types,Simulation,passed,passed
 context_width::test_context_determined_width_subtraction,Types,Simulation,passed,passed

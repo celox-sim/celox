@@ -1,0 +1,26 @@
+#[test(ResetWorker)]
+module ResetWorker #(param P: u32 = 6) {
+    const PERIOD: u32 = P + 0;
+    inst clk: $tb::clock_gen #(period: PERIOD);
+    inst rst: $tb::reset_gen(clk);
+    var done: logic;
+    initial { done = 0; rst.assert(1); done = 1; }
+}
+#[test(Top)]
+module Top {
+    inst short: ResetWorker;
+    inst long: ResetWorker #(P: 12);
+    inst reset_only: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    inst rst: $tb::reset_gen(clk: reset_only);
+    var reset_done: logic;
+    initial { reset_done = 0; rst.assert(1); reset_done = 1; }
+    initial {
+        fast.next(4);
+        $assert(reset_done == 0, "reset-only clock must still wait at time 8");
+        $assert(short.done == 1 && long.done == 0, "instance-specific reset periods");
+        fast.next(3);
+        $assert(reset_done == 1 && long.done == 1, "all resets complete by time 14");
+        $finish();
+    }
+}

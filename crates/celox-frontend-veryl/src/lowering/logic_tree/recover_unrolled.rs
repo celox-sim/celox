@@ -2928,6 +2928,24 @@ enum OpaqueProofKey {
 }
 
 impl ProofBitCanonicalizer {
+    // Memoized (node, bit) pairs can otherwise grow as expression depth times
+    // output width. Keep their payload proportional to the proof arena, rather
+    // than retaining every bit column for the lifetime of the whole proof.
+    // Only evict BETWEEN complete lhs/rhs comparisons: the postorder evaluator
+    // requires its children's entries while reducing a single bit.
+    fn trim_bit_cache(&mut self, arena: &SLTNodeArena<VarId>) {
+        let budget = arena
+            .len()
+            .saturating_mul(std::mem::size_of::<SLTNode<VarId>>());
+        let bytes = self
+            .bit_cache
+            .len()
+            .saturating_mul(std::mem::size_of::<((NodeId, usize), NodeId)>());
+        if bytes > budget {
+            self.bit_cache.clear();
+        }
+    }
+
     fn concat_bit_source(
         &mut self,
         node: NodeId,
@@ -2990,7 +3008,9 @@ fn proof_outputs_match(
         for bit in 0..width {
             let lhs = canonicalize_proof_bit(lhs, bit, arena, canonicalizer)?;
             let rhs = canonicalize_proof_bit(rhs, bit, arena, canonicalizer)?;
-            if lhs != rhs {
+            let matches = lhs == rhs;
+            canonicalizer.trim_bit_cache(arena);
+            if !matches {
                 return Some(false);
             }
         }
@@ -5519,6 +5539,51 @@ mod tests {
         );
         assert_eq!(canonicalizer.concat_layout_builds, 1);
         assert_eq!(arena.len(), first_nodes);
+    }
+
+    #[test]
+    fn wide_deep_proof_does_not_retain_every_bit_column() {
+        let (module, _) = analyze(MULTI_STATE_LOOP);
+        let bits = variable(&module, "bits");
+        let width = 512;
+        let depth = 256;
+        let mut arena = SLTNodeArena::new();
+        let input = arena
+            .alloc(SLTNode::Input {
+                variable: bits,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, width - 1),
+            })
+            .unwrap();
+        let mut equivalent = input;
+        for _ in 0..depth {
+            equivalent = arena
+                .alloc(SLTNode::Slice {
+                    expr: equivalent,
+                    access: BitAccess::new(0, width - 1),
+                })
+                .unwrap();
+        }
+        let mut canonicalizer = ProofBitCanonicalizer::default();
+        assert_eq!(
+            proof_outputs_match(&[equivalent], &[input], &mut arena, &mut canonicalizer),
+            Some(true)
+        );
+        let retained_bytes =
+            canonicalizer.bit_cache.capacity() * std::mem::size_of::<((NodeId, usize), NodeId)>();
+        let arena_bytes = arena.len() * std::mem::size_of::<SLTNode<VarId>>();
+        // Hash table growth rounds capacity up; allow that storage overhead,
+        // while rejecting the depth-by-width retention of the old evaluator.
+        assert!(
+            retained_bytes <= 4 * arena_bytes,
+            "cache={retained_bytes} arena={arena_bytes}"
+        );
+        let flipped = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, input)).unwrap();
+        assert_eq!(
+            proof_outputs_match(&[equivalent], &[flipped], &mut arena, &mut canonicalizer),
+            Some(false)
+        );
     }
 
     #[test]

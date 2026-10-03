@@ -230,6 +230,31 @@ impl<B: SimBackend> SimulationState<B> {
             Some(events) => events,
             None => return Ok(None),
         };
+        self.step_events(executor, current_time, events_to_process)
+    }
+
+    /// Settle externally driven state against the previous edge baseline even
+    /// when no clock/reset signal is explicitly scheduled at this timestamp.
+    pub fn settle_at<E>(
+        &mut self,
+        executor: &mut E,
+        time: u64,
+    ) -> Result<Option<u64>, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.step_events(executor, time, Vec::new())
+    }
+
+    fn step_events<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        events_to_process: Vec<SimEvent<B>>,
+    ) -> Result<Option<u64>, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         self.scheduler.time = current_time;
 
         // Keep periodic provenance private so the public SimEvent shape stays
@@ -268,12 +293,15 @@ impl<B: SimBackend> SimulationState<B> {
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         let mut scheduled_trigger_ids = BitSet::with_capacity(num_events);
-        let mut has_scheduled_event_signal = false;
+        // An external drive may already have been combinationally evaluated
+        // by a testbench read. Compare against our saved baseline even if that
+        // evaluation's transient trigger bits have since been cleared.
+        let mut track_stable_edges = events_to_process.is_empty();
         executor.backend_mut().clear_triggered_bits();
 
         for event in &events_to_process {
             if let Some(&id) = self.signal_to_id.get(&event.signal) {
-                has_scheduled_event_signal = true;
+                track_stable_edges = true;
                 let was_nonzero = self.last_clock_values.contains(id);
                 let is_nonzero = event.next_val != 0;
                 let triggered = match self.domain_kinds[id] {
@@ -293,7 +321,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         executor.eval_comb()?;
-        if has_scheduled_event_signal {
+        if track_stable_edges {
             // Combinational settling before an active scheduled source domain
             // commits may expose transient derived-clock edges. In that case,
             // keep only the source event and rediscover stable edges after the
@@ -334,7 +362,7 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
                             executor.eval_comb()?;
-                            if has_scheduled_event_signal {
+                            if track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
                             }
                             comb_already_done = true;
@@ -397,7 +425,7 @@ impl<B: SimBackend> SimulationState<B> {
                 comb_already_done = false;
             } else {
                 executor.eval_comb()?;
-                if has_scheduled_event_signal {
+                if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
                 }
             }

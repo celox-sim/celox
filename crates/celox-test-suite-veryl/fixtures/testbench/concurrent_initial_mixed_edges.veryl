@@ -1,0 +1,32 @@
+module CrossCoupled (
+    a: input '_ clock,
+    b: input '_ clock,
+    x: output logic<8>,
+    y: output logic<8>,
+) {
+    always_ff (a) { x = y + 8'd1; }
+    always_ff (b) { y = x + 8'd1; }
+}
+#[test(Top)]
+module Top {
+    inst observer: $tb::clock_gen #(period: 2);
+    inst a: $tb::clock_gen #(period: 3);
+    inst b: $tb::clock_gen #(period: 6);
+    var x: logic<8>;
+    var y: logic<8>;
+    let inverted: '_ clock = ~b;
+    inst dut: CrossCoupled (a, b: inverted, x, y);
+    initial {
+        a.next(2);
+        $assert(x == 8'd1, "x=%d y=%d", x, y);
+        $assert(y == 8'd2, "x=%d y=%d", x, y);
+        $finish();
+    }
+    initial { b.next(1); }
+    initial {
+        observer.next(1);
+        // Time 2 precedes b's falling edge at time 3. This observation does
+        // not depend on the order of the two edges that coincide at time 3.
+        $assert(x == 8'd1 && y == 8'd0, "time 2: x=%d y=%d", x, y);
+    }
+}
