@@ -332,3 +332,105 @@ fn reset_between_edges_respects_polarity_and_sync_mode_without_a_clock_event() {
         }
     }
 }
+
+#[test]
+fn child_hierarchical_readmem_waits_for_its_process() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("words.hex");
+    std::fs::write(&path, "ab\ncd\n").unwrap();
+    let code = format!(
+        r#"
+        module Memory (word: output logic<8>) {{
+            #[allow(unassign_variable)]
+            var words: logic<8>[2];
+            assign word = words[0];
+        }}
+        #[test(Loader)] module Loader (word: output logic<8>) {{
+            inst clk: $tb::clock_gen;
+            inst memory: Memory (word);
+            initial {{ clk.next(1); $readmemh("{}", memory.words); }}
+        }}
+        #[test(Top)] module Top {{
+            inst clk: $tb::clock_gen;
+            var word: logic<8>;
+            inst loader: Loader (word);
+            initial {{
+                $assert(loader.memory.words[0] == 0, "loaded before child ran");
+                clk.next(2);
+                $assert(loader.memory.words[0] == 8'hab);
+                $finish();
+            }}
+        }}
+    "#,
+        path.display()
+    );
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>, expected: u32) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(sim.signal("word")), expected.into());
+    }
+    let skipped = code
+        .replace(
+            "clk.next(1); $readmemh",
+            "clk.next(1); var load: logic; load = 0; if load { $readmemh",
+        )
+        .replace("memory.words);", "memory.words); }")
+        .replace("== 8'hab", "== 0");
+    let finished = code.replace(
+        "clk.next(1); $readmemh",
+        "clk.next(1); $finish(); $readmemh",
+    );
+    for (code, expected) in [(&code, 0xab), (&skipped, 0), (&finished, 0)] {
+        check(
+            Simulator::builder(code, "Top").build_interpreter().unwrap(),
+            expected,
+        );
+        check(
+            Simulator::builder(code, "Top").build_cranelift().unwrap(),
+            expected,
+        );
+        check(
+            Simulator::builder(code, "Top").build_wasm().unwrap(),
+            expected,
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let original = Simulator::builder(code, "Top").build_native().unwrap();
+            let bytes = original
+                .shared_code()
+                .program_image()
+                .to_container_bytes()
+                .unwrap();
+            let image = celox::NativeProgramImage::from_container_bytes(&bytes).unwrap();
+            check(original, expected);
+            check(
+                Simulator::builder("unused", "unused")
+                    .build_native_from_image(image)
+                    .unwrap(),
+                expected,
+            );
+        }
+    }
+}
+
+#[test]
+fn clock_period_accepts_module_constant_array_element() {
+    let code = include_str!(
+        "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_only_clock.veryl"
+    )
+    .replace(
+        "const PERIOD: u32 = P + 0;",
+        "const PERIODS: u8[2] = '{P as u8, (P + 2) as u8}; const PERIOD: u32 = PERIODS[0];",
+    );
+    let mut sim = Simulator::builder(&code, "Top")
+        .build_interpreter()
+        .unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench_to_finish(&mut sim, &tb),
+        TestResult::Pass
+    );
+}

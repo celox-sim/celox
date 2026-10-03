@@ -173,6 +173,8 @@ pub struct VerylScheduledRtlOutput {
     pub scheduled: ScheduledRtl,
     pub fused_optimization_hints: FusedSirOptimizationHints,
     pub testbench_source: VerylTestbenchSource,
+    /// Bound checks resolved in each process owner's elaborated instance scope.
+    pub dynamic_for_diagnostics: Vec<crate::FrontendDiagnostic>,
 }
 
 impl VerylScheduledRtlOutput {

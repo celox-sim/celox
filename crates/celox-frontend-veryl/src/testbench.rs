@@ -230,7 +230,8 @@ pub(crate) fn hierarchical_destination_reference(
     }
 }
 
-pub(crate) fn resolve_hierarchical_reference<'a>(
+#[cfg(test)]
+fn resolve_hierarchical_reference<'a>(
     lookup: &'a FrontendLookup,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {

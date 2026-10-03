@@ -54,7 +54,7 @@ impl From<celox_frontend_core::LoweringPhase> for LoweringPhase {
 
 /// Celox-specific source diagnostics produced after Veryl analysis but before
 /// source identities are discarded by lowering.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum FrontendDiagnostic {
     #[error("Array literal side-effect evaluation count is undefined: {detail}")]
     UndefinedArrayLiteralEvaluationCount {

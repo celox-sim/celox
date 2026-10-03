@@ -61,7 +61,7 @@ pub fn schedule_symbolic_rtl(
         .unwrap_or_default();
     let fused_ff_factory =
         super::lowering::global_ff::VerylFusedFfFactory::new(&module_ir, &source_id_maps, *config);
-    let mut output = assembly::schedule_symbolic_rtl(
+    let output = assembly::schedule_symbolic_rtl(
         symbolic,
         Some(&fused_ff_factory),
         ignored_loops,
@@ -70,7 +70,6 @@ pub fn schedule_symbolic_rtl(
         trace_options,
         trace,
     )?;
-    super::readmem::elaborate_hierarchical_initial_memories(&module_ir, &mut output.scheduled)?;
     let lookup = &output.scheduled.frontend_lookup;
     let mut child_sources = Vec::new();
     let mut components = Vec::new();
@@ -159,10 +158,24 @@ pub fn schedule_symbolic_rtl(
         component_libraries: Vec::new(),
         component_file_base: None,
     };
+    // Use the exact elaborated module, including parameter specialization, for
+    // each process owner. Resolving by root/module name loses child scopes.
+    let mut dynamic_for_diagnostics = Vec::new();
+    for source in testbench_source.sources() {
+        let instance = source.base_instance(lookup);
+        let module = module_ir[&lookup.instance_module[&instance]];
+        dynamic_for_diagnostics.extend(super::check_elaborated_dynamic_for_bounds(
+            &output.scheduled,
+            source,
+            module,
+            &output.fused_optimization_hints,
+        ));
+    }
     Ok(VerylScheduledRtlOutput {
         scheduled: output.scheduled,
         fused_optimization_hints: output.fused_optimization_hints,
         testbench_source,
+        dynamic_for_diagnostics,
     })
 }
 
@@ -199,6 +212,7 @@ fn configured_clock_periods(
         };
         let context = context.get_or_insert_with(|| {
             let mut context = Context::default();
+            context.variables = module.variables.clone();
             context.push_generic_map(module.signature.to_generic_map());
             let overrides = module
                 .signature
