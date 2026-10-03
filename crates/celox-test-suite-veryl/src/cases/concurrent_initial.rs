@@ -48,4 +48,10 @@ cases! { ControlFlow, "concurrent_initial";
         @build Design::new(code, "Top");
         sim.run_testbench().unwrap();
     }
+    fn gated_drive(sim) {
+        @tags [TwoStateInitialization];
+        @setup { let code = include_str!("../../fixtures/testbench/concurrent_initial_gated_drive.veryl"); }
+        @build Design::new(code, "Top");
+        sim.run_testbench().unwrap();
+    }
 }

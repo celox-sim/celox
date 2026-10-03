@@ -73,7 +73,9 @@ struct LiveComponent {
 pub(crate) struct ComponentRuntime {
     components: Vec<LiveComponent>,
     last_trace_values: Vec<(num_bigint::BigUint, num_bigint::BigUint)>,
-    active_reset_events: Vec<usize>,
+    // (clock domain, reset event); None is the single-clock tick path, which
+    // also routes reset callbacks through clocks derived from that tick.
+    active_reset_events: Vec<(Option<usize>, usize)>,
     injected: InjectedComponents,
 }
 
@@ -722,13 +724,23 @@ impl ComponentRuntime {
                 .events
                 .iter()
                 .find(|event| event.event_id == event_id)?;
+            // A single-domain component's reset also covers a derived clock.
+            // Multi-domain components require the wait's explicit clock match.
+            let single_clock_domain = component
+                .events
+                .iter()
+                .all(|event| event.reset || event.event_id == triggered.event_id);
             let reset = if triggered.reset {
                 None
             } else {
-                component
-                    .events
-                    .iter()
-                    .find(|event| event.reset && active_reset_events.contains(&event.event_id))
+                component.events.iter().find(|event| {
+                    event.reset
+                        && active_reset_events.iter().any(|&(clock, reset)| {
+                            reset == event.event_id
+                                && clock
+                                    .is_none_or(|clock| clock == event_id || single_clock_domain)
+                        })
+                })
             };
             let event = reset.unwrap_or(triggered);
             Some((event.port, event.reset))
@@ -739,7 +751,17 @@ impl ComponentRuntime {
 
     pub(crate) fn begin_reset_cycles(&mut self, reset_event_id: Option<usize>) {
         if let Some(id) = reset_event_id {
-            self.active_reset_events.push(id);
+            self.active_reset_events.push((None, id));
+        }
+    }
+
+    pub(crate) fn begin_reset_clock_cycles(
+        &mut self,
+        clock_event_id: usize,
+        reset_event_id: Option<usize>,
+    ) {
+        if let Some(id) = reset_event_id {
+            self.active_reset_events.push((Some(clock_event_id), id));
         }
     }
 

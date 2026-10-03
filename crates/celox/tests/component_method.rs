@@ -594,6 +594,30 @@ unsafe extern "C" fn reset_clock_hook(state: *mut c_void, ctx: *mut sys::VrlCtx)
     0
 }
 
+unsafe extern "C" fn create_dual_reset(
+    ctx: *mut sys::VrlCtx,
+    api: *const sys::VrlHostApi,
+) -> *mut c_void {
+    for (name, role) in [("clk_b", sys::VRL_DIR_CLOCK), ("rst_b", sys::VRL_DIR_RESET)] {
+        if unsafe { ((*api).port_index)(ctx, sys::VrlStr::from_str(name), role) } < 0 {
+            return std::ptr::null_mut();
+        }
+    }
+    unsafe { create_reset(ctx, api) }
+}
+
+static DUAL_RESET_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_CLOCKED,
+    create: create_dual_reset,
+    destroy: destroy_reset,
+    on_init: hook,
+    on_reset: reset_hook,
+    on_clock: reset_clock_hook,
+    call_method,
+    on_finish: hook,
+};
+
 static RESET_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     abi_version: sys::VRL_COMPONENT_ABI_VERSION,
     kind: sys::VRL_KIND_CLOCKED,
@@ -734,6 +758,7 @@ fn register_component() {
         celox::register_static_component("celox_init_finisher", &INIT_FINISH_COMPONENT);
         celox::register_static_component("celox_cleanup", &CLEANUP_COMPONENT);
         celox::register_static_component("celox_finish_time", &FINISH_TIME_COMPONENT);
+        celox::register_static_component("celox_dual_reset", &DUAL_RESET_COMPONENT);
         celox::register_static_component("celox_create_failure", &FAILING_COMPONENT);
     });
 }
@@ -842,6 +867,16 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                     "ports": [
                         {"name":"clk","dir":"input","role":"clock"},
                         {"name":"d","dir":"input"},
+                        {"name":"q","dir":"output"}
+                    ]
+                },
+                "celox_dual_reset": {
+                    "kind": "clocked",
+                    "ports": [
+                        {"name":"clk","dir":"input","role":"clock"},
+                        {"name":"rst","dir":"input","role":"reset"},
+                        {"name":"clk_b","dir":"input","role":"clock"},
+                        {"name":"rst_b","dir":"input","role":"reset"},
                         {"name":"q","dir":"output"}
                     ]
                 },
@@ -2838,6 +2873,15 @@ fn reset_assert_routes_derived_component_clocks_through_scheduler() {
             .unwrap(),
         TestResult::Pass
     );
+    let code = code.replace("initial {", "initial { clk.next(10); } initial {");
+    let (_dir, metadata) = component_metadata();
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }
 
 #[test]
@@ -3020,4 +3064,27 @@ fn concurrent_reset_reassertion_reaches_component_between_clock_edges() {
         };
         assert_eq!(result.unwrap(), TestResult::Pass);
     }
+}
+
+#[test]
+fn concurrent_reset_only_replaces_its_own_component_clock_domain() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"#[test(t)] module t {
+        inst a: $tb::clock_gen #(period: 2);
+        inst b: $tb::clock_gen #(period: 10);
+        inst ra: $tb::reset_gen(clk: a);
+        inst rb: $tb::reset_gen(clk: b);
+        var q: logic<8>;
+        inst component: $comp::celox_dual_reset(clk: a, rst: ra, clk_b: b, rst_b: rb, q);
+        initial { rb.assert(1); }
+        initial { a.next(2); $assert(q == 102, "other reset stole clock: %d", q); $finish(); }
+    }"#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }

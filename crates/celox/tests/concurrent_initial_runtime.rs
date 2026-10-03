@@ -469,3 +469,83 @@ fn tick_limit_drains_falling_edges_and_reset_release_without_resuming_processes(
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(Simulator::builder(code, "Top").build_native().unwrap());
 }
+
+#[test]
+fn completed_process_dispatches_reset_release() {
+    let code = r#"
+    module Counter(clk: input clock, count: output logic<8>) {
+        always_ff(clk) { count += 1; }
+    }
+    #[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 10);
+        inst rst: $tb::reset_gen(clk);
+        let released: clock = ~rst;
+        var count: logic<8>;
+        inst dut: Counter(clk: released, count);
+        initial { rst.assert(1); }
+        initial { clk.next(1); }
+    }"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+    }
+    for code in [
+        code.to_owned(),
+        code.replace("rst.assert(1);", "rst.assert(1); $finish();"),
+    ] {
+        macro_rules! build {
+            ($method:ident) => {
+                check(
+                    Simulator::builder(&code, "Top")
+                        .reset_type(celox::ResetType::AsyncHigh)
+                        .$method()
+                        .unwrap(),
+                );
+            };
+        }
+        build!(build_interpreter);
+        build!(build_cranelift);
+        build!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        build!(build_native);
+    }
+}
+
+#[test]
+fn concurrent_formatted_time_uses_scheduler_timestamp() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 10);
+        initial { clk.next(1); $assert_continue(1'd0, "time=%t"); $finish(); }
+        initial { clk.next(3); }
+    }"#;
+    let result = Simulator::builder(code, "Top").run_test_detailed().unwrap();
+    assert_eq!(
+        result.assertions.last().unwrap().message.as_deref(),
+        Some("time=10")
+    );
+}
+
+#[test]
+fn concurrent_runtime_assertions_use_event_time() {
+    let code = r#"
+    module Check(clk: input clock) {
+        always_ff(clk) { $assert_continue(1'd0, "ff time=%t"); }
+    }
+    #[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 10);
+        inst dut: Check(clk);
+        initial { clk.next(3); $finish(); }
+        initial { clk.next(4); }
+    }"#;
+    let result = Simulator::builder(code, "Top").run_test_detailed().unwrap();
+    let messages: Vec<_> = result
+        .assertions
+        .iter()
+        .map(|a| a.message.as_deref())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![Some("ff time=0"), Some("ff time=10"), Some("ff time=20")]
+    );
+}

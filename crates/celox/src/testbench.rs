@@ -1088,7 +1088,7 @@ fn run_testbench_limited<B: SimBackend>(
     } else {
         exec_testbench(sim, testbench, &mut ctx)
     };
-    if let Err(message) = sim.components.finish(ctx.component_time())
+    if let Err(message) = sim.components.finish(ctx.simulation_time())
         && !matches!(result, ExecResult::Fail(_))
     {
         result = ExecResult::Fail(message);
@@ -1239,7 +1239,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         ExecResult::Fail(message) => Some(message),
         ExecResult::Continue | ExecResult::Break | ExecResult::Finished => None,
     };
-    if let Err(message) = sim.components.finish(ctx.component_time())
+    if let Err(message) = sim.components.finish(ctx.simulation_time())
         && error.is_none()
     {
         error = Some(message);
@@ -1263,7 +1263,7 @@ struct DetailedExecContext {
 }
 
 impl DetailedExecContext {
-    fn component_time(&self) -> u64 {
+    fn simulation_time(&self) -> u64 {
         self.scheduler_time.unwrap_or(self.current_time)
     }
 
@@ -1403,7 +1403,7 @@ fn drain_runtime_assertions<B: SimBackend>(
     let mut last_message = None;
     let mut fatal_message = None;
     let format_ctx = RuntimeFormatContext {
-        tb_time: Some(ctx.current_time),
+        tb_time: Some(ctx.simulation_time()),
         scope: None,
     };
     for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
@@ -1648,6 +1648,24 @@ fn exec_testbench<B: SimBackend>(
         .map(|(block, wait)| Some(exec_process(&sim, &ctx, wait, &reset_edges, block)))
         .collect();
     let mut clocks: Vec<ProcessClock<B::Event>> = Vec::new();
+    // Capture the baseline before runnable processes drive reset. Reset
+    // assertions are signal writes AND events at this timestamp, even if
+    // their clock's next edge is still in the future. Rebasing after the
+    // writes would silently absorb the asynchronous transition.
+    {
+        let mut sim = sim.borrow_mut();
+        if sim.dirty
+            && let Err(error) = sim.eval_comb()
+        {
+            return ExecResult::Fail(format!("eval_comb: {error}"));
+        }
+        let mut state = sim
+            .component_simulation
+            .take()
+            .unwrap_or_else(|| crate::simulation::simulation_state(&sim));
+        state.synchronize_event_values(&sim.backend);
+        sim.component_simulation = Some(state);
+    }
     let mut now = 0;
     let mut task_context = Context::from_waker(Waker::noop());
     loop {
@@ -1666,24 +1684,6 @@ fn exec_testbench<B: SimBackend>(
             {
                 return ExecResult::Finished;
             }
-        }
-        // Capture the baseline before runnable processes drive reset. Reset
-        // assertions are signal writes AND events at this timestamp, even if
-        // their clock's next edge is still in the future. Rebasing after the
-        // writes would silently absorb the asynchronous transition.
-        {
-            let mut sim = sim.borrow_mut();
-            if sim.dirty
-                && let Err(error) = sim.eval_comb()
-            {
-                return ExecResult::Fail(format!("eval_comb: {error}"));
-            }
-            let mut state = sim
-                .component_simulation
-                .take()
-                .unwrap_or_else(|| crate::simulation::simulation_state(&sim));
-            state.synchronize_event_values(&sim.backend);
-            sim.component_simulation = Some(state);
         }
         // A waiter resumes at the end of its last cycle. Collect all edge
         // polarities for this timestamp before evaluating clocked logic.
@@ -1714,6 +1714,7 @@ fn exec_testbench<B: SimBackend>(
         }
         // Poll only ready processes, in declaration order, until their next
         // wait, completion, or a global stop. No simulator borrow crosses await.
+        let mut stopped = false;
         for ((process, wait), locals) in processes.iter_mut().zip(&waits).zip(&mut locals) {
             if draining || wait.borrow().is_some() {
                 continue;
@@ -1729,12 +1730,13 @@ fn exec_testbench<B: SimBackend>(
             }
             match result {
                 Poll::Ready(ExecResult::Continue | ExecResult::Break) => *process = None,
+                Poll::Ready(ExecResult::Finished) => {
+                    stopped = true;
+                    break;
+                }
                 Poll::Ready(result) => return result,
                 Poll::Pending => debug_assert!(wait.borrow().is_some()),
             }
-        }
-        if processes.iter().all(Option::is_none) {
-            return ExecResult::Continue;
         }
         for wait in &waits {
             if let Some(wait) = wait.borrow().as_ref()
@@ -1764,13 +1766,17 @@ fn exec_testbench<B: SimBackend>(
         };
         let fired: Vec<_> = clocks
             .iter()
-            .filter(|clock| !draining && clock.next_edge == now && active(clock.event))
+            .filter(|clock| !draining && !stopped && clock.next_edge == now && active(clock.event))
             .map(|clock| clock.event)
             .collect();
-        if !fired.is_empty() || !falling.is_empty() || !reset_edges.borrow().is_empty() {
+        {
             let resets: Vec<_> = waits
                 .iter()
-                .filter_map(|wait| wait.borrow().as_ref()?.reset.map(|(_, event, _)| event))
+                .filter_map(|wait| {
+                    let wait = wait.borrow();
+                    let wait = wait.as_ref()?;
+                    wait.reset.map(|(_, event, _)| (wait.clock, event))
+                })
                 .collect();
             let events: Vec<_> = falling
                 .iter()
@@ -1813,6 +1819,12 @@ fn exec_testbench<B: SimBackend>(
                 }
             }
         }
+        if stopped {
+            return ExecResult::Finished;
+        }
+        if processes.iter().all(Option::is_none) {
+            return ExecResult::Continue;
+        }
         let next_edge = clocks
             .iter()
             .filter(|clock| !ctx.borrow().at_tick_limit() && active(clock.event))
@@ -1841,7 +1853,7 @@ fn exec_testbench<B: SimBackend>(
 fn step_process_events<B: SimBackend>(
     sim: &mut Simulator<B>,
     events: &[(B::Event, u8)],
-    resets: &[Option<B::Event>],
+    resets: &[(B::Event, Option<B::Event>)],
     time: u64,
     rising: bool,
     ctx: &mut DetailedExecContext,
@@ -1856,9 +1868,9 @@ fn step_process_events<B: SimBackend>(
         sim.component_simulation = Some(state);
         return ExecResult::Fail(format!("eval_comb: {error}"));
     }
-    for reset in resets {
+    for (clock, reset) in resets {
         sim.components
-            .begin_reset_cycles(reset.map(|event| event.id()));
+            .begin_reset_clock_cycles(clock.id(), reset.map(|event| event.id()));
     }
     // Submit all simultaneous edges before stepping: every clocked process
     // samples pre-edge values, before any nonblocking assignment is committed.
@@ -1870,7 +1882,11 @@ fn step_process_events<B: SimBackend>(
             value,
         );
     }
-    let result = state.step(sim);
+    let result = if events.is_empty() {
+        state.settle_at(sim, time)
+    } else {
+        state.step(sim)
+    };
     sim.components.end_reset_cycles();
     sim.component_simulation = Some(state);
     if rising {
@@ -2058,7 +2074,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let passed = !eval_expr(sim, expr).is_zero();
             if passed {
-                let rendered_message = render_assert_message(sim, message, ctx.current_time);
+                let rendered_message = render_assert_message(sim, message, ctx.simulation_time());
                 ctx.assertions.push(AssertionResult {
                     passed,
                     message: rendered_message.clone(),
@@ -2069,7 +2085,7 @@ fn exec_one_detailed<B: SimBackend>(
                 publish_tb_assert_event(sim, *site_id, message);
                 let rendered_message = drain_runtime_assertions(sim, ctx, location.as_ref())
                     .last_message
-                    .or_else(|| render_assert_message(sim, message, ctx.current_time));
+                    .or_else(|| render_assert_message(sim, message, ctx.simulation_time()));
                 if !continue_on_fail {
                     ExecResult::Fail(
                         rendered_message.unwrap_or_else(|| "assertion failed".to_string()),
@@ -2084,7 +2100,7 @@ fn exec_one_detailed<B: SimBackend>(
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let rendered =
-                render_assert_message(sim, message, ctx.current_time).unwrap_or_default();
+                render_assert_message(sim, message, ctx.simulation_time()).unwrap_or_default();
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
@@ -2220,7 +2236,7 @@ fn exec_one_detailed<B: SimBackend>(
                 instance,
                 method,
                 &host_args,
-                ctx.component_time(),
+                ctx.simulation_time(),
                 &mut sim.backend,
             ) {
                 Ok(value) => value,

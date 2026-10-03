@@ -1,0 +1,36 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "compile concurrent_initial::gated_drive: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "concurrent_initial::gated_drive",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": true,
+      "tag_reasons": {
+        "two_state_initialization": "Explicitly requires the suite's zero-initialized two-state storage even for emitted four-state logic; SV default initialization depends on the declared type (IEEE 1800-2023 6.8, Table 6-7)."
+      },
+      "tags": [
+        "two_state_initialization"
+      ]
+    }
+  ],
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 1,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite_version": "0.9.1",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052"
+}

@@ -49,4 +49,9 @@ all_backends! {
         @ignore_on(sv);
         @case "concurrent_initial::mixed_edges";
     }
+    fn concurrent_initial_gated_drive(sim) {
+        @omit_veryl;
+        @ignore_on(sv);
+        @case "concurrent_initial::gated_drive";
+    }
 }

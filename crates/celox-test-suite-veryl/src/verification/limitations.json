@@ -664,12 +664,15 @@
     "evidence": [
       "verification/repros/concurrent_initial_verilator.json",
       "verification/repros/concurrent_initial_icarus.json",
+      "verification/repros/concurrent_initial_gated_drive_verilator.json",
+      "verification/repros/concurrent_initial_gated_drive_icarus.json",
       "LIMITATIONS.md#veryl-native-clock-components"
     ],
     "cases": {
       "verilator": [
         "concurrent_initial::clock_periods",
         "concurrent_initial::control_flow",
+        "concurrent_initial::gated_drive",
         "concurrent_initial::hierarchy",
         "concurrent_initial::mixed_edges",
         "concurrent_initial::reset",
@@ -681,6 +684,7 @@
       "icarus": [
         "concurrent_initial::clock_periods",
         "concurrent_initial::control_flow",
+        "concurrent_initial::gated_drive",
         "concurrent_initial::hierarchy",
         "concurrent_initial::mixed_edges",
         "concurrent_initial::reset",

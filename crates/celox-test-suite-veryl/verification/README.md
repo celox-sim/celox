@@ -16,8 +16,8 @@ See [investigation notes](../VERIFICATION_REPORT.md) for limitations and unresol
 | `compile_error` | 1 | 8 |
 | `runtime_error` | 0 | 0 |
 | `unsupported` | 112 | 0 |
-| `ignored` | 90 | 193 |
-| Total | 693 | 693 |
+| `ignored` | 91 | 194 |
+| Total | 694 | 694 |
 
 377 cases pass both simulators; 596 pass at least one. A pass in one tool does not resolve a disagreement with the other.
 
@@ -71,7 +71,7 @@ See [the review](../LIMITATIONS.md) and [pre-exclusion Verilator](limitations/ve
 | [verilator_inout_dfg_crash](../LIMITATIONS.md#verilator-inout-dfg-crash) | compile | 2 | 0 |
 | [verilator_variable_wildcard](../LIMITATIONS.md#verilator-variable-wildcard) | compile | 1 | 0 |
 | [veryl_ff_effects](../LIMITATIONS.md#veryl-ff-effects) | emission | 47 | 52 |
-| [veryl_native_clock_components](../LIMITATIONS.md#veryl-native-clock-components) | emission | 9 | 9 |
+| [veryl_native_clock_components](../LIMITATIONS.md#veryl-native-clock-components) | emission | 10 | 10 |
 | [veryl_negative_for_bounds](../LIMITATIONS.md#veryl-negative-for-bounds) | emission | 2 | 2 |
 | [veryl_runtime_system_calls](../LIMITATIONS.md#veryl-runtime-system-calls) | emission | 4 | 4 |
 
