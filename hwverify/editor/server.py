@@ -18,11 +18,17 @@ KEYWORDS = 'design input reset_input spec impl state reset next outputs binding 
 
 
 def offset(text, pos):
-    lines = text.splitlines(keepends=True)
-    line = min(max(pos.get('line', 0), 0), len(lines))
-    start = sum(map(len, lines[:line]))
+    # Use LF delimiters with CRLF handling, not Unicode paragraph separators.
+    lines = text.split('\n')
+    line = max(pos.get('line', 0), 0)
+    if line >= len(lines):
+        return len(text)
+    start = sum(len(part) + 1 for part in lines[:line])
     units = max(pos.get('character', 0), 0)
-    for ch in text[start:].split('\n', 1)[0]:
+    content = lines[line]
+    if line < len(lines) - 1 and content.endswith('\r'):
+        content = content[:-1]
+    for ch in content:
         width = len(ch.encode('utf-16-le')) // 2
         if units < width:
             break
@@ -36,7 +42,11 @@ def offset(text, pos):
 def position(text, at):
     at = min(max(at, 0), len(text))
     start = text.rfind('\n', 0, at) + 1
-    return {'line': text.count('\n', 0, at), 'character': len(text[start:at].encode('utf-16-le')) // 2}
+    line = text.count('\n', 0, at)
+    end = text.find('\n', start)
+    if end >= 0 and end > start and text[end-1] == '\r':
+        at = min(at, end-1)
+    return {'line': line, 'character': len(text[start:at].encode('utf-16-le')) // 2}
 
 
 def region(text, start=0, end=None):
@@ -273,9 +283,9 @@ class Server:
             source = item.get('source', '')
             match = re.search(re.escape(uri) + r':(\d+):(\d+)', source or item.get('message', ''))
             if match:
-                lines = text.splitlines(keepends=True)
+                lines = text.split('\n')
                 line = int(match[1])-1
-                start = sum(map(len, lines[:line])) + int(match[2])-1
+                start = sum(len(part) + 1 for part in lines[:line]) + int(match[2])-1
                 end = start + 1
         message = item.get('message', 'analysis failed')
         source = item.get('source')
@@ -488,12 +498,32 @@ class Server:
                 has_status = True
         if not has_status:
             text += '\n\nProof status: not checked for this document version. Run an explicit proof command.'
-        if doc.get('proof'):
-            proof = doc['proof'].get('proof', {})
-            text += '\n\nChecked query (source aliases; display only): ' + proof.get('query', '')
+        value = doc.get('proof') or {}
+        proof = value.get('proof', {})
+        for report in proof.get('reports', []):
+            meta = report.get('lemma_candidates', {})
+            if meta.get('program') != program or symbol['kind'] not in ('target', 'lemma', 'use'):
+                continue
+            rows = meta.get('candidates', []) if symbol['kind'] == 'lemma' else meta.get('uses', [])
+            row = next((r for r in rows if r['id'] == symbol['word']), None)
+            if symbol['kind'] != 'target' and row is None:
+                continue  # This declaration was not executed, even in this target.
+            witnesses = value.get('witnesses', {})
+            if symbol['kind'] != 'target':
+                # Live query positions, not labels, identify a candidate or use.
+                query_index = row.get('query_index')
+                children = report.get('children', [])
+                name = children[query_index].get('name') if isinstance(query_index, int) and 0 <= query_index < len(children) else None
+                witnesses = {name: witnesses[name]} if name in witnesses else {}
+            origin = f"target {program}, branch {proof.get('branch')}"
+            if report.get('editor_prefix_through'):
+                origin += f", prefix through {report['editor_prefix_through']}"
+            text += '\n\nChecked target query for ' + origin + ' (source aliases; display only): ' + proof.get('query', '')
             if proof.get('query_display_truncated'):
                 text += ' [truncated]'
-            text += '\n\nWitnesses for failed auxiliary/original queries (not necessarily a target bug or reset reachable):\n' + display_json(doc['proof'].get('witnesses', {}))
+            detail = 'target request' if symbol['kind'] == 'target' else f"{symbol['kind']} {symbol['word']}"
+            text += f'\n\nWitnesses for {detail} in {origin} (auxiliary failures need not be target bugs or reset reachable):\n' + display_json(witnesses)
+            break
         return {'contents': {'kind': 'plaintext', 'value': text}, 'range': region(doc['text'], symbol['start'], symbol['end'])}
 
     def dispatch(self, message):

@@ -159,9 +159,10 @@ The required editor CI gate also uses Microsoft's official
 pinned to 2.5.2, with VS Code 1.100.3. The runner creates a disposable workspace
 from the real counter example and an isolated user profile configured for the
 real Python server and Rust worker. Tests run through VS Code's Extension Host
-and language-provider APIs: activation, unsaved Unicode edits, diagnostics and
+and language-provider APIs: activation, unsaved Unicode/CRLF edits, diagnostics and
 clearing, definition/completion/hover, CodeLens registration, the checked proof
-command/result, actual bounded Unknown, cancellation and stale-result rejection.
+command/result, actual bounded Unknown, cancellation, stale-result rejection and
+per-target witness attribution.
 They do not simulate mouse/keyboard interaction or assert rendered pixels.
 
 ```sh

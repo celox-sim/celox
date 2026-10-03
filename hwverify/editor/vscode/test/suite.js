@@ -49,7 +49,13 @@ exports.run = async function run() {
     const lenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', uri);
     assert(lenses.some(l => l.command?.command === 'hwverify.prove'));
 
-    await replace(doc, source.replace('binding impl.x == spec.x;', 'binding /* 😀 */ impl.missing == spec.x;'));
+    const unicode = source.replace('Counter with native lemma proposals', 'A\u2028B\u2029C\u0085😀').replace('binding impl.x', 'binding /* 😀\u2028 */ impl.x');
+    await replace(doc, unicode);
+    assert(await vscode.window.activeTextEditor.edit(edit => edit.setEndOfLine(vscode.EndOfLine.CRLF)));
+    const nameAt = doc.getText().indexOf('impl.x ==') + 'impl.'.length;
+    const incremental = new vscode.WorkspaceEdit();
+    incremental.replace(uri, new vscode.Range(doc.positionAt(nameAt), doc.positionAt(nameAt + 1)), 'missing');
+    assert(await vscode.workspace.applyEdit(incremental));
     const invalid = await until('name diagnostic on unsaved edit', () => diagnostics().find(d => d.message.includes('missing')));
     assert.equal(invalid.severity, vscode.DiagnosticSeverity.Error);
     assert.equal(invalid.range.start.character, doc.positionAt(doc.getText().indexOf('impl.missing')).character);
@@ -94,6 +100,15 @@ exports.run = async function run() {
     assert(fresh.proof.reports[0].lemma_candidates.target_closed);
     assert.notEqual(fresh.identity, result.identity);
     assert.equal(fresh.documentVersion, doc.version);
+    const twoTargets = source.replace("claim impl.x' == spec.x';", "claim impl.x' == spec.x' + 1u8;").replace('    }\n  }\n}\n', '    }\n    target other { rhs 0u8; lemma untouched { context true; guard pre; claim true; } use other_done: untouched(context: pre); result other_done; }\n  }\n}\n');
+    await replace(doc, twoTargets);
+    const failed = await api.checkProof(options);
+    assert(Object.keys(failed.witnesses).length > 0);
+    const untouchedAt = doc.positionAt(doc.getText().indexOf('lemma untouched') + 'lemma '.length);
+    const unrelated = hoverText(await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, untouchedAt));
+    assert(unrelated.includes('not checked'));
+    assert(!unrelated.includes('Checked target query'));
+    assert(!unrelated.includes('Witnesses for'));
     console.log('PASS: real VS Code Extension Host activation, diagnostics, providers, checked command, Unknown, cancellation and stale-result invalidation');
   } finally {
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');

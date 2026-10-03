@@ -99,6 +99,17 @@ class Positions(unittest.TestCase):
         self.assertEqual(offset(text, {'line': 0, 'character': 1}), 0)
         self.assertEqual(offset(text, {'line': 1, 'character': 0}), 3)
 
+    def test_unicode_separators_and_crlf_positions(self):
+        from editor.server import Server
+        text = 'design "A\u2028B\u2029C\x85😀" {\r\n  binding impl.x == spec.x;\r\n}'
+        at = text.index('impl.x')
+        self.assertEqual(position(text, at), {'line': 1, 'character': 10})
+        self.assertEqual(offset(text, {'line': 1, 'character': 10}), at)
+        self.assertEqual(offset(text, {'line': 0, 'character': 1000}), text.index('\r'))
+        self.assertEqual(position(text, text.index('\r')), position(text, text.index('\n')))
+        diagnostic = Server(WORKER, io.BytesIO()).diagnostic({'source': URI+':2:11', 'message': 'source fallback'}, URI, text)
+        self.assertEqual(diagnostic['range']['start'], {'line': 1, 'character': 10})
+
     def test_scoped_navigation_and_incomplete(self):
         text = SOURCE + '\n// 😀 incomplete\n'
         index = Index(text)
@@ -115,6 +126,27 @@ class Protocol(unittest.TestCase):
     def setUp(self):
         self.client = Client()
         self.addCleanup(self.client.close)
+
+    def test_incremental_edit_unicode_separators_astral_and_crlf(self):
+        c = self.client
+        for index, newline in enumerate(('\n', '\r\n')):
+            with self.subTest(newline=repr(newline)):
+                source = SOURCE.replace('Counter with native lemma proposals', 'A\u2028B\u2029C\x85😀').replace('binding impl.x', 'binding /* 😀\u2028\u2029\x85 */ impl.x').replace('\n', newline)
+                version = 1 + index*3
+                if index == 0:
+                    c.open(source)
+                else:
+                    c.edit(source, version)
+                at = source.index('impl.x ==') + len('impl.')
+                c.notify('textDocument/didChange', {'textDocument': {'uri': URI, 'version': version+1}, 'contentChanges': [{'range': {'start': position(source, at), 'end': position(source, at+1)}, 'text': 'missing'}]})
+                bad = source[:at] + 'missing' + source[at+1:]
+                result = c.prove()
+                self.assertIn('missing', result['diagnostics'][0]['message'])
+                self.assertEqual(result['diagnostics'][0]['span']['start'], len(bad[:at-len('impl.')].encode()))
+                c.notify('textDocument/didChange', {'textDocument': {'uri': URI, 'version': version+2}, 'contentChanges': [{'range': {'start': position(bad, at), 'end': position(bad, at+7)}, 'text': 'x'}]})
+                repaired = c.prove()
+                self.assertTrue(repaired['proof']['reports'][0]['lemma_candidates']['target_closed'])
+                self.assertEqual(repaired['documentVersion'], version+2)
 
     def test_edit_diagnostics_without_a_proof_request(self):
         c = self.client
@@ -187,6 +219,31 @@ class Protocol(unittest.TestCase):
         self.assertTrue(result['diagnostics'])
         c.edit(SOURCE.replace("claim impl.x'", 'claim missing'), 6)
         self.assertTrue(c.prove()['diagnostics'])
+
+    def test_hover_proof_details_belong_to_target_and_executed_step(self):
+        c = self.client
+        source = SOURCE.replace("claim impl.x' == spec.x';", "claim impl.x' == spec.x' + 1u8;")
+        source = source.replace('      lemma step {', '      lemma seed { context true; guard pre; claim true; }\n      lemma step {')
+        source = source.replace('      result done;', '      lemma later { context true; guard pre; claim true; }\n      result done;')
+        source = source.replace('    }\n  }\n}\n', "    }\n    target other { rhs 0u8; lemma untouched { context true; guard pre; claim true; } use other_done: untouched(context: pre); result other_done; }\n  }\n}\n")
+        c.open(source)
+        result = c.prove()
+        self.assertTrue(result['witnesses'])
+        def hover(name):
+            at = source.index('lemma ' + name) + len('lemma ')
+            return c.request('textDocument/hover', {'textDocument': {'uri': URI}, 'position': position(source, at)})['contents']['value']
+        failed = hover('step')
+        self.assertIn('target counter_step, branch 0', failed)
+        for witness in result['witnesses']:
+            # Only the failed candidate's query is attributed to that lemma;
+            # the original target replay may also be present in the full result.
+            self.assertNotIn(witness, hover('seed'))
+        self.assertIn('editor_query_0001', failed)
+        for unexecuted in ('later', 'untouched'):
+            text = hover(unexecuted)
+            self.assertIn('not checked', text)
+            self.assertNotIn('Checked target query', text)
+            self.assertNotIn('Witnesses for', text)
 
     def test_unknown_cycle_and_ambiguous_branch(self):
         c = self.client
