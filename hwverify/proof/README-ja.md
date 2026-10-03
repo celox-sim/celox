@@ -61,6 +61,6 @@ python3 proof/recheck.py --lean lean --rustc rustc
 
 `ProgramRules.lean` には `total_correctness` を追加した。初期不変条件・active時の保存・自然数rankの厳密減少・terminal時のpostを仮定すると、rank(initial)以下のステップでterminalかつpostへ到達する。unsigned BitVecの値は自然数へ解釈できるため、checkerが生成する義務の数学的な根拠になる。`lift_invariant` は仕様1ステップまたはstutterに対応する実装ステップへ不変条件を運ぶ。
 
-これらの定理を具体的CPUやRustの義務生成器へ形式的にinstantiateしたわけではない。Z3結果をLeanが読み込んで検査する仕組みでもない。実装の進行条件との合成・外部stall/resetの環境条件は、PROGRAM-ja.mdで説明する信頼境界として残る。
+これらの定理を具体的CPUやRustの義務生成器へ形式的にinstantiateしたわけではない。Z3結果をLeanが読み込んで検査する仕組みでもない。実装の進行条件との合成・外部stall/resetの環境条件は、[program契約](../docs/program-contracts.md)で説明する信頼境界として残る。
 
 `total_correctness`の依存は標準のpropext/Classical.choice/Quot.sound、`lift_invariant`はpropextのみ。`recheck.py`で両ファイルの検査を再実行する。
