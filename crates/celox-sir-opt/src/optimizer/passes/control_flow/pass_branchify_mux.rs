@@ -1210,6 +1210,23 @@ fn mux_live_through_chunks(
     block: &BasicBlock<RegionedAbsoluteAddr>,
     register_map: &HashMap<RegisterId, crate::ir::RegisterType>,
 ) -> Vec<u128> {
+    mux_suffix_live_through_chunks(block, register_map, false)
+}
+
+// A distributed store moves with the arms; its address and source uses do not
+// belong to the remaining suffix. Sample liveness before visiting that store.
+fn mux_store_live_through_chunks(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    register_map: &HashMap<RegisterId, crate::ir::RegisterType>,
+) -> Vec<u128> {
+    mux_suffix_live_through_chunks(block, register_map, true)
+}
+
+fn mux_suffix_live_through_chunks(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    register_map: &HashMap<RegisterId, crate::ir::RegisterType>,
+    skip_store: bool,
+) -> Vec<u128> {
     let chunks_for = |value: RegisterId| {
         register_map
             .get(&value)
@@ -1225,8 +1242,19 @@ fn mux_live_through_chunks(
     });
     let mut costs = vec![0; block.instructions.len()];
     for (index, instruction) in block.instructions.iter().enumerate().rev() {
-        if let SIRInstruction::Mux(destination, ..) = instruction {
-            costs[index] = chunks
+        let mux_index = if skip_store {
+            if matches!(instruction, SIRInstruction::Store(..)) {
+                index.checked_sub(1)
+            } else {
+                None
+            }
+        } else {
+            Some(index)
+        };
+        if let Some(mux_index) = mux_index
+            && let SIRInstruction::Mux(destination, ..) = &block.instructions[mux_index]
+        {
+            costs[mux_index] = chunks
                 - if live.contains(destination) {
                     chunks_for(*destination)
                 } else {
@@ -1316,16 +1344,6 @@ fn count_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, u
         add_block_uses(&mut counts, block);
     }
     counts
-}
-
-fn block_use_count(block: &BasicBlock<RegionedAbsoluteAddr>, reg: RegisterId) -> usize {
-    let mut count = 0;
-    let mut visit = |used| count += usize::from(used == reg);
-    for inst in &block.instructions {
-        visit_instruction_uses(inst, &mut visit);
-    }
-    visit_terminator_uses(&block.terminator, visit);
-    count
 }
 
 fn add_block_uses(

@@ -953,3 +953,70 @@ module t {{
         expect_mutable_bound_error(&code, "t");
     }
 }
+
+#[test]
+fn child_time_advancing_bound_uses_its_own_instance() {
+    let code = r#"
+        module Counter (clk: input clock, count: output logic<8>) {
+            always_ff (clk) { count += 1; }
+        }
+        #[test(Worker)] module Worker {
+            inst clk: $tb::clock_gen;
+            var count: logic<8>;
+            inst dut: Counter (clk, count);
+            initial { for _i in 0..count { clk.next(); } }
+        }
+        #[test(Top)] module Top { inst worker: Worker; }
+    "#;
+    expect_time_advancing_bound_warning(code, "Top");
+}
+
+#[test]
+fn nested_specialized_process_bounds_resolve_local_events_and_hierarchy() {
+    let code = r#"
+        module Counter (clk: input clock, rst: input reset) {
+            var count: logic<8>;
+            always_ff { if_reset { count = 0; } else { count += 1; } }
+        }
+        #[test(Worker)] module Worker #(param P: u32 = 4) {
+            inst clk: $tb::clock_gen #(period: P);
+            inst other: $tb::clock_gen #(period: P + 2);
+            inst rst: $tb::reset_gen(clk);
+            inst dut: Counter (clk, rst);
+            initial { for _i in 0..dut.count { clk.next(); } }
+        }
+        module Parent { inst worker: Worker #(P: 6); }
+        #[test(Top)] module Top {
+            inst worker: Worker;
+            inst parent: Parent;
+        }
+    "#;
+    for event in ["clk.next();", "rst.assert();", "other.next();"] {
+        let code = code.replace("clk.next();", event);
+        let sim = Simulator::builder(&code, "Top")
+            .build_interpreter()
+            .unwrap();
+        let warnings: Vec<_> = sim
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                CompilationWarning::Frontend(FrontendDiagnostic::TimeAdvancingForBound {
+                    detail: reason,
+                    ..
+                }) => Some(reason),
+                _ => None,
+            })
+            .collect();
+        if event == "other.next();" {
+            assert!(warnings.is_empty(), "unrelated clock: {warnings:?}");
+        } else {
+            assert_eq!(warnings.len(), 2, "both instances: {warnings:?}");
+            assert!(
+                warnings
+                    .iter()
+                    .all(|reason| reason.contains("may update state")),
+                "{warnings:?}"
+            );
+        }
+    }
+}

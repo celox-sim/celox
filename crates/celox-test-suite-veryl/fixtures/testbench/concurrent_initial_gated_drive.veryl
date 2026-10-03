@@ -1,0 +1,28 @@
+module Counter (clk: input clock, count: output logic<8>) {
+    always_ff (clk) { count += 1; }
+}
+#[test(Top)]
+module Top {
+    inst slow: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    inst observer: $tb::clock_gen #(period: 8);
+    var enable: logic;
+    let gated: clock = slow & enable;
+    var count: logic<8>;
+    inst dut: Counter (clk: gated, count);
+    initial { slow.next(3); }
+    initial {
+        enable = 0;
+        fast.next(1);
+        // At time 2, slow is high and no generator edge is scheduled.
+        enable = 1;
+        // A combinational read must not consume the derived clock transition.
+        $assert(gated == 1);
+        slow.next(1);
+    }
+    initial {
+        observer.next(1);
+        $assert(count == 1, "gated edge lost: %d", count);
+        $finish();
+    }
+}

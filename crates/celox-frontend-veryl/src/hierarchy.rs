@@ -230,10 +230,13 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             (module_id, ir_module, inst_ids)
         })
         .collect::<Vec<_>>();
+    // Each worker owns lowering arenas and loop-equivalence proof scratch.
+    // Bound their overlap instead of multiplying it by every host CPU.
     #[cfg(not(target_arch = "wasm32"))]
     let worker_count = tasks
         .len()
-        .min(std::thread::available_parallelism().map_or(1, usize::from));
+        .min(std::thread::available_parallelism().map_or(1, usize::from))
+        .min(4);
     // Browser WASI cannot synchronously join the scoped threads used below.
     // The whole frontend already runs in a dedicated browser worker, so keep
     // module lowering serial inside the wasm module.

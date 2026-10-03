@@ -1,0 +1,24 @@
+module CrossCoupled (
+    a: input '_ clock,
+    b: input '_ clock,
+    x: output logic<8>,
+    y: output logic<8>,
+) {
+    always_ff (a) { x = y + 8'd1; }
+    always_ff (b) { y = x + 8'd1; }
+}
+#[test(Top)]
+module Top {
+    inst a: $tb::clock_gen;
+    inst b: $tb::clock_gen;
+    var x: logic<8>;
+    var y: logic<8>;
+    inst dut: CrossCoupled (a, b, x, y);
+    initial {
+        a.next(2);
+        $assert(x == 8'd2);
+        $assert(y == 8'd2);
+        $finish();
+    }
+    initial { b.next(2); }
+}

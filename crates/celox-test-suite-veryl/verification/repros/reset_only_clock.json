@@ -1,0 +1,26 @@
+{
+  "case": "concurrent_initial::reset_only_clock",
+  "veryl_version": "0.22.0",
+  "veryl_revision": "967e477a4457ce59eec808b7be2ec0dbe7ff938e",
+  "observation": "At time 8 a period-10 reset-only wait must not have completed; period-6 and period-12 child instances must have completed and remained waiting respectively.",
+  "celox_before_fix": "All four backends fail: reset-only clock must still wait at time 8",
+  "celox_after_fix": "All four backends pass; native image roundtrip passes.",
+  "veryl_runs": [
+    {
+      "aot_c_async": false,
+      "exit_code": 1,
+      "diagnostics": [
+        "error: reset-only clock must still wait at time 8"
+      ]
+    },
+    {
+      "aot_c_async": true,
+      "exit_code": 1,
+      "diagnostics": [
+        "error: reset-only clock must still wait at time 8"
+      ]
+    }
+  ],
+  "external_adapters": "Both full-source SV adapters stop in native clock-component emission, before executing a simulator. See concurrent_initial_verilator.json and concurrent_initial_icarus.json.",
+  "reproduction": "Copy fixtures/testbench/concurrent_initial_reset_only_clock.veryl into a temporary Veryl project; cargo run -p celox-bench --bin veryl-heliodor -- --project /tmp/project --test Top [--aot-c-async]"
+}

@@ -1,0 +1,28 @@
+#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    var observed: logic<8>;
+    #[allow(multiple_assign)]
+    var bound: u32;
+    initial {
+        bound = 4;
+        clk.next(5);
+        $assert(observed == 8'd3);
+        $finish();
+    }
+    initial {
+        observed = 0;
+        for i in 0..bound {
+            if i == 3 { break; }
+            if i != 3 {
+                clk.next(1);
+                observed += 1;
+            }
+        }
+    }
+    initial {
+        clk.next(0);
+        clk.next(1);
+        bound = 0;
+    }
+}

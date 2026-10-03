@@ -1,6 +1,6 @@
 use crate::HashSet;
 
-use veryl_parser::resource_table::{self, StrId};
+use veryl_parser::resource_table::StrId;
 
 pub(crate) use celox_frontend_veryl::BuildConfig;
 pub(crate) mod loop_provenance;
@@ -461,44 +461,6 @@ pub(crate) fn optimize_scheduled_program(
     Ok(program)
 }
 
-fn dynamic_for_diagnostics(
-    scheduled: &celox_frontend_veryl::VerylScheduledRtlOutput,
-    ir: &veryl_analyzer::ir::Ir,
-) -> Vec<celox_frontend_veryl::FrontendDiagnostic> {
-    scheduled
-        .scheduled
-        .frontend_lookup
-        .root_instance_and_module()
-        .and_then(|(_, module)| {
-            scheduled
-                .scheduled
-                .frontend_lookup
-                .module_names
-                .get(&module)
-                .cloned()
-        })
-        .and_then(|root_module_name| {
-            ir.components.iter().find_map(|component| match component {
-                veryl_analyzer::ir::Component::Module(module)
-                    if resource_table::get_str_value(module.name).as_deref()
-                        == Some(root_module_name.as_str()) =>
-                {
-                    Some(module)
-                }
-                _ => None,
-            })
-        })
-        .map(|module| {
-            celox_frontend_veryl::check_elaborated_dynamic_for_bounds(
-                &scheduled.scheduled,
-                &scheduled.testbench_source,
-                module,
-                &scheduled.fused_optimization_hints,
-            )
-        })
-        .unwrap_or_default()
-}
-
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
@@ -575,11 +537,11 @@ pub fn parse(
         trace.absorb_frontend(frontend_trace);
     }
     let scheduled = scheduled?;
-    let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
     let celox_frontend_veryl::VerylScheduledRtlOutput {
         scheduled,
         fused_optimization_hints,
         testbench_source,
+        dynamic_for_diagnostics,
     } = scheduled;
     let program = finalize_scheduled_rtl(
         celox_frontend_core::ScheduledRtlOutput {
@@ -701,7 +663,7 @@ pub fn parse_mixed(
     let external_roots = reachable_external_sv_roots(ir, top);
     let external_roots = external_roots
         .into_iter()
-        .map(|name| resource_table::get_str_value(name).unwrap_or_default())
+        .map(|name| veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
         .collect();
     let external =
         celox_frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
@@ -793,11 +755,11 @@ pub fn parse_with_external_hierarchy(
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
-    let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
     let celox_frontend_veryl::VerylScheduledRtlOutput {
         scheduled,
         fused_optimization_hints,
         testbench_source,
+        dynamic_for_diagnostics,
     } = scheduled;
     let program = finalize_scheduled_rtl(
         celox_frontend_core::ScheduledRtlOutput {

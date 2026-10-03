@@ -33,21 +33,28 @@ impl ExecutionUnitPass for GvnPass {
                 .map(|cfg| structural_load_versions(eu, &cfg, &candidates))
                 .unwrap_or_default()
         };
+        drop(candidates);
         let cfg = GvnCfg::new(eu);
-        let register_types = eu.register_map.clone();
         let mut state = GvnState::default();
+        let mut removed_defs = Vec::new();
 
         for &root in &cfg.roots {
             gvn_dom_dfs(
                 root,
                 true,
-                eu,
+                &mut eu.blocks,
                 &cfg,
-                &register_types,
+                &eu.register_map,
                 &load_versions,
                 options.four_state,
                 &mut state,
+                &mut removed_defs,
             );
+        }
+        // Keep types available throughout the traversal without cloning the
+        // entire register table. Deletions are only observable after the pass.
+        for register in removed_defs {
+            eu.register_map.remove(&register);
         }
     }
 }
@@ -492,9 +499,17 @@ impl GvnState {
     }
 
     fn set_canonical(&mut self, register: RegisterId, canonical: RegisterId) {
-        self.canonical_changes
-            .push((register, self.canonical.get(&register).copied()));
-        self.canonical.insert(register, canonical);
+        let old = self.canonical.get(&register).copied();
+        let next = (register != canonical).then_some(canonical);
+        if old == next {
+            return;
+        }
+        self.canonical_changes.push((register, old));
+        if let Some(next) = next {
+            self.canonical.insert(register, next);
+        } else {
+            self.canonical.remove(&register);
+        }
     }
 
     fn set_constant(&mut self, register: RegisterId, value: u64) {
@@ -647,12 +662,13 @@ fn pure_expression_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<Pu
 fn gvn_dom_dfs(
     root: usize,
     reset_root_loads: bool,
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    blocks: &mut HashMap<BlockId, BasicBlock<RegionedAbsoluteAddr>>,
     cfg: &GvnCfg,
     register_types: &HashMap<RegisterId, RegisterType>,
     load_versions: &HashMap<RegisterId, StructuralLoadVersion>,
     four_state: bool,
     state: &mut GvnState,
+    removed_defs: &mut Vec<RegisterId>,
 ) {
     enum Work {
         Enter { node: usize, reset_loads: bool },
@@ -673,12 +689,13 @@ fn gvn_dom_dfs(
                 }
                 process_gvn_block(
                     node,
-                    eu,
+                    blocks,
                     cfg,
                     register_types,
                     load_versions,
                     four_state,
                     state,
+                    removed_defs,
                 );
 
                 work.push(Work::Exit(checkpoint));
@@ -701,16 +718,16 @@ fn gvn_dom_dfs(
 
 fn process_gvn_block(
     node: usize,
-    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    blocks: &mut HashMap<BlockId, BasicBlock<RegionedAbsoluteAddr>>,
     cfg: &GvnCfg,
     register_types: &HashMap<RegisterId, RegisterType>,
     load_versions: &HashMap<RegisterId, StructuralLoadVersion>,
     four_state: bool,
     state: &mut GvnState,
+    removed_defs: &mut Vec<RegisterId>,
 ) {
     let block_id = cfg.block_ids[node];
-    let mut removed_defs = Vec::new();
-    if let Some(block) = eu.blocks.get_mut(&block_id) {
+    if let Some(block) = blocks.get_mut(&block_id) {
         // A block parameter is a phi-like SSA definition and therefore an
         // independent leaf value number. It is deliberately not equated with
         // any incoming edge argument, including a loop backedge argument.
@@ -840,9 +857,6 @@ fn process_gvn_block(
             });
         }
     }
-    for register in removed_defs {
-        eu.register_map.remove(&register);
-    }
 }
 
 fn apply_aliases_to_terminator(
@@ -943,6 +957,33 @@ fn apply_aliases(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_identity_is_implicit_and_rollback_restores_aliases() {
+        use super::{GvnState, resolve_canonical};
+        use crate::ir::RegisterId;
+        let mut state = GvnState::default();
+        for id in 0..1024 {
+            state.set_canonical(RegisterId(id), RegisterId(id));
+        }
+        assert!(state.canonical.is_empty());
+        assert!(state.canonical_changes.is_empty());
+        let first = state.checkpoint();
+        state.set_canonical(RegisterId(5), RegisterId(2));
+        let alias = state.checkpoint();
+        state.set_canonical(RegisterId(5), RegisterId(5));
+        assert_eq!(
+            resolve_canonical(RegisterId(5), &state.canonical),
+            RegisterId(5)
+        );
+        state.rollback(alias);
+        assert_eq!(
+            resolve_canonical(RegisterId(5), &state.canonical),
+            RegisterId(2)
+        );
+        state.rollback(first);
+        assert!(state.canonical.is_empty());
+        assert!(state.canonical_changes.is_empty());
+    }
     use super::*;
     use crate::ir::InstanceId;
     use celox_design::StateObjectId as VarId;

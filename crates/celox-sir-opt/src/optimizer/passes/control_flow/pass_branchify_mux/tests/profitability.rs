@@ -146,3 +146,107 @@ fn runtime_work_cost_scales_with_width_and_operation() {
     assert_eq!(branchified_instruction_cost(&mul, &register_map), 20);
     assert_eq!(branchified_instruction_cost(&div, &register_map), 48);
 }
+
+#[test]
+fn local_profitability_cache_and_bound_preserve_decisions() {
+    use super::super::profitability::branch_profitability;
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for width in [32, 64, 129] {
+        for live_count in [0, 2, 8] {
+            for op in [
+                crate::ir::BinaryOp::Add,
+                crate::ir::BinaryOp::Mul,
+                crate::ir::BinaryOp::DivU,
+            ] {
+                for preserve_result in [false, true] {
+                    for restore_head in [false, true] {
+                        let mut instructions = vec![imm(0, 1), imm(1, 3), imm(2, 5)];
+                        for index in 0..live_count {
+                            instructions.push(imm(6 + index, 11));
+                        }
+                        let left = instructions.len();
+                        instructions.push(SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(1),
+                            op,
+                            RegisterId(2),
+                        ));
+                        let right = instructions.len();
+                        instructions.push(SIRInstruction::Binary(
+                            RegisterId(4),
+                            RegisterId(2),
+                            op,
+                            RegisterId(1),
+                        ));
+                        if restore_head {
+                            instructions.push(store(99, 3));
+                        }
+                        let mux_idx = instructions.len();
+                        instructions.push(SIRInstruction::Mux(
+                            RegisterId(5),
+                            RegisterId(0),
+                            RegisterId(3),
+                            RegisterId(4),
+                        ));
+                        instructions.push(store(0, 5));
+                        for index in 0..live_count {
+                            instructions.push(store(index + 1, 6 + index));
+                        }
+                        let mut eu = unit(instructions);
+                        for ty in eu.register_map.values_mut() {
+                            *ty = RegisterType::Bit {
+                                width,
+                                signed: false,
+                            };
+                        }
+                        let block = &eu.blocks[&BlockId(0)];
+                        let def_pos = block
+                            .instructions
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, inst)| def_reg(inst).map(|reg| (reg, i)))
+                            .collect();
+                        let def_blocks = instruction_def_blocks(&eu);
+                        let plan = BranchifyPlan {
+                            block_id: BlockId(0),
+                            mux_idx,
+                            dst: RegisterId(5),
+                            cond: RegisterId(0),
+                            true_val: RegisterId(3),
+                            false_val: RegisterId(4),
+                            true_defs: vec![left],
+                            false_defs: vec![right],
+                            preserve_result,
+                            distributed_store: (!preserve_result).then(|| DistributedStore {
+                                idx: mux_idx + 1,
+                                true_inst: store(0, 3),
+                                false_inst: store(0, 4),
+                            }),
+                        };
+                        let reference =
+                            branch_profitability(&eu, block, &plan, &def_blocks, &def_pos, None);
+                        let cached = Some(if preserve_result {
+                            mux_live_through_chunks(block, &eu.register_map)[mux_idx]
+                        } else {
+                            mux_store_live_through_chunks(block, &eu.register_map)[mux_idx]
+                        });
+                        let actual =
+                            branch_profitability(&eu, block, &plan, &def_blocks, &def_pos, cached);
+                        assert_eq!(actual.live_through_cost, reference.live_through_cost);
+                        assert_eq!(
+                            branch_is_profitable(&eu, block, &plan, &def_blocks, &def_pos, cached),
+                            reference.proves_expected_benefit()
+                        );
+                        if reference.proves_expected_benefit() {
+                            accepted += 1;
+                        } else {
+                            rejected += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted > 0 && rejected > 0);
+}

@@ -230,7 +230,8 @@ pub(crate) fn hierarchical_destination_reference(
     }
 }
 
-pub(crate) fn resolve_hierarchical_reference<'a>(
+#[cfg(test)]
+fn resolve_hierarchical_reference<'a>(
     lookup: &'a FrontendLookup,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
@@ -599,9 +600,21 @@ pub fn collect_testbench_observability(
     lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
 ) -> Result<(Vec<RuntimeEventSite>, FxHashSet<StateAddr>), ParserError> {
-    let Some(stmts) = source.initial_statements.as_ref() else {
-        return Ok(Default::default());
-    };
+    let mut sites = Vec::new();
+    let mut reads = FxHashSet::default();
+    for source in source.sources() {
+        let (local_sites, local_reads) = collect_instance_testbench_observability(lookup, source)?;
+        sites.extend(local_sites);
+        reads.extend(local_reads);
+    }
+    Ok((sites, reads))
+}
+
+fn collect_instance_testbench_observability(
+    lookup: &FrontendLookup,
+    source: &VerylTestbenchSource,
+) -> Result<(Vec<RuntimeEventSite>, FxHashSet<StateAddr>), ParserError> {
+    let stmts = source.initial_statements.as_deref().unwrap_or(&[]);
     let mut sites = Vec::new();
     collect_runtime_event_sites(stmts, &source.functions, &mut sites);
     let mut read_references = Vec::new();
@@ -616,15 +629,19 @@ pub fn collect_testbench_observability(
     for reference in read_references {
         match reference {
             TestbenchRead::Root(var_id) => {
-                let (root_instance, _) = lookup.root_instance_and_module().unwrap();
+                let root_instance = source.base_instance(lookup);
                 if let Some(source_id) = source.id_map.instance_var(lookup, root_instance, var_id)
-                    && let Some((address, _)) = lookup.root_variable(source_id)
+                    && let Some((address, _)) = lookup.instance_variable(root_instance, source_id)
                 {
                     reads.insert(address);
                 }
             }
             TestbenchRead::Hierarchical(reference) => {
-                let (address, _) = resolve_hierarchical_reference(lookup, &reference)?;
+                let (address, _) = resolve_hierarchical_reference_from(
+                    lookup,
+                    source.base_instance(lookup),
+                    &reference,
+                )?;
                 reads.insert(address);
             }
         }
@@ -2341,6 +2358,7 @@ struct SemanticTestbenchBuilder<'a> {
     event_map: HashMap<StrId, StateAddr>,
     signal_map: HashMap<StrId, SemanticSignal<StateAddr>>,
     default_reset_duration: u64,
+    clock_periods: HashMap<StrId, u64>,
     prepared_readmem: super::readmem::PreparedReadmem,
 }
 
@@ -2357,7 +2375,38 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             event_map: Default::default(),
             signal_map: Default::default(),
             default_reset_duration: 3,
+            clock_periods: Default::default(),
             prepared_readmem: Default::default(),
+        }
+    }
+
+    fn named_variable(&self, name: StrId) -> Option<(StateAddr, &VariableInfo)> {
+        let instance = self.testbench_source.base_instance(self.lookup);
+        let module = self.lookup.instance_module.get(&instance)?;
+        let var = self
+            .lookup
+            .module_var_path_index
+            .get(module)?
+            .get(&vec![source_name(name)])?
+            .as_ref()?;
+        self.lookup.instance_variable(instance, *var)
+    }
+
+    fn resource_name(&self, name: StrId) -> String {
+        let local = resource_table::get_str_value(name).unwrap_or_default();
+        let instance = self.testbench_source.base_instance(self.lookup);
+        let prefix = self
+            .lookup
+            .instance_ids
+            .iter()
+            .find_map(|(path, &id)| {
+                (id == instance).then(|| self.lookup.instance_path_segments(path).join("."))
+            })
+            .unwrap_or_default();
+        if prefix.is_empty() {
+            local
+        } else {
+            format!("{prefix}.{local}")
         }
     }
 
@@ -2365,20 +2414,24 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let mut clock_insts: Vec<StrId> = Vec::new();
         let mut reset_insts: Vec<StrId> = Vec::new();
         let mut active_functions = FxHashSet::default();
+        let mut periods = self.testbench_source.clock_periods.clone();
         self.scan_tb_methods(
             stmts,
             &mut clock_insts,
             &mut reset_insts,
             &mut active_functions,
+            &mut periods,
         );
+        self.clock_periods = periods;
         for inst in clock_insts.iter().chain(reset_insts.iter()) {
-            if let Some((addr, info)) = self.lookup.root_named_variable(&source_name(*inst)) {
+            if let Some((addr, info)) = self.named_variable(*inst) {
+                let width = info.width;
                 self.event_map.insert(*inst, addr);
                 self.signal_map.insert(
                     *inst,
                     SemanticSignal {
                         address: addr,
-                        width: info.width,
+                        width,
                     },
                 );
             }
@@ -2391,11 +2444,19 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         clks: &mut Vec<StrId>,
         rsts: &mut Vec<StrId>,
         active_functions: &mut FxHashSet<VarId>,
+        periods: &mut HashMap<StrId, u64>,
     ) {
         for stmt in stmts {
             match stmt {
                 Statement::TbMethodCall(tb) => match &tb.method {
-                    TbMethod::ClockNext { .. } => {
+                    TbMethod::ClockNext { period, .. } => {
+                        periods.entry(tb.inst).or_insert_with(|| {
+                            period
+                                .as_deref()
+                                .and_then(try_eval_const)
+                                .unwrap_or(2)
+                                .max(2)
+                        });
                         if !clks.contains(&tb.inst) {
                             clks.push(tb.inst);
                         }
@@ -2419,15 +2480,31 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     | TbMethod::RandomGetSeed => {}
                 },
                 Statement::If(s) => {
-                    self.scan_tb_methods(&s.true_side, clks, rsts, active_functions);
-                    self.scan_tb_methods(&s.false_side, clks, rsts, active_functions);
+                    self.scan_tb_methods(&s.true_side, clks, rsts, active_functions, periods);
+                    self.scan_tb_methods(&s.false_side, clks, rsts, active_functions, periods);
+                }
+                Statement::IfReset(s) => {
+                    self.scan_tb_methods(&s.true_side, clks, rsts, active_functions, periods);
+                    self.scan_tb_methods(&s.false_side, clks, rsts, active_functions, periods);
+                }
+                Statement::Case(s) => {
+                    for arm in &s.arms {
+                        self.scan_tb_methods(&arm.body, clks, rsts, active_functions, periods);
+                    }
+                    self.scan_tb_methods(&s.default, clks, rsts, active_functions, periods);
                 }
                 Statement::For(s) => {
-                    self.scan_tb_methods(&s.body, clks, rsts, active_functions);
+                    self.scan_tb_methods(&s.body, clks, rsts, active_functions, periods);
                 }
                 Statement::FunctionCall(call) if active_functions.insert(call.id) => {
                     if let Some(body) = function_body(&self.testbench_source.functions, call) {
-                        self.scan_tb_methods(&body.statements, clks, rsts, active_functions);
+                        self.scan_tb_methods(
+                            &body.statements,
+                            clks,
+                            rsts,
+                            active_functions,
+                            periods,
+                        );
                     }
                     active_functions.remove(&call.id);
                 }
@@ -2436,8 +2513,8 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         }
     }
 
-    fn convert(&mut self, stmts: &[Statement]) -> Vec<SemanticStatement<StateAddr>> {
-        let base_instance = self.lookup.root_instance_and_module().unwrap().0;
+    fn convert(&mut self, stmts: &[Statement]) -> Vec<Vec<SemanticStatement<StateAddr>>> {
+        let base_instance = self.testbench_source.base_instance(self.lookup);
         let ec = ExprCompiler {
             lookup: self.lookup,
             id_map: &self.testbench_source.id_map,
@@ -2448,9 +2525,15 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let mut next_assert_site_id = self
             .runtime_event_site_count
             .saturating_sub(site_count as usize) as u32;
-        stmts
-            .iter()
-            .filter_map(|s| self.convert_stmt(s, &ec, &mut next_assert_site_id))
+        self.testbench_source
+            .initial_blocks()
+            .into_iter()
+            .map(|block| {
+                block
+                    .iter()
+                    .filter_map(|s| self.convert_stmt(s, &ec, &mut next_assert_site_id))
+                    .collect()
+            })
             .collect()
     }
 
@@ -2768,7 +2851,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         ec: &ExprCompiler<'_>,
     ) -> Option<SemanticStatement<StateAddr>> {
         match &tb.method {
-            TbMethod::ClockNext { count, .. } => {
+            TbMethod::ClockNext { count, period } => {
                 let ev = self.event_map.get(&tb.inst).copied()?;
                 let clock_count = match count {
                     Some(expr) => {
@@ -2783,6 +2866,11 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 Some(GenericTestbenchStatement::ClockNext {
                     clock_event: ev,
                     count: clock_count,
+                    period: period
+                        .as_deref()
+                        .and_then(try_eval_const)
+                        .unwrap_or(2)
+                        .max(2),
                 })
             }
             TbMethod::ResetAssert { clock, duration } => {
@@ -2803,12 +2891,13 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     reset_event,
                     clock_event,
                     duration,
+                    period: self.clock_periods.get(clock).copied().unwrap_or(2),
                     assert_value,
                     deassert_value,
                 })
             }
             TbMethod::RandomSeed { value } => Some(GenericTestbenchStatement::RandomSeed {
-                handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                handle: self.resource_name(tb.inst),
                 value: ec.compile(value),
             }),
             TbMethod::RandomGet { width, signed } => {
@@ -2817,7 +2906,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     None => None,
                 };
                 Some(GenericTestbenchStatement::RandomGet {
-                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    handle: self.resource_name(tb.inst),
                     width: *width,
                     signed: *signed,
                     ret,
@@ -2834,7 +2923,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     None => None,
                 };
                 Some(GenericTestbenchStatement::RandomGetRange {
-                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    handle: self.resource_name(tb.inst),
                     min: ec.compile(min),
                     max: ec.compile(max),
                     width: *width,
@@ -2848,7 +2937,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     None => None,
                 };
                 Some(GenericTestbenchStatement::RandomGetSeed {
-                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    handle: self.resource_name(tb.inst),
                     ret,
                 })
             }
@@ -2858,7 +2947,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     None => None,
                 };
                 Some(GenericTestbenchStatement::ComponentMethod {
-                    instance: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    instance: self.resource_name(tb.inst),
                     method: resource_table::get_str_value(*method).unwrap_or_default(),
                     args: args
                         .iter()
@@ -2881,7 +2970,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     /// PortTypeKind covers all four reset types (async/sync × high/low),
     /// unlike DomainKind which maps sync resets to Other.
     fn resolve_reset_polarity(&self, inst: &StrId) -> (u8, u8) {
-        if let Some((_, info)) = self.lookup.root_named_variable(&source_name(*inst)) {
+        if let Some((_, info)) = self.named_variable(*inst) {
             return match info.type_kind {
                 PortTypeKind::ResetAsyncHigh | PortTypeKind::ResetSyncHigh => (1, 0),
                 PortTypeKind::ResetAsyncLow | PortTypeKind::ResetSyncLow => (0, 1),
@@ -2892,12 +2981,12 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     }
 
     fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SemanticSignal<StateAddr>, usize)> {
-        let root_instance = self.lookup.root_instance_and_module()?.0;
+        let root_instance = self.testbench_source.base_instance(self.lookup);
         let source_id =
             self.testbench_source
                 .id_map
                 .instance_var(self.lookup, root_instance, *var_id)?;
-        let (addr, info) = self.lookup.root_variable(source_id)?;
+        let (addr, info) = self.lookup.instance_variable(root_instance, source_id)?;
         Some((
             SemanticSignal {
                 address: addr,
@@ -3420,13 +3509,14 @@ fn validate_testbench_hierarchical_destination(
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     let reference = hierarchical_destination_reference(destination);
-    let (_, info) = resolve_hierarchical_reference(lookup, &reference)?;
+    let (_, info) =
+        resolve_hierarchical_reference_from(lookup, source.base_instance(lookup), &reference)?;
     ExprCompiler::validate_target_bounds_parts(info, &destination.index, &destination.select)?;
     let compiler = ExprCompiler {
         lookup,
         id_map: &source.id_map,
         functions: &source.functions,
-        base_instance: lookup.root_instance_and_module().unwrap().0,
+        base_instance: source.base_instance(lookup),
     };
     if compiler.resolve_hierarchical_target(destination).is_none() {
         return Err(ParserError::illegal_context(
@@ -3457,7 +3547,7 @@ fn validate_testbench_destination(
         lookup,
         id_map: &source.id_map,
         functions: &source.functions,
-        base_instance: lookup.root_instance_and_module().unwrap().0,
+        base_instance: source.base_instance(lookup),
     }
     .validate_target_bounds(destination)?;
     Ok(())
@@ -3469,21 +3559,53 @@ pub fn compile_semantic_testbench(
     runtime_event_site_count: usize,
     random_seed: Option<u64>,
 ) -> Result<Option<TestbenchProgram<StateAddr>>, ParserError> {
-    let Some(initial_stmts) = source.initial_statements.as_ref() else {
+    let sources: Vec<_> = source
+        .sources()
+        .filter(|source| source.initial_statements.is_some())
+        .collect();
+    if sources.is_empty() {
         return Ok(None);
-    };
-    // Resolve every hierarchical read before the infallible bytecode emitter
-    // runs. The same walk also guarantees direct callers get path diagnostics,
-    // even when observability projection is not invoked separately.
-    let _ = collect_testbench_observability(lookup, source)?;
-    validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
-    let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
-    builder.prepared_readmem = super::readmem::prepare_testbench_memories(lookup, source)?;
-    builder.build_event_map(initial_stmts);
+    }
+    let (_, reads) = collect_testbench_observability(lookup, source)?;
+    let mut private_variables = Vec::new();
+    for source in &sources {
+        let instance = source.base_instance(lookup);
+        for &id in &source.function_locals {
+            if let Some(id) = source.id_map.instance_var(lookup, instance, id)
+                && let Some((address, _)) = lookup.instance_variable(instance, id)
+                && reads.contains(&address)
+            {
+                private_variables.push(address);
+            }
+        }
+    }
+    private_variables.sort_unstable();
+    private_variables.dedup();
+    let total_sites: usize = sources
+        .iter()
+        .map(|source| {
+            count_assert_statements(
+                source.initial_statements.as_ref().unwrap(),
+                &source.functions,
+            )
+        })
+        .sum();
+    let mut site_end = runtime_event_site_count.saturating_sub(total_sites);
+    let mut processes = Vec::new();
+    for source in sources {
+        let initial_stmts = source.initial_statements.as_ref().unwrap();
+        validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
+        site_end += count_assert_statements(initial_stmts, &source.functions);
+        let mut builder = SemanticTestbenchBuilder::new(lookup, source, site_end);
+        builder.prepared_readmem = super::readmem::prepare_testbench_memories(lookup, source)?;
+        builder.build_event_map(initial_stmts);
+        processes.extend(builder.convert(initial_stmts));
+    }
+    let builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     let component_bindings = builder.convert_component_bindings()?;
-    let statements = builder.convert(initial_stmts);
     Ok(Some(
-        TestbenchProgram::new(statements)
+        TestbenchProgram::from_processes(processes)
+            .with_private_variables(private_variables)
             .with_random_seed_option(random_seed)
             .with_components(source.components.clone())
             .with_component_runtime(

@@ -1019,3 +1019,205 @@ fn wide_repeated_msb_chunk_uses_constant_work_in_both_planes() {
         }
     }
 }
+
+fn runtime_wide_shift_fixture(
+    width: usize,
+    arithmetic: bool,
+) -> (ExecutionUnit<RegionedAbsoluteAddr>, MemoryLayout) {
+    let operations = if arithmetic {
+        vec![BinaryOp::Shl, BinaryOp::Shr, BinaryOp::Sar]
+    } else {
+        vec![BinaryOp::Shl, BinaryOp::Shr]
+    };
+    let bytes = width.div_ceil(64) * 8;
+    let mut layout = empty_layout();
+    let mut addresses = Vec::new();
+    for index in 0..operations.len() + 2 {
+        let address = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(index as _),
+        };
+        let offset = match index {
+            0 => 0,
+            1 => bytes,
+            _ => bytes + 8 + (index - 2) * bytes,
+        };
+        layout.offsets.insert(address, offset);
+        layout
+            .widths
+            .insert(address, if index == 1 { 64 } else { width });
+        layout.is_4states.insert(address, false);
+        addresses.push(RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            address,
+        ));
+    }
+    let total = bytes * (operations.len() + 1) + 8;
+    layout.total_size = total;
+    layout.working_base_offset = total;
+    layout.sparse_base_offset = total;
+    layout.merged_total_size = total;
+    layout.triggered_bits_offset = total;
+    layout.scratch_base_offset = total;
+    let mut instructions = vec![
+        SIRInstruction::Load(RegisterId(0), addresses[0], SIROffset::Static(0), width),
+        SIRInstruction::Load(RegisterId(1), addresses[1], SIROffset::Static(0), 64),
+    ];
+    for (index, operation) in operations.iter().enumerate() {
+        let result = RegisterId(index + 2);
+        instructions.push(SIRInstruction::Binary(
+            result,
+            RegisterId(0),
+            *operation,
+            RegisterId(1),
+        ));
+        instructions.push(SIRInstruction::Store(
+            addresses[index + 2],
+            SIROffset::Static(0),
+            width,
+            result,
+            vec![],
+            vec![],
+        ));
+    }
+    let eu = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions,
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        register_map: (0..operations.len() + 2)
+            .map(|index| {
+                (
+                    RegisterId(index),
+                    RegisterType::Bit {
+                        width: if index == 1 { 64 } else { width },
+                        signed: index != 1 && arithmetic,
+                    },
+                )
+            })
+            .collect(),
+    };
+    eu.verify();
+    (eu, layout)
+}
+
+#[test]
+fn runtime_wide_shift_network_preserves_boundaries_and_sign_fill() {
+    for width in [65usize, 128, 192, 257, 512] {
+        // Non-word-aligned logical shifts also exercise the final partial word.
+        let arithmetic = width.is_multiple_of(64);
+        let (eu, layout) = runtime_wide_shift_fixture(width, arithmetic);
+        let mut function = lower_execution_unit(&eu, &layout, false);
+        function.verify();
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function, &allocation.assignment);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let bytes = width.div_ceil(64) * 8;
+        let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let patterned = BigUint::from_bytes_le(
+            &(0..bytes)
+                .map(|i| (i.wrapping_mul(73) + 19) as u8)
+                .collect::<Vec<_>>(),
+        ) & &mask;
+        let patterns = [
+            BigUint::from(0u8),
+            mask.clone(),
+            BigUint::from(1u8) << (width - 1),
+            patterned,
+        ];
+        for input in patterns {
+            for shift in [
+                0u64,
+                1,
+                31,
+                63,
+                64,
+                65,
+                127,
+                width as u64 - 1,
+                width as u64,
+                width as u64 + 1,
+                1023,
+                u64::MAX,
+            ] {
+                let mut state = vec![0u8; layout.total_size];
+                let encoded = input.to_bytes_le();
+                state[..encoded.len()].copy_from_slice(&encoded);
+                state[bytes..bytes + 8].copy_from_slice(&shift.to_le_bytes());
+                assert_eq!(unsafe { jit.call(&mut state) }, 0);
+                let left = if shift < width as u64 {
+                    (&input << shift as usize) & &mask
+                } else {
+                    BigUint::from(0u8)
+                };
+                let right = if shift < width as u64 {
+                    &input >> shift as usize
+                } else {
+                    BigUint::from(0u8)
+                };
+                let signed = if !input.bit(width as u64 - 1) {
+                    right.clone()
+                } else if shift >= width as u64 {
+                    mask.clone()
+                } else {
+                    &right
+                        | (&mask
+                            ^ ((BigUint::from(1u8) << (width - shift as usize))
+                                - BigUint::from(1u8)))
+                };
+                for (index, expected) in [left, right, signed]
+                    .into_iter()
+                    .take(if arithmetic { 3 } else { 2 })
+                    .enumerate()
+                {
+                    let offset = bytes + 8 + index * bytes;
+                    let actual = BigUint::from_bytes_le(&state[offset..offset + bytes]) & &mask;
+                    assert_eq!(
+                        actual, expected,
+                        "width={width} shift={shift} operation={index} input={input}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn runtime_wide_shift_instruction_growth_is_not_quadratic() {
+    let mut counts = Vec::new();
+    for width in [512usize, 1024, 2048, 4096] {
+        let (eu, layout) = runtime_wide_shift_fixture(width, true);
+        let function = lower_execution_unit(&eu, &layout, false);
+        function.verify();
+        counts.push(
+            function
+                .blocks
+                .iter()
+                .map(|block| block.insts.len())
+                .sum::<usize>(),
+        );
+    }
+    for pair in counts.windows(2) {
+        assert!(
+            pair[1] < 3 * pair[0],
+            "doubling widths must not quadruple generated work: {counts:?}"
+        );
+    }
+}
