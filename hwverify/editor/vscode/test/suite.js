@@ -22,6 +22,28 @@ function hoverText(items) {
   return items.flatMap(h => h.contents).map(c => typeof c === 'string' ? c : c.value).join('\n');
 }
 
+function onNextProofStarted(api, uri, version, interrupt) {
+  let subscription;
+  let timer;
+  const promise = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {subscription.dispose(); reject(new Error('No real proof-worker start notification'));}, 15000);
+    subscription = api.onProofStarted(event => {
+      if (event.uri !== uri.toString() || event.documentVersion !== version) return;
+      clearTimeout(timer);
+      subscription.dispose();
+      try {
+        assert.equal(event.phase, 'worker_started');
+        assert.equal(event.program, 'counter_step');
+        assert.match(event.requestIdentity, /^[0-9a-f]{64}$/);
+        // Interrupt directly in the actual client notification callback, with
+        // no elapsed-time assumption about server or solver startup.
+        Promise.resolve(interrupt()).then(() => resolve(event), reject);
+      } catch (error) {reject(error);}
+    });
+  });
+  return promise;
+}
+
 exports.run = async function run() {
   const uri = vscode.Uri.file(path.join(process.env.HWVERIFY_EXTENSION_TEST_WORKSPACE, 'counter.hwv'));
   const doc = await vscode.workspace.openTextDocument(uri);
@@ -68,9 +90,13 @@ exports.run = async function run() {
     assert(result?.diagnosticOnly);
     assert(result.proof.reports[0].lemma_candidates.target_closed);
     assert.equal(result.documentVersion, doc.version);
-    await until('proof diagnostic reaches VS Code', () => diagnostics().some(d => d.message.includes('proved')));
+    const expectedStatus = 'Lemma step: proved; target closed.';
+    await until('exact proof diagnostic reaches VS Code', () => diagnostics().some(d => d.message === expectedStatus && d.code === 'target_closed'));
     const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, proofAt());
-    assert(hoverText(hovers).includes('proved'));
+    const proofHoverLines = hoverText(hovers).split('\n');
+    assert(proofHoverLines.includes(expectedStatus));
+    assert(proofHoverLines.includes(`Proof request identity: ${result.requestIdentity}`));
+    assert(proofHoverLines.includes(`Document version: ${result.documentVersion}`));
 
     await replace(doc, source + '\n// invalidate checked snapshot\n');
     await until('proof status cleared on unsaved edit', () => !diagnostics().some(d => d.message.includes('proved')));
@@ -83,16 +109,16 @@ exports.run = async function run() {
     const unknown = await api.checkProof(options);
     assert.equal(unknown.proof.reports[0].lemma_candidates.candidates[0].validity, 'unknown_budget');
     const cancellation = new vscode.CancellationTokenSource();
+    const cancellationStarted = onNextProofStarted(api, uri, doc.version, () => cancellation.cancel());
     const cancelled = api.checkProof(options, cancellation.token).then(() => {throw new Error('cancelled proof unexpectedly returned a verdict');}, error => error);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    cancellation.cancel();
+    await cancellationStarted;
     const cancelledError = await cancelled;
     assert([-32800, -32801].includes(cancelledError.code), String(cancelledError));
     cancellation.dispose();
 
+    const staleStarted = onNextProofStarted(api, uri, doc.version, () => replace(doc, source + '\n// edit during real proof request\n'));
     const stale = api.checkProof(options).then(() => {throw new Error('edited proof unexpectedly returned a verdict');}, error => error);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    await replace(doc, source + '\n// edit during real proof request\n');
+    await staleStarted;
     const staleError = await stale;
     assert([-32800, -32801].includes(staleError.code), String(staleError));
     await until('no stale proof diagnostics', () => !diagnostics().some(d => d.message.includes('proved')));

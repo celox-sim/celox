@@ -23,6 +23,9 @@ async function activate(context) {
       synchronize: {fileEvents: watcher}, middleware: {executeCommand: (command, args, next) => command === 'hwverify.prove' ? prove(args[0]) : next(command, args)}});
   await client.start();
   client.onNotification('hwverify/statusChanged', () => {});
+  const proofStarted = new vscode.EventEmitter();
+  context.subscriptions.push(proofStarted);
+  client.onNotification('hwverify/proofStarted', event => proofStarted.fire(event));
   const checkProof = (options, token) => client.sendRequest('workspace/executeCommand', {command: 'hwverify.prove', arguments: [options]}, token);
   // Own the command so CodeLens and the palette both get cancellable progress.
   prove = async (options) => {
@@ -71,7 +74,7 @@ async function activate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('hwverify.associate', () => associate(false)));
   context.subscriptions.push(vscode.commands.registerCommand('hwverify.clearBase', () => associate(true)));
   // Diagnostic-only extension API for clients that supply their own cancellation UI.
-  return {checkProof};
+  return {checkProof, onProofStarted: proofStarted.event};
 }
 async function deactivate() { if (client) await client.dispose(); }
 module.exports = {activate, deactivate};

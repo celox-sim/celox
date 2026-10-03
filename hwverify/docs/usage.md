@@ -185,5 +185,10 @@ Extension consumers can invoke `hwverify.prove` with explicit `branch: 0` (or
 `branch: null` for a unique match) to avoid the branch-selection dialog and receive
 the diagnostic result. The activated extension also exposes
 `checkProof(options, cancellationToken)` for clients providing their own UI; it
-uses the same live language client and checked backend. Neither entry point
+uses the same live language client and checked backend. `onProofStarted(listener)`
+reports the real worker startup with its request identity and document version;
+tests interrupt in that notification callback rather than guessing a startup
+delay. The underlying `hwverify/proofStarted` notification is lifecycle data only,
+not a solver verdict. Checked hovers include the exact proof request identity.
+Neither entry point
 accepts saved reports as proof authority.

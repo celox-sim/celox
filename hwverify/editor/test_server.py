@@ -176,7 +176,9 @@ class Protocol(unittest.TestCase):
         self.assertTrue(result['proof']['reports'][0]['lemma_candidates']['target_closed'])
         self.assertFalse(result['proof']['saved_reports_are_authority'])
         hover = c.request('textDocument/hover', {'textDocument': {'uri': URI}, 'position': position(source, source.index('lemma step {') + len('lemma '))})
-        self.assertIn('proved', hover['contents']['value'])
+        self.assertIn('Lemma step: proved; target closed.', hover['contents']['value'].splitlines())
+        self.assertIn('Proof request identity: ' + result['requestIdentity'], hover['contents']['value'].splitlines())
+        self.assertIn('Document version: 1', hover['contents']['value'].splitlines())
         # Edit in UTF-16 coordinates on the line with an astral character.
         at = source.index('😀')
         c.notify('textDocument/didChange', {'textDocument': {'uri': URI, 'version': 2}, 'contentChanges': [{'range': {'start': position(source, at), 'end': position(source, at+1)}, 'text': '中'}]})
@@ -244,6 +246,32 @@ class Protocol(unittest.TestCase):
             self.assertIn('not checked', text)
             self.assertNotIn('Checked target query', text)
             self.assertNotIn('Witnesses for', text)
+
+    def test_real_worker_start_signal_and_interruptions(self):
+        c = self.client
+        c.open()
+        params = {'command': 'hwverify.prove', 'arguments': [{'uri': URI, 'program': 'counter_step'}]}
+        def started(rid):
+            event = c.wait(lambda m: m.get('method') == 'hwverify/proofStarted' and m['params']['requestId'] == rid)['params']
+            self.assertEqual(event['uri'], URI)
+            self.assertEqual(event['program'], 'counter_step')
+            self.assertEqual(event['phase'], 'worker_started')
+            return event
+        rid = c.begin('workspace/executeCommand', params)
+        event = started(rid)
+        result = c.wait(lambda m: m.get('id') == rid)['result']
+        self.assertEqual(event['requestIdentity'], result['requestIdentity'])
+        self.assertEqual(event['documentVersion'], result['documentVersion'])
+        hard = SOURCE.replace('    forall word: bv<8>;', '    mode shared_query;\n    forall a: bv<64>; forall b: bv<64>; forall c: bv<64>;').replace("claim impl.x' == spec.x';", 'claim a * (b + c) == a * b + a * c;')
+        c.edit(hard, 2)
+        rid = c.begin('workspace/executeCommand', params)
+        self.assertEqual(started(rid)['documentVersion'], 2)
+        c.notify('$/cancelRequest', {'id': rid})
+        self.assertEqual(c.wait(lambda m: m.get('id') == rid)['error']['code'], -32800)
+        rid = c.begin('workspace/executeCommand', params)
+        started(rid)
+        c.edit(SOURCE + '\n', 3)
+        self.assertEqual(c.wait(lambda m: m.get('id') == rid)['error']['code'], -32800)
 
     def test_unknown_cycle_and_ambiguous_branch(self):
         c = self.client

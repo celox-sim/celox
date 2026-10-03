@@ -392,6 +392,10 @@ class Server:
                         raise InterruptedError()
                     proc = subprocess.Popen([str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                     job['process'] = proc
+                    if job['proof']:
+                        # Lifecycle observation only: the real child exists and
+                        # is awaiting input. This never establishes a verdict.
+                        self.send({'jsonrpc': '2.0', 'method': 'hwverify/proofStarted', 'params': {'uri': job['uri'], 'requestId': job['rid'], 'requestIdentity': job['request_identity'], 'documentVersion': self.docs[job['uri']]['version'], 'program': request['program'], 'phase': 'worker_started'}})
                 try:
                     stdout, stderr = proc.communicate(json.dumps(request).encode(), timeout=120 if job['proof'] else 20)
                 except subprocess.TimeoutExpired:
@@ -413,6 +417,7 @@ class Server:
                 doc['diagnostics'] = [self.diagnostic(x, job['uri'], doc['text']) for x in value.get('diagnostics', [])]
                 if job['proof']:
                     doc['proof'] = value
+                    doc['proof_request_identity'] = job['request_identity']
                     doc['proof_diagnostics'] = self.proof_diagnostics(value, job['uri'], doc['text'])
                 self.publish(job['uri'])
                 self.refresh()
@@ -518,6 +523,8 @@ class Server:
             origin = f"target {program}, branch {proof.get('branch')}"
             if report.get('editor_prefix_through'):
                 origin += f", prefix through {report['editor_prefix_through']}"
+            text += '\n\nProof request identity: ' + doc['proof_request_identity']
+            text += '\nDocument version: ' + str(doc['version'])
             text += '\n\nChecked target query for ' + origin + ' (source aliases; display only): ' + proof.get('query', '')
             if proof.get('query_display_truncated'):
                 text += ' [truncated]'

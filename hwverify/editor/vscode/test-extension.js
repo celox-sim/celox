@@ -16,6 +16,11 @@ async function run() {
   const vscode = {
     workspace: {isTrusted: true, getConfiguration: () => ({get: k => ({server: '/repo/editor/server.py', worker: '/repo/target/release/hwverify-editor', python: 'python3'})[k]}), createFileSystemWatcher: () => ({dispose() {}})},
     commands: {registerCommand: (name, fn) => {assert(!commands.has(name)); commands.set(name, fn); return {dispose() {commands.delete(name);}};}},
+    EventEmitter: class {
+      constructor() {this.listeners = new Set(); this.event = listener => {this.listeners.add(listener); return {dispose: () => this.listeners.delete(listener)};};}
+      fire(value) {for (const listener of this.listeners) listener(value);}
+      dispose() {this.listeners.clear();}
+    },
     ProgressLocation: {Notification: 15},
     window: {
       activeTextEditor: {document: {languageId: 'hwverify', uri: {toString: () => options.uri}}},
@@ -33,7 +38,7 @@ async function run() {
       // Model the actual languageclient automatic executeCommand registration.
       vscode.commands.registerCommand('hwverify.prove', (...args) => this.options.middleware.executeCommand('hwverify.prove', args, () => {throw new Error('proof bypassed progress');}));
     }
-    onNotification() {}
+    onNotification(method, handler) {this.notifications ||= new Map(); this.notifications.set(method, handler);}
     async sendRequest(method, params, cancel) {
       calls.push([method, params, cancel]);
       if (method === 'textDocument/codeLens') return [{command: {title: 'Check prefix', arguments: [options]}}];
@@ -50,6 +55,11 @@ async function run() {
   const extension = sandbox.module.exports;
   const api = await extension.activate({subscriptions: []});
   assert.equal(typeof api.checkProof, 'function');
+  let started;
+  const subscription = api.onProofStarted(event => {started = event;});
+  instance.notifications.get('hwverify/proofStarted')({phase: 'worker_started'});
+  assert.equal(started.phase, 'worker_started');
+  subscription.dispose();
   assert(instance.options.documentSelector.some(x => x.language === 'json'));
   assert.equal((await commands.get('hwverify.check')()).diagnosticOnly, true);
   let proof = calls.find(x => x[0] === 'workspace/executeCommand' && x[1].command === 'hwverify.prove');
