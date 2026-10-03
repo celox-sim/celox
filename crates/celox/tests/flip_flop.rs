@@ -3890,7 +3890,7 @@ fn test_ff_runtime_reverse_exclusive_i32_upper_sentinel(sim) {
 }
 
 fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "flip_flop::test_ff_runtime_reverse_min_i32_end_wraps_before_range_check";
 }
 
@@ -3933,7 +3933,7 @@ fn test_ff_runtime_for_reverse_singleton_exits_cleanly(sim) {
 }
 
 fn test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(sv);
     @case "flip_flop::test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds";
 }
 
@@ -4073,16 +4073,10 @@ fn test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice(sim
 }
 
 fn test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion(sim) {
-    // Deferred Veryl/Celox fix: input-formal width must reach the addition
-    // before evaluation (IEEE 1800-2023 10.8, 11.8.2). These backends return 0
-    // instead of 1. Keep the passing SV frontend enabled; see the suite's
-    // MISMATCH_REVIEW.md section 2 for the retained failure observations.
-    @ignore_on(native, cranelift, wasm, interp, veryl);
     @case "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion";
 }
 
 fn test_ff_function_call_part_select_of_signed_formal_is_unsigned(sim) {
-    @ignore_on(veryl);
     @case "flip_flop::test_ff_function_call_part_select_of_signed_formal_is_unsigned";
 }
 

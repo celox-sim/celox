@@ -69,7 +69,7 @@ all_backends! {
     }
 
     fn test_comb_function_call_early_return(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "basic::test_comb_function_call_early_return";
     }
 
@@ -93,7 +93,7 @@ all_backends! {
     }
 
     fn test_comb_function_call_return_inside_for(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "basic::test_comb_function_call_return_inside_for";
     }
 
@@ -323,12 +323,12 @@ module Top (
     }
 
     fn test_comb_function_call_statement_preserves_return_control_flow(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_preserves_return_control_flow";
     }
 
     fn test_comb_function_call_statement_preserves_conditional_return_control_flow(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(sv);
         @case "basic::test_comb_function_call_statement_preserves_conditional_return_control_flow";
     }
 
