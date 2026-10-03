@@ -14,7 +14,10 @@ module Top;
         #3; b = 0;
     end
     initial begin
-        #6;
+        #2;
+        if (x !== 8'd1 || y !== 8'd0) $fatal(1, "time 2: x=%0d y=%0d", x, y);
+        $display("PASS time 2: x=%0d y=%0d", x, y);
+        #4;
         if (x !== 8'd1 || y !== 8'd2) $fatal(1, "x=%0d y=%0d", x, y);
         $display("PASS x=%0d y=%0d", x, y);
         $finish;

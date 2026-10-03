@@ -29,6 +29,11 @@ all_backends! {
         @ignore_on(sv);
         @case "concurrent_initial::reset";
     }
+    fn concurrent_initial_reset_between_edges(sim) {
+        @omit_veryl;
+        @ignore_on(sv);
+        @case "concurrent_initial::reset_between_edges";
+    }
     fn concurrent_initial_hierarchy(sim) {
         @omit_veryl;
         @ignore_on(sv);

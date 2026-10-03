@@ -1444,6 +1444,7 @@ fn exec_process<'a, B: SimBackend>(
     sim: &'a RefCell<&mut Simulator<B>>,
     ctx: &'a RefCell<&mut DetailedExecContext>,
     wait: &'a RefCell<Option<ProcessWait<B::Event>>>,
+    reset_edges: &'a RefCell<Vec<(B::Event, u8)>>,
     stmts: &'a [TestbenchStatement<B>],
 ) -> Pin<Box<dyn Future<Output = ExecResult> + 'a>> {
     Box::pin(async move {
@@ -1489,6 +1490,9 @@ fn exec_process<'a, B: SimBackend>(
                         Err(error) => return ExecResult::Fail(error.to_string()),
                     };
                     sim_set_u64(&mut sim.borrow_mut(), *reset_signal, (*assert_value).into());
+                    if let Some(event) = reset_event {
+                        reset_edges.borrow_mut().push((*event, *assert_value));
+                    }
                     *wait.borrow_mut() = Some(ProcessWait {
                         clock: *clock_event,
                         remaining: duration,
@@ -1522,6 +1526,7 @@ fn exec_process<'a, B: SimBackend>(
                         sim,
                         ctx,
                         wait,
+                        reset_edges,
                         if condition { then_block } else { else_block },
                     )
                     .await
@@ -1545,7 +1550,7 @@ fn exec_process<'a, B: SimBackend>(
                         *step,
                         *step_op,
                         *reverse,
-                        || exec_process(sim, ctx, wait, body),
+                        || exec_process(sim, ctx, wait, reset_edges, body),
                     )
                     .await
                 }
@@ -1566,6 +1571,34 @@ struct ProcessClock<Event> {
     falling_edge: Option<u64>,
 }
 
+// Clock generators start low even when the design uses four-state storage.
+// Otherwise X's nonzero payload can make the first scheduled 1 look like a
+// steady high to the edge detector, losing the first clock/reset cycle.
+fn initialize_process_clocks<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    statements: &[TestbenchStatement<B>],
+) {
+    for statement in statements {
+        match statement {
+            GenericTestbenchStatement::ClockNext { clock_event, .. }
+            | GenericTestbenchStatement::ResetAssert { clock_event, .. } => {
+                let signal = sim.backend.resolve_signal(&clock_event.addr());
+                sim_set_u64(sim, signal, 0);
+            }
+            GenericTestbenchStatement::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                initialize_process_clocks(sim, then_block);
+                initialize_process_clocks(sim, else_block);
+            }
+            GenericTestbenchStatement::For { body, .. } => initialize_process_clocks(sim, body),
+            _ => {}
+        }
+    }
+}
+
 fn exec_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
@@ -1578,6 +1611,7 @@ fn exec_testbench<B: SimBackend>(
     if blocks.len() <= 1 {
         return exec_detailed(sim, testbench.statements(), ctx);
     }
+    initialize_process_clocks(sim, testbench.statements());
     // The compiler's function slots are shared by inline call sites. Keep
     // only these temporaries private; design variables remain shared between
     // initial processes and all RTL. Capture masks as well as payloads.
@@ -1590,10 +1624,11 @@ fn exec_testbench<B: SimBackend>(
     let sim = RefCell::new(sim);
     let ctx = RefCell::new(ctx);
     let waits: Vec<_> = blocks.iter().map(|_| RefCell::new(None)).collect();
+    let reset_edges = RefCell::new(Vec::new());
     let mut processes: Vec<_> = blocks
         .iter()
         .zip(&waits)
-        .map(|(block, wait)| Some(exec_process(&sim, &ctx, wait, block)))
+        .map(|(block, wait)| Some(exec_process(&sim, &ctx, wait, &reset_edges, block)))
         .collect();
     let mut clocks: Vec<ProcessClock<B::Event>> = Vec::new();
     let mut now = 0;
@@ -1606,6 +1641,24 @@ fn exec_testbench<B: SimBackend>(
         {
             ctx.borrow_mut().tick_limit_reached = true;
             return ExecResult::Finished;
+        }
+        // Capture the baseline before runnable processes drive reset. Reset
+        // assertions are signal writes AND events at this timestamp, even if
+        // their clock's next edge is still in the future. Rebasing after the
+        // writes would silently absorb the asynchronous transition.
+        {
+            let mut sim = sim.borrow_mut();
+            if sim.dirty
+                && let Err(error) = sim.eval_comb()
+            {
+                return ExecResult::Fail(format!("eval_comb: {error}"));
+            }
+            let mut state = sim
+                .component_simulation
+                .take()
+                .unwrap_or_else(|| crate::simulation::simulation_state(&sim));
+            state.synchronize_event_values(&sim.backend);
+            sim.component_simulation = Some(state);
         }
         // A waiter resumes at the end of its last cycle. Collect all edge
         // polarities for this timestamp before evaluating clocked logic.
@@ -1625,8 +1678,11 @@ fn exec_testbench<B: SimBackend>(
             if let Some(pending) = wait.as_ref()
                 && pending.resume_at == Some(now)
             {
-                if let Some((signal, _, value)) = pending.reset {
+                if let Some((signal, event, value)) = pending.reset {
                     sim_set_u64(&mut sim.borrow_mut(), signal, value.into());
+                    if let Some(event) = event {
+                        reset_edges.borrow_mut().push((event, value));
+                    }
                 }
                 *wait = None;
             }
@@ -1686,7 +1742,7 @@ fn exec_testbench<B: SimBackend>(
             .filter(|clock| clock.next_edge == now && active(clock.event))
             .map(|clock| clock.event)
             .collect();
-        if !fired.is_empty() || !falling.is_empty() {
+        if !fired.is_empty() || !falling.is_empty() || !reset_edges.borrow().is_empty() {
             let resets: Vec<_> = waits
                 .iter()
                 .filter_map(|wait| wait.borrow().as_ref()?.reset.map(|(_, event, _)| event))
@@ -1695,6 +1751,7 @@ fn exec_testbench<B: SimBackend>(
                 .iter()
                 .map(|&event| (event, 0))
                 .chain(fired.iter().map(|&event| (event, 1)))
+                .chain(reset_edges.borrow_mut().drain(..))
                 .collect();
             let result = step_process_events(
                 &mut sim.borrow_mut(),
@@ -1767,7 +1824,6 @@ fn step_process_events<B: SimBackend>(
         sim.component_simulation = Some(state);
         return ExecResult::Fail(format!("eval_comb: {error}"));
     }
-    state.synchronize_event_values(&sim.backend);
     for reset in resets {
         sim.components
             .begin_reset_cycles(reset.map(|event| event.id()));

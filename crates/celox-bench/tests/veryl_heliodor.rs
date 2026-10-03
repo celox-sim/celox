@@ -98,8 +98,9 @@ fn reports_assertion_failure_in_a_later_initial_block() {
 
 #[test]
 fn shared_concurrent_initial_fixtures_match_veryl() {
-    // mixed_edges is checked against the IEEE NBA rule and an independent SV
-    // reproducer: Veryl 0.22.0 disagrees there. See the shared suite's LIMITATIONS.md.
+    // mixed_edges and reset_between_edges expose upstream timing differences.
+    // The former now observes BEFORE coincident edges, avoiding an assumption
+    // about their order. See the timing audit linked from LIMITATIONS.md.
     for source in [
         include_str!(
             "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_shared_clock.veryl"

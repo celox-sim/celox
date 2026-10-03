@@ -287,28 +287,32 @@ Affected cases: icarus 1. See the manifest for exact IDs.
 
 ## veryl-native-clock-components
 
-The seven `concurrent_initial` cases exercise native `$tb::clock_gen` and
+The eight `concurrent_initial` cases exercise native `$tb::clock_gen` and
 `$tb::reset_gen` methods. The shared SV adapter does not translate those
 components. Both external verification commands stop in Veryl 0.22.0 emission
 with `internal error: entered unreachable code`, before producing SV or running
 Verilator/Icarus. This is an adapter/emitter limitation, not a simulation verdict.
 The [Verilator-path report](verification/repros/concurrent_initial_verilator.json)
 and [Icarus-path report](verification/repros/concurrent_initial_icarus.json)
-retain all seven observations each. Reproduce with `--include-ignored --filter
+retain all eight observations each. Reproduce with `--include-ignored --filter
 concurrent_initial` on either verification binary.
 
 Six of the Veryl fixtures are also run by
 `cargo test -p celox-bench --test veryl_heliodor
-shared_concurrent_initial_fixtures_match_veryl`, using the Veryl 0.22.0 native
-runner and AOT runner. Celox's four execution backends run the same fixtures
-without exclusions. The legacy Veryl/SV differential harness exclusions remain
+shared_concurrent_initial_fixtures_match_veryl`, using Veryl 0.22.0's
+AOT-C runner with synchronous and asynchronous compilation. Celox's four execution
+backends run all eight fixtures without exclusions. The legacy Veryl/SV differential harness exclusions remain
 because those adapters do not expose native testbench execution.
 
-The `mixed_edges` case separately covers a rising source clock coinciding with
-the rising edge of another, inverted clock. Celox batches the events before
-committing clocked writes (IEEE 1800-2023 4.9.4). Veryl 0.22.0's native runner
-produces `x=3 y=2` instead of `x=1 y=2` for this case, so it is not included in
-the six-fixture upstream parity test. A [minimal SV reproducer](verification/repros/concurrent_initial_mixed_edges.sv)
-passes with both Icarus and Verilator; [observations and commands](verification/repros/concurrent_initial_mixed_edges.json)
-retain this narrower corroboration. It does not replace verification of the
-original Veryl through the blocked SV emission path.
+The `mixed_edges` and `reset_between_edges` cases are not included in the
+six-fixture native-runner parity test. Their assertions remain enabled on all
+four Celox backends. The [timing audit](verification/repros/concurrent_initial_timing.md)
+records the Veryl 0.22.0 scheduler's intended concurrency model, the conflicting
+published multi-clock description, and the two observed timing discrepancies.
+In particular, an observation before the inverted clock's falling edge rules
+out simultaneous-edge ordering as the explanation for `mixed_edges`.
+
+Both [minimal SV timing fixtures](verification/repros/concurrent_initial_timing.json)
+pass Icarus and Verilator. They are hand-written corroboration, not a successful
+translation of the full Veryl fixtures. IEEE NBA rules alone do not establish
+the Veryl native testbench's contract.

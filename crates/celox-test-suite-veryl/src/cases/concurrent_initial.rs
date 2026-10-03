@@ -27,6 +27,11 @@ cases! { ControlFlow, "concurrent_initial";
         @build Design::new(code, "Top");
         sim.run_testbench().unwrap();
     }
+    fn reset_between_edges(sim) {
+        @setup { let code = include_str!("../../fixtures/testbench/concurrent_initial_reset_between_edges.veryl"); }
+        @build Design::new(code, "Top");
+        sim.run_testbench().unwrap();
+    }
     fn hierarchy(sim) {
         @setup { let code = include_str!("../../fixtures/testbench/concurrent_initial_hierarchy.veryl"); }
         @build Design::new(code, "Top");

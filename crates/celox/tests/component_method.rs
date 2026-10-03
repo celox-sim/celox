@@ -2956,3 +2956,39 @@ fn child_initial_resolves_its_component_method_instance() {
         TestResult::Pass
     );
 }
+
+#[test]
+fn concurrent_reset_reassertion_reaches_component_between_clock_edges() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst slow: $tb::clock_gen #(period: 10);
+            inst fast: $tb::clock_gen #(period: 2);
+            inst rst: $tb::reset_gen(clk: slow);
+            var q: logic<8>;
+            inst component: $comp::celox_reset(clk: slow, rst, q);
+            initial { slow.next(4); }
+            initial {
+                rst.assert(1);
+                fast.next(1);
+                $assert(q == 101, "before reset: q=%d", q);
+                rst.assert(1);
+            }
+            initial {
+                fast.next(7);
+                $assert(q == 2, "between edges: q=%d", q);
+                $finish();
+            }
+        }
+    "#;
+    for native in [true, false] {
+        let (_dir, metadata) = component_metadata();
+        let builder = Simulator::builder(code, "t").with_metadata(metadata);
+        let result = if native {
+            builder.run_test()
+        } else {
+            builder.run_test_cranelift()
+        };
+        assert_eq!(result.unwrap(), TestResult::Pass);
+    }
+}

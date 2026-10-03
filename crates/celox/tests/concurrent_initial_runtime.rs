@@ -138,6 +138,9 @@ fn native_image_roundtrip_preserves_concurrent_processes_and_periods() {
         include_str!(
             "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_hierarchy.veryl"
         ),
+        include_str!(
+            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_between_edges.veryl"
+        ),
     ] {
         let original = Simulator::builder(code, "Top").build_native().unwrap();
         let bytes = original
@@ -267,6 +270,62 @@ fn concurrent_helper_calls_preserve_each_calls_arguments_across_waits() {
                         .unwrap(),
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn reset_between_edges_respects_polarity_and_sync_mode_without_a_clock_event() {
+    use celox::ResetType;
+    // Isolate the assertion at time 12: neither clock polarity is scheduled
+    // then. A separate observer resumes at time 14, before slow's time-20 edge.
+    let source = include_str!(
+        "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_between_edges.veryl"
+    )
+    .replace(
+        "    inst slow:",
+        "    inst observer: $tb::clock_gen #(period: 14);\n    inst slow:",
+    )
+    .replace("fast.next(7);", "observer.next(1);");
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>, reset_type: ResetType, four_state: bool) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass,
+            "{reset_type:?} four_state={four_state} backend={}",
+            std::any::type_name::<B>()
+        );
+    }
+    for reset_type in [
+        ResetType::AsyncLow,
+        ResetType::AsyncHigh,
+        ResetType::SyncLow,
+        ResetType::SyncHigh,
+    ] {
+        let source = if matches!(reset_type, ResetType::SyncLow | ResetType::SyncHigh) {
+            source.replace("count == 8'd0", "count == 8'd1")
+        } else {
+            source.clone()
+        };
+        for four_state in [false, true] {
+            macro_rules! check_backend {
+                ($build:ident) => {
+                    check(
+                        Simulator::builder(&source, "Top")
+                            .reset_type(reset_type)
+                            .four_state(four_state)
+                            .$build()
+                            .unwrap(),
+                        reset_type,
+                        four_state,
+                    );
+                };
+            }
+            check_backend!(build_interpreter);
+            check_backend!(build_cranelift);
+            check_backend!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check_backend!(build_native);
         }
     }
 }
