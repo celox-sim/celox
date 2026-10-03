@@ -134,6 +134,7 @@ pub struct Stats {
     pub control_variables: Vec<String>,
     pub control_cases: usize,
     pub control_cases_closed: usize,
+    pub control_cache_hits: usize,
     pub control_case_work: Vec<u64>,
     pub control_preprocess_work: u64,
     pub asserted_definitions: usize,
@@ -177,7 +178,7 @@ pub struct Outcome {
 impl Outcome {
     pub fn diagnostics(&self) -> Value {
         let mut result = json!({"solver_result":self.verdict.as_str(),"reason":self.reason,
-            "control_variables":self.stats.control_variables,"control_cases":self.stats.control_cases,"control_cases_closed":self.stats.control_cases_closed,"control_case_work":self.stats.control_case_work,"control_preprocess_work":self.stats.control_preprocess_work,"search_hint":self.search_hint.as_str(),"search_strategy":self.search_strategy.as_str(),
+            "control_variables":self.stats.control_variables,"control_cases":self.stats.control_cases,"control_cases_closed":self.stats.control_cases_closed,"control_cache_hits":self.stats.control_cache_hits,"control_case_work":self.stats.control_case_work,"control_preprocess_work":self.stats.control_preprocess_work,"search_hint":self.search_hint.as_str(),"search_strategy":self.search_strategy.as_str(),
             "kind":"bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
             "trusted":"Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
             "original_formula_validated":self.original_formula_validated,
@@ -606,6 +607,50 @@ impl Aliases {
         Ok(())
     }
 }
+// Sufficient syntactic entailment from mandatory branch facts. Failure means
+// "not established", never falsity. In particular, an asserted disjunction
+// does not supply either operand as a fact. This helper creates no terms and
+// all traversals share the enclosing query's resource budget.
+fn guard_entailed(
+    guard: &Term,
+    facts: &HashSet<Term>,
+    memo: &mut HashMap<Term, bool>,
+    b: &mut Budget,
+    depth: usize,
+) -> Res<bool> {
+    b.tick(1)?;
+    if depth > b.limits.max_depth {
+        return Err("guard entailment depth budget exhausted".into());
+    }
+    if let Some(value) = memo.get(guard) {
+        return Ok(*value);
+    }
+    if memo.len() >= b.limits.max_terms {
+        return Err("guard entailment term budget exhausted".into());
+    }
+    let known = if facts.contains(guard) {
+        true
+    } else {
+        match operation(guard)? {
+            Op::Bool(value) => value,
+            Op::And => {
+                guard_entailed(&guard.0.args[0], facts, memo, b, depth + 1)?
+                    && guard_entailed(&guard.0.args[1], facts, memo, b, depth + 1)?
+            }
+            Op::Or => {
+                guard_entailed(&guard.0.args[0], facts, memo, b, depth + 1)?
+                    || guard_entailed(&guard.0.args[1], facts, memo, b, depth + 1)?
+            }
+            _ => false,
+        }
+    };
+    if memo.len() >= b.limits.max_terms {
+        return Err("guard entailment term budget exhausted".into());
+    }
+    memo.insert(guard.clone(), known);
+    Ok(known)
+}
+
 struct Blast {
     lookup: lookup::Rewrite,
     guarded_created: usize,
@@ -858,9 +903,17 @@ impl Blast {
             }
         }
         let mut replacements = HashMap::new();
+        let mut entailed = HashMap::new();
         for (name, (guard, rhs)) in &self.aliases.guarded {
             b.tick(1)?;
-            if guard.iter().all(|g| facts.contains(g)) {
+            let mut established = true;
+            for g in guard {
+                if !guard_entailed(g, &facts, &mut entailed, b, depth + 1)? {
+                    established = false;
+                    break;
+                }
+            }
+            if established {
                 replacements.insert(name.clone(), rhs.clone());
             }
         }
@@ -1611,6 +1664,55 @@ fn split_choices(formula: &Term, blast: &Blast, b: &mut Budget) -> Res<Vec<Lit>>
 
 /// Compatibility entry point: use proof-oriented search, as in 0.11.2.
 /// SAT is still returned and validated normally, even though the hint is UNSAT.
+/// Validate the entire original formula AND diagnostic context before any
+/// compositional projection can discard derived-context expressions.
+pub(crate) fn validate_original_context(formula: &Term, context: &Env) -> Res<(usize, u64)> {
+    validate_original_context_with_limits(formula, context, Limits::default())
+}
+pub(crate) fn validate_original_context_with_limits(
+    formula: &Term,
+    context: &Env,
+    limits: Limits,
+) -> Res<(usize, u64)> {
+    let mut budget = Budget {
+        limits,
+        start: Instant::now(),
+        work: 0,
+        time_check_in: 0,
+    };
+    if formula.0.sort != Sort::Bool {
+        return Err("finite formula must have Bool sort".into());
+    }
+    let mut todo = vec![(formula, 0usize)];
+    todo.extend(context.values().map(|value| (value, 0usize)));
+    let mut seen = HashSet::new();
+    let mut variables = BTreeMap::new();
+    while let Some((term, depth)) = todo.pop() {
+        budget.tick(1)?;
+        if depth > budget.limits.max_depth {
+            return Err("original context depth budget exhausted".into());
+        }
+        if !seen.insert(term.clone()) {
+            continue;
+        }
+        if seen.len() > budget.limits.max_terms {
+            return Err("original context term budget exhausted".into());
+        }
+        readonly::validate(term)?;
+        if let Some(name) = term.0.op.strip_prefix('@') {
+            if variables
+                .insert(name.to_string(), term.0.sort.clone())
+                .is_some_and(|sort| sort != term.0.sort)
+            {
+                return Err("original context variable has inconsistent sorts".into());
+            }
+        }
+        todo.extend(term.0.args.iter().map(|arg| (arg, depth + 1)));
+    }
+    budget.check_time()?;
+    Ok((seen.len(), budget.work))
+}
+
 pub fn solve(formula: &Term, context: &Env, limits: Limits) -> Outcome {
     solve_with_hint(formula, context, limits, SearchHint::Unsat)
 }

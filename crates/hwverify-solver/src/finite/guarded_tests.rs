@@ -241,3 +241,128 @@ fn small_guarded_formulas_match_exhaustive_independent_boolean_word_oracle() {
         );
     }
 }
+
+fn entailment_budget() -> Budget {
+    Budget {
+        limits: Limits::default(),
+        start: Instant::now(),
+        work: 0,
+        time_check_in: 0,
+    }
+}
+#[test]
+fn guard_entailment_truth_tables_do_not_invent_conjuncts_or_disjuncts() {
+    let g = var("selector_a".into(), Sort::Bool);
+    let h = var("selector_b".into(), Sort::Bool);
+    // Each table is calculated directly with Rust Boolean operations, without
+    // using solver normalization or its expression evaluator as the oracle.
+    let atoms = vec![
+        (g.clone(), [false, true, false, true]),
+        (h.clone(), [false, false, true, true]),
+        (not(g.clone()), [true, false, true, false]),
+        (not(h.clone()), [true, true, false, false]),
+        (boolv(true), [true; 4]),
+        (boolv(false), [false; 4]),
+    ];
+    let mut forms = atoms.clone();
+    for (a, av) in &atoms {
+        for (c, cv) in &atoms {
+            forms.push((
+                and(a.clone(), c.clone()),
+                std::array::from_fn(|i| av[i] && cv[i]),
+            ));
+            forms.push((
+                or(a.clone(), c.clone()),
+                std::array::from_fn(|i| av[i] || cv[i]),
+            ));
+        }
+    }
+    for (fact_a, av) in &forms {
+        for (fact_b, bv) in &forms {
+            let facts = HashSet::from([fact_a.clone(), fact_b.clone()]);
+            let mut memo = HashMap::new();
+            let mut budget = entailment_budget();
+            for (target, tv) in &forms {
+                if guard_entailed(target, &facts, &mut memo, &mut budget, 0).unwrap() {
+                    for i in 0..4 {
+                        assert!(
+                            !(av[i] && bv[i]) || tv[i],
+                            "entailed guard was false in a satisfying assignment"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let facts = HashSet::from([or(g.clone(), h.clone())]);
+    assert!(!guard_entailed(&g, &facts, &mut HashMap::new(), &mut entailment_budget(), 0).unwrap());
+    assert!(!guard_entailed(
+        &and(g.clone(), h.clone()),
+        &HashSet::from([g]),
+        &mut HashMap::new(),
+        &mut entailment_budget(),
+        0
+    )
+    .unwrap());
+}
+#[test]
+fn guard_entailment_enables_broader_guards_but_not_partial_guards() {
+    let (g, h, x, y, z) = vars();
+    let k = var("third_guard".into(), Sort::Bool);
+    for polarity in [false, true] {
+        let atom = if polarity { g.clone() } else { not(g.clone()) };
+        let requirement = and(or(atom.clone(), h.clone()), or(atom.clone(), k.clone()));
+        let fact = imp(requirement, eq(x.clone(), plus(y.clone())));
+        for (branch, expected) in [
+            (atom.clone(), Verdict::Unsat),
+            (and(h.clone(), k.clone()), Verdict::Unsat),
+            (h.clone(), Verdict::Sat),
+            (or(atom.clone(), h.clone()), Verdict::Sat),
+            (not(atom.clone()), Verdict::Sat),
+        ] {
+            let q = and(
+                fact.clone(),
+                not(eq(
+                    ite(branch.clone(), x.clone(), z.clone()),
+                    ite(branch, plus(y.clone()), z.clone()),
+                )),
+            );
+            let out = both(&q, &Env::from([("original x".into(), x.clone())]), expected);
+            if expected == Verdict::Unsat {
+                assert!(out.stats.guarded_rewrites > 0);
+            }
+        }
+    }
+}
+#[test]
+fn guard_entailment_memoizes_shared_dags_and_obeys_all_limits() {
+    let g = var("fact".into(), Sort::Bool);
+    let facts = HashSet::from([g.clone()]);
+    let mut target = g;
+    for _ in 0..24 {
+        target = and(target.clone(), target);
+    }
+    let mut budget = entailment_budget();
+    assert!(guard_entailed(&target, &facts, &mut HashMap::new(), &mut budget, 0).unwrap());
+    assert!(budget.work < 100);
+    for limits in [
+        Limits {
+            max_terms: 10,
+            ..Limits::default()
+        },
+        Limits {
+            max_depth: 10,
+            ..Limits::default()
+        },
+        Limits {
+            max_work: budget.work - 1,
+            ..Limits::default()
+        },
+    ] {
+        let mut budget = Budget {
+            limits,
+            ..entailment_budget()
+        };
+        assert!(guard_entailed(&target, &facts, &mut HashMap::new(), &mut budget, 0).is_err());
+    }
+}

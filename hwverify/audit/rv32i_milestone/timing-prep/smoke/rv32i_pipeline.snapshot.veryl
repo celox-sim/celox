@@ -1,0 +1,345 @@
+// Handwritten RV32I v2.1, overlapped D/X/W, little-endian Harvard ports.
+// External memory returns the aligned 32-bit word at the full BYTE address.
+// X memory checks/reads are side-effect-free; W stores are atomic byte-lane writes.
+// W writes must be visible to same-edge X loads. No MMIO, interrupts or trap handler.
+// Faults drain the older W instruction, retire one precise trap, then halt.
+module RV32IPipeline (
+    clk: input clock, rst_n: input bit, stall: input bit,
+    imem_response: input bit<32>, imem_fault: input bit,
+    dmem_response: input bit<32>, dmem_fault: input bit,
+    imem_address: output bit<32>, imem_valid: output bit,
+    dmem_address: output bit<32>, dmem_valid: output bit, dmem_write: output bit,
+    write_enable: output bit, write_address: output bit<32>,
+    write_data: output bit<32>, write_mask: output bit<4>,
+    commit: output bit, retire: output bit,
+    trap_valid: output bit, trap_cause: output bit<4>,
+    trap_pc: output bit<32>, trap_value: output bit<32>, halted: output bit,
+    pc: output bit<32>, fetch_pc: output bit<32>,
+    r0: output bit<32>,
+    r1: output bit<32>,
+    r2: output bit<32>,
+    r3: output bit<32>,
+    r4: output bit<32>,
+    r5: output bit<32>,
+    r6: output bit<32>,
+    r7: output bit<32>,
+    r8: output bit<32>,
+    r9: output bit<32>,
+    r10: output bit<32>,
+    r11: output bit<32>,
+    r12: output bit<32>,
+    r13: output bit<32>,
+    r14: output bit<32>,
+    r15: output bit<32>,
+    r16: output bit<32>,
+    r17: output bit<32>,
+    r18: output bit<32>,
+    r19: output bit<32>,
+    r20: output bit<32>,
+    r21: output bit<32>,
+    r22: output bit<32>,
+    r23: output bit<32>,
+    r24: output bit<32>,
+    r25: output bit<32>,
+    r26: output bit<32>,
+    r27: output bit<32>,
+    r28: output bit<32>,
+    r29: output bit<32>,
+    r30: output bit<32>,
+    r31: output bit<32>,
+    d_valid: output bit, d_pc: output bit<32>, d_ir: output bit<32>, d_fetch_fault: output bit,
+    x_valid: output bit, x_pc: output bit<32>, x_ir: output bit<32>, x_fetch_fault: output bit,
+    x_operand1: output bit<32>, x_operand2: output bit<32>,
+    w_valid: output bit, w_pc: output bit<32>, w_ir: output bit<32>,
+    w_result: output bit<32>, w_next_pc: output bit<32>, w_writes: output bit,
+    w_store: output bit, w_address: output bit<32>, w_data: output bit<32>, w_mask: output bit<4>,
+    w_fault: output bit, w_cause: output bit<4>, w_tval: output bit<32>,
+) {
+    var d_op: bit<7>; var x_op: bit<7>; var f3: bit<3>; var f7: bit<7>;
+    var d_rs1: bit<5>; var d_rs2: bit<5>; var x_rd: bit<5>; var w_rd: bit<5>;
+    var uses1: bit; var uses2: bit; var legal: bit; var writes: bit;
+    var is_load: bit; var is_store: bit; var is_branch: bit; var is_jump: bit;
+    var hazard: bit; var redirect: bit; var taken: bit; var fault: bit;
+    var cause: bit<4>; var tval: bit<32>;
+    var operand1: bit<32>; var operand2: bit<32>;
+    var imm_i: bit<32>; var imm_s: bit<32>; var imm_b: bit<32>; var imm_u: bit<32>; var imm_j: bit<32>;
+    var rhs: bit<32>; var result: bit<32>; var next_pc: bit<32>; var target: bit<32>;
+    var address: bit<32>; var store_data: bit<32>; var store_mask: bit<4>;
+    var shifted_load: bit<32>; var lane_shift: bit<5>; var shift: bit<5>;
+    var signed_lt: bit; var unsigned_lt: bit; var misaligned: bit;
+    always_comb {
+        d_op = d_ir[6:0]; x_op = x_ir[6:0]; f3 = x_ir[14:12]; f7 = x_ir[31:25];
+        d_rs1 = d_ir[19:15]; d_rs2 = d_ir[24:20]; x_rd = x_ir[11:7]; w_rd = w_ir[11:7];
+        uses1 = d_op == 7'h13 || d_op == 7'h33 || d_op == 7'h67 || d_op == 7'h03 || d_op == 7'h23 || d_op == 7'h63;
+        uses2 = d_op == 7'h33 || d_op == 7'h23 || d_op == 7'h63;
+        imm_i = x_ir >> 20;
+        imm_s = ((x_ir >> 25) << 5) | ((x_ir >> 7) & 32'h1f);
+        imm_b = ((x_ir >> 31) << 12) | (((x_ir >> 7) & 32'd1) << 11)
+              | (((x_ir >> 25) & 32'h3f) << 5) | (((x_ir >> 8) & 32'hf) << 1);
+        imm_u = x_ir & 32'hfffff000;
+        imm_j = ((x_ir >> 31) << 20) | (x_ir & 32'hff000)
+              | (((x_ir >> 20) & 32'd1) << 11) | (((x_ir >> 21) & 32'h3ff) << 1);
+        if x_ir[31] { imm_i = imm_i | 32'hfffff000; imm_s = imm_s | 32'hfffff000;
+                       imm_b = imm_b | 32'hffffe000; imm_j = imm_j | 32'hffe00000; }
+        is_load = x_op == 7'h03; is_store = x_op == 7'h23;
+        is_branch = x_op == 7'h63; is_jump = x_op == 7'h6f || x_op == 7'h67;
+        legal = 0;
+        case x_op {
+            7'h37: legal = 1;
+            7'h17: legal = 1;
+            7'h6f: legal = 1;
+            7'h67: legal = f3 == 3'd0;
+            7'h63: legal = f3 == 3'd0 || f3 == 3'd1 || f3 == 3'd4 || f3 == 3'd5 || f3 == 3'd6 || f3 == 3'd7;
+            7'h03: legal = f3 == 3'd0 || f3 == 3'd1 || f3 == 3'd2 || f3 == 3'd4 || f3 == 3'd5;
+            7'h23: legal = f3 == 3'd0 || f3 == 3'd1 || f3 == 3'd2;
+            7'h13: legal = f3 != 3'd1 && f3 != 3'd5 || f3 == 3'd1 && f7 == 7'h00 || f3 == 3'd5 && (f7 == 7'h00 || f7 == 7'h20);
+            7'h33: legal = f7 == 7'h00 || f7 == 7'h20 && (f3 == 3'd0 || f3 == 3'd5);
+            // RV32I requires ignoring reserved FENCE rd/rs1/fm/pred/succ fields.
+            7'h0f: legal = f3 == 3'd0;
+            7'h73: legal = x_ir == 32'h00000073 || x_ir == 32'h00100073;
+            default: {}
+        }
+        writes = legal && (x_op == 7'h37 || x_op == 7'h17 || is_jump || is_load || x_op == 7'h13 || x_op == 7'h33) && x_rd != 5'd0;
+        rhs = x_operand2;
+        if x_op == 7'h13 { rhs = imm_i; }
+        shift = rhs[4:0];
+        // Select comparison results rather than muxing an entire compare input.
+        // The two forms are equivalent; this keeps independent ISA proofs small.
+        unsigned_lt = x_operand1 <: x_operand2;
+        signed_lt = unsigned_lt;
+        if x_operand1[31] != x_operand2[31] { signed_lt = x_operand1[31]; }
+        if x_op == 7'h13 {
+            unsigned_lt = x_operand1 <: imm_i;
+            signed_lt = unsigned_lt;
+            if x_operand1[31] != imm_i[31] { signed_lt = x_operand1[31]; }
+        }
+        result = '0;
+        case f3 {
+            3'd0: result = x_operand1 + rhs;
+            3'd1: result = x_operand1 << shift;
+            3'd2: if signed_lt { result = 32'd1; }
+            3'd3: if unsigned_lt { result = 32'd1; }
+            3'd4: result = x_operand1 ^ rhs;
+            3'd5: {
+                result = x_operand1 >> shift;
+                if f7 == 7'h20 && x_operand1[31] { result = ~((~x_operand1) >> shift); }
+            }
+            3'd6: result = x_operand1 | rhs;
+            default: result = x_operand1 & rhs;
+        }
+        if x_op == 7'h33 && f3 == 3'd0 && f7 == 7'h20 { result = x_operand1 - rhs; }
+        if x_op == 7'h37 { result = imm_u; }
+        if x_op == 7'h17 { result = x_pc + imm_u; }
+        if is_jump { result = x_pc + 32'd4; }
+        address = x_operand1 + imm_i;
+        if is_store { address = x_operand1 + imm_s; }
+        lane_shift = address[1:0] << 3;
+        shifted_load = dmem_response >> lane_shift;
+        if is_load {
+            result = shifted_load;
+            if f3 == 3'd0 || f3 == 3'd4 {
+                result = shifted_load & 32'hff;
+                if f3 == 3'd0 && shifted_load[7] { result = result | 32'hffffff00; }
+            } else if f3 == 3'd1 || f3 == 3'd5 {
+                result = shifted_load & 32'hffff;
+                if f3 == 3'd1 && shifted_load[15] { result = result | 32'hffff0000; }
+            }
+        }
+        store_data = x_operand2 << lane_shift;
+        store_mask = 4'hf;
+        if f3 == 3'd0 { store_mask = 4'd1 << address[1:0]; }
+        if f3 == 3'd1 { store_mask = 4'd3 << address[1:0]; }
+        misaligned = (f3 == 3'd1 || f3 == 3'd5) && address[0] || f3 == 3'd2 && address[1:0] != 2'd0;
+        target = x_pc + imm_b;
+        taken = 0;
+        if is_branch {
+            case f3 {
+                3'd0: taken = x_operand1 == x_operand2;
+                3'd1: taken = x_operand1 != x_operand2;
+                3'd4: taken = signed_lt;
+                3'd5: taken = !signed_lt;
+                3'd6: taken = unsigned_lt;
+                3'd7: taken = !unsigned_lt;
+                default: {}
+            }
+        }
+        if x_op == 7'h6f { taken = 1; target = x_pc + imm_j; }
+        if x_op == 7'h67 { taken = 1; target = (x_operand1 + imm_i) & 32'hfffffffe; }
+        next_pc = x_pc + 32'd4;
+        if taken { next_pc = target; }
+        fault = 0; cause = '0; tval = '0;
+        if x_pc[1:0] != 2'd0 { fault = 1; cause = 4'd0; tval = x_pc; }
+        else if x_fetch_fault { fault = 1; cause = 4'd1; tval = x_pc; }
+        else if !legal { fault = 1; cause = 4'd2; tval = x_ir; }
+        else if x_ir == 32'h00000073 { fault = 1; cause = 4'd8; }
+        else if x_ir == 32'h00100073 { fault = 1; cause = 4'd3; tval = x_pc; }
+        else if taken && target[1:0] != 2'd0 { fault = 1; cause = 4'd0; tval = target; }
+        else if (is_load || is_store) && misaligned {
+            fault = 1; cause = 4'd4; tval = address;
+            if is_store { cause = 4'd6; }
+        } else if (is_load || is_store) && dmem_fault {
+            fault = 1; cause = 4'd5; tval = address;
+            if is_store { cause = 4'd7; }
+        }
+        if fault { next_pc = x_pc; }
+        case d_rs1 {
+            5'd0: operand1 = r0;
+            5'd1: operand1 = r1;
+            5'd2: operand1 = r2;
+            5'd3: operand1 = r3;
+            5'd4: operand1 = r4;
+            5'd5: operand1 = r5;
+            5'd6: operand1 = r6;
+            5'd7: operand1 = r7;
+            5'd8: operand1 = r8;
+            5'd9: operand1 = r9;
+            5'd10: operand1 = r10;
+            5'd11: operand1 = r11;
+            5'd12: operand1 = r12;
+            5'd13: operand1 = r13;
+            5'd14: operand1 = r14;
+            5'd15: operand1 = r15;
+            5'd16: operand1 = r16;
+            5'd17: operand1 = r17;
+            5'd18: operand1 = r18;
+            5'd19: operand1 = r19;
+            5'd20: operand1 = r20;
+            5'd21: operand1 = r21;
+            5'd22: operand1 = r22;
+            5'd23: operand1 = r23;
+            5'd24: operand1 = r24;
+            5'd25: operand1 = r25;
+            5'd26: operand1 = r26;
+            5'd27: operand1 = r27;
+            5'd28: operand1 = r28;
+            5'd29: operand1 = r29;
+            5'd30: operand1 = r30;
+            default: operand1 = r31;
+        }
+        case d_rs2 {
+            5'd0: operand2 = r0;
+            5'd1: operand2 = r1;
+            5'd2: operand2 = r2;
+            5'd3: operand2 = r3;
+            5'd4: operand2 = r4;
+            5'd5: operand2 = r5;
+            5'd6: operand2 = r6;
+            5'd7: operand2 = r7;
+            5'd8: operand2 = r8;
+            5'd9: operand2 = r9;
+            5'd10: operand2 = r10;
+            5'd11: operand2 = r11;
+            5'd12: operand2 = r12;
+            5'd13: operand2 = r13;
+            5'd14: operand2 = r14;
+            5'd15: operand2 = r15;
+            5'd16: operand2 = r16;
+            5'd17: operand2 = r17;
+            5'd18: operand2 = r18;
+            5'd19: operand2 = r19;
+            5'd20: operand2 = r20;
+            5'd21: operand2 = r21;
+            5'd22: operand2 = r22;
+            5'd23: operand2 = r23;
+            5'd24: operand2 = r24;
+            5'd25: operand2 = r25;
+            5'd26: operand2 = r26;
+            5'd27: operand2 = r27;
+            5'd28: operand2 = r28;
+            5'd29: operand2 = r29;
+            5'd30: operand2 = r30;
+            default: operand2 = r31;
+        }
+        // x0 never forwards; load to x0 nevertheless performs the memory access.
+        if w_valid && w_writes && !w_fault && w_rd == d_rs1 { operand1 = w_result; }
+        if w_valid && w_writes && !w_fault && w_rd == d_rs2 { operand2 = w_result; }
+        if x_valid && writes && !is_load && !fault && x_rd == d_rs1 { operand1 = result; }
+        if x_valid && writes && !is_load && !fault && x_rd == d_rs2 { operand2 = result; }
+        hazard = d_valid && x_valid && writes && is_load && !fault
+              && (uses1 && x_rd == d_rs1 || uses2 && x_rd == d_rs2);
+        redirect = x_valid && taken && !fault;
+        commit = rst_n && !stall && !halted && w_valid && !w_fault;
+        trap_valid = rst_n && !stall && !halted && w_valid && w_fault;
+        retire = commit || trap_valid;
+        trap_pc = w_pc; trap_cause = w_cause; trap_value = w_tval;
+        write_enable = commit && w_store;
+        write_address = w_address; write_data = w_data; write_mask = w_mask;
+        imem_address = fetch_pc;
+        imem_valid = rst_n && !stall && !halted && !(w_valid && w_fault) && !hazard && !redirect && !(x_valid && fault);
+        dmem_address = address;
+        dmem_write = is_store;
+        dmem_valid = rst_n && !stall && !halted && !(w_valid && w_fault) && x_valid
+                  && x_pc[1:0] == 2'd0 && !x_fetch_fault && legal && (is_load || is_store) && !misaligned;
+    }
+    always_ff (clk) {
+        if !rst_n {
+            pc = '0; fetch_pc = '0; halted = 0;
+            r0 = '0; r1 = '0; r2 = '0; r3 = '0; r4 = '0; r5 = '0; r6 = '0; r7 = '0; r8 = '0; r9 = '0; r10 = '0; r11 = '0; r12 = '0; r13 = '0; r14 = '0; r15 = '0; r16 = '0; r17 = '0; r18 = '0; r19 = '0; r20 = '0; r21 = '0; r22 = '0; r23 = '0; r24 = '0; r25 = '0; r26 = '0; r27 = '0; r28 = '0; r29 = '0; r30 = '0; r31 = '0;
+            d_valid = 0; d_pc = '0; d_ir = '0; d_fetch_fault = 0;
+            x_valid = 0; x_pc = '0; x_ir = '0; x_fetch_fault = 0;
+            x_operand1 = '0; x_operand2 = '0;
+            w_valid = 0; w_pc = '0; w_ir = '0; w_result = '0; w_next_pc = '0; w_writes = 0;
+            w_store = 0; w_address = '0; w_data = '0; w_mask = '0;
+            w_fault = 0; w_cause = '0; w_tval = '0;
+        } else if !stall && !halted {
+            if w_valid && w_fault {
+                halted = 1; pc = w_pc;
+                d_valid = 0; x_valid = 0; w_valid = 0;
+            } else {
+                if w_valid {
+                    pc = w_next_pc;
+                    if w_writes {
+                        case w_rd {
+                        5'd1: r1 = w_result;
+                        5'd2: r2 = w_result;
+                        5'd3: r3 = w_result;
+                        5'd4: r4 = w_result;
+                        5'd5: r5 = w_result;
+                        5'd6: r6 = w_result;
+                        5'd7: r7 = w_result;
+                        5'd8: r8 = w_result;
+                        5'd9: r9 = w_result;
+                        5'd10: r10 = w_result;
+                        5'd11: r11 = w_result;
+                        5'd12: r12 = w_result;
+                        5'd13: r13 = w_result;
+                        5'd14: r14 = w_result;
+                        5'd15: r15 = w_result;
+                        5'd16: r16 = w_result;
+                        5'd17: r17 = w_result;
+                        5'd18: r18 = w_result;
+                        5'd19: r19 = w_result;
+                        5'd20: r20 = w_result;
+                        5'd21: r21 = w_result;
+                        5'd22: r22 = w_result;
+                        5'd23: r23 = w_result;
+                        5'd24: r24 = w_result;
+                        5'd25: r25 = w_result;
+                        5'd26: r26 = w_result;
+                        5'd27: r27 = w_result;
+                        5'd28: r28 = w_result;
+                        5'd29: r29 = w_result;
+                        5'd30: r30 = w_result;
+                        5'd31: r31 = w_result;
+                        default: {}
+                        }
+                    }
+                }
+                w_valid = x_valid; w_pc = x_pc; w_ir = x_ir;
+                w_result = result; w_next_pc = next_pc; w_writes = writes && !fault;
+                w_store = is_store && legal && !fault; w_address = address; w_data = store_data; w_mask = store_mask;
+                w_fault = x_valid && fault; w_cause = cause; w_tval = tval;
+                x_valid = d_valid && !hazard && !redirect && !(x_valid && fault);
+                x_pc = d_pc; x_ir = d_ir; x_fetch_fault = d_fetch_fault;
+                x_operand1 = operand1; x_operand2 = operand2;
+                if redirect || x_valid && fault { d_valid = 0; }
+                else if !hazard { d_valid = 1; }
+                if !hazard && !redirect && !(x_valid && fault) {
+                    d_pc = fetch_pc; d_ir = imem_response; d_fetch_fault = imem_fault;
+                    fetch_pc = fetch_pc + 32'd4;
+                }
+                if redirect { fetch_pc = next_pc; }
+            }
+        }
+    }
+}

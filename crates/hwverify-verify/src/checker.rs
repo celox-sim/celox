@@ -77,6 +77,17 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
     ctx.insert("commit".into(), c.clone());
     ctx.insert("binding_before".into(), r.clone());
     ctx.insert("binding_after".into(), rn.clone());
+    // Proof metadata is untrusted search input. Resolve every expression in
+    // this exact Design context before any solver query can succeed.
+    let proof_programs = doc
+        .get("proof_programs")
+        .map(|metadata| {
+            if std::env::var("HWVERIFY_SOLVER").as_deref() != Ok("finite") {
+                return Err("proof programs require finite-only mode".into());
+            }
+            crate::proof_program::ProofPrograms::from_json(metadata, &ctx)
+        })
+        .transpose()?;
     let mut q = Check {
         z3,
         out,
@@ -84,7 +95,30 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
     };
     q.query("binding_nonempty", r.clone(), true, &Env::new())?;
     q.query("reset_binding", not(rr), false, &ctx)?;
-    q.query("microstep_refinement", and(r.clone(), not(rn)), false, &ctx)?;
+    if let Some(programs) = &proof_programs {
+        let mut callback = |checker: &mut Check, name: &str, bad: &Term, context: &Env| {
+            programs.try_query(checker, name, bad, context)
+        };
+        if programs.is_independent() {
+            q.query_implication_with_fallback(
+                "microstep_refinement",
+                r.clone(),
+                rn,
+                &ctx,
+                &mut callback,
+            )?;
+        } else {
+            q.query_implication_with_callback(
+                "microstep_refinement",
+                r.clone(),
+                rn,
+                &ctx,
+                &mut callback,
+            )?;
+        }
+    } else {
+        q.query_implication("microstep_refinement", r.clone(), rn, &ctx)?;
+    }
     q.query(
         "commit_eligible",
         and(
@@ -164,15 +198,20 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
     } else {
         "stuttering_refinement_verified"
     };
+    let primitive_reports = hwverify_solver::primitive_query_reports(&q.reports);
     let engine_summary = json!({
-        "custom_closed":q.reports.iter().filter(|r|r["backend"]=="structural_kernel").count(),
-        "z3_queries":q.reports.iter().filter(|r|r["backend"]=="z3").count(),
-        "finite_queries":q.reports.iter().filter(|r|r["backend"]=="finite_bv").count(),
-        "not_run":q.reports.iter().filter(|r|r["solver_result"]=="not_run").count(),
-        "query_seconds":q.reports.iter().filter_map(|r|r["seconds"].as_f64()).sum::<f64>(),
-        "kernel_compute_seconds":q.reports.iter().filter_map(|r|r["kernel"]["seconds"].as_f64()).sum::<f64>(),
-        "z3_seconds":q.reports.iter().filter_map(|r|r["z3_seconds"].as_f64()).sum::<f64>(),
-        "finite_seconds":q.reports.iter().filter_map(|r|r["finite_seconds"].as_f64()).sum::<f64>(),
+        "conjunctive_bundles":q.reports.iter().filter(|r|r["backend"]=="conjunctive_lemmas").count(),
+        "source_validation_work":primitive_reports.iter().filter_map(|r|r["original_source_validation"]["work"].as_u64()).sum::<u64>(),
+        "source_validation_seconds":primitive_reports.iter().filter_map(|r|r["original_source_validation"]["seconds"].as_f64()).sum::<f64>(),
+        "finite_total_work":primitive_reports.iter().filter_map(|r|r["finite"]["work"].as_u64()).sum::<u64>(),
+        "custom_closed":primitive_reports.iter().filter(|r|r["backend"]=="structural_kernel").count(),
+        "z3_queries":primitive_reports.iter().filter(|r|r["backend"]=="z3").count(),
+        "finite_queries":primitive_reports.iter().filter(|r|r["backend"]=="finite_bv").count(),
+        "not_run":primitive_reports.iter().filter(|r|r["solver_result"]=="not_run").count(),
+        "query_seconds":primitive_reports.iter().filter_map(|r|r["seconds"].as_f64()).sum::<f64>(),
+        "kernel_compute_seconds":primitive_reports.iter().filter_map(|r|r["kernel"]["seconds"].as_f64()).sum::<f64>(),
+        "z3_seconds":primitive_reports.iter().filter_map(|r|r["z3_seconds"].as_f64()).sum::<f64>(),
+        "finite_seconds":primitive_reports.iter().filter_map(|r|r["finite_seconds"].as_f64()).sum::<f64>(),
         "scoring_seconds":partition_plan.as_ref().and_then(|p|p["scoring_seconds"].as_f64()).unwrap_or(0.0),
         "timing_note":"query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally"
     });

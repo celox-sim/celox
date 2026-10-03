@@ -14,32 +14,81 @@ pub struct Emitter {
     ids: HashMap<Term, String>,
     lines: Vec<String>,
     count: u64,
+    visits: u64,
+}
+struct EmissionBudget {
+    work: u64,
+    start: Instant,
+    timeout_ms: u64,
 }
 impl Emitter {
     fn emit(&mut self, t: &Term) -> String {
+        self.emit_inner(t, &mut None).expect("unbounded emitter")
+    }
+    fn emit_inner(&mut self, t: &Term, budget: &mut Option<EmissionBudget>) -> Res<String> {
+        self.visits += 1;
+        if let Some(b) = budget {
+            if self.visits > b.work || b.start.elapsed().as_millis() >= b.timeout_ms as u128 {
+                return Err("checked query emission budget exhausted".into());
+            }
+        }
         if let Some(n) = self.ids.get(t) {
-            return n.clone();
+            return Ok(n.clone());
         }
         if let Some(n) = t.0.op.strip_prefix('@') {
             self.lines
                 .push(format!("(declare-fun {n} () {})", t.0.sort.smt()));
             self.ids.insert(t.clone(), n.into());
-            return n.into();
+            return Ok(n.into());
         }
-        let args = t.0.args.iter().map(|x| self.emit(x)).collect::<Vec<_>>();
+        let args =
+            t.0.args
+                .iter()
+                .map(|x| self.emit_inner(x, budget))
+                .collect::<Res<Vec<_>>>()?;
         let n = format!("t{}", self.count);
         self.count += 1;
-        let expr = if args.is_empty() {
+        let expression = if args.is_empty() {
             t.0.op.clone()
         } else {
             format!("({} {})", t.0.op, args.join(" "))
         };
-        self.lines
-            .push(format!("(define-fun {n} () {} {expr})", t.0.sort.smt()));
+        self.lines.push(format!(
+            "(define-fun {n} () {} {expression})",
+            t.0.sort.smt()
+        ));
         self.ids.insert(t.clone(), n.clone());
-        n
+        Ok(n)
     }
 }
+
+pub(crate) fn write_original_query(
+    out: &std::path::Path,
+    name: &str,
+    bad: &Term,
+    context: &Env,
+    limits: Option<crate::finite::Limits>,
+) -> (Res<()>, usize) {
+    let mut emitter = Emitter::default();
+    let mut budget = limits.map(|l| EmissionBudget {
+        work: l.max_work,
+        start: Instant::now(),
+        timeout_ms: l.timeout_ms,
+    });
+    let result = (|| -> Res<()> {
+        let root = emitter.emit_inner(bad, &mut budget)?;
+        for term in context.values() {
+            emitter.emit_inner(term, &mut budget)?;
+        }
+        let text = format!(
+            "(set-logic QF_AUFBV)\n{}\n(assert {root})\n(check-sat)\n",
+            emitter.lines.join("\n")
+        );
+        fs::write(out.join(format!("{name}.smt2")), text).map_err(|e| e.to_string())
+    })();
+    (result, emitter.visits as usize)
+}
+
 pub(crate) fn finite_only() -> bool {
     std::env::var("HWVERIFY_SOLVER").as_deref() == Ok("finite")
 }
@@ -124,6 +173,10 @@ pub(crate) fn resolve_finite_search_hint(
         "logical_expectation",
     ))
 }
+pub(crate) struct QueryBudget {
+    pub limits: crate::finite::Limits,
+    pub allow_kernel: bool,
+}
 pub struct Check {
     pub z3: String,
     pub out: PathBuf,
@@ -181,28 +234,85 @@ impl Check {
         context: &Env,
         options: QueryOptions,
     ) -> Res<()> {
+        self.query_limited(name, bad, expect_sat, context, options, None)
+    }
+
+    /// Internal bounded route for checked query decompositions. No external
+    /// solver or proof rule is introduced by selecting smaller finite limits.
+    pub(crate) fn query_limited(
+        &mut self,
+        name: &str,
+        bad: Term,
+        expect_sat: bool,
+        context: &Env,
+        options: QueryOptions,
+        budget: Option<QueryBudget>,
+    ) -> Res<()> {
+        // Reject an invalid/non-finite opt-in before ANY backend invocation,
+        // including nonvacuity/example queries preceding the inductive query.
+        crate::conjunctive::enabled()?;
+        let bounded = budget.is_some();
+        if bounded && !finite_only() {
+            return Err("bounded query cannot invoke an external solver".into());
+        }
+        let finite_mode = bounded || finite_only();
+        let (mut limits, allow_kernel) = match budget {
+            Some(b) => (Some(b.limits), b.allow_kernel),
+            None => (None, true),
+        };
         let QueryOptions {
             timeout_ms,
             capture_sat,
             finite_search_hint,
         } = options;
         let logical_expectation = if expect_sat { "sat" } else { "unsat" };
-        let finite_hint = if finite_only() {
+        let finite_hint = if finite_mode {
             Some(resolve_finite_search_hint(expect_sat, finite_search_hint)?)
         } else {
             None
         };
         let start = Instant::now();
         let mut e = Emitter::default();
-        let b = e.emit(&bad);
-        let ctx = context
-            .iter()
-            .map(|(n, t)| (n.clone(), e.emit(t)))
-            .collect::<BTreeMap<_, _>>();
+        let strict = limits.is_some() && !allow_kernel;
+        let mut emission_budget = if strict {
+            limits.as_ref().map(|l| EmissionBudget {
+                work: l.max_work,
+                start,
+                timeout_ms: l.timeout_ms,
+            })
+        } else {
+            None
+        };
+        let emitted = (|| -> Res<(String, BTreeMap<String, String>)> {
+            let root = e.emit_inner(&bad, &mut emission_budget)?;
+            let context = context
+                .iter()
+                .map(|(name, t)| Ok((name.clone(), e.emit_inner(t, &mut emission_budget)?)))
+                .collect::<Res<BTreeMap<_, _>>>()?;
+            Ok((root, context))
+        })();
+        let (b, ctx) = match emitted {
+            Ok(value) => value,
+            Err(reason) => {
+                self.reports.push(json!({"name":name,"status":"unknown","solver_result":"unknown","backend":"finite_bv","logical_expectation":logical_expectation,
+                "seconds":start.elapsed().as_secs_f64(),"z3_seconds":0.0,"emission_seconds":start.elapsed().as_secs_f64(),"emission_nodes":e.ids.len(),"emission_work":e.visits,
+                "kernel":{"enabled":false},"finite":{"solver_result":"unknown","work":0,"clauses":0,"terms":0,"variables":0,"reason":reason,"original_formula_validated":false}}));
+                return Ok(());
+            }
+        };
+        if strict {
+            if let Some(l) = limits.as_mut() {
+                l.max_work = l.max_work.saturating_sub(e.visits);
+                l.timeout_ms = l
+                    .timeout_ms
+                    .saturating_sub(start.elapsed().as_millis() as u64);
+            }
+        }
         let base=format!("(set-option :timeout {timeout_ms})\n(set-option :produce-models true)\n(set-logic QF_AUFBV)\n{}\n(assert {b})\n(check-sat)\n",e.lines.join("\n"));
         let emission_seconds = start.elapsed().as_secs_f64();
         let kernel_start = Instant::now();
-        let use_kernel = !expect_sat && std::env::var("HWVERIFY_KERNEL").as_deref() != Ok("off");
+        let use_kernel =
+            allow_kernel && !expect_sat && std::env::var("HWVERIFY_KERNEL").as_deref() != Ok("off");
         let mut kernel_report = json!({"enabled":use_kernel});
         if use_kernel {
             let attempt = crate::kernel::refute(&bad);
@@ -240,21 +350,21 @@ impl Check {
                     "finite_search_hint":finite_hint.map(|(hint, _)| hint.as_str()),
                     "search_hint_source":finite_hint.map(|(_, source)| source),
                     "search_strategy":"structural_kernel","seconds":start.elapsed().as_secs_f64(),
-                    "emission_seconds":emission_seconds,"z3_seconds":0.0,"kernel":kernel_report,
+                    "emission_seconds":emission_seconds,"emission_nodes":e.ids.len(),"emission_work":e.visits,"z3_seconds":0.0,"kernel":kernel_report,
                     "context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
                 return Ok(());
             }
         }
-        if finite_only() {
+        if finite_mode {
             let finite_start = Instant::now();
             let (search_hint, search_hint_source) = finite_hint.unwrap();
             let result = crate::finite::solve_with_hint(
                 &bad,
                 context,
-                crate::finite::Limits {
+                limits.unwrap_or(crate::finite::Limits {
                     timeout_ms,
                     ..Default::default()
-                },
+                }),
                 search_hint,
             );
             let finite_seconds = finite_start.elapsed().as_secs_f64();
@@ -326,7 +436,7 @@ impl Check {
             fs::write(self.out.join(format!("{name}.out")), &raw).map_err(|e| e.to_string())?;
             self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"finite_bv",
                 "logical_expectation":logical_expectation,"search_hint_source":search_hint_source,
-                "seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":0.0,
+                "seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"emission_nodes":e.ids.len(),"emission_work":e.visits,"z3_seconds":0.0,
                 "finite_seconds":finite_seconds,"finite":diagnostics,"finite_diagnostics":diagnostics_path,
                 "kernel":kernel_report,"context_symbols":ctx,"concrete_model":result.original_formula_validated,
                 "evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
@@ -374,7 +484,7 @@ impl Check {
         }
         fs::write(self.out.join(format!("{name}.smt2")), &script).map_err(|e| e.to_string())?;
         fs::write(self.out.join(format!("{name}.out")), &raw).map_err(|e| e.to_string())?;
-        self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"z3","logical_expectation":logical_expectation,"seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"z3_seconds":z3_seconds,"kernel":kernel_report,"context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
+        self.reports.push(json!({"name":name,"status":status,"solver_result":verdict,"backend":"z3","logical_expectation":logical_expectation,"seconds":start.elapsed().as_secs_f64(),"emission_seconds":emission_seconds,"emission_nodes":e.ids.len(),"emission_work":e.visits,"z3_seconds":z3_seconds,"kernel":kernel_report,"context_symbols":ctx,"evidence":format!("{name}.smt2"),"solver_output":format!("{name}.out")}));
         Ok(())
     }
 }

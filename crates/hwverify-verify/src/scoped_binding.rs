@@ -151,10 +151,10 @@ pub(crate) fn obligations(target: &ScopedTarget, q: &mut Check) -> Res<Option<Va
     // Shared outputs satisfy the current and next invariants and all activated
     // relations. There is deliberately no blanket output equality on idle steps:
     // private-state stutter does not imply observable stutter for every contract.
-    q.query(
+    q.query_implication(
         "binding_product_preservation",
-        and(active, not(and(relation, next_invariant))),
-        false,
+        active,
+        and(relation, next_invariant),
         &context,
     )?;
     let reports = q.reports[before..].to_vec();

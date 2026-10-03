@@ -1,0 +1,79 @@
+{
+  "status": "selected_architecture_and_current_symbolic_gates_passed",
+  "selected": {
+    "status": "passed",
+    "architectural_refinement": "verified",
+    "microstep_passed": 436,
+    "microstep_total": 436,
+    "other_global_passed": 7,
+    "compositions": [
+      4,
+      16,
+      64
+    ],
+    "python_tests": 132,
+    "selected_cpu_mutants": 9,
+    "memory_mutants": 18,
+    "artifacts_rehashed": 7131,
+    "wall_seconds": 184.37540550500125,
+    "source_sha256": "b5c634c60b31c07313f5c54b069b5428013fa162b63f96e24cbb0f56f74722ab",
+    "engine_summary": {
+      "conjunctive_bundles": 1,
+      "custom_closed": 348,
+      "finite_queries": 131,
+      "finite_seconds": 48.18684255299996,
+      "finite_total_work": 3132146969,
+      "kernel_compute_seconds": 23.06339888399998,
+      "not_run": 0,
+      "query_seconds": 85.60738392100002,
+      "scoring_seconds": 0.0,
+      "source_validation_seconds": 0.15668154,
+      "source_validation_work": 13765,
+      "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+      "z3_queries": 0,
+      "z3_seconds": 0.0
+    },
+    "microstep_cost": {
+      "original_monolithic_result": "unknown",
+      "per_lemma_clause_limit": 1000000,
+      "per_lemma_timeout_ms": 10000,
+      "per_lemma_work_limit": 100000000,
+      "total_child_clauses": 32923155,
+      "total_child_seconds": 81.47853377499997,
+      "total_child_work": 3027420975,
+      "whole_bundle_budget_is_not_a_single_query_budget": true
+    },
+    "evidence": "rv32i-selected-ci-accepted-final"
+  },
+  "workspace": {
+    "release_tests": 317,
+    "strict_clippy": "passed",
+    "fmt": "passed",
+    "logs": [
+      "rv32i-proof-final-workspace.log",
+      "proof-bundle-clippy2.log"
+    ]
+  },
+  "legacy_symbolic_store": {
+    "status": "passed",
+    "evidence": "rv32i-proof-accepted-legacy-symbolic",
+    "external_solver_invoked": false
+  },
+  "whole_corpus_final_rerun": {
+    "status": "infrastructure_blocked_before_compilation",
+    "reason": "Pinned Celox GitHub fetch returned CONNECT403; process terminated before complete run-status",
+    "evidence": "rv32i-proof-accepted-legacy-proof",
+    "log": "rv32i-proof-accepted-legacy-proof-launch.log"
+  },
+  "original_finite_final_rerun": {
+    "status": "not_run",
+    "reason": "Same pinned upstream dependency unavailable"
+  },
+  "historical_passed_corpora": [
+    "rv32i-final-legacy-proof",
+    "rv32i-final-original-finite"
+  ],
+  "publication": "parent_owned_pending",
+  "budget_scope": "100M work,1M clauses,10 seconds per finite query; independent lemma aggregate explicitly larger; original monolith remains Unknown",
+  "historical_validation": "rv32i-final-validation-historical-preclosure.json"
+}

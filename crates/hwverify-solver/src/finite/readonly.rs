@@ -46,7 +46,7 @@ fn array_equality(t: &Term) -> bool {
             .first()
             .is_some_and(|a| matches!(a.0.sort, Sort::Mem(_, _)))
 }
-fn validate(t: &Term) -> Res<()> {
+pub(super) fn validate(t: &Term) -> Res<()> {
     let a = &t.0.args;
     if let Sort::Mem(aw, vw) = t.0.sort {
         if !(1..=64).contains(&aw) || !(1..=64).contains(&vw) {

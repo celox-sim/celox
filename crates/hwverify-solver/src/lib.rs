@@ -7,3 +7,12 @@ pub use z3::*;
 
 mod quantified;
 pub use quantified::*;
+
+mod conjunctive;
+pub use conjunctive::primitive_query_reports;
+
+mod checked_congruence;
+pub use checked_congruence::CutBudgetMode;
+
+mod proof_bundle;
+pub use proof_bundle::{ProofBundle, RewritePlan, SequentHandle};
