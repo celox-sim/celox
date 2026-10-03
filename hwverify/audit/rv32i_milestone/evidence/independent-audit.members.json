@@ -1,0 +1,35 @@
+{
+  "members": [
+    {
+      "path": "rv32i-independent-audit/check_final_proof_session.py",
+      "sha256": "59211eac1b7de233604e6cc497ae7dface9a9d1d469f5da7c8f764237c571628",
+      "size": 4514
+    },
+    {
+      "path": "rv32i-independent-audit/final-acceptance.json",
+      "sha256": "4281a58229e806be1785cde18713d3243e73d729140c2c17540269d40e25e19a",
+      "size": 1993
+    },
+    {
+      "path": "rv32i-independent-audit/final-session-artifact-audit.json",
+      "sha256": "775b539ebb3f89df51da2217b1e55465fb4de78e254569cab3e074548878c3cc",
+      "size": 522
+    },
+    {
+      "path": "rv32i-independent-audit/rerun_final_session.py",
+      "sha256": "784defe9a56f87baa6d828f1e2e7281c0e39a0c895f16050db2d5cce5b0a535f",
+      "size": 1094
+    },
+    {
+      "path": "rv32i-independent-audit/selected-instruction-programs.json",
+      "sha256": "1ccc23878eaa7f8d237019dd39935c43a33ba6f1b16008daa0ec02d5f3c4e5fb",
+      "size": 705
+    },
+    {
+      "path": "rv32i-independent-audit/selected_instruction_programs.py",
+      "sha256": "a7a9a99bfa9f4482545436eaea08f62e58efce9a0b42438fe820eb3e06d79814",
+      "size": 1636
+    }
+  ],
+  "schema": "rv32i-evidence-members-v1"
+}

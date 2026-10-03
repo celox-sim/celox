@@ -1,5 +1,15 @@
 # hwverify-rs 0.13.0
 
+## Selected RV32I milestone
+
+The selected four-stage RV32I source now has a checked architectural refinement:
+436/436 preservation children, seven other global obligations, and live
+4/16/64-word memory compositions pass. The original monolithic query remains
+Unknown; independent lemma budgets and timing limits are reported explicitly.
+Source, complete final audit archives, reproduction steps, historical corpus
+limits, and synthesis results are indexed in the
+[verified RV32I milestone](audit/rv32i_milestone/README.md).
+
 Rustによる、ハードウェア向け状態対応チェッカー。小さなCPUを題材に、**複数命令が同時に進むin-order pipelineのretireを、ISAの1ステップへ対応づける**ところまで実装した。既定はZ3 fallback、有限Bool/BVにはZ3を呼ばない選択経路もある。
 
 中核の型付きIR・正規化・証明義務・有限Bool/BVソルバーはRust実装。既存のSMT-LIB/Z3経路も選択肢として残る。Veryl conformanceアダプターではPythonでSIRを式へ変換し、RustサービスでSAT/UNSATを判定する。Pythonは実例生成・移行・独立監査にも使う。
@@ -345,3 +355,26 @@ plus a 7-bit proof-only immutable backing configuration and zero backing cells.
 Independently proved concrete reset/write/frame/read contracts justify checked
 step simulation at 4/16/64 words. Stores to unmapped addresses are ignored and
 unmapped reads stay zero. All previous readonly gates remain supported.
+
+### Automatic finite proof discovery
+
+An opt-in bounded planner can discover structural equality cuts and exhaustive
+mux branches without source-specific proof programs. Use
+`HWVERIFY_SOLVER=finite HWVERIFY_AUTOMATIC_PROOFS=independent_lemmas`.
+See [automatic proofs](AUTOMATIC-PROOFS.md) for the checked boundary, explicit
+aggregate budgets, strict shared mode, held-out evaluation, and limitations.
+The [phase-1 publication record](audit/automatic_proof/PHASE1-PUBLICATION.md)
+includes complete paired replay evidence and the remaining RV32I Unknown scope.
+
+The next checked-sharing increment reuses freshly proved compound equalities
+under exact guards; see [equality sharing](EQUALITY-SHARING.md) for its bounded
+scope, evidence, and remaining Unknown cases.
+Its [phase-2 publication record](audit/equality_sharing/publication/README.md)
+includes complete replay evidence and the mandatory diagnostic CI scope.
+
+A bounded [whole-word frontier policy](WORD-FRONTIERS.md) raises the measured
+selected hint-free RV32I child count from 430/436 to 431/436. Five residuals and
+the full hint-free result remain Unknown. Its generic regression gates and the
+separate Rust-Unknown/concrete-counterexample mutation evidence are documented.
+The [phase-3 publication record](audit/word_frontier/publication/README.md)
+preserves those exact boundaries and the complete nonbinary replay inventory.

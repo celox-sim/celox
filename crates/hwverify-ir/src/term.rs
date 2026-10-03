@@ -1,6 +1,7 @@
 //! Pure finite-word/array expression representation and memory laws. No I/O.
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap},
+    cmp::Ordering,
+    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
     hash::{Hash, Hasher},
     rc::Rc,
 };
@@ -20,20 +21,92 @@ impl Sort {
         }
     }
 }
-#[derive(Clone, Debug, PartialOrd, Ord)]
+#[derive(Clone, Debug)]
 pub struct Term(pub Rc<Node>);
 // Hash equality is only a fast rejection. Structural equality remains mandatory,
 // so collisions cannot establish expression equality or a proof.
 impl PartialEq for Term {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
-            || (self.0.structural_hash == other.0.structural_hash
-                && self.0.sort == other.0.sort
-                && self.0.op == other.0.op
-                && self.0.args == other.0.args)
+        let mut pending = vec![(self, other)];
+        let mut seen = HashSet::new();
+        while let Some((a, b)) = pending.pop() {
+            if Rc::ptr_eq(&a.0, &b.0) {
+                continue;
+            }
+            if a.0.structural_hash != b.0.structural_hash
+                || a.0.sort != b.0.sort
+                || a.0.op != b.0.op
+                || a.0.args.len() != b.0.args.len()
+            {
+                return false;
+            }
+            // Identity pairs only avoid revisiting already checked DAG nodes.
+            // Hash equality never establishes structural equality.
+            if seen.insert((Rc::as_ptr(&a.0), Rc::as_ptr(&b.0))) {
+                pending.extend(a.0.args.iter().zip(&b.0.args));
+            }
+        }
+        true
     }
 }
 impl Eq for Term {}
+impl PartialOrd for Term {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Term {
+    fn cmp(&self, other: &Self) -> Ordering {
+        enum Visit<'a> {
+            Pair(&'a Term, &'a Term),
+            Tail(&'a Term, &'a Term),
+        }
+        let mut pending = vec![Visit::Pair(self, other)];
+        let mut equal = HashSet::new();
+        while let Some(visit) = pending.pop() {
+            let ordering = match visit {
+                Visit::Pair(a, b) => {
+                    if Rc::ptr_eq(&a.0, &b.0)
+                        || equal.contains(&(Rc::as_ptr(&a.0), Rc::as_ptr(&b.0)))
+                    {
+                        continue;
+                    }
+                    let head = a.0.sort.cmp(&b.0.sort).then_with(|| a.0.op.cmp(&b.0.op));
+                    if head != Ordering::Equal {
+                        return head;
+                    }
+                    // Preserve derived Node ordering exactly: sort, op, the
+                    // lexicographic argument vector, then cached metadata.
+                    pending.push(Visit::Tail(a, b));
+                    pending.extend(
+                        a.0.args
+                            .iter()
+                            .zip(&b.0.args)
+                            .rev()
+                            .map(|(a, b)| Visit::Pair(a, b)),
+                    );
+                    continue;
+                }
+                Visit::Tail(a, b) => {
+                    let tail =
+                        a.0.args
+                            .len()
+                            .cmp(&b.0.args.len())
+                            .then_with(|| a.0.structural_hash.cmp(&b.0.structural_hash))
+                            .then_with(|| a.0.contains_memory.cmp(&b.0.contains_memory));
+                    if tail == Ordering::Equal {
+                        equal.insert((Rc::as_ptr(&a.0), Rc::as_ptr(&b.0)));
+                    }
+                    tail
+                }
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        Ordering::Equal
+    }
+}
 impl Hash for Term {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.0.structural_hash);
@@ -159,5 +232,96 @@ mod hash_collision_tests {
         set.insert(b.clone());
         assert_eq!(set.len(), 2);
         assert_ne!(eq(a.clone(), a), eq(b.clone(), b));
+    }
+}
+
+#[cfg(test)]
+mod dag_comparison_tests {
+    use super::*;
+
+    fn shared(depth: usize, leaf: &str) -> Term {
+        let mut t = var(leaf.into(), Sort::Bool);
+        for _ in 0..depth {
+            t = and(t.clone(), t);
+        }
+        t
+    }
+    fn old_cmp(a: &Term, b: &Term) -> Ordering {
+        let mut order = a.0.sort.cmp(&b.0.sort).then_with(|| a.0.op.cmp(&b.0.op));
+        for (x, y) in a.0.args.iter().zip(&b.0.args) {
+            if order != Ordering::Equal {
+                return order;
+            }
+            order = old_cmp(x, y);
+        }
+        order
+            .then_with(|| a.0.args.len().cmp(&b.0.args.len()))
+            .then_with(|| a.0.structural_hash.cmp(&b.0.structural_hash))
+            .then_with(|| a.0.contains_memory.cmp(&b.0.contains_memory))
+    }
+    #[test]
+    fn separately_allocated_shared_dags_compare_exactly() {
+        let a = shared(96, "a");
+        let b = shared(96, "a");
+        let c = shared(96, "b");
+        assert!(a == b);
+        assert_eq!(a.cmp(&b), Ordering::Equal);
+        assert!(a != c);
+        assert_eq!(a.cmp(&c), Ordering::Less);
+        assert_eq!(c.cmp(&a), Ordering::Greater);
+    }
+    #[test]
+    fn ordering_matches_original_lexicographic_definition() {
+        let mut terms = vec![
+            boolv(false),
+            boolv(true),
+            bv(1, 0),
+            bv(32, 7),
+            shared(5, "a"),
+            shared(5, "b"),
+        ];
+        for arity in 0..4 {
+            terms.push(node(Sort::Bool, "synthetic", terms[..arity].to_vec()));
+        }
+        for a in &terms {
+            for b in &terms {
+                assert_eq!(a.cmp(b), old_cmp(a, b));
+                assert_eq!(a.cmp(b), b.cmp(a).reverse());
+                assert_eq!(a == b, a.cmp(b) == Ordering::Equal);
+                for c in &terms {
+                    if a <= b && b <= c {
+                        assert!(a <= c);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn equal_hash_unequal_descendant_cannot_be_skipped() {
+        let collision = |op: &str, args: Vec<Term>| {
+            Term(Rc::new(Node {
+                sort: Sort::Bool,
+                op: op.into(),
+                args,
+                structural_hash: 0,
+                contains_memory: false,
+            }))
+        };
+        let a = collision("a", vec![]);
+        let b = collision("b", vec![]);
+        let x = collision("f", vec![a.clone(), a]);
+        let y = collision("f", vec![b.clone(), b]);
+        let lhs = collision("g", vec![x.clone(), x]);
+        let rhs = collision("g", vec![y.clone(), y]);
+        assert!(lhs != rhs);
+        assert_eq!(lhs.cmp(&rhs), old_cmp(&lhs, &rhs));
+        // Tail metadata remains in its historical position in Ord.
+        let mut different_metadata = (*lhs.0).clone();
+        different_metadata.contains_memory = true;
+        let different_metadata = Term(Rc::new(different_metadata));
+        assert_eq!(
+            lhs.cmp(&different_metadata),
+            old_cmp(&lhs, &different_metadata)
+        );
     }
 }

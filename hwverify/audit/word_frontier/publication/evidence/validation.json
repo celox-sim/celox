@@ -1,0 +1,14 @@
+{
+  "archive_bytes_verified": 6921088,
+  "archives_verified": 3,
+  "extracted_to": "/tmp/phase3-publication-extraction-check",
+  "extraction_disposition": "verified temporary extraction removed after validation",
+  "members_verified": 19502,
+  "original_files_verified": 19502,
+  "recorded_artifact_maps": [],
+  "recorded_artifact_references_verified": 0,
+  "saved_reports_create_proof_handles": false,
+  "scope": "Byte integrity and recorded artifact hash maps; no proof rerun or composition authorization",
+  "status": "verified",
+  "uncompressed_bytes_verified": 655873768
+}

@@ -1,0 +1,209 @@
+{
+  "schema": "automatic-proof-ci-v1",
+  "positive_count": 11,
+  "negative_count": 18,
+  "groups": [
+    {
+      "label": "w32",
+      "width": 32,
+      "alpha_seed": null,
+      "cases": [
+        {
+          "base_name": "wrapped_multiplier",
+          "name": "wrapped_multiplier",
+          "input_sha256": "eaee8dc8fbd4158791632046fbe6d7a91538b5569758feb2221e1d69b15a9578",
+          "expected": "verified"
+        },
+        {
+          "base_name": "double_guard_mac",
+          "name": "double_guard_mac",
+          "input_sha256": "3e91ffdbcf4ea2dc9e866bbfc4d0341702cb743e5376a564659918e5bb88df16",
+          "expected": "verified"
+        },
+        {
+          "base_name": "wrapped_barrel_shift",
+          "name": "wrapped_barrel_shift",
+          "input_sha256": "bf58a9d423f0fb59f88648437879c9357e370d0d7da5f1ef9daf30537d295830",
+          "expected": "verified"
+        },
+        {
+          "base_name": "postscaled_multiplier",
+          "name": "postscaled_multiplier",
+          "input_sha256": "35611a7f2db3de18d8b6f6bc2198914918cd1fbfbd6a62a4e8af0b37af810ae6",
+          "expected": "verified"
+        },
+        {
+          "base_name": "operand_isolation",
+          "name": "operand_isolation",
+          "input_sha256": "aaccaeeea530de7f2efa5a7556bf300062b2837f1a4d539e3dba596a218dac03",
+          "expected": "verified"
+        },
+        {
+          "base_name": "double_guard_barrel_shift",
+          "name": "double_guard_barrel_shift",
+          "input_sha256": "3e60e0902d75e38fe1cedcda8a4e8e8320f2d8c59571a265375c63c147e89e40",
+          "expected": "verified"
+        },
+        {
+          "base_name": "wrapped_multiplier_wrong_result",
+          "name": "wrapped_multiplier_wrong_result",
+          "input_sha256": "43f25175a1f35ccac158b7ca8f5232c4dda2d679377e732e24c431605b31d50d",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "wrapped_multiplier_complement_wrong",
+          "name": "wrapped_multiplier_complement_wrong",
+          "input_sha256": "fcfebc15c7b3d3cd7c70e72575f421cd4f851daceb2af47b6c903cea11142822",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "double_guard_mac_wrong_result",
+          "name": "double_guard_mac_wrong_result",
+          "input_sha256": "5f112d7bdb4d0804cfa326c7c9654cea7658951b7099facc288e24c140c66185",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "double_guard_mac_complement_wrong",
+          "name": "double_guard_mac_complement_wrong",
+          "input_sha256": "27bb67aa1f9923199d832f0531cb33cb6ac0a4ac4174fed6d6ee7c34fe052d6e",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "wrapped_barrel_shift_wrong_result",
+          "name": "wrapped_barrel_shift_wrong_result",
+          "input_sha256": "990c9e418d1dcbefdd603a658db7239298912bdb954e1b144485d5db239e2c86",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "wrapped_barrel_shift_complement_wrong",
+          "name": "wrapped_barrel_shift_complement_wrong",
+          "input_sha256": "2f25161d714931799ec6775753bdc25169584c145324d4dc534e2b51a8e192dd",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "postscaled_multiplier_wrong_result",
+          "name": "postscaled_multiplier_wrong_result",
+          "input_sha256": "c2512c11969cb0401b754446e842392b5f2683f7b4b0c952509f104a0c430afd",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "postscaled_multiplier_complement_wrong",
+          "name": "postscaled_multiplier_complement_wrong",
+          "input_sha256": "3a46180ada2f095027714b8558a532708610314aa46d3edca222484be625e6d1",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "operand_isolation_wrong_result",
+          "name": "operand_isolation_wrong_result",
+          "input_sha256": "f0b6f03a29da8a802bde01ae465b71cfd71be3847dd9f3df674041e631a672ab",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "operand_isolation_complement_wrong",
+          "name": "operand_isolation_complement_wrong",
+          "input_sha256": "8cbea3c1b78931b86dd7d7099739a90ad0dca64ddd67c4a1af97d3868f880ad2",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "double_guard_barrel_shift_wrong_result",
+          "name": "double_guard_barrel_shift_wrong_result",
+          "input_sha256": "71529ea061b53ad7e873ed1b83626d579c99c9ec7f2e2078c97386ffb4667cf6",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "double_guard_barrel_shift_complement_wrong",
+          "name": "double_guard_barrel_shift_complement_wrong",
+          "input_sha256": "5d4aab0059dbfc6cf069d4deab59601f77e3a4a3d30c79c563f43e7e7e65a114",
+          "expected": "counterexample"
+        }
+      ]
+    },
+    {
+      "label": "shifts64",
+      "width": 64,
+      "alpha_seed": null,
+      "cases": [
+        {
+          "base_name": "wrapped_barrel_shift",
+          "name": "wrapped_barrel_shift",
+          "input_sha256": "ee85d5736ecdf6d13063d0a14a9886d5a6245e83e40a0db3507019fd558332af",
+          "expected": "verified"
+        },
+        {
+          "base_name": "double_guard_barrel_shift",
+          "name": "double_guard_barrel_shift",
+          "input_sha256": "b2c3e51c5bbaf9fd7dd82e5819726d7eb611bb229c4b306cfaf5265b64563757",
+          "expected": "verified"
+        },
+        {
+          "base_name": "wrapped_barrel_shift_complement_wrong",
+          "name": "wrapped_barrel_shift_complement_wrong",
+          "input_sha256": "e4c403e39c6a2f9040799235458344ec993585170a3d6b007253d635c6573d83",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "double_guard_barrel_shift_complement_wrong",
+          "name": "double_guard_barrel_shift_complement_wrong",
+          "input_sha256": "6f6470a7c807ed00368f91901f2298cc65c90a2eca0336df5606072a44a4c706",
+          "expected": "counterexample"
+        }
+      ]
+    },
+    {
+      "label": "heldout24",
+      "width": 24,
+      "alpha_seed": null,
+      "cases": [
+        {
+          "base_name": "double_guard_mac",
+          "name": "double_guard_mac",
+          "input_sha256": "b3ce38dff7669b3460f1e43e93c3d347135275b7d4e2e94e511b14689f3deb45",
+          "expected": "verified"
+        },
+        {
+          "base_name": "operand_isolation",
+          "name": "operand_isolation",
+          "input_sha256": "6c3b0a37e2e858d810e4891836acddcbde7e103c7e6531d8f1072beb23296a86",
+          "expected": "verified"
+        },
+        {
+          "base_name": "double_guard_mac_complement_wrong",
+          "name": "double_guard_mac_complement_wrong",
+          "input_sha256": "45d5a60c709e4f3efdbb70c613b91471bf78b47ecd61963cb3781b4ebe37749b",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "operand_isolation_complement_wrong",
+          "name": "operand_isolation_complement_wrong",
+          "input_sha256": "eaceaf5f67591e1da4fad52cd663605a49dc30acf78011b0eade5cd04a21def2",
+          "expected": "counterexample"
+        }
+      ]
+    },
+    {
+      "label": "alpha24",
+      "width": 24,
+      "alpha_seed": 7301,
+      "cases": [
+        {
+          "base_name": "wrapped_multiplier",
+          "name": "wrapped_multiplier__alpha_7301",
+          "input_sha256": "2060ffc0cdfeaeb4dcfca7ac0249a9754dcf9de8540ba07d1ac6bdfa157a39c9",
+          "expected": "verified"
+        },
+        {
+          "base_name": "wrapped_multiplier_wrong_result",
+          "name": "wrapped_multiplier_wrong_result__alpha_7301",
+          "input_sha256": "aa879b88591395e7852361e9d40c7ee5841d18d446f8ddffb7a879dd8d7b8749",
+          "expected": "counterexample"
+        },
+        {
+          "base_name": "wrapped_multiplier_complement_wrong",
+          "name": "wrapped_multiplier_complement_wrong__alpha_7301",
+          "input_sha256": "a7b7dc2f7dce6673fa78a7ff4ad1f7b0bdee1a03d33df940d124588e0c35db9d",
+          "expected": "counterexample"
+        }
+      ]
+    }
+  ]
+}

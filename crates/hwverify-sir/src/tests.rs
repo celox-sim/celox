@@ -507,3 +507,108 @@ fn partial_writes_drop_word_fast_path_until_unconditional_overwrite() {
         var("c", 8),
     );
 }
+
+#[test]
+fn split_initialization_requires_every_bit_before_reading() {
+    for w in [2, 8, 32, 64] {
+        let mut storage = Storage::new(w, 1, false);
+        let input = var("input", w);
+        storage
+            .write(
+                (w - 1) as usize,
+                1,
+                extract(input.clone(), w - 1, 1),
+                b(true),
+            )
+            .unwrap();
+        assert!(storage.read(0, w).unwrap_err().contains("unbound"));
+        storage
+            .write(0, w - 1, extract(input.clone(), 0, w - 1), b(true))
+            .unwrap();
+        prove(storage.read(0, w).unwrap(), input);
+    }
+}
+
+#[test]
+fn incomplete_initialization_rejects_reads_conditional_writes_and_joins() {
+    let mut storage = Storage::new(8, 1, false);
+    storage.write(0, 4, bv(4, 10), b(true)).unwrap();
+    // Overlapping writes do not count twice toward coverage.
+    storage.write(2, 4, bv(4, 3), b(true)).unwrap();
+    assert!(storage.read(0, 8).is_err());
+    // Even a defined slice stays unreadable until the entire lane is initialized.
+    assert!(storage.read(0, 2).is_err());
+    assert!(storage.read(6, 2).is_err());
+    assert!(storage
+        .write(6, 2, bv(2, 1), ir::var("g".into(), Sort::Bool))
+        .is_err());
+    assert!(Storage::merge(b(true), &storage, &storage).is_err());
+    storage.write(6, 2, bv(2, 2), b(true)).unwrap();
+    prove(storage.read(0, 8).unwrap(), bv(8, 142));
+}
+
+#[test]
+fn whole_write_replaces_pending_initialization() {
+    let mut storage = Storage::new(8, 1, false);
+    storage.write(3, 2, bv(2, 3), b(true)).unwrap();
+    storage.write(0, 8, bv(8, 42), b(true)).unwrap();
+    assert!(storage.cells[0].pending_bits.is_empty());
+    prove(storage.read(0, 8).unwrap(), bv(8, 42));
+}
+
+#[test]
+fn split_initialization_is_checked_at_public_outputs() {
+    let empty = unit(json!({"0":block(vec![],json!("Return"))}), &[]);
+    let (mut code, mut config) = compiled_unit(empty);
+    config["state"] = json!({});
+    let first = json!({"Store":[address(3,0),{"Static":4},4,0,[],[]]});
+    let second = json!({"Store":[address(3,0),{"Static":0},4,0,[],[]]});
+    let comb = unit(
+        json!({"0":block(vec![load(0,2,0,4),first.clone(),second],json!("Return"))}),
+        &[4],
+    );
+    code["sir"]["eval_comb"] = json!([comb]);
+    let lifted = lift(&code, &config).unwrap();
+    let nibble = extract(var("i.a", 8), 0, 4);
+    prove(
+        lifted.outputs["q"].clone(),
+        cat(nibble.clone(), nibble).unwrap(),
+    );
+    code["sir"]["eval_comb"] = json!([unit(
+        json!({"0":block(vec![load(0,2,0,4),first],json!("Return"))}),
+        &[4]
+    )]);
+    assert!(lift(&code, &config).unwrap_err().contains("unbound"));
+}
+
+#[test]
+fn unbound_cross_lane_fragments_require_complete_individual_lanes() {
+    let mut storage = Storage::new(8, 2, false);
+    let middle = var("middle", 8);
+    let low = var("low", 4);
+    let high = var("high", 4);
+    storage.write(4, 8, middle.clone(), b(true)).unwrap();
+    assert!(storage.read(0, 8).is_err());
+    assert!(storage.read(8, 8).is_err());
+    assert!(storage.read(0, 16).is_err());
+    assert!(storage
+        .write(
+            0,
+            8,
+            var("replacement", 8),
+            ir::var("guard".into(), Sort::Bool)
+        )
+        .is_err());
+    storage.write(0, 4, low.clone(), b(true)).unwrap();
+    prove(
+        storage.read(0, 8).unwrap(),
+        cat(extract(middle.clone(), 0, 4), low.clone()).unwrap(),
+    );
+    assert!(storage.read(8, 8).is_err());
+    assert!(storage.read(0, 16).is_err());
+    storage.write(12, 4, high.clone(), b(true)).unwrap();
+    prove(
+        storage.read(0, 16).unwrap(),
+        cat(high, cat(middle, low).unwrap()).unwrap(),
+    );
+}

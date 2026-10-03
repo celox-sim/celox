@@ -1,0 +1,12 @@
+{
+  "date_utc": "2026-10-03",
+  "workspace_release_tests": 317,
+  "workspace_fmt": "passed",
+  "workspace_release_all_target_clippy": "passed",
+  "focused_python_tests": 132,
+  "python_status": "passed",
+  "source_path_manifest": "accepted-source-paths.json",
+  "environment_note": "Used recovered pinned Rust 1.98.1 and explicit Z3_BIN for legacy Z3-specific tests. Selected RV32I and symbolic gates retain finite-only tripwires.",
+  "fresh_whole_corpus_rerun": false,
+  "fresh_selected_architectural_proof_rerun": false
+}

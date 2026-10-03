@@ -49,6 +49,18 @@ jobs:
         run: ./conformance/veryl-proof/run_ci.sh "$RUNNER_TEMP/veryl-proof"
       - name: Verify symbolic Veryl pipeline against ISA and reject RTL mutants
         run: ./conformance/veryl-symbolic/run_ci.sh "$RUNNER_TEMP/veryl-symbolic"
+      - name: Verify selected RV32I architecture, memory, latency and mutations
+        run: ./conformance/veryl-symbolic/run_rv32i_ci.sh "$RUNNER_TEMP/selected-rv32i"
+      - name: Verify fixed automatic-proof held-outs and original-formula mutants
+        run: ./conformance/veryl-symbolic/run_automatic_ci.sh "$RUNNER_TEMP/automatic-proof"
+      - name: Verify checked equality sharing and retain explicit Unknown diagnostics
+        run: |
+          python3 -m unittest audit.equality_sharing.test_generate audit.equality_sharing.test_evidence audit.equality_sharing.test_ci
+          python3 -m audit.equality_sharing.ci --checker target/release/hwverify-rs --out "$RUNNER_TEMP/equality-sharing"
+      - name: Verify whole-word frontier controls and original-formula mutants
+        run: |
+          python3 -m unittest audit.word_frontier.test_generate audit.word_frontier.test_ci
+          python3 -m audit.word_frontier.ci --checker target/release/hwverify-rs --expected-checker-sha256 "$(sha256sum target/release/hwverify-rs | cut -d' ' -f1)" --out "$RUNNER_TEMP/word-frontier"
       - name: Upload whole-corpus proof audit and coverage dispositions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -63,5 +75,37 @@ jobs:
         with:
           name: veryl-symbolic-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/veryl-symbolic/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload selected RV32I proof and counterexamples
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: selected-rv32i-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/selected-rv32i/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload automatic-proof fixed-matrix evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: automatic-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/automatic-proof/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload equality-sharing proof and diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: equality-sharing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/equality-sharing/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload whole-word frontier control evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: word-frontier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/word-frontier/
           if-no-files-found: error
           retention-days: 14

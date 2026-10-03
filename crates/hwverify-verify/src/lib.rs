@@ -12,3 +12,5 @@ pub use scoped_specification::check_scoped_specification;
 mod scoped_binding;
 
 mod quantified_examples;
+
+mod proof_program;

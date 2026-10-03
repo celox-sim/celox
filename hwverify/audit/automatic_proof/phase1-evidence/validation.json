@@ -1,0 +1,22 @@
+{
+  "archive_bytes_verified": 5561008,
+  "archives_verified": 3,
+  "extracted_to": null,
+  "members_verified": 13638,
+  "original_files_verified": 13638,
+  "recorded_artifact_maps": [
+    {
+      "document": "phase1-ci/automatic-proof-phase1-ci-reviewed/gate/run-status.json",
+      "entries": 1195,
+      "json_path": [
+        "artifacts"
+      ],
+      "verified": true
+    }
+  ],
+  "recorded_artifact_references_verified": 1195,
+  "saved_reports_create_proof_handles": false,
+  "scope": "Byte integrity and recorded artifact hash maps; no proof rerun or composition authorization",
+  "status": "verified",
+  "uncompressed_bytes_verified": 501046757
+}

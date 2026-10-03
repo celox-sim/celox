@@ -120,7 +120,7 @@ impl Design {
                     "can_step",
                     "progress",
                 ],
-                &["name", "hold_when", "program_contract"],
+                &["name", "hold_when", "program_contract", "proof_programs"],
             ),
         )?;
         if doc["version"] != 2 {

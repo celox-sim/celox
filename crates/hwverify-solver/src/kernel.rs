@@ -109,6 +109,10 @@ impl Context {
             result = boolean(&a[0]).map(|x| boolv(!x));
             if a[0].0.op == "not" {
                 result = Some(a[0].0.args[0].clone());
+            } else if a[0].0.op == "=>" {
+                // Exact polarity rule. Unlike a positive implication, its
+                // negation asserts the guard and negates the consequent.
+                result = Some(and(a[0].0.args[0].clone(), not(a[0].0.args[1].clone())));
             }
         } else if op == "ite" {
             result = boolean(&a[0]).map(|g| a[if g { 1 } else { 2 }].clone());
@@ -457,5 +461,56 @@ pub fn refute(t: &Term) -> ProofAttempt {
         residual: r,
         rules: c.rules,
         rounds,
+    }
+}
+
+#[cfg(test)]
+mod implication_tests {
+    use super::*;
+    fn evaluate(t: &Term, a: bool, b: bool, c: bool) -> bool {
+        match t.0.op.as_str() {
+            "@a" => a,
+            "@b" => b,
+            "@c" => c,
+            "true" => true,
+            "false" => false,
+            "not" => !evaluate(&t.0.args[0], a, b, c),
+            "and" => evaluate(&t.0.args[0], a, b, c) && evaluate(&t.0.args[1], a, b, c),
+            "or" => evaluate(&t.0.args[0], a, b, c) || evaluate(&t.0.args[1], a, b, c),
+            "=>" => !evaluate(&t.0.args[0], a, b, c) || evaluate(&t.0.args[1], a, b, c),
+            _ => panic!("independent Boolean oracle"),
+        }
+    }
+    #[test]
+    fn negated_implication_truth_table_and_nested_guards() {
+        let (a, b, c) = (
+            var("a".into(), Sort::Bool),
+            var("b".into(), Sort::Bool),
+            var("c".into(), Sort::Bool),
+        );
+        for term in [
+            not(node(Sort::Bool, "=>", vec![a.clone(), b.clone()])),
+            not(node(
+                Sort::Bool,
+                "=>",
+                vec![
+                    a.clone(),
+                    node(Sort::Bool, "=>", vec![b.clone(), c.clone()]),
+                ],
+            )),
+        ] {
+            let simplified = simplify(&term, &[]);
+            for bits in 0..8 {
+                assert_eq!(
+                    evaluate(&term, bits & 1 != 0, bits & 2 != 0, bits & 4 != 0),
+                    evaluate(&simplified, bits & 1 != 0, bits & 2 != 0, bits & 4 != 0)
+                );
+            }
+        }
+        let neg = not(node(Sort::Bool, "=>", vec![a.clone(), b.clone()]));
+        assert!(refute(&and(neg.clone(), not(a.clone()))).closed);
+        assert!(refute(&and(neg.clone(), b.clone())).closed);
+        assert!(!refute(&neg).closed);
+        assert!(!refute(&and(node(Sort::Bool, "=>", vec![a.clone(), b]), not(a))).closed);
     }
 }

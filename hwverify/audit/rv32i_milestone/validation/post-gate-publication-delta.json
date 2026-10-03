@@ -1,0 +1,26 @@
+{
+  "executable_sources_unchanged": true,
+  "changes": [
+    {
+      "path": ".github/workflows/veryl-fv.yml",
+      "accepted_gate_sha256": "1f46fb231ab4fac96ba64431882f5f7d02f7ae70f32625ba9690028f99897546",
+      "publication_sha256": "b4aa17ca035f4bab9ada03deab31af5c3c64188a348c03ec717ab5af8cb7a2fb"
+    },
+    {
+      "path": "audit/veryl_scaling/RV32I-CI.md",
+      "accepted_gate_sha256": "2c475b312c7c87e6a8024ecc9d86a1c943f7bf43cdb1b991ddc07c18c7253071",
+      "publication_sha256": "ef62e86fc47ac61d845c654668d3460756973d4fc99e2be48b9134896fd2e185"
+    },
+    {
+      "path": "audit/veryl_scaling/RV32I.md",
+      "accepted_gate_sha256": "e615ed03a2ab7d5dbe01d01e152c97dbc59ce7beac624f5a9c7ff385a87ed316",
+      "publication_sha256": "a193862e1095958f2203cfb3af5105552d3f7e336059ff1cb0f7142bca073117"
+    },
+    {
+      "path": "audit/veryl_scaling/RV32I_SPLIT_REFINEMENT.md",
+      "accepted_gate_sha256": "328bedd4b1ec37714adea8ad73353e3903ade396f1239c1e7509011fd51bf765",
+      "publication_sha256": "77f737c679c15dac7195bb83a0c9786a5c4b4cd1333583543eb61a734f23ce1d"
+    }
+  ],
+  "note": "Only three result documents and the workflow wiring were changed after the accepted selected gate. This record does not claim a fresh hosted CI result."
+}

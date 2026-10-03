@@ -291,6 +291,8 @@ fn apply_word_update(
 }
 #[derive(Clone, Debug)]
 struct Cell {
+    // Explicit fragments only: an unbound lane has no readable value until complete.
+    pending_bits: BTreeMap<u32, Term>,
     whole_word: Option<std::rc::Rc<WordUpdate>>,
     value: Option<Term>,
     mask: Term,
@@ -306,6 +308,7 @@ impl Storage {
             lane,
             cells: (0..count)
                 .map(|_| Cell {
+                    pending_bits: BTreeMap::new(),
                     whole_word: Some(std::rc::Rc::new(WordUpdate::Keep)),
                     value: if sparse { Some(bv(lane, 0)) } else { None },
                     mask: bv(lane, 0),
@@ -367,6 +370,31 @@ impl Storage {
             );
             let moved = op("bvshl", self.lane, piece, bv(self.lane, low as u64));
             let cell = &mut self.cells[index];
+            if cell.value.is_none() && !(low == 0 && n == self.lane) {
+                if guard != b(true) {
+                    return Err("conditional partial write to unbound storage".into());
+                }
+                // The frontend may split a full initialization into bit ranges.
+                // Preserve only explicitly assigned bits; never invent an old value.
+                for bit in 0..n {
+                    cell.pending_bits.insert(
+                        low as u32 + bit,
+                        extract(value.clone(), (pos - offset) as u32 + bit, 1),
+                    );
+                }
+                cell.whole_word = None;
+                cell.mask = op("bvor", self.lane, cell.mask.clone(), mask);
+                if cell.pending_bits.len() == self.lane as usize {
+                    let mut joined = cell.pending_bits[&0].clone();
+                    for bit in 1..self.lane {
+                        joined = cat(cell.pending_bits[&bit].clone(), joined)?;
+                    }
+                    cell.value = Some(joined);
+                    cell.pending_bits.clear();
+                }
+                pos += n as usize;
+                continue;
+            }
             let new = if low == 0 && n == self.lane {
                 moved.clone()
             } else {
@@ -403,6 +431,7 @@ impl Storage {
                         .ok_or("conditional write to unbound storage")?,
                 )
             });
+            cell.pending_bits.clear();
             cell.mask = ite(
                 guard.clone(),
                 op("bvor", self.lane, cell.mask.clone(), mask),
@@ -416,6 +445,13 @@ impl Storage {
         if a.lane != c.lane || a.cells.len() != c.cells.len() {
             return Err("storage join shape mismatch".into());
         }
+        if a.cells
+            .iter()
+            .chain(&c.cells)
+            .any(|cell| !cell.pending_bits.is_empty())
+        {
+            return Err("join with incomplete unbound storage initialization".into());
+        }
         Ok(Self {
             lane: a.lane,
             cells: a
@@ -423,6 +459,7 @@ impl Storage {
                 .iter()
                 .zip(&c.cells)
                 .map(|(a, c)| Cell {
+                    pending_bits: BTreeMap::new(),
                     whole_word: match (&a.whole_word, &c.whole_word) {
                         (Some(a), Some(c)) => {
                             Some(word_choice(guard.clone(), a.clone(), c.clone()))
@@ -848,7 +885,8 @@ impl Lifter {
                 .state
                 .get_mut(&a)
                 .unwrap()
-                .write(offset, w, value, b(true));
+                .write(offset, w, value, b(true))
+                .map_err(|error| format!("{error}: address {a:?}, offset {offset}, width {w}"));
         }
         self.stats.dynamic_accesses += 1;
         let bits = self.frame.state[&a].bits();
@@ -859,7 +897,10 @@ impl Lifter {
                     .state
                     .get_mut(&a)
                     .unwrap()
-                    .write(pos, w, value.clone(), guard)?
+                    .write(pos, w, value.clone(), guard)
+                    .map_err(|error| {
+                        format!("{error}: address {a:?}, dynamic candidate offset {pos}, width {w}")
+                    })?
             }
         }
         Ok(())
