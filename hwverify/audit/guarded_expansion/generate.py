@@ -3,6 +3,7 @@ import copy
 from audit.equality_sharing.generate import alpha_rename, conjunction, op, word
 
 FAMILIES = ('guarded_encoded_product', 'guarded_encoded_mac_shift')
+POSITIVES = tuple(name for family in FAMILIES for name in (family, family+'_reversed'))
 
 
 def expression(family, value, factor, bias, shift):
@@ -43,7 +44,7 @@ def document(family, width=32):
             'commit': 'retire', 'can_step': 'allowed', 'progress': {'enabled': True, 'rank': word(1, 0)}}
 
 
-def cases(width=32):
+def _forward_cases(width=32):
     for family in FAMILIES:
         original = document(family, width)
         yield original
@@ -59,3 +60,15 @@ def cases(width=32):
                 bad['spec']['next']['out'] = bad['spec']['next']['out'][2]
                 bad['impl']['next']['out'] = value[2]
             yield bad
+
+
+def cases(width=32):
+    for doc in _forward_cases(width):
+        yield doc
+        mirrored = copy.deepcopy(doc)
+        mirrored['name'] += '_reversed'
+        # Reverse only the output equality; definitions and guards are identical.
+        equality = mirrored['binding'][1]
+        assert equality == ['eq', 'spec.out', 'impl.out']
+        equality[1], equality[2] = equality[2], equality[1]
+        yield mirrored

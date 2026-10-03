@@ -4,14 +4,14 @@ import json
 import random
 import unittest
 from audit.equality_sharing.test_generate import related, reset, transition
-from audit.guarded_expansion.generate import FAMILIES, alpha_rename, cases, document
+from audit.guarded_expansion.generate import FAMILIES, POSITIVES, alpha_rename, cases, document
 
 
 class Fixtures(unittest.TestCase):
     def test_unhinted_deterministic_full_domains(self):
         docs = list(cases())
         self.assertEqual(docs, list(cases()))
-        self.assertEqual(len(docs), 8)
+        self.assertEqual(len(docs), 16)
         for d in docs:
             self.assertNotIn('proof_programs', d)
             self.assertNotIn('program_contract', d)
@@ -48,13 +48,21 @@ class Fixtures(unittest.TestCase):
         for width in (4, 24, 32, 64):
             mask = (1 << width)-1
             for d in cases(width):
-                if d['name'] in FAMILIES:
+                if d['name'] in POSITIVES:
                     continue
                 inp = {'i.'+k: False if t == 'bool' else 0 for k, t in d['inputs'].items()}
                 inp['i.inactive'] = 1
                 state = reset(d, inp, mask)
                 self.assertTrue(related(d, state, mask))
                 self.assertFalse(related(d, transition(d, state, inp, mask), mask), d['name'])
+
+    def test_reversal_changes_only_output_equality_orientation(self):
+        docs = list(cases())
+        for normal, mirror in zip(docs[::2], docs[1::2]):
+            self.assertEqual(mirror['binding'][1], ['eq', 'impl.out', 'spec.out'])
+            mirror['binding'][1] = ['eq', 'spec.out', 'impl.out']
+            mirror['name'] = normal['name']
+            self.assertEqual(normal, mirror)
 
     def test_alpha_equivalence(self):
         seed, mask, rng = 25109, (1 << 24)-1, random.Random(25109)

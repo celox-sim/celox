@@ -1,9 +1,9 @@
-"""Fail-closed fresh 24-row guarded word expansion gate; every positive must verify."""
+"""Fail-closed fresh 48-row guarded word expansion gate; every positive must verify."""
 import argparse
 import json
 from pathlib import Path
 from audit.equality_sharing.ci import digest, read_json, require, validate_outcome
-from audit.guarded_expansion.generate import FAMILIES, alpha_rename, cases
+from audit.guarded_expansion.generate import FAMILIES, POSITIVES, alpha_rename, cases
 from audit.word_frontier.run import run
 
 GROUPS=((32,None),(24,None),(24,25109))
@@ -16,7 +16,7 @@ def matrix():
         for doc in cases(width):
             if seed is not None: doc=alpha_rename(doc,seed)
             rows.append({'key':f'{width}:{seed}:{doc["name"]}', 'input_sha256':digest((json.dumps(doc,indent=2)+'\n').encode())})
-    require(len(rows)==24 and len({r['key'] for r in rows})==24,'invalid matrix')
+    require(len(rows)==48 and len({r['key'] for r in rows})==48,'invalid matrix')
     require({r['key']:r['input_sha256'] for r in rows}==read_json(MANIFEST),'frozen input matrix changed')
     return rows
 
@@ -27,7 +27,7 @@ def validate_results(summaries):
     for (width,seed),s in zip(GROUPS,summaries):
         require(s.get('width')==width and s.get('alpha_seed')==seed,'run group mismatch')
         require(s.get('status')=='passed' and s.get('forbidden_solver_invocations')=='','run failed or solver invoked')
-        require(len(s.get('rows',[]))==8,'missing case')
+        require(len(s.get('rows',[]))==16,'missing case')
         for r in s['rows']:
             require(not r.get('errors'),'case audit failed')
             actual.append({'key':f'{width}:{seed}:{r["name"]}', 'input_sha256':r['input_sha256']})
@@ -38,7 +38,7 @@ def validate_results(summaries):
                 require(r.get('status')=='stuttering_refinement_verified' and r.get('disposition')=='limitation_improved_verified','control positive is not verified')
                 positive+=1
     require(actual==expected,'missing, duplicate, reordered or changed matrix row')
-    require(positive==6 and negative==18,'incomplete outcomes')
+    require(positive==12 and negative==36,'incomplete outcomes')
     require(len({s['checker_sha256'] for s in summaries})==1,'mixed checker hashes')
     return {'positive_controls_verified':positive,'original_formula_sat_mutants':negative}
 
@@ -50,7 +50,7 @@ def main():
     a=p.parse_args();matrix();a.out.mkdir(parents=True,exist_ok=False)
     results=[]
     for width,seed in GROUPS:
-        results.append(run(a.checker,a.out.resolve()/f'width{width}-alpha{seed}',width,seed,expected_sha256=a.expected_checker_sha256, case_generator=cases, positive_names=FAMILIES))
+        results.append(run(a.checker,a.out.resolve()/f'width{width}-alpha{seed}',width,seed,expected_sha256=a.expected_checker_sha256, case_generator=cases, positive_names=POSITIVES))
     summary={'status':'passed','checker_sha256':a.expected_checker_sha256,**validate_results(results),
              'runs':[str((a.out/f'width{w}-alpha{s}'/'summary.json').resolve()) for w,s in GROUPS],
              'input_manifest_sha256':digest(MANIFEST.read_bytes())}

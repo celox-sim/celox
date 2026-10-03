@@ -1,0 +1,52 @@
+[
+  {
+    "path": "/workspace/next-proof/orientation-before/width24-alpha25109/checker",
+    "size": 4762608,
+    "sha256": "5a0f2fe1544b15c012578f79794f961611e83eeb2dc9aa879ca616bde8e090d9"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-before/width24-alphaNone/checker",
+    "size": 4762608,
+    "sha256": "5a0f2fe1544b15c012578f79794f961611e83eeb2dc9aa879ca616bde8e090d9"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-before/width32-alphaNone/checker",
+    "size": 4762608,
+    "sha256": "5a0f2fe1544b15c012578f79794f961611e83eeb2dc9aa879ca616bde8e090d9"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-candidate/width24-alpha25109/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-candidate/width24-alphaNone/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-candidate/width32-alphaNone/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-phase2/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-phase3/width24-alpha18073/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-phase3/width24-alphaNone/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  },
+  {
+    "path": "/workspace/next-proof/orientation-phase3/width32-alphaNone/checker",
+    "size": 4774792,
+    "sha256": "e47977e1b7af703e5364899c86d6dc022515623aeb6e7df6b813d013389beb5b"
+  }
+]

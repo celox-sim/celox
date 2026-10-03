@@ -381,6 +381,6 @@ preserves those exact boundaries and the complete nonbinary replay inventory.
 
 [Checked guarded word expansion](audit/guarded_expansion/README.md) lets the
 automatic planner expose asserted word definitions using fresh equality handles.
-Two independent generic families gain coverage, with 18 original-formula SAT
-mutants in the fixed gate. The selected hint-free RV32I result remains 431/436;
+Two independent generic families gain coverage in both equality orientations,
+with 12 positive instances and 36 original-formula SAT mutants in the fixed gate. The selected hint-free RV32I result remains 431/436;
 the five Unknowns and their guard-selection barrier are documented explicitly.

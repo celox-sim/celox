@@ -9,7 +9,7 @@ def valid_summaries():
     frozen=iter(matrix());out=[]
     for w,s in GROUPS:
         rows=[]
-        for _ in range(8):
+        for _ in range(16):
             r=next(frozen);name=r['key'].split(':',2)[2]
             negative='_wrong_result' in name or '_complement_wrong' in name or '_guard_escape_wrong' in name
             rows.append({'name':name,'input_sha256':r['input_sha256'],'errors':[],
@@ -23,8 +23,8 @@ def valid_summaries():
 
 class Gate(unittest.TestCase):
     def test_frozen_matrix(self):
-        self.assertEqual(len(matrix()),24)
-        self.assertEqual(validate_results(valid_summaries()),{'positive_controls_verified':6,'original_formula_sat_mutants':18})
+        self.assertEqual(len(matrix()),48)
+        self.assertEqual(validate_results(valid_summaries()),{'positive_controls_verified':12,'original_formula_sat_mutants':36})
 
     def reject(self,change):
         summaries=valid_summaries();change(summaries)
@@ -38,8 +38,8 @@ class Gate(unittest.TestCase):
         self.reject(lambda s:s[0]['rows'][0].update(status='unknown',disposition='diagnostic_unknown'))
 
     def test_auxiliary_sat_and_mutant_verification_fail(self):
-        self.reject(lambda s:s[0]['rows'][1].update(disposition='auxiliary_sat'))
-        self.reject(lambda s:s[0]['rows'][1].update(disposition='limitation_improved_verified',status='stuttering_refinement_verified'))
+        self.reject(lambda s:s[0]['rows'][2].update(disposition='auxiliary_sat'))
+        self.reject(lambda s:s[0]['rows'][2].update(disposition='limitation_improved_verified',status='stuttering_refinement_verified'))
 
     def test_changed_hash_or_order_fail(self):
         self.reject(lambda s:s[0]['rows'][0].update(input_sha256='changed'))

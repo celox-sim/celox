@@ -310,6 +310,71 @@ impl Planner {
     }
 }
 
+/// Apply cuts in checked stages when an expansion introduces a later source.
+/// Cuts already present remain simultaneous, preserving ordinary frontier rules.
+/// Search only schedules handles: every stage still enforces exact antecedents
+/// and the kernel's unchanged occurrence and final-sequent checks.
+fn rewrite_frontier(
+    bundle: &mut ProofBundle<'_>,
+    pre: Term,
+    goal: Term,
+    mut pending: Vec<SequentHandle>,
+    cofactor_work: usize,
+) -> Res<SequentHandle> {
+    if pending.is_empty() || pending.len() > MAX_CUTS {
+        return Err("automatic frontier equality count limit".into());
+    }
+    let mut current = goal;
+    let mut stages = vec![];
+    let mut search = Planner {
+        work: cofactor_work,
+        ..Default::default()
+    };
+    while !pending.is_empty() {
+        let before = search.work;
+        let ready = (|| -> Res<Vec<SequentHandle>> {
+            let mut terms = HashSet::new();
+            let mut todo = vec![(current.clone(), 0usize)];
+            while let Some((term, depth)) = todo.pop() {
+                search.tick()?;
+                if depth > 256 {
+                    return Err("automatic rewrite scheduling depth limit".into());
+                }
+                if terms.insert(term.clone()) {
+                    todo.extend(term.0.args.iter().map(|a| (a.clone(), depth + 1)));
+                }
+            }
+            let mut ready = vec![];
+            let mut later = vec![];
+            for h in pending.drain(..) {
+                search.tick()?;
+                if h.post().0.op != "=" || h.post().0.args.len() != 2 {
+                    return Err("automatic frontier handle is not an equality".into());
+                }
+                if terms.contains(&h.post().0.args[0]) {
+                    ready.push(h);
+                } else {
+                    later.push(h);
+                }
+            }
+            pending = later;
+            if ready.is_empty() {
+                return Err("automatic frontier has an unused replacement".into());
+            }
+            Ok(ready)
+        })();
+        bundle.charge_search(search.started, (search.work - before) as u64)?;
+        let plan = bundle.prepare_rewrite(pre.clone(), current, &ready?, false)?;
+        current = plan.post().clone();
+        stages.push(plan);
+    }
+    let mut result = bundle.prove("automatic rewritten goal", pre, current)?;
+    while let Some(plan) = stages.pop() {
+        result = bundle.finish_rewrite(plan, &result)?;
+    }
+    Ok(result)
+}
+
 fn execute(
     bundle: &mut ProofBundle<'_>,
     plan: &Plan,
@@ -353,13 +418,7 @@ fn execute(
                         guards,
                     )?);
                 }
-                let rewritten = bundle.prepare_rewrite(pre, viewed, &handles, false)?;
-                let proved = bundle.prove(
-                    "automatic rewritten goal",
-                    rewritten.pre().clone(),
-                    rewritten.post().clone(),
-                )?;
-                bundle.finish_rewrite(rewritten, &proved)?
+                rewrite_frontier(bundle, pre, viewed, handles, cofactor.work)?
             };
             if let Some(plan) = normalization {
                 bundle.finish_rewrite(plan, &result)
@@ -558,6 +617,146 @@ mod tests {
         assert_eq!(planner.guarded_word_expansions, 1);
         assert_eq!(planner.leaves, 1);
         assert!(planner.work < MAX_PLAN_WORK);
+    }
+    #[test]
+    fn guarded_word_expansion_proves_both_goal_orientations() {
+        if std::env::var("HWVERIFY_EXPANSION_ORIENTATION_CHILD").is_err() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "automatic::tests::guarded_word_expansion_proves_both_goal_orientations",
+                    "--nocapture",
+                ])
+                .env("HWVERIFY_EXPANSION_ORIENTATION_CHILD", "1")
+                .env("HWVERIFY_SOLVER", "finite")
+                .env_remove("HWVERIFY_AUTOMATIC_PROOFS")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        for reversed in [false, true] {
+            let left = add(v("a"), v("b"));
+            let right = node(Sort::Bv(8), "bvxor", vec![v("c"), v("d")]);
+            let product = |t| node(Sort::Bv(8), "bvmul", vec![t, v("factor")]);
+            let pre = and(
+                eq(v("encoded"), product(left.clone())),
+                eq(left, right.clone()),
+            );
+            let goal = if reversed {
+                eq(product(right), v("encoded"))
+            } else {
+                eq(v("encoded"), product(right))
+            };
+            let out = std::env::temp_dir().join(format!(
+                "hwverify-expansion-orientation-{}-{reversed}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&out).unwrap();
+            let mut checker = Check {
+                out: out.clone(),
+                z3: "must-not-run".into(),
+                reports: vec![],
+            };
+            assert!(checker
+                .query_automatic_proof(
+                    "orientation",
+                    and(pre, not(goal)),
+                    &Env::new(),
+                    CutBudgetMode::IndependentLemmas
+                )
+                .unwrap());
+            let r = &checker.reports[0];
+            assert_eq!(
+                r["status"],
+                "passed",
+                "reversed={reversed}: {:?}",
+                r.get("automatic_plan_error")
+            );
+            crate::proof_bundle::validate_report(r).unwrap();
+            fs::remove_dir_all(out).unwrap();
+        }
+    }
+    #[test]
+    fn staged_frontier_checks_each_intermediate_goal_and_rejects_unused_handles() {
+        if std::env::var("HWVERIFY_STAGED_FRONTIER_CHILD").is_err() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "automatic::tests::staged_frontier_checks_each_intermediate_goal_and_rejects_unused_handles", "--nocapture"])
+                .env("HWVERIFY_STAGED_FRONTIER_CHILD", "1").env("HWVERIFY_SOLVER", "finite")
+                .env_remove("HWVERIFY_AUTOMATIC_PROOFS").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        for unused in [false, true] {
+            let pre = and(
+                eq(v("encoded"), add(v("middle"), v("offset"))),
+                and(
+                    eq(v("middle"), add(v("a"), v("b"))),
+                    eq(add(v("a"), v("b")), v("result")),
+                ),
+            );
+            let goal = eq(v("encoded"), add(v("result"), v("offset")));
+            let out = std::env::temp_dir().join(format!(
+                "hwverify-staged-frontier-{}-{unused}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&out).unwrap();
+            let mut checker = Check {
+                out: out.clone(),
+                z3: "must-not-run".into(),
+                reports: vec![],
+            };
+            let mut bundle = ProofBundle::new(
+                &mut checker,
+                "staged",
+                &and(pre.clone(), not(goal.clone())),
+                &Env::new(),
+                CutBudgetMode::IndependentLemmas,
+            )
+            .unwrap();
+            let mut handles = vec![];
+            for (from, to) in [
+                (v("encoded"), add(v("middle"), v("offset"))),
+                (v("middle"), add(v("a"), v("b"))),
+                (add(v("a"), v("b")), v("result")),
+            ] {
+                handles.push(
+                    bundle
+                        .prove("fresh definition", pre.clone(), eq(from, to))
+                        .unwrap(),
+                );
+            }
+            if unused {
+                handles.push(
+                    bundle
+                        .prove(
+                            "unused reflexivity",
+                            pre.clone(),
+                            eq(v("absent"), v("absent")),
+                        )
+                        .unwrap(),
+                );
+                let result = rewrite_frontier(&mut bundle, pre, goal, handles, 0);
+                assert!(matches!(result, Err(error) if error.contains("unused replacement")));
+                drop(bundle);
+            } else {
+                let proved = rewrite_frontier(&mut bundle, pre, goal, handles, 0).unwrap();
+                bundle.finish(&proved).unwrap();
+                crate::proof_bundle::validate_report(&checker.reports[0]).unwrap();
+                assert_eq!(checker.reports[0]["status"], "passed");
+                assert_eq!(
+                    checker.reports[0]["proof_graph"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|step| step["rule"]
+                            == "exact-congruence-with-original-premise-retained")
+                        .count(),
+                    3
+                );
+            }
+            fs::remove_dir_all(out).unwrap();
+        }
     }
     #[test]
     fn entire_goal_is_not_its_own_cut_and_search_is_bounded() {
