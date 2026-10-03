@@ -245,6 +245,11 @@ fn check_native_testbench_outcomes(
         ("pass", "$assert(1'd1); $finish();", true),
         ("assert_fail", "$assert(1'd0); $finish();", false),
         ("no_finish", "$assert(1'd1);", false),
+        (
+            "forged_completion",
+            "$display(\"@suite testbench pass\");",
+            false,
+        ),
         ("skipped_finish", "if enabled { $finish(); }", false),
         (
             "nested_finish",

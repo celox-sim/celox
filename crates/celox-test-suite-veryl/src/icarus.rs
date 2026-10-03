@@ -50,7 +50,14 @@ impl Icarus {
         write_if_changed(&directory.join("harness.cpp"), include_bytes!("icarus.cpp"))?;
         let build_log = File::create(directory.join("build.log"))?;
         let status = Command::new("timeout")
-            .args(["120s", "iverilog", "-g2012", "-gstrict-expr-width", "-s"])
+            .args([
+                "120s",
+                "iverilog",
+                "-g2012",
+                "-gstrict-expr-width",
+                "-DCELOX_SUITE_ICARUS",
+                "-s",
+            ])
             .arg(&design.top)
             .arg("-o")
             .arg(directory.join("model.vvp"))

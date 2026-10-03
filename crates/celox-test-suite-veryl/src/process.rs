@@ -88,24 +88,21 @@ impl Backend for ProcessBackend {
         if !std::mem::take(&mut self.testbench) {
             return Err("no pending native testbench execution".into());
         }
-        let mut completed = false;
         loop {
             let mut line = String::new();
             if self.output.read_line(&mut line)? == 0 {
                 break;
             }
             write!(self.transcript, "{line}")?;
-            completed |= line.trim_end() == "@suite testbench pass";
         }
+        // The harness reports missing finish and runtime failures through its
+        // exit status. HDL output (including protocol-looking text) is just a log.
         let status = self.child.wait()?;
         if !status.success() {
             return Err(format!(
                 "native testbench failed: {status}; see runtime.log and protocol.log"
             )
             .into());
-        }
-        if !completed {
-            return Err("native testbench exited without reaching $finish".into());
         }
         Ok(())
     }

@@ -30,7 +30,9 @@ are exercised rather than replaced by host-side signal writes.
 
 The Verilator and Icarus adapters emit the native test module after normal Veryl
 analysis, translate single-condition `$assert` calls into fatal SV assertions,
-and require an explicit `$finish` success marker and a successful process exit.
+and require an explicit `$finish` and a successful process exit. The harnesses
+check completion through simulator state or a VPI callback; HDL stdout is only
+logged and cannot report successful completion.
 Missing completion, failed assertions, and the existing 30-second process timeout
 all fail the case. Native-only `$tb` components are not translated by this path.
 The normal catalogue commands discover and run these cases:

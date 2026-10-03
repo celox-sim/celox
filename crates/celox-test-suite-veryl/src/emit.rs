@@ -176,7 +176,11 @@ fn emitted_path(index: usize, source_path: &Path) -> PathBuf {
 
 const TESTBENCH_MACROS: &str = r#"
 `define CELOX_SUITE_ASSERT(condition) assert (condition) else $fatal(1, "native testbench assertion failed")
-`define CELOX_SUITE_FINISH(unused) begin $display("@suite testbench pass"); $finish; end
+`ifdef CELOX_SUITE_ICARUS
+`define CELOX_SUITE_FINISH(unused) begin $celox_suite_finish; $finish; end
+`else
+`define CELOX_SUITE_FINISH(unused) $finish
+`endif
 "#;
 
 // Replace task identifiers, not text inside strings or comments. The SV
