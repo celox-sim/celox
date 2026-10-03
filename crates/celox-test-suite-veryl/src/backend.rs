@@ -69,7 +69,7 @@ pub trait Backend {
     fn read(&mut self, signal: &SignalPath) -> Result<(BigUint, BigUint)>;
     fn eval_comb(&mut self) -> Result<()>;
     fn tick(&mut self, event: &str) -> Result<()>;
-    /// Run a self-checking initial block to completion. Failed assertions,
+    /// Run a self-checking initial block to explicit `$finish`. Failed assertions,
     /// missing completion, and execution errors must not return success.
     /// Adapters without testbench execution fail explicitly.
     fn run_testbench(&mut self) -> Result<()> {

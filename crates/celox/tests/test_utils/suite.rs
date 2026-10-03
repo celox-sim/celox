@@ -39,7 +39,7 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
     fn run_testbench(&mut self) -> Result<()> {
         let program = celox::testbench::compile_initial_testbench(&self.0)
             .ok_or("testbench program was not compiled")?;
-        match celox::testbench::run_compiled_testbench(&mut self.0, &program) {
+        match celox::testbench::run_compiled_testbench_to_finish(&mut self.0, &program) {
             celox::TestResult::Pass => Ok(()),
             result => Err(format!("testbench failed: {result:?}").into()),
         }
@@ -89,7 +89,7 @@ impl Backend for VerylBackend {
     }
 }
 
-fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
+pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     let sources = design
         .sources
         .iter()

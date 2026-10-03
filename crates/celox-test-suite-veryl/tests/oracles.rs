@@ -245,12 +245,20 @@ fn check_native_testbench_outcomes(
         ("pass", "$assert(1'd1); $finish();", true),
         ("assert_fail", "$assert(1'd0); $finish();", false),
         ("no_finish", "$assert(1'd1);", false),
+        ("skipped_finish", "if enabled { $finish(); }", false),
+        (
+            "nested_finish",
+            "if !enabled { $finish(); } $assert(1'd0);",
+            true,
+        ),
     ] {
         let directory = std::env::temp_dir().join(format!(
             "veryl-suite-testbench-{tool}-{name}-{}",
             std::process::id()
         ));
-        let source = format!("#[test(Top)] module Top {{ initial {{ {body} }} }}");
+        let source = format!(
+            "#[test(Top)] module Top {{ var enabled: logic; initial {{ enabled = 1'd0; {body} }} }}"
+        );
         let mut backend = build(&Design::new(&source, "Top"), &directory).unwrap();
         let result = backend.run_testbench();
         assert_eq!(result.is_ok(), expected, "{tool} {name}: {result:?}");
