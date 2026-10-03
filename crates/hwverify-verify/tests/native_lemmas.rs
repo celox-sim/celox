@@ -74,6 +74,8 @@ fn cycle_width_and_module_boundary_diagnostics_are_source_linked() {
 #[test]
 fn real_rv_module_only_replaces_named_proposals() {
     let base = json!({"version":1,"mode":"independent_lemmas","variables":{},"lets":[{"id":"x_pre","expr":true},{"id":"x_post","expr":true}],"programs":[{"id":"x_operand1","match_rhs":["bv",8,0],"steps":[{"op":"candidate","id":"delivery","frame":"current_query","context":true,"guard":"let.x_pre","claim":"let.x_post","depends_on":[]},{"op":"project","id":"local","source":"delivery","path":[]},{"op":"use_candidate","id":"equality","candidate":"local","context":"$pre"}],"result":"equality"}]});
+    let mut base = base;
+    base["programs"].as_array_mut().unwrap().push(json!({"id":"m_address","match_rhs":["bv",8,0],"steps":[{"op":"candidate","id":"ir","frame":"current_query","context":["and","$pre","let.normal_m_address"],"guard":true,"claim":["eq","impl_next.m_ir","impl.x_ir"],"depends_on":[]}],"result":"ir"}));
     let source = include_str!("../../../audit/lemma_candidates/rv-delivery.hwv");
     let d = merge_lemma_source(source, "rv-delivery.hwv", Some(&base)).unwrap();
     assert_eq!(
@@ -85,7 +87,12 @@ fn real_rv_module_only_replaces_named_proposals() {
         base["programs"][0]["match_rhs"]
     );
     let mut stripped = d.clone();
-    for step in stripped["programs"][0]["steps"].as_array_mut().unwrap() {
+    for step in stripped["programs"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .flat_map(|p| p["steps"].as_array_mut().unwrap())
+    {
         if matches!(step["op"].as_str(), Some("candidate" | "use_candidate")) {
             step.as_object_mut().unwrap().remove("source");
         }
@@ -132,4 +139,25 @@ fn native_guard_worker() {
         assert_eq!(d["uses"][0]["source"], "guard-use.hwv:6:9");
         fs::remove_dir_all(out).unwrap();
     }
+    // A source-authored false claim fails before its use can receive a handle.
+    let false_source = SOURCE.replace("claim impl.x == 0u8;", "claim impl.x == 1u8;");
+    let metadata = merge_lemma_source(&false_source, "false-claim.hwv", None).unwrap();
+    let program = ProofPrograms::from_json(&metadata, &ctx).unwrap();
+    let out = std::env::temp_dir().join(format!("native-false-{}", std::process::id()));
+    fs::create_dir_all(&out).unwrap();
+    let mut check = Check {
+        out: out.clone(),
+        z3: "FORBIDDEN".into(),
+        reports: vec![],
+    };
+    let g = eq(ctx["impl.x"].clone(), bv(8, 0));
+    assert!(program
+        .try_query(&mut check, "false_claim", &and(g.clone(), not(g)), &ctx)
+        .is_err());
+    let d = &check.reports[0]["lemma_candidates"];
+    assert_eq!(d["candidates"][0]["validity"], "lemma_counterexample");
+    assert_eq!(d["candidates"][0]["source"], "false-claim.hwv:5:11");
+    assert!(d["candidates"][0]["claim_true"].is_null());
+    assert!(d["uses"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(out).unwrap();
 }

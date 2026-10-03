@@ -200,7 +200,8 @@ class ProofSession:
                 if query.get('backend')=='conjunctive_lemmas' and self.conjunctive_lemmas:p.base.validate_conjunctive_obligation(query)
                 elif query.get('backend') not in ('finite_bv','structural_kernel'):raise ValueError('unsupported proof backend')
         if not scoped and 'proof_programs' in doc:
-            from audit.lemma_candidates.validate import validate
+            from audit.lemma_candidates.validate import validate, validate_native_rv_sources
+            validate_native_rv_sources(report,p.ROOT/'audit/lemma_candidates/rv-delivery.hwv')
             coverage=validate(report,doc['proof_programs'])
             c.RUNNER.write_json(folder/'candidate-coverage.json',coverage)
         self._check()
