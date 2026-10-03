@@ -2,9 +2,10 @@
 //!
 //! No saved reports or numeric query IDs enter this interface. Every successful
 //! result is produced by the live opaque sequent kernel for the exact query.
+use crate::lemma_candidate::LemmaCandidate;
 use hwverify_ir::*;
 use hwverify_solver::{Check, CutBudgetMode, ProofBundle, RewritePlan, SequentHandle};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const MAX_PROGRAMS: usize = 16;
@@ -95,6 +96,237 @@ fn add_handle(env: &mut Env, id: &str, h: &SequentHandle) -> Res<()> {
     bind(env, format!("handle.{id}.post"), h.post().clone())
 }
 
+fn expression_dependencies(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::String(s) => {
+            for prefix in ["handle.", "plan."] {
+                if let Some(rest) = s.strip_prefix(prefix) {
+                    out.insert(rest.split('.').next().unwrap().to_owned());
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|v| expression_dependencies(v, out)),
+        Value::Object(o) => o.values().for_each(|v| expression_dependencies(v, out)),
+        _ => (),
+    }
+}
+fn dependencies(step: &Value) -> Res<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for key in [
+        "context",
+        "guard",
+        "claim",
+        "pre",
+        "post",
+        "goal",
+        "expr",
+        "substitution",
+    ] {
+        if let Some(v) = step.get(key) {
+            expression_dependencies(v, &mut out);
+        }
+    }
+    for key in [
+        "source",
+        "lemma",
+        "premise",
+        "candidate",
+        "plan",
+        "proof",
+        "positive",
+        "negative",
+    ] {
+        // Candidate source is a nonsemantic location label, never a handle.
+        if key == "source" && step["op"] == "candidate" {
+            continue;
+        }
+        if let Some(v) = step.get(key) {
+            out.insert(text(v)?.to_owned());
+        }
+    }
+    for key in ["depends_on", "equalities"] {
+        if let Some(v) = step.get(key) {
+            for dep in array(v, MAX_STEPS)? {
+                out.insert(identifier(dep)?);
+            }
+        }
+    }
+    Ok(out)
+}
+fn validate_dependencies(steps: &[Value]) -> Res<()> {
+    let ids = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Ok((identifier(&s["id"])?, i)))
+        .collect::<Res<BTreeMap<_, _>>>()?;
+    let graph = steps.iter().map(dependencies).collect::<Res<Vec<_>>>()?;
+    fn visit(
+        i: usize,
+        steps: &[Value],
+        ids: &BTreeMap<String, usize>,
+        graph: &[BTreeSet<String>],
+        path: &mut Vec<usize>,
+        done: &mut BTreeSet<usize>,
+    ) -> Res<()> {
+        if let Some(start) = path.iter().position(|n| *n == i) {
+            let cycle = path[start..]
+                .iter()
+                .chain(std::iter::once(&i))
+                .map(|n| format!("/steps/{n} ({})", steps[*n]["id"].as_str().unwrap()))
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return Err(format!(
+                "same-query dependency cycle: {cycle}; no induction rule is available"
+            ));
+        }
+        if done.contains(&i) {
+            return Ok(());
+        }
+        path.push(i);
+        for dep in &graph[i] {
+            if let Some(j) = ids.get(dep) {
+                visit(*j, steps, ids, graph, path, done)?;
+            }
+        }
+        path.pop();
+        done.insert(i);
+        Ok(())
+    }
+    let mut done = BTreeSet::new();
+    for i in 0..steps.len() {
+        visit(i, steps, &ids, &graph, &mut vec![], &mut done)?;
+    }
+    for (i, step) in steps.iter().enumerate() {
+        if step["op"] == "candidate" {
+            let c = LemmaCandidate::from_step(step)?;
+            let declared = c.depends_on.iter().cloned().collect::<BTreeSet<_>>();
+            if declared.len() != c.depends_on.len() {
+                return Err(format!("/steps/{i}: duplicate candidate dependency"));
+            }
+            let mut referenced = BTreeSet::new();
+            fn handle_refs(v: &Value, out: &mut BTreeSet<String>) {
+                match v {
+                    Value::String(s) if s.starts_with("handle.") => {
+                        out.insert(s[7..].split('.').next().unwrap().to_owned());
+                    }
+                    Value::Array(a) => a.iter().for_each(|v| handle_refs(v, out)),
+                    _ => (),
+                }
+            }
+            for v in [&c.context, &c.guard, &c.claim] {
+                handle_refs(v, &mut referenced);
+            }
+            for dep in referenced.iter().filter(|d| ids.contains_key(*d)) {
+                if !declared.contains(dep) {
+                    return Err(format!("/steps/{i}: undeclared candidate dependency {dep}"));
+                }
+            }
+            for dep in &declared {
+                if ids.get(dep).is_none_or(|j| *j >= i) {
+                    return Err(format!(
+                        "/steps/{i}: candidate dependency {dep} must be a prior checked handle"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn failed_diagnostic(report: &Value, label: &str, sat: &str) -> Value {
+    let query = report["children"]
+        .as_array()
+        .and_then(|a| a.iter().find(|q| q["proof_label"] == label));
+    match query {
+        Some(q)
+            if q["solver_result"] == "sat" && q["finite"]["original_formula_validated"] == true =>
+        {
+            json!(sat)
+        }
+        Some(q) if q["solver_result"] == "unknown" => {
+            let reason = q["finite"]["reason"].as_str().unwrap_or("");
+            json!(if reason.contains("budget") || reason.contains("limit") {
+                "unknown_budget"
+            } else {
+                "unknown"
+            })
+        }
+        _ => json!("not_established"),
+    }
+}
+fn annotate_candidates(report: &Value, result: &str, candidates: &mut [Value], uses: &mut [Value]) {
+    let closed = report["status"] == "passed";
+    let graph = report["proof_graph"].as_array();
+    let queries = report["children"].as_array();
+    let mut needed = BTreeSet::new();
+    let mut pending = report["root"].as_u64().into_iter().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        if needed.insert(id) {
+            if let Some(node) = graph.and_then(|g| g.get(id as usize)) {
+                pending.extend(
+                    node["dependencies"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_u64),
+                );
+            }
+        }
+    }
+    for candidate in candidates {
+        let label = candidate["proof_label"].as_str().unwrap();
+        if candidate["state"] == "proposed" {
+            candidate["validity"] = failed_diagnostic(report, label, "lemma_counterexample");
+            continue;
+        }
+        let query = queries.and_then(|a| a.iter().position(|q| q["proof_label"] == label));
+        let node = graph.and_then(|g| {
+            g.iter().find(|n| {
+                n.get("query_index").and_then(Value::as_u64) == query.map(|i| i as u64)
+                    && n.get("query_index").is_some()
+            })
+        });
+        if let Some(node) = node {
+            candidate["proof_node"] = node["id"].clone();
+            let used = report["root"] == node["id"]
+                || graph.is_some_and(|g| {
+                    g.iter().any(|n| {
+                        n["dependencies"]
+                            .as_array()
+                            .is_some_and(|ds| ds.contains(&node["id"]))
+                    })
+                });
+            if used {
+                candidate["state"] = json!("applied");
+                candidate["usefulness"] = json!(if node["id"]
+                    .as_u64()
+                    .is_some_and(|id| needed.contains(&id))
+                {
+                    "target_closed"
+                } else if closed {
+                    "established_but_unused"
+                } else {
+                    "target_not_closed"
+                });
+            } else {
+                candidate["usefulness"] = json!(if !closed && candidate["id"] == result {
+                    "established_but_insufficient"
+                } else {
+                    "established_but_unused"
+                });
+            }
+        }
+    }
+    for usage in uses {
+        if usage["state"] == "checking_guard" {
+            usage["state"] = failed_diagnostic(
+                report,
+                usage["proof_label"].as_str().unwrap(),
+                "use_context_does_not_establish_guard",
+            );
+        }
+    }
+}
+
 impl ProofPrograms {
     pub fn is_independent(&self) -> bool {
         self.mode == CutBudgetMode::IndependentLemmas
@@ -141,7 +373,10 @@ impl ProofPrograms {
         }
         let mut programs = vec![];
         let mut ids = BTreeSet::new();
-        for row in array(&metadata["programs"], MAX_PROGRAMS)? {
+        for (program_index, row) in array(&metadata["programs"], MAX_PROGRAMS)?
+            .iter()
+            .enumerate()
+        {
             keys(row, &["id", "match_rhs", "steps", "result"], &[])?;
             let id = identifier(&row["id"])?;
             if !ids.insert(id.clone()) {
@@ -156,7 +391,10 @@ impl ProofPrograms {
                 return Err("empty proof program".into());
             }
             let result = identifier(&row["result"])?;
-            Self::validate_steps(&steps, &result, &environment, &formals, &rhs.0.sort)?;
+            validate_dependencies(&steps)
+                .map_err(|e| format!("/programs/{program_index} ({id}): {e}"))?;
+            Self::validate_steps(&steps, &result, &environment, &formals, &rhs.0.sort)
+                .map_err(|e| format!("/programs/{program_index} ({id}): {e}"))?;
             programs.push(Program {
                 id,
                 rhs,
@@ -211,6 +449,20 @@ impl ProofPrograms {
                     let t = expr(&step["expr"], &env)?;
                     bind(&mut env, format!("let.{id}"), t)?;
                     continue;
+                }
+                "candidate" => {
+                    let candidate = LemmaCandidate::from_step(step)?;
+                    for dep in &candidate.depends_on {
+                        existing(&handles, &json!(dep))?;
+                    }
+                    candidate
+                        .lower(&env)
+                        .map_err(|e| format!("candidate {id}: {e}"))?;
+                }
+                "use_candidate" => {
+                    keys(step, &["op", "id", "candidate", "context"], &[])?;
+                    existing(&handles, &step["candidate"])?;
+                    boolean(&step["context"], &env)?;
                 }
                 "prove" => {
                     keys(step, &["op", "id", "pre", "post"], &[])?;
@@ -340,93 +592,137 @@ impl ProofPrograms {
         let Some(program) = self.programs.iter().find(|p| p.rhs == goal.0.args[1]) else {
             return Ok(false);
         };
-        let mut bundle = ProofBundle::new(check, name, original_bad, &self.context, self.mode)?;
-        let mut env = self.environment.clone();
-        for (key, term) in [
-            ("$pre", bundle.original_pre().clone()),
-            ("$goal", bundle.original_goal().clone()),
-            ("$lhs", goal.0.args[0].clone()),
-            ("$rhs", goal.0.args[1].clone()),
-        ] {
-            bind(&mut env, key.into(), term)?;
-        }
-        let mut handles: BTreeMap<String, SequentHandle> = BTreeMap::new();
-        let mut plans: BTreeMap<String, RewritePlan> = BTreeMap::new();
-        for step in &program.steps {
-            let id = text(&step["id"])?;
-            let handle = match text(&step["op"])? {
-                "let" => {
-                    let t = expr(&step["expr"], &env)?;
-                    bind(&mut env, format!("let.{id}"), t)?;
-                    continue;
-                }
-                "prove" => bundle.prove(
-                    &format!("{}_{}", program.id, id),
-                    boolean(&step["pre"], &env)?,
-                    boolean(&step["post"], &env)?,
-                )?,
-                "instantiate" => {
-                    let substitutions = array(&step["substitution"], MAX_FORMALS)?
-                        .iter()
-                        .map(|x| Ok((env[text(&x["from"])?].clone(), expr(&x["to"], &env)?)))
-                        .collect::<Res<Vec<_>>>()?;
-                    bundle.instantiate(existing(&handles, &step["source"])?, &substitutions)?
-                }
-                "project" => {
-                    let path = array(&step["path"], 64)?
-                        .iter()
-                        .map(|x| {
-                            usize::try_from(x.as_u64().unwrap())
-                                .map_err(|_| "projection index overflow".into())
-                        })
-                        .collect::<Res<Vec<_>>>()?;
-                    bundle.project(existing(&handles, &step["source"])?, &path)?
-                }
-                "apply" => bundle.apply(
-                    existing(&handles, &step["lemma"])?,
-                    existing(&handles, &step["premise"])?,
-                )?,
-                "conditional_eq" => bundle.conditional_eq(
-                    boolean(&step["pre"], &env)?,
-                    boolean(&step["guard"], &env)?,
-                    existing(&handles, &step["source"])?,
-                )?,
-                "prepare_rewrite" => {
-                    let equalities = array(&step["equalities"], 32)?
-                        .iter()
-                        .map(|x| existing(&handles, x).cloned())
-                        .collect::<Res<Vec<_>>>()?;
-                    let plan = bundle.prepare_rewrite(
+        let before = check.reports.len();
+        let mut candidates = vec![];
+        let mut uses = vec![];
+        let execution = (|| -> Res<()> {
+            let mut bundle = ProofBundle::new(check, name, original_bad, &self.context, self.mode)?;
+            let mut env = self.environment.clone();
+            for (key, term) in [
+                ("$pre", bundle.original_pre().clone()),
+                ("$goal", bundle.original_goal().clone()),
+                ("$lhs", goal.0.args[0].clone()),
+                ("$rhs", goal.0.args[1].clone()),
+            ] {
+                bind(&mut env, key.into(), term)?;
+            }
+            let mut handles: BTreeMap<String, SequentHandle> = BTreeMap::new();
+            let mut plans: BTreeMap<String, RewritePlan> = BTreeMap::new();
+            for step in &program.steps {
+                let id = text(&step["id"])?;
+                let handle = match text(&step["op"])? {
+                    "let" => {
+                        let t = expr(&step["expr"], &env)?;
+                        bind(&mut env, format!("let.{id}"), t)?;
+                        continue;
+                    }
+                    "candidate" => {
+                        let candidate = LemmaCandidate::from_step(step)?;
+                        for dep in &candidate.depends_on {
+                            existing(&handles, &json!(dep))?;
+                        }
+                        let typed = candidate.lower(&env)?;
+                        let label = format!("{}_{}", program.id, id);
+                        candidates.push(json!({"id":id,"source":candidate.source,
+                        "location":format!("program:{}/step:{id}",program.id),
+                        "frame":"current_query", "depends_on":candidate.depends_on,
+                        "state":"proposed","validity":"not_checked", "claim_true":null,
+                        "usefulness":"not_applied", "proof_label":label,
+                        "guard_feasibility":"not_checked", "reachable_from_reset":"not_checked"}));
+                        let handle =
+                            bundle.prove(&label, typed.antecedent(), typed.claim().clone())?;
+                        let row = candidates.last_mut().unwrap();
+                        row["state"] = json!("checked");
+                        row["validity"] = json!("established");
+                        row["claim_true"] = json!(true);
+                        handle
+                    }
+                    "use_candidate" => {
+                        let lemma = existing(&handles, &step["candidate"])?;
+                        let context = boolean(&step["context"], &env)?;
+                        let label = format!("{}_{}_guard_at_use", program.id, id);
+                        uses.push(json!({"id":id,"candidate":step["candidate"],"state":"checking_guard","proof_label":label}));
+                        let premise = bundle.prove(&label, context, lemma.pre().clone())?;
+                        let applied = bundle.apply(lemma, &premise)?;
+                        uses.last_mut().unwrap()["state"] = json!("applied");
+                        applied
+                    }
+                    "prove" => bundle.prove(
+                        &format!("{}_{}", program.id, id),
+                        boolean(&step["pre"], &env)?,
+                        boolean(&step["post"], &env)?,
+                    )?,
+                    "instantiate" => {
+                        let substitutions = array(&step["substitution"], MAX_FORMALS)?
+                            .iter()
+                            .map(|x| Ok((env[text(&x["from"])?].clone(), expr(&x["to"], &env)?)))
+                            .collect::<Res<Vec<_>>>()?;
+                        bundle.instantiate(existing(&handles, &step["source"])?, &substitutions)?
+                    }
+                    "project" => {
+                        let path = array(&step["path"], 64)?
+                            .iter()
+                            .map(|x| {
+                                usize::try_from(x.as_u64().unwrap())
+                                    .map_err(|_| "projection index overflow".into())
+                            })
+                            .collect::<Res<Vec<_>>>()?;
+                        bundle.project(existing(&handles, &step["source"])?, &path)?
+                    }
+                    "apply" => bundle.apply(
+                        existing(&handles, &step["lemma"])?,
+                        existing(&handles, &step["premise"])?,
+                    )?,
+                    "conditional_eq" => bundle.conditional_eq(
+                        boolean(&step["pre"], &env)?,
+                        boolean(&step["guard"], &env)?,
+                        existing(&handles, &step["source"])?,
+                    )?,
+                    "prepare_rewrite" => {
+                        let equalities = array(&step["equalities"], 32)?
+                            .iter()
+                            .map(|x| existing(&handles, x).cloned())
+                            .collect::<Res<Vec<_>>>()?;
+                        let plan = bundle.prepare_rewrite(
+                            boolean(&step["pre"], &env)?,
+                            boolean(&step["goal"], &env)?,
+                            &equalities,
+                            step["retain_rewritten_pre"].as_bool().unwrap(),
+                        )?;
+                        bind(&mut env, format!("plan.{id}.pre"), plan.pre().clone())?;
+                        bind(&mut env, format!("plan.{id}.post"), plan.post().clone())?;
+                        plans.insert(id.into(), plan);
+                        continue;
+                    }
+                    "finish_rewrite" => {
+                        let plan = plans
+                            .remove(text(&step["plan"])?)
+                            .ok_or("stale or consumed rewrite plan")?;
+                        bundle.finish_rewrite(plan, existing(&handles, &step["proof"])?)?
+                    }
+                    "join" => bundle.join(
                         boolean(&step["pre"], &env)?,
                         boolean(&step["goal"], &env)?,
-                        &equalities,
-                        step["retain_rewritten_pre"].as_bool().unwrap(),
-                    )?;
-                    bind(&mut env, format!("plan.{id}.pre"), plan.pre().clone())?;
-                    bind(&mut env, format!("plan.{id}.post"), plan.post().clone())?;
-                    plans.insert(id.into(), plan);
-                    continue;
-                }
-                "finish_rewrite" => {
-                    let plan = plans
-                        .remove(text(&step["plan"])?)
-                        .ok_or("stale or consumed rewrite plan")?;
-                    bundle.finish_rewrite(plan, existing(&handles, &step["proof"])?)?
-                }
-                "join" => bundle.join(
-                    boolean(&step["pre"], &env)?,
-                    boolean(&step["goal"], &env)?,
-                    boolean(&step["guard"], &env)?,
-                    existing(&handles, &step["positive"])?,
-                    existing(&handles, &step["negative"])?,
-                )?,
-                _ => return Err("unsupported proof-program instruction".into()),
-            };
-            add_handle(&mut env, id, &handle)?;
-            handles.insert(id.into(), handle);
+                        boolean(&step["guard"], &env)?,
+                        existing(&handles, &step["positive"])?,
+                        existing(&handles, &step["negative"])?,
+                    )?,
+                    _ => return Err("unsupported proof-program instruction".into()),
+                };
+                add_handle(&mut env, id, &handle)?;
+                handles.insert(id.into(), handle);
+            }
+            bundle.finish(existing(&handles, &Value::String(program.result.clone()))?)?;
+            Ok(())
+        })();
+        if check.reports.len() == before + 1 {
+            let report = check.reports.last_mut().unwrap();
+            annotate_candidates(report, &program.result, &mut candidates, &mut uses);
+            report["lemma_candidates"] = json!({"program":program.id,"target_closed":report["status"]=="passed",
+                "candidates":candidates,"uses":uses,"saved_reports_are_authority":false,
+                "error":execution.as_ref().err()});
         }
-        bundle.finish(existing(&handles, &Value::String(program.result.clone()))?)?;
-        Ok(true)
+        execution.map(|_| true)
     }
 }
 

@@ -49,6 +49,8 @@ jobs:
         run: ./conformance/veryl-proof/run_ci.sh "$RUNNER_TEMP/veryl-proof"
       - name: Verify symbolic Veryl pipeline against ISA and reject RTL mutants
         run: ./conformance/veryl-symbolic/run_ci.sh "$RUNNER_TEMP/veryl-symbolic"
+      - name: Verify typed lemma candidates and proof-use diagnostics
+        run: python3 -m audit.lemma_candidates.ci --out "$RUNNER_TEMP/lemma-candidates"
       - name: Verify selected RV32I architecture, memory, latency and mutations
         run: ./conformance/veryl-symbolic/run_rv32i_ci.sh "$RUNNER_TEMP/selected-rv32i"
       - name: Verify fixed automatic-proof held-outs and original-formula mutants
@@ -120,5 +122,13 @@ jobs:
         with:
           name: guarded-expansion-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/guarded-expansion/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload lemma-candidate interface checks
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lemma-candidates-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lemma-candidates/
           if-no-files-found: error
           retention-days: 14

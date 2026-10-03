@@ -146,7 +146,7 @@ class ProofSession:
         self.conjunctive_lemmas=bool(conjunctive_lemmas);self._handles={};self._records={};self._equation_handles={}
         self.cpu=None;self._cpu_hash=None;self._normalization=None;self._canonical_bank=False;self._bank_record=None;self._transport_view=False;self._control_invariant=False;self._dispatch_record=None;self._operand_views=False;self._history_record=None;self._proof_programs=False
         if p.sha(p.SOURCE)!=p.SELECTED_SHA256:raise ValueError('selected RTL changed')
-        files=[Path(__file__),Path(__file__).with_name('rv32i_split_proof_program.py'),Path(p.__file__),Path(a.__file__),Path(c.__file__),Path(mem.__file__),Path(p.base.__file__),
+        files=[p.ROOT/'audit/lemma_candidates/migrate.py',p.ROOT/'audit/lemma_candidates/validate.py',Path(__file__),Path(__file__).with_name('rv32i_split_proof_program.py'),Path(p.__file__),Path(a.__file__),Path(c.__file__),Path(mem.__file__),Path(p.base.__file__),
             Path(rv32i_memory.__file__),Path(control.__file__),Path(control.p.__file__),
             p.ROOT/'audit/veryl_scaling/rv32i_latency_variants.py',Path(control.c.registers.__file__),
             p.ROOT/'examples/build_pipeline.py',p.ROOT/'audit/veryl_scaling/cpu_memory_reuse.py',p.ROOT/'conformance/veryl-symbolic/run.py',
@@ -195,6 +195,10 @@ class ProofSession:
             for query in report['obligations']:
                 if query.get('backend')=='conjunctive_lemmas' and self.conjunctive_lemmas:p.base.validate_conjunctive_obligation(query)
                 elif query.get('backend') not in ('finite_bv','structural_kernel'):raise ValueError('unsupported proof backend')
+        if not scoped and 'proof_programs' in doc:
+            from audit.lemma_candidates.validate import validate
+            coverage=validate(report,doc['proof_programs'])
+            c.RUNNER.write_json(folder/'candidate-coverage.json',coverage)
         self._check()
         if json.loads(path.read_text())!=doc:raise ValueError('contract changed during solve')
         queries=report['implementation_binding']['obligations'] if scoped else report['obligations']

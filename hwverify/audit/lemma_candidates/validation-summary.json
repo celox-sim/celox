@@ -1,0 +1,93 @@
+{
+  "base_commit": "6d3de84c83a293254f5d7e0b2b952a1c1fd30994",
+  "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+  "scope": "Shared typed proof-program candidate API and diagnostics; no .hwv candidate surface or automatic heuristic changes.",
+  "manual_migrated": {
+    "status": "stuttering_refinement_verified",
+    "children_verified": 436,
+    "unknown_children": [],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3132146969,
+    "report_sha256": "f066200e2b7976eeec78986c3eb041e805b478ab15460a7552eaeac29cd77e14"
+  },
+  "manual_legacy_comparison": {
+    "status": "stuttering_refinement_verified",
+    "children_verified": 436,
+    "unknown_children": [],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3132146969,
+    "report_sha256": "39621ad790d4be90978a29d78b14ac3f18293349cbb2eac0a7e87ce1571d8757"
+  },
+  "migrated_coverage": {
+    "programs": 6,
+    "checked_candidates": 27,
+    "checked_guard_uses": 8
+  },
+  "manual_smt_files_byte_identical": 1032,
+  "original_queries_byte_identical_manual": 437,
+  "hintfree": {
+    "status": "unknown",
+    "children_verified": 431,
+    "unknown_children": [
+      362,
+      364,
+      366,
+      430,
+      434
+    ],
+    "other_global_obligations_passed": 7,
+    "finite_work": 3076007506,
+    "report_sha256": "9bff0acf6164cf5f2a982dfc3ba3ac047525d52ef1a3a3e5bec455693b4d17fe"
+  },
+  "original_queries_byte_identical_hintfree": 437,
+  "source_model_and_environment_fields_unchanged": true,
+  "original_input_sha256": "1f9cac480cb2040850180df568bd43b96ccd4090090e4702a3c258b8fc49212a",
+  "migrated_input_sha256": "589eb3bd590b5559dfd59cc19ea3d61fcef587c34192960dba96759f0c9a7f25",
+  "source_fields_sha256_excluding_proof_programs": "128c27eca249800908ec1983462b449bc06774a3d80ad767ac498923054d2a86",
+  "gates": {
+    "phase1": {
+      "status": "passed",
+      "positive_passed": 11,
+      "mutants_original_replayed": 18,
+      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6"
+    },
+    "phase2": {
+      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+      "status": "passed_with_diagnostic_unknowns",
+      "verified_covered_positives": 9,
+      "validated_original_counterexamples": 19,
+      "diagnostic_unknowns": 4
+    },
+    "phase3": {
+      "status": "passed",
+      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+      "positive_controls_verified": 6,
+      "original_formula_sat_mutants": 12
+    },
+    "guarded_expansion": {
+      "status": "passed",
+      "checker_sha256": "19677ae8186f8b8268bc0ff65ac062dab4127de7e0c5e4afce37f882b29b9ba6",
+      "positive_controls_verified": 12,
+      "original_formula_sat_mutants": 36
+    },
+    "candidate_interface": {
+      "status": "passed"
+    }
+  },
+  "validation_logs_sha256": {
+    "reviewed-workspace-tests.log": "4b61aa4d13d9d5936790a8536cd4638cfc4141a30d5d17f94a91658d02b6f9e1",
+    "reviewed-clippy.log": "0333a987b1b426171d5d57eda225bbf86e29f890e3a75bfb74f7b1473a0c6169",
+    "reviewed-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "reviewed-python-tests.log": "165bd5d0151f66177c3b546c249b71ffe713de5ff4017170027281781d8092e9"
+  },
+  "python_tests_passed": 172,
+  "rust_workspace_tests": "passed",
+  "strict_clippy": "passed",
+  "formatting": "passed",
+  "hosted_full665_and_fresh_RTL_import": "required on the new PR; not claimed by local archived-contract reruns",
+  "saved_reports_are_authority": false,
+  "evidence": "Complete local query/log trees in /workspace/lemma-candidates; hosted CI uploads complete fresh artifacts. No duplicate large archive committed.",
+  "publication_base": "8682f0f2f89c6791cc6f2d4e8f90ebd6235ddf8f",
+  "publication_base_tree_equals_tested_base": true,
+  "legacy_comparison_note": "Legacy comparison run preceded the final diagnostic-only root-usefulness adjustment; all 1032 SMT files match the final migrated run."
+}
