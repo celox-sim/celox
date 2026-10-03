@@ -55,12 +55,7 @@ fn hierarchical_assignment_settles_logic_and_clocked_consumers(sim) {
 fn hierarchical_assignment_resolves_nested_instances_and_dynamic_selections(sim) {
     @omit_veryl;
     @ignore_on(sv);
-    @setup {
-        let code = include_str!("../../celox-test-suite-veryl/fixtures/testbench/hierarchical_assignment_selections.veryl");
-    }
-    @build Simulator::builder(code, "Top").opt_level(OptLevel::O2);
-    let testbench = compile_initial_testbench(&sim).unwrap();
-    assert_eq!(run_compiled_testbench(&mut sim, &testbench), TestResult::Pass);
+    @case "hierarchical_assignment::selections";
 }
 
 fn hierarchical_assignment_preserves_unselected_four_state_bits(sim) {
@@ -130,12 +125,7 @@ all_backends! {
 fn hierarchical_assignment_to_disjoint_loop_state(sim) {
     @omit_veryl;
     @ignore_on(sv);
-    @setup {
-        let code = include_str!("../../celox-test-suite-veryl/fixtures/testbench/hierarchical_assignment_disjoint_loop.veryl");
-    }
-    @build Simulator::builder(code, "Top").opt_level(OptLevel::O2);
-    let testbench = compile_initial_testbench(&sim).unwrap();
-    assert_eq!(run_compiled_testbench(&mut sim, &testbench), TestResult::Pass);
+    @case "hierarchical_assignment::disjoint_loop";
 }
 
 fn hierarchical_assignment_updates_register_state(sim) {

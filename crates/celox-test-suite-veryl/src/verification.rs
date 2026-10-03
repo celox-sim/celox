@@ -183,6 +183,11 @@ struct ObservedBackend {
     failed: Arc<AtomicBool>,
 }
 impl Backend for ObservedBackend {
+    fn run_testbench(&mut self) -> Result<()> {
+        self.backend
+            .run_testbench()
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         self.backend
             .write(signal, payload, mask)

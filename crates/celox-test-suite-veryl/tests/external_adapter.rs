@@ -93,7 +93,7 @@ fn catalogue_has_unique_stable_names_and_categories() {
         assert!(names.insert(case.name), "duplicate {}", case.name);
         assert!(case.name.contains("::"));
     }
-    assert_eq!(names.len(), 682);
+    assert_eq!(names.len(), 684);
     assert_eq!(
         case("operators::test_bitwise_operations").unwrap().category,
         Category::Operators
@@ -283,4 +283,43 @@ fn negative_cases_fail_on_adapter_errors_and_panics() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn native_cases_require_explicit_testbench_execution() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Testbench(Arc<AtomicUsize>);
+    impl Backend for Testbench {
+        fn write(&mut self, _: &SignalPath, _: BigUint, _: BigUint) -> Result<()> {
+            panic!("the shared case must execute HDL assignments, not host writes");
+        }
+        fn read(&mut self, _: &SignalPath) -> Result<(BigUint, BigUint)> {
+            panic!("unexpected host read");
+        }
+        fn eval_comb(&mut self) -> Result<()> {
+            panic!("unexpected host eval");
+        }
+        fn tick(&mut self, _: &str) -> Result<()> {
+            panic!("unexpected host tick");
+        }
+        fn run_testbench(&mut self) -> Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    let executions = Arc::new(AtomicUsize::new(0));
+    for name in [
+        "hierarchical_assignment::selections",
+        "hierarchical_assignment::disjoint_loop",
+    ] {
+        case(name).unwrap().run(&mut |design| {
+            assert!(design.sources[0].text.contains("#[test(Top)]"));
+            Ok(Box::new(Testbench(executions.clone())))
+        });
+    }
+    assert_eq!(executions.load(Ordering::Relaxed), 2);
+    assert!(Bitwise::default().run_testbench().is_err());
 }

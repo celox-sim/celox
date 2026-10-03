@@ -93,6 +93,9 @@ static PLI_INT32 start(p_cb_data) {
     for (int i = 0; i < info.argc; ++i) {
         if (std::string(info.argv[i]) == "+suite_two_state") initialize(nullptr);
     }
+    for (int i = 0; i < info.argc; ++i) {
+        if (std::string(info.argv[i]) == "+suite_testbench") return 0;
+    }
     return commands(nullptr);
 }
 

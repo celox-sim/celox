@@ -36,6 +36,15 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
         self.0.eval_comb().map_err(Into::into)
     }
 
+    fn run_testbench(&mut self) -> Result<()> {
+        let program = celox::testbench::compile_initial_testbench(&self.0)
+            .ok_or("testbench program was not compiled")?;
+        match celox::testbench::run_compiled_testbench(&mut self.0, &program) {
+            celox::TestResult::Pass => Ok(()),
+            result => Err(format!("testbench failed: {result:?}").into()),
+        }
+    }
+
     fn tick(&mut self, event: &str) -> Result<()> {
         self.0.tick(self.0.event(event)).map_err(Into::into)
     }

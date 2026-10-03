@@ -236,3 +236,53 @@ fn verilator_rejects_invalid_assignment() {
         ))
     });
 }
+
+fn check_native_testbench_outcomes(
+    build: fn(&Design, &Path) -> Result<Box<dyn Backend>>,
+    tool: &str,
+) {
+    for (name, body, expected) in [
+        ("pass", "$assert(1'd1); $finish();", true),
+        ("assert_fail", "$assert(1'd0); $finish();", false),
+        ("no_finish", "$assert(1'd1);", false),
+    ] {
+        let directory = std::env::temp_dir().join(format!(
+            "veryl-suite-testbench-{tool}-{name}-{}",
+            std::process::id()
+        ));
+        let source = format!("#[test(Top)] module Top {{ initial {{ {body} }} }}");
+        let mut backend = build(&Design::new(&source, "Top"), &directory).unwrap();
+        let result = backend.run_testbench();
+        assert_eq!(result.is_ok(), expected, "{tool} {name}: {result:?}");
+        // A consumed process must never report a second successful execution.
+        assert!(backend.run_testbench().is_err());
+    }
+}
+
+#[cfg(feature = "icarus")]
+#[test]
+#[ignore = "requires Icarus, iverilog-vpi, C++ and timeout on PATH"]
+fn icarus_native_testbench_outcomes() {
+    check_native_testbench_outcomes(
+        |d, p| {
+            Ok(Box::new(celox_test_suite_veryl::icarus::Icarus::build(
+                d, p,
+            )?))
+        },
+        "icarus",
+    );
+}
+
+#[cfg(feature = "verilator")]
+#[test]
+#[ignore = "requires Verilator, C++, make and timeout on PATH"]
+fn verilator_native_testbench_outcomes() {
+    check_native_testbench_outcomes(
+        |d, p| {
+            Ok(Box::new(
+                celox_test_suite_veryl::verilator::Verilator::build(d, p)?,
+            ))
+        },
+        "verilator",
+    );
+}

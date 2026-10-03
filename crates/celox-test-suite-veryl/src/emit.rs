@@ -13,9 +13,15 @@ use veryl_parser::Parser;
 pub struct EmittedSources {
     sources: Vec<(String, PathBuf)>,
     events: BTreeMap<String, BTreeMap<String, bool>>,
+    testbench: bool,
 }
 
 impl EmittedSources {
+    /// Whether the selected top is an emitted native testbench.
+    pub fn is_testbench(&self) -> bool {
+        self.testbench
+    }
+
     /// Event polarities from declared port types, including ports forwarded to
     /// child modules. `true` means a rising edge, `false` a falling edge.
     pub fn event_edges(&self, top: &str) -> Option<&BTreeMap<String, bool>> {
@@ -33,6 +39,17 @@ impl EmittedSources {
 
 /// Analyze and emit every Veryl source in `sources` as SystemVerilog.
 pub fn emit_veryl_sources(sources: &[(&str, &Path)]) -> EmittedSources {
+    emit_sources(sources, None)
+}
+
+/// Emit a verification design, including a native testbench when it is the top.
+/// Assertion failures are fatal; success requires reaching an explicit $finish.
+/// Native-only components (such as $tb::clock_gen) are not translated here.
+pub fn emit_verification_sources(sources: &[(&str, &Path)], top: &str) -> EmittedSources {
+    emit_sources(sources, Some(top))
+}
+
+fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSources {
     symbol_table::clear();
     attribute_table::clear();
 
@@ -79,6 +96,30 @@ pub fn emit_veryl_sources(sources: &[(&str, &Path)]) -> EmittedSources {
         "Veryl analyze_post_pass2 errors: {errors:?}"
     );
 
+    let mut test_defines = String::new();
+    let mut native_testbench = false;
+    if let Some(top) = testbench {
+        for (name, _) in symbol_table::get_tests("prj") {
+            test_defines.push_str(&format!("`define __veryl_test_prj_{name}__\n"));
+        }
+
+        // Analyze with the native-test rules first, then remove only the
+        // emitter's omission gate. Keep the original AST and hierarchy writes.
+        for mut symbol in symbol_table::get_all() {
+            if symbol.token.to_string() == top
+                && symbol.namespace.to_string() == "prj"
+                && let veryl_analyzer::symbol::SymbolKind::Module(module) = &mut symbol.kind
+                && module.test.as_ref().is_some_and(|test| {
+                    matches!(test.r#type, veryl_analyzer::symbol::TestType::Native)
+                })
+            {
+                module.test = None;
+                symbol_table::update(symbol);
+                native_testbench = true;
+            }
+        }
+    }
+
     let emitted = parsed_sources
         .into_iter()
         .enumerate()
@@ -87,7 +128,16 @@ pub fn emit_veryl_sources(sources: &[(&str, &Path)]) -> EmittedSources {
             let map_path = output_path.with_extension("sv.map");
             let mut emitter = Emitter::new(&metadata, "prj", source_path, &output_path, &map_path);
             emitter.emit(&parsed.veryl, code);
-            (emitter.as_str().to_string(), output_path)
+            let source = if native_testbench {
+                format!(
+                    "{test_defines}{}{}",
+                    TESTBENCH_MACROS,
+                    translate_testbench_tasks(emitter.as_str())
+                )
+            } else {
+                emitter.as_str().to_string()
+            };
+            (source, output_path)
         })
         .collect();
 
@@ -110,6 +160,7 @@ pub fn emit_veryl_sources(sources: &[(&str, &Path)]) -> EmittedSources {
     EmittedSources {
         sources: emitted,
         events,
+        testbench: native_testbench,
     }
 }
 
@@ -120,5 +171,83 @@ fn emitted_path(index: usize, source_path: &Path) -> PathBuf {
         let mut path = source_path.to_path_buf();
         path.set_extension("sv");
         path
+    }
+}
+
+const TESTBENCH_MACROS: &str = r#"
+`define CELOX_SUITE_ASSERT(condition) assert (condition) else $fatal(1, "native testbench assertion failed")
+`define CELOX_SUITE_FINISH(unused) begin $display("@suite testbench pass"); $finish; end
+"#;
+
+// Replace task identifiers, not text inside strings or comments. The SV
+// preprocessor handles balanced expressions and multiline assertion arguments.
+fn translate_testbench_tasks(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = String::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if source[i..].starts_with("//") {
+            i += source[i..].find('\n').unwrap_or(bytes.len() - i);
+        } else if source[i..].starts_with("/*") {
+            i += source[i + 2..]
+                .find("*/")
+                .map_or(bytes.len() - i, |n| n + 4);
+        } else if bytes[i] == b'$' {
+            let end = (i + 1..bytes.len())
+                .find(|&n| !bytes[n].is_ascii_alphanumeric() && bytes[n] != b'_')
+                .unwrap_or(bytes.len());
+            let replacement = match &source[i..end] {
+                "$assert" => Some("`CELOX_SUITE_ASSERT"),
+                "$finish" => Some("`CELOX_SUITE_FINISH"),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                output.push_str(&source[start..i]);
+                output.push_str(replacement);
+                start = end;
+            }
+            i = end;
+        } else {
+            i += source[i..].chars().next().unwrap().len_utf8();
+        }
+    }
+    output.push_str(&source[start..]);
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn testbench_task_translation_preserves_strings_comments_and_other_tasks() {
+        let source = r#"$display("日本語 $assert(0) and \"$finish()\"");
+// $assert(0);
+/* $finish(); */
+$assertion(0);
+$assert(
+    (a == b)
+);
+$finish();"#;
+        let translated = translate_testbench_tasks(source);
+        assert!(translated.contains(r#"$display("日本語 $assert(0) and \"$finish()\"");"#));
+        assert!(translated.contains("// $assert(0);"));
+        assert!(translated.contains("/* $finish(); */"));
+        assert!(translated.contains("$assertion(0);"));
+        assert!(translated.contains("`CELOX_SUITE_ASSERT(\n    (a == b)\n);"));
+        assert!(translated.contains("`CELOX_SUITE_FINISH();"));
     }
 }

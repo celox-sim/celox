@@ -16,6 +16,21 @@ int main(int argc, char** argv) {
     context.commandArgs(argc, argv);
     context.randReset(0);
     Vdut dut{&context};
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "+suite_testbench") {
+            while (!context.gotFinish()) {
+                dut.eval();
+#if VM_TIMING
+                if (!dut.eventsPending()) break;
+                context.time(dut.nextTimeSlot());
+#else
+                break;
+#endif
+            }
+            dut.final();
+            return 0;
+        }
+    }
     // Drive the first batch before evaluating. Zero-initialized runtime loop
     // bounds/steps may be invalid until the test supplies its inputs.
     bool dirty = true;

@@ -11,6 +11,7 @@ pub(crate) struct ProcessBackend {
     transcript: File,
     top: String,
     edges: BTreeMap<String, bool>,
+    testbench: bool,
 }
 
 impl ProcessBackend {
@@ -35,7 +36,19 @@ impl ProcessBackend {
             transcript: File::create(directory.join("protocol.log"))?,
             top,
             edges,
+            testbench: false,
         })
+    }
+
+    pub(crate) fn spawn_testbench(
+        command: Command,
+        directory: &std::path::Path,
+        top: String,
+        edges: BTreeMap<String, bool>,
+    ) -> Result<Self> {
+        let mut backend = Self::spawn(command, directory, top, edges)?;
+        backend.testbench = true;
+        Ok(backend)
     }
 
     fn command(&mut self, command: &str) -> Result<String> {
@@ -71,6 +84,32 @@ impl ProcessBackend {
 }
 
 impl Backend for ProcessBackend {
+    fn run_testbench(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.testbench) {
+            return Err("no pending native testbench execution".into());
+        }
+        let mut completed = false;
+        loop {
+            let mut line = String::new();
+            if self.output.read_line(&mut line)? == 0 {
+                break;
+            }
+            write!(self.transcript, "{line}")?;
+            completed |= line.trim_end() == "@suite testbench pass";
+        }
+        let status = self.child.wait()?;
+        if !status.success() {
+            return Err(format!(
+                "native testbench failed: {status}; see runtime.log and protocol.log"
+            )
+            .into());
+        }
+        if !completed {
+            return Err("native testbench exited without reaching $finish".into());
+        }
+        Ok(())
+    }
+
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         self.command(&format!(
             "write {} {}",

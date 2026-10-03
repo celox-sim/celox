@@ -1,6 +1,6 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 682 Veryl language tests for compiler and simulator
+A reusable corpus of 684 Veryl language tests for compiler and simulator
 implementations. Sources, input sequences, and assertions live together in this
 crate. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.
@@ -20,6 +20,25 @@ receives `Design` (source files, top module, and two/four-state mode) and return
 a fresh `Box<dyn Backend>`. The four required operations are `write`, `read`,
 `eval_comb`, and `tick`; the shared driver handles integer conversions, batched
 writes, and stable signal handles.
+
+Self-checking native testbenches use `Design::new(source, top)`
+and `Simulator::run_testbench()`. Implement the optional `Backend::run_testbench`
+operation to execute their HDL stimulus and assertions; its default returns an
+unsupported-operation error. The `hierarchical_assignment` cases use this path,
+including Celox's four-backend suite harness, so their hierarchical HDL writes
+are exercised rather than replaced by host-side signal writes.
+
+The Verilator and Icarus adapters emit the native test module after normal Veryl
+analysis, translate single-condition `$assert` calls into fatal SV assertions,
+and require an explicit `$finish` success marker and a successful process exit.
+Missing completion, failed assertions, and the existing 30-second process timeout
+all fail the case. Native-only `$tb` components are not translated by this path.
+The normal catalogue commands discover and run these cases:
+
+```sh
+cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator -- --filter hierarchical_assignment::
+cargo run -p celox-test-suite-veryl --features icarus --bin verify-icarus -- --filter hierarchical_assignment::
+```
 
 ```rust
 use celox_test_suite_veryl::{Category, Factory, case, cases};
