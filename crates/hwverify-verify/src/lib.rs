@@ -13,4 +13,5 @@ mod scoped_binding;
 
 mod quantified_examples;
 
-mod proof_program;
+pub mod lemma_candidate;
+pub mod proof_program;

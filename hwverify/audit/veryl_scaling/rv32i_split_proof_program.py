@@ -4,6 +4,7 @@ Every expression is lowered against the current validated Design. Plans contain
 no verdicts, SMT identifiers, or numeric child IDs. The live sequent kernel must
 prove every local lemma, premise implication, branch, and final original goal.
 """
+from audit.lemma_candidates.migrate import migrate
 from audit.veryl_scaling import rv32i_split_pipeline as p
 from audit.veryl_scaling import rv32i_split_reuse as r
 from audit.veryl_scaling.cpu_memory_reuse import expand
@@ -143,5 +144,5 @@ def build(cpu,doc):
             prove('premise','$pre','handle.local.pre'),apply('equality','local','premise'),
             rewrite('rw','$pre','$goal',['equality'],False),prove('rewritten','plan.rw.pre','plan.rw.post'),finish('complete','rw','rewritten')]
         program('x_operand'+str(j),steps,'complete')
-    return {'version':1,'mode':'independent_lemmas','variables':{k:{'bv':32} for k in ('ir','pc','rs1','rs2','alt1','alt2','load_response')},
-        'lets':[{'id':key,'expr':value} for key,value in definitions.items()],'programs':programs}
+    return migrate({'version':1,'mode':'independent_lemmas','variables':{k:{'bv':32} for k in ('ir','pc','rs1','rs2','alt1','alt2','load_response')},
+        'lets':[{'id':key,'expr':value} for key,value in definitions.items()],'programs':programs})

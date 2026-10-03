@@ -384,3 +384,9 @@ automatic planner expose asserted word definitions using fresh equality handles.
 Two independent generic families gain coverage in both equality orientations,
 with 12 positive instances and 36 original-formula SAT mutants in the fixed gate. The selected hint-free RV32I result remains 431/436;
 the five Unknowns and their guard-selection barrier are documented explicitly.
+
+[Shared typed lemma candidates](audit/lemma_candidates/README.md) extend the
+existing proof-program API with explicit claims, guards, dependencies and checked
+use sites. The migrated manual RV programs retain 436/436 children and seven
+global checks; validity, failed guard discharge, usefulness and Unknown are
+reported separately. The `.hwv` model language is unchanged.
