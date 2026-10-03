@@ -371,3 +371,10 @@ under exact guards; see [equality sharing](EQUALITY-SHARING.md) for its bounded
 scope, evidence, and remaining Unknown cases.
 Its [phase-2 publication record](audit/equality_sharing/publication/README.md)
 includes complete replay evidence and the mandatory diagnostic CI scope.
+
+A bounded [whole-word frontier policy](WORD-FRONTIERS.md) raises the measured
+selected hint-free RV32I child count from 430/436 to 431/436. Five residuals and
+the full hint-free result remain Unknown. Its generic regression gates and the
+separate Rust-Unknown/concrete-counterexample mutation evidence are documented.
+The [phase-3 publication record](audit/word_frontier/publication/README.md)
+preserves those exact boundaries and the complete nonbinary replay inventory.

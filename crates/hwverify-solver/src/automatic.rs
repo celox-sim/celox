@@ -46,6 +46,7 @@ struct Planner {
     work: usize,
     leaves: usize,
     cuts: usize,
+    word_cutpoint_frontiers: usize,
 }
 impl Default for Planner {
     fn default() -> Self {
@@ -54,6 +55,7 @@ impl Default for Planner {
             work: 0,
             leaves: 0,
             cuts: 0,
+            word_cutpoint_frontiers: 0,
         }
     }
 }
@@ -61,7 +63,7 @@ impl Planner {
     fn stats(&self, prefix_work: u64, accepted: bool, reason: Option<String>) -> Value {
         json!({"version":1,"heuristic":"bounded-structural-frontier-and-mux-splits",
             "search_work":self.work as u64+prefix_work,"search_work_unit":"planner visits; structural comparisons are not constant-time",
-            "search_seconds":self.started.elapsed().as_secs_f64(),"leaves":self.leaves,"equalities":self.cuts,
+            "search_seconds":self.started.elapsed().as_secs_f64(),"leaves":self.leaves,"equalities":self.cuts,"word_cutpoint_frontiers":self.word_cutpoint_frontiers,
             "accepted":accepted,"reason":reason,"max_search_work":MAX_PLAN_WORK,"max_search_ms":MAX_SEARCH_MS,
             "max_cuts_per_leaf":MAX_CUTS,"max_split_depth":MAX_SPLIT_DEPTH,"max_leaves":MAX_LEAVES,
             "trusted":false,"source_names_used":false,"saved_hints_used":false})
@@ -228,7 +230,22 @@ impl Planner {
         pool: &EqualityPool,
     ) -> Res<Plan> {
         let (cuts, split) = self.frontier(lhs, rhs, guards, pool)?;
+        // Preserve a whole typed word relation when its frontier reaches an
+        // input/state cutpoint. Splitting inside a read/mux cone can destroy the
+        // word-level structure which the finite engine can prove cheaply.
+        // This ranks two existing proposals; neither proposal authorizes a fact.
+        let word_cutpoints = cuts.as_ref().is_some_and(|cuts| {
+            !cuts.is_empty()
+                && cuts.iter().all(|(a, b)| {
+                    matches!(a.0.sort, Sort::Bv(_))
+                        && (a.0.op.starts_with('@') || b.0.op.starts_with('@'))
+                })
+        });
+        if word_cutpoints {
+            self.word_cutpoint_frontiers += 1;
+        }
         let prefer_split = split.is_some()
+            && !word_cutpoints
             && cuts
                 .as_ref()
                 .is_some_and(|cuts| cuts.iter().any(|(a, b)| a.0.op == "ite" || b.0.op == "ite"))
@@ -662,5 +679,46 @@ mod tests {
                 >= 100_000_000
         );
         fs::remove_dir_all(out).unwrap();
+    }
+    #[test]
+    fn preserves_whole_word_variable_cutpoints_without_name_matching() {
+        for prefix in ["plain", "alpha_9413_unrelated"] {
+            let guard = var(format!("{prefix}_choose"), Sort::Bool);
+            let mux = ite(
+                guard,
+                v(&format!("{prefix}_left")),
+                v(&format!("{prefix}_right")),
+            );
+            let lhs = add(mux.clone(), bv(8, 1));
+            let rhs = add(v(&format!("{prefix}_latched")), bv(8, 1));
+            let mut planner = Planner::default();
+            let plan = planner
+                .build(&lhs, &rhs, &mut vec![], &EqualityPool::new(boolv(true)))
+                .unwrap();
+            assert!(matches!(plan,Plan::Leaf(ref cuts) if cuts.len()==1 && cuts[0].1==mux));
+            assert_eq!(planner.word_cutpoint_frontiers, 1);
+            assert_eq!(planner.leaves, 1);
+        }
+    }
+    #[test]
+    fn compound_datapath_muxes_still_use_exhaustive_splits() {
+        let guard = var("route".into(), Sort::Bool);
+        let mul = |a, b| node(Sort::Bv(8), "bvmul", vec![a, b]);
+        let lhs = add(
+            mul(ite(guard.clone(), v("a"), v("b")), v("scale")),
+            bv(8, 1),
+        );
+        let rhs = add(
+            ite(guard, mul(v("a"), v("scale")), mul(v("b"), v("scale"))),
+            bv(8, 1),
+        );
+        let mut planner = Planner::default();
+        let plan = planner
+            .build(&lhs, &rhs, &mut vec![], &EqualityPool::new(boolv(true)))
+            .unwrap();
+        assert!(matches!(plan, Plan::Split(_, _, _)));
+        assert_eq!(planner.word_cutpoint_frontiers, 0);
+        assert_eq!(planner.leaves, 2);
+        assert_eq!(planner.cuts, 0);
     }
 }

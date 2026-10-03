@@ -1,0 +1,31 @@
+{
+  "scope": "Independent concrete interpreter replay of exact original model binding and reset/commit-priority transitions; model-level mutations, not a fresh RTL import or Rust solver verdict",
+  "script_sha256": "351fca2f23a28141229a0e6d716f716215c1b2537ff2276ed09b1fc66711b0b4",
+  "interpreter_sha256": "995a5dbb4402c52bad5783071ffe9cfae594f8597e55ee4cf1c1cd8ee5088f9b",
+  "base_input_sha256": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+  "program_words": [
+    8323,
+    115
+  ],
+  "maximum_cycles_per_mutant": 16,
+  "original_microstep_formula": "binding_before AND NOT binding_after, with reset/commit transition exactly as the checker",
+  "no_assumptions_added_to_models": true,
+  "rust_original_sat_successes": 0,
+  "concrete_original_counterexamples": 2,
+  "results": [
+    {
+      "name": "active_plus_one",
+      "status": "concrete_original_counterexample_replayed",
+      "cycle": 2,
+      "seconds": 2.4096888170024613,
+      "report_sha256": "fbd64a3a7095431f27de92647626753c6ba5f776f255e8e56b3410fc17a91bc0"
+    },
+    {
+      "name": "complement_plus_one",
+      "status": "concrete_original_counterexample_replayed",
+      "cycle": 3,
+      "seconds": 1.7884010590059916,
+      "report_sha256": "5c3ebae72e936b30ade895178c36b173d82ecc0f5673d66d1af235b6b83a9d21"
+    }
+  ]
+}

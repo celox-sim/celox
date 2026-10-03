@@ -57,6 +57,10 @@ jobs:
         run: |
           python3 -m unittest audit.equality_sharing.test_generate audit.equality_sharing.test_evidence audit.equality_sharing.test_ci
           python3 -m audit.equality_sharing.ci --checker target/release/hwverify-rs --out "$RUNNER_TEMP/equality-sharing"
+      - name: Verify whole-word frontier controls and original-formula mutants
+        run: |
+          python3 -m unittest audit.word_frontier.test_generate audit.word_frontier.test_ci
+          python3 -m audit.word_frontier.ci --checker target/release/hwverify-rs --expected-checker-sha256 "$(sha256sum target/release/hwverify-rs | cut -d' ' -f1)" --out "$RUNNER_TEMP/word-frontier"
       - name: Upload whole-corpus proof audit and coverage dispositions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -95,5 +99,13 @@ jobs:
         with:
           name: equality-sharing-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/equality-sharing/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload whole-word frontier control evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: word-frontier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/word-frontier/
           if-no-files-found: error
           retention-days: 14
