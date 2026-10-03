@@ -663,7 +663,7 @@ pub fn parse_mixed(
     let external_roots = reachable_external_sv_roots(ir, top);
     let external_roots = external_roots
         .into_iter()
-        .map(|name| resource_table::get_str_value(name).unwrap_or_default())
+        .map(|name| veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
         .collect();
     let external =
         celox_frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
