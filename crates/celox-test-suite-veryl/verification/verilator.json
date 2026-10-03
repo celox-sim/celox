@@ -6579,17 +6579,27 @@
         "veryl_context_regressions::wide_logical_operand_keeps_result_type"
       ],
       "note": "upstream Veryl expression regressions regression probes and two isolated Celox fixes were checked with the same external tool versions. Other observations are retained. Compilation blockers remain unexcluded."
+    },
+    {
+      "date": "2026-10-03",
+      "suite_version": "0.9.1",
+      "cases": [
+        "hierarchical_assignment::disjoint_loop",
+        "hierarchical_assignment::selections"
+      ],
+      "results": "repros/hierarchical_assignment_verilator.json",
+      "note": "Only the two newly registered native testbench cases were run through the standard external adapter. All other observations, including failures and exclusions, are retained from earlier reports."
     }
   ],
   "partial_refresh": {
     "date": "2026-10-03",
     "suite_version": "0.9.1",
     "cases": [
-      "hierarchical_assignment::disjoint_loop",
-      "hierarchical_assignment::selections"
+      "veryl_language::parameter_expression_type_cast_widths",
+      "veryl_language::inside_outside_range_endpoints"
     ],
-    "results": "repros/hierarchical_assignment_verilator.json",
-    "note": "Only the two newly registered native testbench cases were run through the standard external adapter. All other observations, including failures and exclusions, are retained from earlier reports."
+    "results": "repros/veryl_0_22_language_verilator.json",
+    "note": "Reran expression casts and runtime inclusive range bounds with Veryl 0.22. All other results are retained observations, not new runs."
   },
   "inout_refresh": {
     "date": "2026-09-28",
