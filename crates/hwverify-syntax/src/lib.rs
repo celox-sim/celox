@@ -10,8 +10,10 @@ use hwv_grammar_trait as g;
 mod examples;
 mod expectations;
 mod json_input;
+mod proofs;
 mod scoped;
 pub use json_input::parse as parse_json;
+pub use proofs::merge_lemma_source;
 mod hwv_grammar {
     pub use super::HwvGrammar;
 }
@@ -101,6 +103,7 @@ impl ParsedDocument {
     }
 }
 struct Lower<'s> {
+    proof_mode: bool,
     source: &'s str,
     filename: &'s str,
     spans: BTreeMap<String, Span>,
@@ -476,7 +479,7 @@ impl Lower<'_> {
                         "only one prime is allowed on a local state or output name",
                     ));
                 }
-                if token.text().contains('.') {
+                if token.text().contains('.') && !self.proof_mode {
                     return Err(self.error(&span, "prime requires an unqualified local state or output name; use n. or no. without a prime"));
                 }
                 Ok(E::leaf(json!(format!("{}'", token.text())), span))
@@ -645,6 +648,21 @@ impl Lower<'_> {
         let mut result = Map::new();
         let mut explicit_entries = BTreeSet::new();
         for entry in entries {
+            if let g::Entry::Block(x) = entry {
+                if context == "root" && id_token(&x.block.id).text() == "proof" {
+                    if result.contains_key("proof_programs") {
+                        return Err(
+                            self.error(&self.span(id_token(&x.block.id)), "duplicate proof block")
+                        );
+                    }
+                    let metadata = self.proof_block(
+                        x.block.block_list.iter().map(|e| &*e.entry).collect(),
+                        None,
+                    )?;
+                    result.insert("proof_programs".into(), metadata);
+                    continue;
+                }
+            }
             if self.quantifier(entry, context, path, &mut result)? {
                 continue;
             }
@@ -955,6 +973,7 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
         span: None,
     })?;
     let mut lower = Lower {
+        proof_mode: false,
         source,
         filename,
         spans: BTreeMap::new(),
@@ -971,6 +990,12 @@ pub fn parse_document(source: &str, filename: &str) -> Res<ParsedDocument> {
             x.document_body_list0.iter().map(|e| &*e.entry).collect()
         }
     };
+    if root.doc_kind.doc_kind.text() == "lemmas" {
+        return Err(lower.error(
+            &lower.span(&root.string.string),
+            "lemma modules are attached to a design with --lemmas FILE.hwv",
+        ));
+    }
     let relational = root.doc_kind.doc_kind.text() == "specification";
     let scoped = relational && entries.iter().any(|entry| matches!(entry, g::Entry::NamedEntry(x) if matches!(&*x.named_entry.named_body, g::NamedBody::SignatureBody(_))));
     let mut canonical = lower.entries(

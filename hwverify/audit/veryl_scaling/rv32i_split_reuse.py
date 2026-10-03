@@ -146,7 +146,7 @@ class ProofSession:
         self.conjunctive_lemmas=bool(conjunctive_lemmas);self._handles={};self._records={};self._equation_handles={}
         self.cpu=None;self._cpu_hash=None;self._normalization=None;self._canonical_bank=False;self._bank_record=None;self._transport_view=False;self._control_invariant=False;self._dispatch_record=None;self._operand_views=False;self._history_record=None;self._proof_programs=False
         if p.sha(p.SOURCE)!=p.SELECTED_SHA256:raise ValueError('selected RTL changed')
-        files=[p.ROOT/'audit/lemma_candidates/migrate.py',p.ROOT/'audit/lemma_candidates/validate.py',Path(__file__),Path(__file__).with_name('rv32i_split_proof_program.py'),Path(p.__file__),Path(a.__file__),Path(c.__file__),Path(mem.__file__),Path(p.base.__file__),
+        files=[p.ROOT/'audit/lemma_candidates/rv-delivery.hwv',p.ROOT/'audit/lemma_candidates/migrate.py',p.ROOT/'audit/lemma_candidates/validate.py',Path(__file__),Path(__file__).with_name('rv32i_split_proof_program.py'),Path(p.__file__),Path(a.__file__),Path(c.__file__),Path(mem.__file__),Path(p.base.__file__),
             Path(rv32i_memory.__file__),Path(control.__file__),Path(control.p.__file__),
             p.ROOT/'audit/veryl_scaling/rv32i_latency_variants.py',Path(control.c.registers.__file__),
             p.ROOT/'examples/build_pipeline.py',p.ROOT/'audit/veryl_scaling/cpu_memory_reuse.py',p.ROOT/'conformance/veryl-symbolic/run.py',
@@ -154,7 +154,7 @@ class ProofSession:
         self._files={str(x.resolve()):p.sha(x) for x in files}
         snapshots=self.out/'source-snapshots';snapshots.mkdir()
         for path,digest in self._files.items():
-            if path.endswith(('.py','.veryl')):
+            if path.endswith(('.py','.veryl','.hwv')):
                 data=Path(path).read_bytes()
                 if p.hashlib.sha256(data).hexdigest()!=digest:raise ValueError('source changed while snapshotting')
                 (snapshots/(digest+'-'+Path(path).name)).write_bytes(data)
@@ -177,7 +177,10 @@ class ProofSession:
         if any(k.startswith('HWVERIFY_') and k not in keys for k in os.environ):raise ValueError('non-default solver settings forbidden')
         decompose=self.conjunctive_lemmas and not label.startswith('memory-')
         os.environ['HWVERIFY_SOLVER']='finite';os.environ['HWVERIFY_CONJUNCTIVE_LEMMAS']='1' if decompose else '0'
-        try:report,seconds=c.execute([self.checker,path,'--out',folder/'proof'],folder/'report.json',(0,1,3))
+        command=[self.checker,path,'--out',folder/'proof']
+        native_lemmas=not scoped and 'proof_programs' in doc
+        if native_lemmas:command+=['--lemmas',p.ROOT/'audit/lemma_candidates/rv-delivery.hwv']
+        try:report,seconds=c.execute(command,folder/'report.json',(0,1,3))
         finally:
             for k,v in previous.items():
                 if v is None:os.environ.pop(k,None)
@@ -185,6 +188,7 @@ class ProofSession:
         self._check()
         if json.loads(path.read_text())!=doc:raise ValueError('contract changed during solve')
         attempt={'status':report['status'],'document_sha256':p.base.digest(doc),'report_sha256':p.sha(folder/'report.json'),
+            'native_lemma_source':'audit/lemma_candidates/rv-delivery.hwv' if native_lemmas else None,
             'seconds':seconds,'files':copy.deepcopy(self._files),'machine_sha256':self._raw_hash,'saved_records_are_certificates':False}
         c.RUNNER.write_json(folder/'attempt.json',attempt)
         if scoped:
@@ -196,7 +200,8 @@ class ProofSession:
                 if query.get('backend')=='conjunctive_lemmas' and self.conjunctive_lemmas:p.base.validate_conjunctive_obligation(query)
                 elif query.get('backend') not in ('finite_bv','structural_kernel'):raise ValueError('unsupported proof backend')
         if not scoped and 'proof_programs' in doc:
-            from audit.lemma_candidates.validate import validate
+            from audit.lemma_candidates.validate import validate, validate_native_rv_sources
+            validate_native_rv_sources(report,p.ROOT/'audit/lemma_candidates/rv-delivery.hwv')
             coverage=validate(report,doc['proof_programs'])
             c.RUNNER.write_json(folder/'candidate-coverage.json',coverage)
         self._check()

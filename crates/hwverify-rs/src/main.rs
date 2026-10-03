@@ -34,10 +34,10 @@ impl Input {
 fn run() -> Res<i32> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--finite-search-hint query|sat|unsat]".into());
+        return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--finite-search-hint query|sat|unsat]".into());
     }
     if args[0] == "--help" || args[0] == "-h" {
-        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence.");
+        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence.");
         return Ok(0);
     }
     let mut out = PathBuf::from("results");
@@ -52,6 +52,7 @@ fn run() -> Res<i32> {
     };
     let mut check_only = false;
     let mut emit_json = None;
+    let mut lemma_source: Option<PathBuf> = None;
     let mut finite_search_hint = None;
     let mut n = 1;
     while n < args.len() {
@@ -64,6 +65,12 @@ fn run() -> Res<i32> {
             return Err("missing option value".into());
         }
         match args[n].as_str() {
+            "--lemmas" => {
+                if lemma_source.is_some() {
+                    return Err("--lemmas may only be specified once".into());
+                }
+                lemma_source = Some(PathBuf::from(&args[n + 1]));
+            }
             "--out" => out = PathBuf::from(&args[n + 1]),
             "--z3" => z3 = args[n + 1].clone(),
             "--finite-search-hint" => {
@@ -103,7 +110,7 @@ fn run() -> Res<i32> {
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let outcome = (|| -> Res<Value> {
         let bytes = fs::read(&args[0]).map_err(|e| e.to_string())?;
-        let design = if format == "hwv" {
+        let mut design = if format == "hwv" {
             let source = std::str::from_utf8(&bytes)
                 .map_err(|e| format!("{}: invalid UTF-8 source: {e}", args[0]))?;
             let parsed =
@@ -134,6 +141,28 @@ fn run() -> Res<i32> {
                 Input::Design(ir::Design::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?)
             }
         };
+        if let Some(path) = lemma_source {
+            let Input::Design(original) = &design else {
+                return Err(
+                    "native lemma modules currently require a design, not a scoped specification"
+                        .into(),
+                );
+            };
+            hwverify_verify::validate_proof_metadata(original)?;
+            let source =
+                fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut doc = original.document().clone();
+            doc["proof_programs"] = hwverify_syntax::merge_lemma_source(
+                &source,
+                &path.to_string_lossy(),
+                doc.get("proof_programs"),
+            )
+            .map_err(|e| e.to_string())?;
+            design = Input::Design(ir::Design::from_json(&doc).map_err(|e| e.to_string())?);
+        }
+        if let Input::Design(d) = &design {
+            hwverify_verify::validate_proof_metadata(d).map_err(|e| format!("{}: {e}", args[0]))?;
+        }
         if let Some(destination) = emit_json {
             fs::write(
                 destination,

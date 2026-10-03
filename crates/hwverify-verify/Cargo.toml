@@ -7,3 +7,6 @@ edition.workspace = true
 serde_json.workspace = true
 hwverify-ir.workspace = true
 hwverify-solver.workspace = true
+
+[dev-dependencies]
+hwverify-syntax.workspace = true

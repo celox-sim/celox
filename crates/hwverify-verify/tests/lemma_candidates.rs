@@ -256,5 +256,92 @@ fn live_worker() {
     assert_eq!(d["candidates"].as_array().unwrap().len(), 1);
     assert_eq!(d["candidates"][0]["validity"], "unknown_budget");
     assert!(d["candidates"][0]["claim_true"].is_null());
+    // Human labels may collide; attribution must use the live query position.
+    for fail in [false, true] {
+        let seed = candidate("seed", json!(true), json!(true));
+        let usage = json!({"op":"use_candidate","id":"u","candidate":"seed","context":"$pre","source":"collision.hwv:3:5"});
+        let claim = if fail {
+            json!(["eq", "impl.x", ["bv", 8, 0]])
+        } else {
+            json!("$goal")
+        };
+        let last = candidate("u_guard_at_use", json!("$pre"), claim);
+        let bad = if fail {
+            and(boolv(true), not(eq(ctx["impl.x"].clone(), bv(8, 0))))
+        } else {
+            let g = eq(ctx["impl.x"].clone(), bv(8, 0));
+            and(g.clone(), not(g))
+        };
+        let (result, reports) = run(
+            if fail {
+                "collision_fail"
+            } else {
+                "collision_ok"
+            },
+            metadata(
+                vec![seed, usage, last],
+                "u_guard_at_use",
+                "independent_lemmas",
+            ),
+            bad,
+        );
+        let d = &reports[0]["lemma_candidates"];
+        assert_eq!(d["uses"][0]["source"], "collision.hwv:3:5");
+        assert_ne!(
+            d["uses"][0]["query_index"],
+            d["candidates"][1]["query_index"]
+        );
+        if fail {
+            assert!(result.is_err());
+            assert_eq!(d["candidates"][1]["validity"], "lemma_counterexample");
+        } else {
+            assert!(result.unwrap());
+            assert_eq!(d["candidates"][1]["usefulness"], "target_closed");
+            assert_eq!(d["candidates"][1]["proof_node"], reports[0]["root"]);
+        }
+    }
+    // A legacy prove label must not hide a later failed guard query.
+    let c = candidate("guarded", json!(false), json!(true));
+    let legacy = json!({"op":"prove","id":"u_guard_at_use","pre":true,"post":true});
+    let usage = json!({"op":"use_candidate","id":"u","candidate":"guarded","context":"$pre","source":"guard.hwv:9:5"});
+    let (r, reports) = run(
+        "legacy_collision",
+        metadata(vec![c, legacy, usage], "u", "independent_lemmas"),
+        and(boolv(true), not(eq(ctx["impl.x"].clone(), bv(8, 0)))),
+    );
+    assert!(r.is_err());
+    assert_eq!(
+        reports[0]["lemma_candidates"]["uses"][0]["state"],
+        "use_context_does_not_establish_guard"
+    );
+    // Replacing a model alias with an identically named formal must not pass identity checks.
+    let original = Env::from([("impl.x".into(), ctx["impl.x"].clone())]);
+    let mut doc = metadata(
+        vec![candidate("c", json!("$pre"), json!("$goal"))],
+        "c",
+        "independent_lemmas",
+    );
+    doc["variables"] = json!({"a":{"bv":8}});
+    let p = ProofPrograms::from_json(&doc, &original).unwrap();
+    let substituted = Env::from([(
+        "formal.a".into(),
+        var("proof_program_formal_a".into(), Sort::Bv(8)),
+    )]);
+    let mut check = Check {
+        out: root.join("context_collision"),
+        z3: "FORBIDDEN".into(),
+        reports: vec![],
+    };
+    let g = eq(ctx["impl.x"].clone(), bv(8, 0));
+    assert!(p
+        .try_query(
+            &mut check,
+            "identity",
+            &and(g.clone(), not(g)),
+            &substituted
+        )
+        .unwrap_err()
+        .contains("stale proof-program context"));
+    assert!(check.reports.is_empty());
     fs::remove_dir_all(root).unwrap();
 }

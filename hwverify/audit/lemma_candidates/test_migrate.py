@@ -56,4 +56,21 @@ class Acceptance(unittest.TestCase):
             else:row['saved_reports_are_authority']=True
             with self.assertRaises(ValueError):validate(bad,metadata)
 
+    def test_native_rv_gate_rejects_missing_source_coverage(self):
+        import copy
+        from audit.lemma_candidates.validate import validate_native_rv_sources
+        children=[]
+        for program, ids in [('m_address',['ir']),('x_operand1',['delivery','equality'])]:
+            children.append({'lemma_candidates':{'program':program,'candidates':[
+                {'id':name,'source':'rv.hwv:7:11','state':'applied','usefulness':'target_closed'} for name in ids]}})
+        report={'obligations':[{'children':children}]}
+        validate_native_rv_sources(report,'rv.hwv')
+        unused=copy.deepcopy(report)
+        unused['obligations'][0]['children'][0]['lemma_candidates']['candidates'][0]['usefulness']='established_but_unused'
+        with self.assertRaises(ValueError):validate_native_rv_sources(unused,'rv.hwv')
+        for source in (None,'JSON source','rv.hwv:0:1','other.hwv:7:11'):
+            bad=copy.deepcopy(report)
+            bad['obligations'][0]['children'][0]['lemma_candidates']['candidates'][0]['source']=source
+            with self.assertRaises(ValueError):validate_native_rv_sources(bad,'rv.hwv')
+
 if __name__=='__main__':unittest.main()
