@@ -4,7 +4,6 @@ mod test_utils;
 
 all_backends! {
     fn cast_binary_semantics_match_between_comb_and_ff(sim) {
-        @omit_veryl;
         @ignore_on(sv);
         @case "expression_semantics::cast_binary_semantics_match_between_comb_and_ff";
     }
@@ -46,9 +45,8 @@ all_backends! {
     }
 
     fn system_function_results_obey_ternary_width_contexts(sim) {
-        // Veryl 0.21.0 cannot evaluate this system function; the SV frontend
-        // cannot lower this assignment expression. See MISMATCH_REVIEW.md section 2.
-        @ignore_on(veryl, sv);
+        // The SV frontend cannot lower this assignment expression.
+        @ignore_on(sv);
         @case "expression_semantics::system_function_results_obey_ternary_width_contexts";
     }
 
