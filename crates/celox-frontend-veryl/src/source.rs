@@ -66,6 +66,9 @@ pub struct VerylTestbenchSource {
     /// Function temporaries need process-private storage across clock waits.
     pub function_locals: Vec<VarId>,
     pub functions: HashMap<VarId, Function>,
+    /// Configured generator periods in this elaborated module, including clocks
+    /// used only through reset.assert() (which carries no period in Veryl IR).
+    pub clock_periods: HashMap<veryl_parser::resource_table::StrId, u64>,
     pub components: Vec<celox_testbench::TestbenchComponent>,
     pub component_bindings: Vec<VerylComponentBinding>,
     pub component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -155,6 +158,7 @@ impl fmt::Debug for VerylTestbenchSource {
             .field("instance", &self.instance)
             .field("child_sources", &self.child_sources.len())
             .field("function_locals", &self.function_locals.len())
+            .field("clock_periods", &self.clock_periods)
             .field("functions", &self.functions.len())
             .field("components", &self.components.len())
             .field("component_bindings", &self.component_bindings.len())

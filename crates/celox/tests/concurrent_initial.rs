@@ -19,6 +19,11 @@ all_backends! {
         @ignore_on(sv);
         @case "concurrent_initial::clock_periods";
     }
+    fn concurrent_initial_reset_only_clock(sim) {
+        @omit_veryl;
+        @ignore_on(sv);
+        @case "concurrent_initial::reset_only_clock";
+    }
     fn concurrent_initial_simultaneous_edges(sim) {
         @omit_veryl;
         @ignore_on(sv);

@@ -2413,7 +2413,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let mut clock_insts: Vec<StrId> = Vec::new();
         let mut reset_insts: Vec<StrId> = Vec::new();
         let mut active_functions = FxHashSet::default();
-        let mut periods = HashMap::default();
+        let mut periods = self.testbench_source.clock_periods.clone();
         self.scan_tb_methods(
             stmts,
             &mut clock_insts,

@@ -150,6 +150,30 @@
     },
     {
       "category": "ControlFlow",
+      "detail": "compile concurrent_initial::reset_only_clock: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/concurrent_initial_verilator.json",
+          "verification/repros/concurrent_initial_icarus.json",
+          "LIMITATIONS.md#veryl-native-clock-components"
+        ],
+        "id": "veryl_native_clock_components",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "These native testbench fixtures use $tb::clock_gen (and reset_gen). The shared adapter does not translate native clock components; Veryl 0.22.0 SV emission panics with internal error: entered unreachable code before either external simulator runs.",
+        "upstream": []
+      },
+      "name": "concurrent_initial::reset_only_clock",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
       "detail": "compile concurrent_initial::shared_clock: internal error: entered unreachable code",
       "expectation": "Simulation",
       "known_issue": {
@@ -203,7 +227,7 @@
   ],
   "counts": {
     "compile_error": 0,
-    "emission_error": 8,
+    "emission_error": 9,
     "ignored": 0,
     "mismatch": 0,
     "passed": 0,

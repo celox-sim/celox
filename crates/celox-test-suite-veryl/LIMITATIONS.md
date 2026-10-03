@@ -287,24 +287,24 @@ Affected cases: icarus 1. See the manifest for exact IDs.
 
 ## veryl-native-clock-components
 
-The eight `concurrent_initial` cases exercise native `$tb::clock_gen` and
+The nine `concurrent_initial` cases exercise native `$tb::clock_gen` and
 `$tb::reset_gen` methods. The shared SV adapter does not translate those
 components. Both external verification commands stop in Veryl 0.22.0 emission
 with `internal error: entered unreachable code`, before producing SV or running
 Verilator/Icarus. This is an adapter/emitter limitation, not a simulation verdict.
 The [Verilator-path report](verification/repros/concurrent_initial_verilator.json)
 and [Icarus-path report](verification/repros/concurrent_initial_icarus.json)
-retain all eight observations each. Reproduce with `--include-ignored --filter
+retain all nine observations each. Reproduce with `--include-ignored --filter
 concurrent_initial` on either verification binary.
 
 Six of the Veryl fixtures are also run by
 `cargo test -p celox-bench --test veryl_heliodor
 shared_concurrent_initial_fixtures_match_veryl`, using Veryl 0.22.0's
 AOT-C runner with synchronous and asynchronous compilation. Celox's four execution
-backends run all eight fixtures without exclusions. The legacy Veryl/SV differential harness exclusions remain
+backends run all nine fixtures without exclusions. The legacy Veryl/SV differential harness exclusions remain
 because those adapters do not expose native testbench execution.
 
-The `mixed_edges` and `reset_between_edges` cases are not included in the
+The `mixed_edges`, `reset_between_edges`, and `reset_only_clock` cases are not included in the
 six-fixture native-runner parity test. Their assertions remain enabled on all
 four Celox backends. The [timing audit](verification/repros/concurrent_initial_timing.md)
 records the Veryl 0.22.0 scheduler's intended concurrency model, the conflicting
@@ -316,3 +316,9 @@ Both [minimal SV timing fixtures](verification/repros/concurrent_initial_timing.
 pass Icarus and Verilator. They are hand-written corroboration, not a successful
 translation of the full Veryl fixtures. IEEE NBA rules alone do not establish
 the Veryl native testbench's contract.
+
+The `reset_only_clock` regression covers a configured period with no `next()`
+call for that generator, including differently parameterized child instances.
+Veryl 0.22.0 also derives reset periods from `ClockNext` statements and falls back
+to period 2 for this case. The [focused observation](verification/repros/reset_only_clock.json)
+records the native-runner result; the case stays enabled on all Celox backends.

@@ -114,6 +114,7 @@ pub fn schedule_symbolic_rtl(
                         })
                         .collect(),
                     functions: module.functions.clone(),
+                    clock_periods: configured_clock_periods(module)?,
                     ..Default::default()
                 });
             }
@@ -149,6 +150,10 @@ pub fn schedule_symbolic_rtl(
             })
             .unwrap_or_default(),
         functions,
+        clock_periods: root
+            .map(configured_clock_periods)
+            .transpose()?
+            .unwrap_or_default(),
         components,
         component_bindings,
         component_libraries: Vec::new(),
@@ -159,4 +164,74 @@ pub fn schedule_symbolic_rtl(
         fused_optimization_hints: output.fused_optimization_hints,
         testbench_source,
     })
+}
+
+/// Veryl 0.22 keeps clock configuration on instance symbols, but only copies it
+/// into ClockNext IR. Recover it while the analyzer symbols are still available,
+/// using the specialization's overrides rather than a parameter's default.
+fn configured_clock_periods(
+    module: &veryl_analyzer::ir::Module,
+) -> Result<crate::HashMap<veryl_parser::resource_table::StrId, u64>, ParserError> {
+    use veryl_analyzer::{
+        Context,
+        ir::{Comptime, Expression, ValueVariant, VarPath},
+        symbol::SymbolKind,
+        symbol_table,
+    };
+    let mut context = None;
+    let mut periods = crate::HashMap::default();
+    for variable in module.variables.values() {
+        if !variable.r#type.is_clock() {
+            continue;
+        }
+        let Ok(symbol) = symbol_table::resolve(&variable.token.beg) else {
+            continue;
+        };
+        let SymbolKind::Instance(instance) = &symbol.found.kind else {
+            continue;
+        };
+        let Some((_, target)) = instance
+            .parameter_connects
+            .iter()
+            .find(|(name, _)| name.text.to_string() == "period")
+        else {
+            continue;
+        };
+        let context = context.get_or_insert_with(|| {
+            let mut context = Context::default();
+            context.push_generic_map(module.signature.to_generic_map());
+            let overrides = module
+                .signature
+                .parameters
+                .iter()
+                .filter_map(|(name, value)| {
+                    let ValueVariant::Numeric(value) = value else {
+                        return None;
+                    };
+                    Some((
+                        VarPath::new(*name),
+                        (
+                            Comptime::create_value(value.clone(), module.token),
+                            Expression::create_value(value.clone(), module.token),
+                        ),
+                    ))
+                })
+                .collect();
+            context.push_override(module.signature.namespace(), overrides);
+            context
+        });
+        let value =
+            veryl_analyzer::conv::utils::eval_expr(context, None, &target.expression, false)
+                .ok()
+                .and_then(|(comptime, _)| comptime.get_value().ok().cloned());
+        let Some(value) = value else {
+            return Err(ParserError::illegal_context(
+                "testbench clock period",
+                "cannot evaluate configured clock period",
+                Some(&variable.token),
+            ));
+        };
+        periods.insert(symbol.found.token.text, value.payload_u64().max(2));
+    }
+    Ok(periods)
 }

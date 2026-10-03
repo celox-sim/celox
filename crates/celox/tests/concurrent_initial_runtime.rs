@@ -141,6 +141,9 @@ fn native_image_roundtrip_preserves_concurrent_processes_and_periods() {
         include_str!(
             "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_between_edges.veryl"
         ),
+        include_str!(
+            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_only_clock.veryl"
+        ),
     ] {
         let original = Simulator::builder(code, "Top").build_native().unwrap();
         let bytes = original

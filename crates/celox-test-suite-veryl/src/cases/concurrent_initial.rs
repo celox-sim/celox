@@ -16,6 +16,11 @@ cases! { ControlFlow, "concurrent_initial";
         @build Design::new(code, "Top");
         sim.run_testbench().unwrap();
     }
+    fn reset_only_clock(sim) {
+        @setup { let code = include_str!("../../fixtures/testbench/concurrent_initial_reset_only_clock.veryl"); }
+        @build Design::new(code, "Top");
+        sim.run_testbench().unwrap();
+    }
     fn simultaneous_edges(sim) {
         @tags [TwoStateInitialization];
         @setup { let code = include_str!("../../fixtures/testbench/concurrent_initial_simultaneous_edges.veryl"); }
