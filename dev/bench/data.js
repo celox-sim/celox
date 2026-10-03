@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791028001365,
+  "lastUpdate": 1791028289504,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -315789,6 +315789,41 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_71_linux_boot_execution",
             "unit": "ms",
             "value": 242146.105917
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "a550e681e55217067e104cbb7315a6684cd4f9a7",
+          "message": "perf(sir): simplify guarded scans and packed array updates (#970)",
+          "timestamp": "2026-10-02T08:30:21Z",
+          "url": "https://github.com/celox-sim/celox/commit/a550e681e55217067e104cbb7315a6684cd4f9a7"
+        },
+        "date": 1791028289504,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71_linux_boot_startup",
+            "unit": "ms",
+            "value": 22172.297488
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71_linux_boot_execution",
+            "unit": "ms",
+            "value": 258373.059902
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_71_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 280561.135713
           }
         ]
       }
