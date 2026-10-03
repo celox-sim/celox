@@ -120,6 +120,16 @@ pub(super) fn optimize_unit_groups_cached(
         );
     }
 
+    // Classification is complete, so alias inputs are no longer needed. Drop
+    // them before any optimizer scratch is allocated, not while replacing
+    // them with the optimized copy afterward.
+    for class in &classes {
+        for alias in &class.aliases {
+            *groups
+                .get_mut(alias)
+                .expect("equivalence-class alias must exist") = Vec::new();
+        }
+    }
     for class in classes {
         {
             let units = groups
@@ -130,11 +140,13 @@ pub(super) fn optimize_unit_groups_cached(
         if class.aliases.is_empty() {
             continue;
         }
-        let optimized = groups[&class.representative].clone();
         for alias in class.aliases {
+            // Make only the copy that the alias owns; do not retain a third
+            // group as an intermediate cache entry.
+            let optimized = groups[&class.representative].clone();
             *groups
                 .get_mut(&alias)
-                .expect("equivalence-class alias must exist") = optimized.clone();
+                .expect("equivalence-class alias must exist") = optimized;
         }
     }
     if let Some(start) = total_start {
@@ -196,5 +208,60 @@ mod tests {
     #[test]
     fn fingerprint_is_independent_of_hash_map_iteration_order() {
         assert_eq!(fingerprint(&[unit(false)]), fingerprint(&[unit(true)]));
+    }
+
+    #[test]
+    fn discarded_alias_inputs_are_replaced_by_their_optimized_representative() {
+        use super::super::pass_manager::{ExecutionUnitPass, ExecutionUnitPassManager};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct Flip(Arc<AtomicUsize>);
+        impl ExecutionUnitPass for Flip {
+            fn name(&self) -> &'static str {
+                "test_flip"
+            }
+            fn run(
+                &self,
+                eu: &mut ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
+                _: &crate::PassOptions,
+            ) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let inst = &mut eu.blocks.get_mut(&BlockId(0)).unwrap().instructions[0];
+                let SIRInstruction::Imm(_, value) = inst else {
+                    panic!("expected immediate")
+                };
+                *value = if *value == SIRValue::new(1u8) {
+                    SIRValue::new(0u8)
+                } else {
+                    SIRValue::new(1u8)
+                };
+            }
+        }
+        let address = |id| crate::ir::AbsoluteAddr {
+            instance_id: celox_design::InstanceId(0),
+            var_id: celox_design::StateObjectId(id),
+        };
+        let original = unit(false);
+        let mut distinct = unit(true);
+        distinct.blocks.get_mut(&BlockId(0)).unwrap().instructions[0] =
+            SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8));
+        let mut groups = HashMap::default();
+        groups.insert(address(0), vec![original.clone()]);
+        groups.insert(address(1), vec![unit(true)]);
+        groups.insert(address(2), vec![original.clone()]);
+        groups.insert(address(3), vec![distinct.clone()]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut passes = ExecutionUnitPassManager::new();
+        passes.add_pass(Flip(Arc::clone(&calls)));
+        super::optimize_unit_groups_cached(&mut groups, &passes, &crate::PassOptions::default());
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(groups.len(), 4);
+        for id in 0..3 {
+            assert_eq!(groups[&address(id)], vec![distinct.clone()]);
+        }
+        assert_eq!(groups[&address(3)], vec![original]);
     }
 }

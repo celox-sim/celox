@@ -16,12 +16,16 @@ pub(super) fn find_branchify_mux_in_block(
         }
     }
 
+    let mut local_uses = HashMap::default();
+    add_block_uses(&mut local_uses, block);
+    let mut suffix_chunks = None;
+    let mut store_suffix_chunks = None;
     for (mux_idx, inst) in block.instructions.iter().enumerate() {
         let SIRInstruction::Mux(dst, cond, true_val, false_val) = inst else {
             continue;
         };
 
-        if use_counts.get(dst).copied().unwrap_or(0) > block_use_count(block, *dst) {
+        if use_counts.get(dst).copied().unwrap_or(0) > local_uses.get(dst).copied().unwrap_or(0) {
             continue;
         }
 
@@ -90,7 +94,15 @@ pub(super) fn find_branchify_mux_in_block(
             },
             preserve_result,
         };
-        if !branch_is_profitable(eu, block, &plan, def_blocks, &def_pos) {
+        let live_through_chunks = Some(if plan.preserve_result {
+            suffix_chunks.get_or_insert_with(|| mux_live_through_chunks(block, &eu.register_map))
+                [mux_idx]
+        } else {
+            store_suffix_chunks
+                .get_or_insert_with(|| mux_store_live_through_chunks(block, &eu.register_map))
+                [mux_idx]
+        });
+        if !branch_is_profitable(eu, block, &plan, def_blocks, &def_pos, live_through_chunks) {
             continue;
         }
         return Some(plan);
@@ -287,30 +299,6 @@ pub(super) fn apply_branchify_mux(
         trace_reg_branchify_plan(&original, &plan, &remove_defs, reg);
     }
 
-    let mut head_insts = Vec::new();
-    for (idx, inst) in original.instructions.iter().enumerate().take(plan.mux_idx) {
-        if !remove_defs.contains(&idx) {
-            head_insts.push(inst.clone());
-        }
-    }
-    let branch_cond = normalize_branch_condition(
-        &mut eu.register_map,
-        &mut head_insts,
-        plan.cond,
-        reg_counter,
-    );
-    let mut suffix = Vec::new();
-    for (idx, inst) in original
-        .instructions
-        .iter()
-        .enumerate()
-        .skip(plan.mux_idx + 1)
-    {
-        if !remove_defs.contains(&idx) {
-            suffix.push(inst.clone());
-        }
-    }
-
     let mut true_insts = plan
         .true_defs
         .iter()
@@ -327,6 +315,14 @@ pub(super) fn apply_branchify_mux(
         true_insts.push(store.true_inst.clone());
         false_insts.push(store.false_inst.clone());
     }
+    let (mut head_insts, suffix) =
+        partition_instructions(original.instructions, plan.mux_idx, &remove_defs);
+    let branch_cond = normalize_branch_condition(
+        &mut eu.register_map,
+        &mut head_insts,
+        plan.cond,
+        reg_counter,
+    );
     let true_args = if plan.preserve_result {
         vec![plan.true_val]
     } else {
@@ -401,6 +397,88 @@ pub(super) fn apply_branchify_mux(
     }
 
     [true_id, false_id, merge_id]
+}
+
+// Reuse the original allocation for the larger half. A local rewrite often
+// peels a tiny head from a very long suffix; cloning and growing that suffix
+// for every accepted Mux doubles live instructions and repeatedly allocates
+// large buffers. Only arm definitions shared by the new branches need clones.
+fn partition_instructions(
+    mut instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    mux_idx: usize,
+    remove_defs: &HashSet<usize>,
+) -> (
+    Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+) {
+    let (mut head, mut suffix) = if mux_idx < instructions.len() / 2 {
+        let head = instructions.drain(..=mux_idx).collect::<Vec<_>>();
+        (head, instructions)
+    } else {
+        let suffix = instructions.split_off(mux_idx + 1);
+        (instructions, suffix)
+    };
+    head.truncate(mux_idx);
+    for (values, offset) in [(&mut head, 0), (&mut suffix, mux_idx + 1)] {
+        let mut index = offset;
+        values.retain(|_| {
+            let keep = !remove_defs.contains(&index);
+            index += 1;
+            keep
+        });
+        // Release a buffer only after its retained contents have halved,
+        // instead of reallocating it after each small suffix rewrite.
+        if values.len() < values.capacity() / 2 {
+            values.shrink_to_fit();
+        }
+    }
+    (head, suffix)
+}
+
+#[cfg(test)]
+#[test]
+fn partitions_reuse_the_larger_side_and_preserve_instruction_order() {
+    use crate::ir::SIRValue;
+    for mux_idx in [0, 8, 32, 56, 63] {
+        let mut instructions = Vec::with_capacity(64);
+        for id in 0..64 {
+            instructions.push(SIRInstruction::Imm(
+                RegisterId(id),
+                SIRValue::new(id as u64),
+            ));
+        }
+        let allocation = instructions.as_ptr();
+        let removed = [2, mux_idx, mux_idx + 1].into_iter().collect();
+        let (head, suffix) = partition_instructions(instructions, mux_idx, &removed);
+        let ids = |values: &[SIRInstruction<RegionedAbsoluteAddr>]| {
+            values
+                .iter()
+                .map(|inst| def_reg(inst).unwrap().0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&head),
+            (0..mux_idx)
+                .filter(|id| !removed.contains(id))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ids(&suffix),
+            (mux_idx + 1..64)
+                .filter(|id| !removed.contains(id))
+                .collect::<Vec<_>>()
+        );
+        if matches!(mux_idx, 8 | 56) {
+            assert_eq!(
+                allocation,
+                if mux_idx < 32 {
+                    suffix.as_ptr()
+                } else {
+                    head.as_ptr()
+                }
+            );
+        }
+    }
 }
 
 pub(super) fn removable_defs_after_head_restore(

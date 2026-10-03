@@ -34,6 +34,36 @@ enum LatticeValue {
     Overdefined,
 }
 
+#[derive(Default)]
+struct LatticeValues {
+    constants: HashMap<RegisterId, LatticeValue>,
+    overdefined: HashSet<RegisterId>,
+}
+
+impl LatticeValues {
+    fn get(&self, register: &RegisterId) -> Option<&LatticeValue> {
+        if self.overdefined.contains(register) {
+            Some(&LatticeValue::Overdefined)
+        } else {
+            self.constants.get(register)
+        }
+    }
+
+    fn insert(&mut self, register: RegisterId, value: LatticeValue) {
+        match value {
+            LatticeValue::Overdefined => {
+                self.constants.remove(&register);
+                self.overdefined.insert(register);
+            }
+            LatticeValue::Constant(_) => {
+                debug_assert!(!self.overdefined.contains(&register));
+                self.constants.insert(register, value);
+            }
+            LatticeValue::Unknown => unreachable!("unknown SCCP values are implicit"),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Edge {
     target: BlockId,
@@ -42,7 +72,7 @@ struct Edge {
 
 struct Analysis {
     executable: HashSet<BlockId>,
-    values: HashMap<RegisterId, LatticeValue>,
+    values: LatticeValues,
 }
 
 impl ExecutionUnitPass for ControlFlowSimplifyPass {
@@ -63,6 +93,7 @@ impl ExecutionUnitPass for ControlFlowSimplifyPass {
             // overdefined condition never gets treated as a boolean just
             // because one predecessor happened to carry a constant value.
             let sccp_changed = apply_sccp_rewrites(eu, &analysis, options.four_state);
+            drop(analysis);
 
             // Constant propagation handles values known independently of
             // control flow.  The second proof is deliberately different: a
@@ -690,8 +721,6 @@ fn thread_correlated_case_edges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
     let edges = correlated_edges(eu, &cfg);
     let edge_facts = analyze_correlated_facts(eu, &cfg, &definitions, &repeated_booleans, &edges);
     let transparent_targets = transparent_jump_targets(eu, &cfg);
-    let uses = register_use_blocks(eu);
-    let definition_blocks = register_definition_blocks(eu);
 
     let mut decisions = Vec::<CaseDecision>::new();
     let mut decision_for_block = vec![None; cfg.block_ids.len()];
@@ -840,6 +869,11 @@ fn thread_correlated_case_edges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
     if plans.is_empty() {
         return false;
     }
+
+    // Def/use repair is needed only when an edge will actually be threaded.
+    // Do not allocate whole-unit per-register sets for a rejected candidate.
+    let uses = register_use_blocks(eu);
+    let definition_blocks = register_definition_blocks(eu);
 
     // Most generated case predicates die inside their own decision spine.
     // Summarize that common case once from tail to head; otherwise validating
@@ -1714,18 +1748,9 @@ fn replace_register_uses_in_block(
 
 fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Analysis {
     let mut edges = HashMap::<BlockId, Vec<Edge>>::default();
-    let mut users = HashMap::<RegisterId, HashSet<BlockId>>::default();
+    let users = sccp_use_blocks(eu);
 
     for (&block_id, block) in &eu.blocks {
-        for instruction in &block.instructions {
-            for register in instruction_uses(instruction) {
-                users.entry(register).or_default().insert(block_id);
-            }
-        }
-        for register in terminator_uses(&block.terminator) {
-            users.entry(register).or_default().insert(block_id);
-        }
-
         let outgoing = match &block.terminator {
             SIRTerminator::Jump(target, arguments) => vec![Edge {
                 target: *target,
@@ -1761,7 +1786,9 @@ fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Analys
         edges.insert(block_id, outgoing);
     }
 
-    let mut values = HashMap::<RegisterId, LatticeValue>::default();
+    // Runtime-dependent values only need a membership bit, not space for two
+    // arbitrary-width integers in every hash bucket.
+    let mut values = LatticeValues::default();
     let mut executable = HashSet::default();
     let mut queued = HashSet::default();
     let mut worklist = VecDeque::new();
@@ -1848,16 +1875,42 @@ fn analyze(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Analys
     Analysis { executable, values }
 }
 
-fn merge_value(
-    values: &mut HashMap<RegisterId, LatticeValue>,
-    register: RegisterId,
-    incoming: LatticeValue,
-) -> bool {
+fn sccp_use_blocks(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, HashSet<BlockId>> {
+    let mut users = HashMap::<RegisterId, HashSet<BlockId>>::default();
+    for (&block_id, block) in &eu.blocks {
+        let mut local_definitions = HashSet::default();
+        for instruction in &block.instructions {
+            for register in instruction_uses(instruction) {
+                // Verified SSA defines these values earlier in the same block.
+                // This forward scan already propagates their latest lattice
+                // state, so they cannot require another visit to this block.
+                // Parameters remain external: incoming edges can change them
+                // after the block has been visited, including on backedges.
+                if !local_definitions.contains(&register) {
+                    users.entry(register).or_default().insert(block_id);
+                }
+            }
+            if let Some(register) = def_reg(instruction) {
+                local_definitions.insert(register);
+            }
+        }
+        for register in terminator_uses(&block.terminator) {
+            if !local_definitions.contains(&register) {
+                users.entry(register).or_default().insert(block_id);
+            }
+        }
+    }
+    users
+}
+
+fn merge_value(values: &mut LatticeValues, register: RegisterId, incoming: LatticeValue) -> bool {
     if matches!(incoming, LatticeValue::Unknown) {
         return false;
     }
-    let current = values.entry(register).or_insert(LatticeValue::Unknown);
-    let next = match (&*current, incoming) {
+    let current = values.get(&register).unwrap_or(&LatticeValue::Unknown);
+    let next = match (current, incoming) {
         (LatticeValue::Unknown, value) => value,
         (_, LatticeValue::Unknown) => return false,
         (LatticeValue::Overdefined, _) => LatticeValue::Overdefined,
@@ -1868,7 +1921,7 @@ fn merge_value(
     if *current == next {
         false
     } else {
-        *current = next;
+        values.insert(register, next);
         true
     }
 }
@@ -1885,7 +1938,7 @@ fn exact_truth(value: Option<&LatticeValue>) -> Option<bool> {
 
 fn evaluate_instruction(
     instruction: &SIRInstruction<RegionedAbsoluteAddr>,
-    values: &HashMap<RegisterId, LatticeValue>,
+    values: &LatticeValues,
     types: &HashMap<RegisterId, RegisterType>,
     four_state: bool,
 ) -> LatticeValue {
@@ -2304,6 +2357,80 @@ mod tests {
     use super::*;
     use crate::ir::InstanceId;
     use celox_design::StateObjectId as VarId;
+
+    #[test]
+    fn sccp_tracks_backedge_parameters_without_retaining_local_use_sets() {
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: vec![],
+            instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8))],
+            terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+        };
+        let mut instructions = vec![SIRInstruction::Imm(RegisterId(2), SIRValue::new(1u8))];
+        let mut previous = RegisterId(1);
+        for id in 3..259 {
+            instructions.push(SIRInstruction::Binary(
+                RegisterId(id),
+                previous,
+                BinaryOp::Add,
+                RegisterId(2),
+            ));
+            previous = RegisterId(id);
+        }
+        instructions.push(SIRInstruction::Load(
+            RegisterId(600),
+            address(),
+            SIROffset::Static(0),
+            1,
+        ));
+        let body = BasicBlock {
+            id: BlockId(1),
+            params: vec![RegisterId(1)],
+            instructions,
+            terminator: SIRTerminator::Branch {
+                cond: RegisterId(600),
+                true_block: (BlockId(1), vec![previous]),
+                false_block: (BlockId(2), vec![previous]),
+            },
+        };
+        let exit = BasicBlock {
+            id: BlockId(2),
+            params: vec![RegisterId(700)],
+            instructions: vec![SIRInstruction::Store(
+                address_instance(1),
+                SIROffset::Static(0),
+                32,
+                RegisterId(700),
+                vec![],
+                vec![],
+            )],
+            terminator: SIRTerminator::Return,
+        };
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, body, exit]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: (0..701).map(|id| (RegisterId(id), bit(32))).collect(),
+        };
+        eu.register_map.insert(RegisterId(600), bit(1));
+        eu.verify_result().unwrap();
+        let users = sccp_use_blocks(&eu);
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[&RegisterId(1)], [BlockId(1)].into_iter().collect());
+        assert_eq!(users[&RegisterId(700)], [BlockId(2)].into_iter().collect());
+        for four_state in [false, true] {
+            let analysis = analyze(&eu, four_state);
+            assert_eq!(analysis.executable.len(), 3);
+            for register in [RegisterId(1), previous, RegisterId(700)] {
+                assert_eq!(
+                    analysis.values.get(&register),
+                    Some(&LatticeValue::Overdefined)
+                );
+            }
+        }
+    }
 
     #[test]
     fn correlated_fact_intersections_match_set_intersection_and_share_subsets() {

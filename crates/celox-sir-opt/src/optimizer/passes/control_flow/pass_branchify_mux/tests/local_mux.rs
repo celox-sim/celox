@@ -663,3 +663,144 @@ fn preserves_mux_result_through_merge_when_used_after_store() {
             .any(|inst| matches!(inst, SIRInstruction::Store(_, _, 64, RegisterId(4), _, _)))
     }));
 }
+
+#[test]
+#[ignore = "manual planner scaling measurement"]
+#[allow(clippy::disallowed_macros, reason = "opt-in timing benchmark output")]
+fn rejected_local_mux_scaling() {
+    for distributed_store in [false, true] {
+        for count in [128, 256, 512, 1024, 2048] {
+            let mut instructions = vec![imm(0, 1), imm(1, 3), imm(2, 5)];
+            let live_base = 3 + count * 4;
+            if distributed_store {
+                for index in 0..count {
+                    instructions.push(imm(live_base + index, 11));
+                }
+            }
+            for index in 0..count {
+                let base = 3 + index * 4;
+                let op = if distributed_store {
+                    crate::ir::BinaryOp::DivU
+                } else {
+                    crate::ir::BinaryOp::Add
+                };
+                instructions.push(SIRInstruction::Binary(
+                    RegisterId(base),
+                    RegisterId(1),
+                    op,
+                    RegisterId(2),
+                ));
+                instructions.push(SIRInstruction::Binary(
+                    RegisterId(base + 1),
+                    RegisterId(2),
+                    op,
+                    RegisterId(1),
+                ));
+                instructions.push(SIRInstruction::Mux(
+                    RegisterId(base + 2),
+                    RegisterId(0),
+                    RegisterId(base),
+                    RegisterId(base + 1),
+                ));
+                if distributed_store {
+                    instructions.push(store(index, base + 2));
+                } else {
+                    instructions.push(SIRInstruction::Unary(
+                        RegisterId(base + 3),
+                        crate::ir::UnaryOp::Ident,
+                        RegisterId(base + 2),
+                    ));
+                    instructions.push(store(index, base + 3));
+                }
+            }
+            if distributed_store {
+                for index in 0..count {
+                    instructions.push(store(count + index, live_base + index));
+                }
+            }
+            let mut eu = unit(instructions);
+            for register in 0..live_base + count {
+                eu.register_map.insert(
+                    RegisterId(register),
+                    RegisterType::Bit {
+                        width: 64,
+                        signed: false,
+                    },
+                );
+            }
+            let mut uses = HashMap::default();
+            add_block_uses(&mut uses, &eu.blocks[&BlockId(0)]);
+            let defs = instruction_def_blocks(&eu);
+            let start = std::time::Instant::now();
+            assert!(find_branchify_mux_in_block(&eu, BlockId(0), &uses, &defs).is_none());
+            eprintln!(
+                "local rejected mux distributed_store={distributed_store} count={count} seconds={:.6}",
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
+
+#[test]
+fn distributed_store_suffix_costs_exclude_dynamic_address_uses() {
+    let register_map = (0..96)
+        .map(|value| {
+            (
+                RegisterId(value),
+                RegisterType::Bit {
+                    width: [1, 64, 65, 129][value % 4],
+                    signed: false,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut different_from_unmoved_store = false;
+    for seed in 0..32 {
+        let mut instructions = Vec::new();
+        for index in 0..32 {
+            instructions.push(SIRInstruction::Mux(
+                RegisterId(index * 2),
+                RegisterId(99),
+                RegisterId(index * 2 + 1),
+                RegisterId(95),
+            ));
+            let mut write = store(index, index * 2);
+            if let SIRInstruction::Store(_, offset, ..) = &mut write {
+                *offset = SIROffset::Dynamic(RegisterId((index * 7 + seed) % 96));
+            }
+            instructions.push(write);
+        }
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Jump(
+                BlockId(1),
+                vec![RegisterId(seed), RegisterId(seed), RegisterId(99)],
+            ),
+        };
+        let costs = mux_store_live_through_chunks(&block, &register_map);
+        let unmoved = mux_live_through_chunks(&block, &register_map);
+        for index in (0..block.instructions.len()).step_by(2) {
+            let SIRInstruction::Mux(destination, ..) = &block.instructions[index] else {
+                unreachable!()
+            };
+            let expected = block_live_ins(
+                &block.instructions[index + 2..],
+                &terminator_uses(&block.terminator),
+            )
+            .into_iter()
+            .filter(|value| value != destination)
+            .map(|value| {
+                register_map
+                    .get(&value)
+                    .map(|register| register.width().div_ceil(64).max(1))
+                    .unwrap_or(1) as u128
+            })
+            .sum::<u128>();
+            assert_eq!(costs[index], expected, "seed={seed} instruction={index}");
+            different_from_unmoved_store |= costs[index] != unmoved[index];
+        }
+    }
+    assert!(different_from_unmoved_store);
+}

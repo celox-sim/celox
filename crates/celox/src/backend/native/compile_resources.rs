@@ -46,6 +46,42 @@ fn available_memory() -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn available_memory() -> Option<u64> {
+    host_available_memory()
+        .into_iter()
+        .chain(address_space_available())
+        .min()
+}
+
+#[cfg(target_os = "linux")]
+fn address_space_available() -> Option<u64> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // RLIMIT_AS covers allocator arenas, mapped code and thread stacks as well
+    // as resident pages. Host/cgroup headroom can be much larger than it.
+    if unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut limit) } != 0
+        || limit.rlim_cur == libc::RLIM_INFINITY
+    {
+        return None;
+    }
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let virtual_bytes = status.lines().find_map(|line| {
+        line.strip_prefix("VmSize:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    })?;
+    // rlim_t has different widths across Linux ABIs.
+    #[allow(clippy::useless_conversion)]
+    let limit = u64::try_from(limit.rlim_cur).ok()?;
+    Some(limit.saturating_sub(virtual_bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn host_available_memory() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let host = meminfo.lines().find_map(|line| {
         let value = line.strip_prefix("MemAvailable:")?;
@@ -117,6 +153,50 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_process_limit_caps_the_worker_memory_budget() {
+        const CHILD: &str = "CELOX_TEST_ADDRESS_SPACE_LIMIT";
+        // Test-process recursion marker, not a compiler diagnostic option.
+        #[allow(clippy::disallowed_methods)]
+        let is_child = std::env::var_os(CHILD).is_some();
+        if is_child {
+            let remaining = address_space_available().expect("finite process limit");
+            assert!(remaining < GIB);
+            let available = available_memory().expect("process budget is usable without cgroups");
+            assert!(available <= GIB);
+            assert_eq!(choose_workers(1, 200_000, 4, 16, Some(available)), 1);
+            return;
+        }
+        use std::os::unix::process::CommandExt;
+        let current = std::thread::current();
+        let name = current.name().expect("named test thread");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1");
+        unsafe {
+            child.pre_exec(|| {
+                let cap: libc::rlim_t = 1024 * 1024 * 1024;
+                let limit = libc::rlimit {
+                    rlim_cur: cap,
+                    rlim_max: cap,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let result = child.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+    }
 
     #[test]
     fn large_design_uses_host_memory_instead_of_always_serializing() {

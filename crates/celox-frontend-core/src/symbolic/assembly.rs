@@ -616,11 +616,15 @@ pub fn schedule_symbolic_rtl(
             });
         }
     };
+    // The comb schedule no longer refers to SLT nodes. Release its arena before
+    // constructing the clock-fused schedules, whose arena already owns its
+    // remapped nodes.
+    drop(global_arena);
     if let Some(s) = sched_start {
         tracing::debug!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
-    let schduled: Vec<ExecutionUnit<RegionedAbsoluteAddr>> = schedule
+    let eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>> = schedule
         .execution_units
         .into_iter()
         .map(|eu| ExecutionUnit {
@@ -653,7 +657,6 @@ pub fn schedule_symbolic_rtl(
             register_map: eu.register_map,
         })
         .collect();
-    let eval_comb = schduled.clone();
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
     if let (
@@ -743,7 +746,7 @@ pub fn schedule_symbolic_rtl(
     if let Some(t) = trace
         && trace_opts.scheduled_units
     {
-        t.scheduled_units = Some(schduled.clone());
+        t.scheduled_units = Some(eval_comb.clone());
     }
 
     // The unified function is the normal fast path.  Split evaluator/apply
