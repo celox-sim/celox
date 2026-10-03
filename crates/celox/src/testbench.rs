@@ -369,8 +369,8 @@ fn eval_loop_bound<B: SimBackend>(
     bound: &LoopBound,
 ) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
     match bound {
-        // ForBound::Const no longer carries source signedness; use the signed
-        // i32 induction-variable semantics for static Veryl loop bounds.
+        // Unsigned Veryl constants are represented as typed Dynamic bytecode;
+        // Static retains signed induction-variable semantics.
         LoopBound::Static(v) => Ok(EvaluatedLoopBound::Signed(*v as i128)),
         LoopBound::Dynamic {
             expr,
@@ -641,6 +641,50 @@ fn exec_for_loop<B: SimBackend>(
     reverse: bool,
     mut exec_body: impl FnMut(&mut Simulator<B>) -> ExecResult,
 ) -> ExecResult {
+    let continuation_bound = if reverse { start } else { end };
+    let (bound_width, bound_signed) = match continuation_bound {
+        LoopBound::Static(value) => (
+            (usize::BITS as usize - value.leading_zeros() as usize).max(32),
+            true,
+        ),
+        LoopBound::Dynamic { width, signed, .. } => (*width, *signed),
+    };
+    let (counter_width, counter_signed) = loop_var
+        .as_ref()
+        .map_or((usize::BITS as usize, true), |(_, width, signed)| {
+            (*width, *signed)
+        });
+    let comparison_signed = counter_signed && bound_signed;
+    let unsigned_value = |value: i128, width: usize| {
+        let mask = if width >= u128::BITS as usize {
+            u128::MAX
+        } else {
+            (1u128 << width.max(1)) - 1
+        };
+        (value as u128) & mask
+    };
+    let in_range = |value: i128, limit: i128| {
+        if comparison_signed {
+            if reverse {
+                value >= limit
+            } else if inclusive {
+                value <= limit
+            } else {
+                value < limit
+            }
+        } else {
+            let value = unsigned_value(value, counter_width);
+            let limit = unsigned_value(limit, bound_width);
+            if reverse {
+                value >= limit
+            } else if inclusive {
+                value <= limit
+            } else {
+                value < limit
+            }
+        }
+    };
+
     let mut start = match eval_loop_bound(sim, start) {
         Ok(v) => v,
         Err(error) => return ExecResult::Fail(error.to_string()),
@@ -799,7 +843,7 @@ fn exec_for_loop<B: SimBackend>(
         let step_i = step as i128;
         if reverse {
             let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
-            while i >= start {
+            while in_range(i, start) {
                 let r = step_body(sim, i);
                 if matches!(r, ExecResult::Break) {
                     return ExecResult::Continue;
@@ -815,7 +859,7 @@ fn exec_for_loop<B: SimBackend>(
             }
         } else if let Some(op) = step_op {
             let mut i = truncate_counter(start);
-            while if inclusive { i <= end } else { i < end } {
+            while in_range(i, end) {
                 let r = step_body(sim, i);
                 if matches!(r, ExecResult::Break) {
                     return ExecResult::Continue;
@@ -844,7 +888,7 @@ fn exec_for_loop<B: SimBackend>(
             }
         } else {
             let mut i = truncate_counter(start);
-            while if inclusive { i <= end } else { i < end } {
+            while in_range(i, end) {
                 let r = step_body(sim, i);
                 if matches!(r, ExecResult::Break) {
                     return ExecResult::Continue;
@@ -1569,6 +1613,13 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let val = eval_expr(sim, expr);
             sim_set_target(sim, dst, val);
+            ExecResult::Continue
+        }
+        GenericTestbenchStatement::WriteMemory { signal, writes } => {
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            sim.apply_testbench_memory_writes(*signal, writes);
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomSeed { handle, value } => {

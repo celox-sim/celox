@@ -483,6 +483,7 @@ cases! { Regression, "veryl_context_regressions";
             r#"
             module Top #(
                 param N: u32 = 2,
+                param S: i32 = 2,
             ) (
                 a : input  logic<8>,
                 b : input  logic<8>,
@@ -491,6 +492,7 @@ cases! { Regression, "veryl_context_regressions";
                 y2: output logic<32>,
                 y3: output logic<32>,
                 y4: output logic<32>,
+                signed_count: output logic<32>,
             ) {
                 var lo: i32;
                 var hi: logic<8>;
@@ -499,6 +501,12 @@ cases! { Regression, "veryl_context_regressions";
                     y0 = 0;
                     for j in lo..N {
                         y0 = y0 + 1 + (j - j) + a;
+                    }
+                }
+                always_comb {
+                    signed_count = 0;
+                    for j in lo..S {
+                        signed_count += 1 + (j - j);
                     }
                 }
                 always_comb {
@@ -542,6 +550,7 @@ cases! { Regression, "veryl_context_regressions";
                 ("y2", BigUint::from(0x100u64)),
                 ("y3", BigUint::from(0x100u64)),
                 ("y4", BigUint::from(0x101u64)),
+                ("signed_count", BigUint::from(4u64)),
             ],
         );
     }

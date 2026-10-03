@@ -271,6 +271,13 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     let mut rewrite_cache: HashMap<NodeId, NodeId> = HashMap::default();
     for path in paths.iter_mut() {
         if path.sources.iter().any(|s| const_vars.contains_key(&s.id)) {
+            // Legacy folds have scoped bindings and are not rewritten below.
+            // Keep their source edges until their input references are actually
+            // replaced, otherwise the scheduler can load a constant before its
+            // producer stores it.
+            if contains_legacy_fold(path.expr, arena) {
+                continue;
+            }
             path.expr = rewrite_expr(path.expr, arena, &const_vars, &mut rewrite_cache)?;
             path.sources.retain(|src| !const_vars.contains_key(&src.id));
             path.previous_sources
@@ -285,6 +292,32 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     // working memory see the correct values.
 
     Ok(true)
+}
+
+fn contains_legacy_fold<A: Clone + Eq + Hash>(root: NodeId, arena: &SLTNodeArena<A>) -> bool {
+    let mut pending = vec![root];
+    let mut visited = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::ForFold { .. } => return true,
+            SLTNode::Binary(lhs, _, rhs) => pending.extend([*lhs, *rhs]),
+            SLTNode::Unary(_, child)
+            | SLTNode::Slice { expr: child, .. }
+            | SLTNode::Capture { expr: child, .. } => pending.push(*child),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => pending.extend([*cond, *then_expr, *else_expr]),
+            SLTNode::Concat(parts) => pending.extend(parts.iter().map(|(child, _)| *child)),
+            // Grouped folds cannot contain legacy folds (verified at allocation).
+            SLTNode::ForFoldGroup { .. } | SLTNode::Constant(..) | SLTNode::Input { .. } => {}
+        }
+    }
+    false
 }
 
 /// Recursively rewrite an expression tree, replacing Input nodes that reference
@@ -440,6 +473,76 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::eval_const_expr;
+
+    #[test]
+    fn preserves_constant_dependencies_inside_legacy_fold() {
+        use crate::{
+            LogicPath, LogicPathTarget, SLTForFoldResult, SLTForUpdate, SLTLoopBound, SLTStepOp,
+        };
+        use celox_design::{BitAccess, VarAtomBase};
+        let mut arena = SLTNodeArena::<u32>::new();
+        let value = arena
+            .alloc(SLTNode::Constant(2u32.into(), 0u32.into(), 32, true))
+            .unwrap();
+        let enabled = arena
+            .alloc(SLTNode::Constant(1u32.into(), 0u32.into(), 1, false))
+            .unwrap();
+        let input = arena
+            .alloc(SLTNode::Input {
+                variable: 1,
+                signed: true,
+                index: vec![],
+                access: BitAccess::new(0, 31),
+            })
+            .unwrap();
+        let target = VarAtomBase::new(2, 0, 31);
+        let fold = arena
+            .alloc(SLTNode::ForFold {
+                loop_var: 3,
+                loop_width: 32,
+                loop_signed: true,
+                start: SLTLoopBound::TypedExpr {
+                    node: input,
+                    signed: true,
+                },
+                end: SLTLoopBound::Const(4),
+                inclusive: false,
+                step: 1,
+                step_op: SLTStepOp::Add,
+                reverse: false,
+                result: SLTForFoldResult::State(target),
+                initials: vec![SLTForUpdate {
+                    target,
+                    expr: value,
+                }],
+                updates: vec![SLTForUpdate {
+                    target,
+                    expr: value,
+                }],
+                effects: vec![],
+                continue_cond: enabled,
+            })
+            .unwrap();
+        let make_path = |variable, expr, sources| LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(variable, 0, 31)),
+            sources,
+            previous_sources: Default::default(),
+            address_sources: Default::default(),
+            local_inputs: vec![],
+            order_before: Default::default(),
+            comb_capture_enable_sites: vec![],
+            comb_capture_enable_always: false,
+            pre_lower_nodes: vec![],
+            expr,
+        };
+        let source = VarAtomBase::new(1, 0, 31);
+        let mut paths = [
+            make_path(1, value, Default::default()),
+            make_path(2, fold, [source].into_iter().collect()),
+        ];
+        super::inline_constant_variables(&mut paths, &mut arena).unwrap();
+        assert!(paths[1].sources.contains(&source));
+    }
 
     #[test]
     fn evaluates_two_state_bit_count_constants() {

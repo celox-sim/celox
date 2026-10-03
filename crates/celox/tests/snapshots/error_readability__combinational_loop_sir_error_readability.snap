@@ -5,7 +5,7 @@ expression: err
 ---
 combinational_loop (https://doc.veryl-lang.org/book/07_appendix/02_semantic_error.html#combinational_loop)
 
-  × combinational loop detected
+  × combinational loop detected: x -> z -> y -> x
    ╭─[:6:20]
  5 │             var z: logic;
  6 │             assign x = y;

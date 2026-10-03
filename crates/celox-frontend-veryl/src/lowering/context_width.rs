@@ -1,7 +1,8 @@
 use crate::bitaccess::eval_constexpr;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, Expression, Factor, Op, SystemFunctionKind, ValueVariant,
+    ArrayLiteralItem, Expression, Factor, Op, SystemFunctionInput, SystemFunctionKind, Type,
+    ValueVariant,
 };
 
 use celox_design::BinaryOp;
@@ -98,7 +99,7 @@ pub fn factor_signed(factor: &Factor) -> bool {
         Factor::SystemFunctionCall(call) => match call.kind {
             // IEEE 1800-2023 20.6.2 and 20.7: $bits/$size return signed integers.
             // Veryl's AIR currently marks these results unsigned.
-            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => true,
+            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) => true,
             SystemFunctionKind::Signed(_) => true,
             SystemFunctionKind::Unsigned(_) => false,
             _ => call.comptime.r#type.signed,
@@ -378,7 +379,7 @@ fn get_factor_width(factor: &Factor) -> Option<usize> {
             .map(|w| call.comptime.r#type.array.total().unwrap_or(1) * w),
         Factor::SystemFunctionCall(call) => match &call.kind {
             SystemFunctionKind::Bits(_)
-            | SystemFunctionKind::Size(_)
+            | SystemFunctionKind::Size(..)
             | SystemFunctionKind::Clog2(_) => Some(32),
             SystemFunctionKind::Onehot(_) => Some(1),
             SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -397,4 +398,33 @@ fn get_factor_width(factor: &Factor) -> Option<usize> {
         },
         _ => None,
     }
+}
+
+/// The dimension `$size` asks about: 1 when the argument is omitted, else the
+/// compile-time value of `$size(x, n)`'s second operand.
+pub fn system_function_dimension(dimension: Option<&SystemFunctionInput>) -> Option<usize> {
+    match dimension {
+        None => Some(1),
+        Some(dimension) => eval_constexpr(&dimension.0)?.to_usize(),
+    }
+}
+
+/// Elements in the `dimension`-th dimension of `ty`, numbered the way
+/// `$size(x, n)` numbers them: unpacked dimensions first, then packed ones.
+/// A dimension the type does not have has no size.
+pub fn system_function_type_size(ty: &Type, dimension: usize) -> Option<usize> {
+    let index = dimension.checked_sub(1)?;
+    let unpacked = ty.array.dims();
+    if index < unpacked {
+        return *ty.array.get(index)?;
+    }
+    let packed = index - unpacked;
+    if let Some(size) = ty.width_expr().get(packed).and_then(|expr| expr.numeric()) {
+        return Some(size);
+    }
+    if let Some(size) = ty.width().get(packed) {
+        return *size;
+    }
+    // A struct or enum is one packed vector of its own width.
+    if packed == 0 { ty.total_width() } else { None }
 }

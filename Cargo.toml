@@ -70,13 +70,13 @@ celox-test-suite-veryl   = { version = "=0.9.1", path = "crates/celox-test-suite
 celox-testbench         = { version = "=0.9.1", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.9.1", path = "crates/celox-ts-gen" } # x-release-please-version
 
-veryl-analyzer = "0.21.0"
-veryl-emitter  = "0.21.0"
-veryl-metadata = "0.21.0"
-veryl-parser   = { version = "0.21.0", default-features = false }
-veryl-path      = "0.21.0"
-veryl-simulator = "0.21.0"
-veryl-std       = "0.21.0"
+veryl-analyzer = "0.22.0"
+veryl-emitter  = "0.22.0"
+veryl-metadata = "0.22.0"
+veryl-parser   = { version = "0.22.0", default-features = false }
+veryl-path      = "0.22.0"
+veryl-simulator = "0.22.0"
+veryl-std       = "0.22.0"
 sv-parser = "0.13.5"
 
 bit-set         = "0.11"

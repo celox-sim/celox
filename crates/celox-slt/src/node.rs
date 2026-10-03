@@ -454,7 +454,7 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                     |f: &mut std::fmt::Formatter<'_>, bound: &SLTLoopBound| -> std::fmt::Result {
                         match bound {
                             SLTLoopBound::Const(v) => write!(f, "{v}"),
-                            SLTLoopBound::Expr(node) => {
+                            SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } => {
                                 write!(f, "n{}:", node.0)?;
                                 arena.get(*node).fmt_expression(f, arena)
                             }
@@ -575,6 +575,11 @@ pub struct SLTIndex {
 pub enum SLTLoopBound {
     Const(usize),
     Expr(NodeId),
+    /// An expression whose source signedness must survive symbolic rewriting.
+    TypedExpr {
+        node: NodeId,
+        signed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1035,10 +1040,13 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         if let SLTForFoldResult::Transient { initial, update } = result {
                             children.extend([*initial, *update]);
                         }
-                        if let SLTLoopBound::Expr(node) = start {
+                        if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } =
+                            start
+                        {
                             children.push(*node);
                         }
-                        if let SLTLoopBound::Expr(node) = end {
+                        if let SLTLoopBound::Expr(node) | SLTLoopBound::TypedExpr { node, .. } = end
+                        {
                             children.push(*node);
                         }
                         children.push(*continue_cond);
@@ -1135,6 +1143,10 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         match bound {
                             SLTLoopBound::Const(v) => SLTLoopBound::Const(*v),
                             SLTLoopBound::Expr(node) => SLTLoopBound::Expr(mapped(*node)),
+                            SLTLoopBound::TypedExpr { node, signed } => SLTLoopBound::TypedExpr {
+                                node: mapped(*node),
+                                signed: *signed,
+                            },
                         }
                     };
                     let mapped_initials = initials
