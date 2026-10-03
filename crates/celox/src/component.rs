@@ -73,7 +73,9 @@ struct LiveComponent {
 pub(crate) struct ComponentRuntime {
     components: Vec<LiveComponent>,
     last_trace_values: Vec<(num_bigint::BigUint, num_bigint::BigUint)>,
-    active_reset_event: Option<usize>,
+    // (clock domain, reset event); None is the single-clock tick path, which
+    // also routes reset callbacks through clocks derived from that tick.
+    active_reset_events: Vec<(Option<usize>, usize)>,
     injected: InjectedComponents,
 }
 
@@ -338,7 +340,7 @@ impl ComponentRuntime {
     ) -> Result<Vec<ComponentWrite>, String> {
         self.components.clear();
         self.last_trace_values.clear();
-        self.active_reset_event = None;
+        self.active_reset_events.clear();
         let mut initialized = Vec::with_capacity(descriptors.len());
         let mut initial_writes = Vec::new();
         let mut driven_outputs = HashMap::<SignalRef, Vec<ComponentOutputDriver>>::default();
@@ -716,33 +718,55 @@ impl ComponentRuntime {
         event_id: usize,
         time: u64,
     ) -> Result<Vec<ComponentWrite>, String> {
-        let active_reset_event = self.active_reset_event;
-        self.fire_matching(time, |component| {
+        let active_reset_events = std::mem::take(&mut self.active_reset_events);
+        let result = self.fire_matching(time, |component| {
             let triggered = component
                 .events
                 .iter()
                 .find(|event| event.event_id == event_id)?;
+            // A single-domain component's reset also covers a derived clock.
+            // Multi-domain components require the wait's explicit clock match.
+            let single_clock_domain = component
+                .events
+                .iter()
+                .all(|event| event.reset || event.event_id == triggered.event_id);
             let reset = if triggered.reset {
                 None
             } else {
-                active_reset_event.and_then(|reset_event_id| {
-                    component
-                        .events
-                        .iter()
-                        .find(|event| event.reset && event.event_id == reset_event_id)
+                component.events.iter().find(|event| {
+                    event.reset
+                        && active_reset_events.iter().any(|&(clock, reset)| {
+                            reset == event.event_id
+                                && clock
+                                    .is_none_or(|clock| clock == event_id || single_clock_domain)
+                        })
                 })
             };
             let event = reset.unwrap_or(triggered);
             Some((event.port, event.reset))
-        })
+        });
+        self.active_reset_events = active_reset_events;
+        result
     }
 
     pub(crate) fn begin_reset_cycles(&mut self, reset_event_id: Option<usize>) {
-        self.active_reset_event = reset_event_id;
+        if let Some(id) = reset_event_id {
+            self.active_reset_events.push((None, id));
+        }
+    }
+
+    pub(crate) fn begin_reset_clock_cycles(
+        &mut self,
+        clock_event_id: usize,
+        reset_event_id: Option<usize>,
+    ) {
+        if let Some(id) = reset_event_id {
+            self.active_reset_events.push((Some(clock_event_id), id));
+        }
     }
 
     pub(crate) fn end_reset_cycles(&mut self) {
-        self.active_reset_event = None;
+        self.active_reset_events.clear();
     }
 
     fn fire_matching(

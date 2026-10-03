@@ -594,6 +594,30 @@ unsafe extern "C" fn reset_clock_hook(state: *mut c_void, ctx: *mut sys::VrlCtx)
     0
 }
 
+unsafe extern "C" fn create_dual_reset(
+    ctx: *mut sys::VrlCtx,
+    api: *const sys::VrlHostApi,
+) -> *mut c_void {
+    for (name, role) in [("clk_b", sys::VRL_DIR_CLOCK), ("rst_b", sys::VRL_DIR_RESET)] {
+        if unsafe { ((*api).port_index)(ctx, sys::VrlStr::from_str(name), role) } < 0 {
+            return std::ptr::null_mut();
+        }
+    }
+    unsafe { create_reset(ctx, api) }
+}
+
+static DUAL_RESET_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_CLOCKED,
+    create: create_dual_reset,
+    destroy: destroy_reset,
+    on_init: hook,
+    on_reset: reset_hook,
+    on_clock: reset_clock_hook,
+    call_method,
+    on_finish: hook,
+};
+
 static RESET_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     abi_version: sys::VRL_COMPONENT_ABI_VERSION,
     kind: sys::VRL_KIND_CLOCKED,
@@ -734,6 +758,7 @@ fn register_component() {
         celox::register_static_component("celox_init_finisher", &INIT_FINISH_COMPONENT);
         celox::register_static_component("celox_cleanup", &CLEANUP_COMPONENT);
         celox::register_static_component("celox_finish_time", &FINISH_TIME_COMPONENT);
+        celox::register_static_component("celox_dual_reset", &DUAL_RESET_COMPONENT);
         celox::register_static_component("celox_create_failure", &FAILING_COMPONENT);
     });
 }
@@ -842,6 +867,16 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                     "ports": [
                         {"name":"clk","dir":"input","role":"clock"},
                         {"name":"d","dir":"input"},
+                        {"name":"q","dir":"output"}
+                    ]
+                },
+                "celox_dual_reset": {
+                    "kind": "clocked",
+                    "ports": [
+                        {"name":"clk","dir":"input","role":"clock"},
+                        {"name":"rst","dir":"input","role":"reset"},
+                        {"name":"clk_b","dir":"input","role":"clock"},
+                        {"name":"rst_b","dir":"input","role":"reset"},
                         {"name":"q","dir":"output"}
                     ]
                 },
@@ -1812,6 +1847,7 @@ fn synchronous_reset_without_runtime_reset_event_still_binds() {
                 reset_event: None,
                 clock_event: *clock_event,
                 duration: duration.clone(),
+                period: 2,
                 assert_value: *assert_value,
                 deassert_value: *deassert_value,
             }),
@@ -2837,6 +2873,15 @@ fn reset_assert_routes_derived_component_clocks_through_scheduler() {
             .unwrap(),
         TestResult::Pass
     );
+    let code = code.replace("initial {", "initial { clk.next(10); } initial {");
+    let (_dir, metadata) = component_metadata();
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }
 
 #[test]
@@ -2864,4 +2909,182 @@ fn component_finish_hook_observes_final_testbench_time() {
         TestResult::Pass
     );
     assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10);
+    for period in [2, 10] {
+        let code = code
+            .replace(
+                "inst clk: $tb::clock_gen;",
+                &format!(
+                    "inst clk: $tb::clock_gen #(period: {period}); initial {{ clk.next(20); }}"
+                ),
+            )
+            .replace(
+                "$finish();",
+                &format!("$assert(component.time() == {}); $finish();", 10 * period),
+            );
+        let (_dir, metadata) = component_metadata();
+        assert_eq!(
+            Simulator::builder(&code, "t")
+                .with_metadata(metadata)
+                .run_test()
+                .unwrap(),
+            TestResult::Pass
+        );
+        assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10 * period);
+        let (_dir, metadata) = component_metadata();
+        let result = Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed, "{result:?}");
+        assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10 * period);
+    }
+}
+
+#[test]
+fn concurrent_initial_reset_windows_reach_both_components() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            inst left_rst: $tb::reset_gen(clk);
+            inst right_rst: $tb::reset_gen(clk);
+            var left_q: logic<8>;
+            var right_q: logic<8>;
+            inst left: $comp::celox_reset (clk, rst: left_rst, q: left_q);
+            inst right: $comp::celox_reset (clk, rst: right_rst, q: right_q);
+            initial {
+                clk.next(4);
+                $assert(left_q == 101);
+                $assert(right_q == 101);
+                $finish();
+            }
+            initial { left_rst.assert(3); $assert(left_q == 3); }
+            initial { right_rst.assert(3); $assert(right_q == 3); }
+        }
+    "#;
+    for native in [true, false] {
+        let (_dir, metadata) = component_metadata();
+        let builder = Simulator::builder(code, "t").with_metadata(metadata);
+        let result = if native {
+            builder.run_test()
+        } else {
+            builder.run_test_cranelift()
+        };
+        assert_eq!(result.unwrap(), TestResult::Pass);
+    }
+}
+
+#[test]
+fn concurrent_initial_component_finish_stops_other_waiters() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var q: logic<8>;
+            inst component: $comp::celox_clocked #(STEP: 0) (clk, d, q);
+            initial { clk.next(100); $assert(0, "waiter outlived component finish"); }
+            initial { clk.next(1); component.stop(); $assert(0); }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn child_initial_resolves_its_component_method_instance() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(Helper)] module Helper {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var q: logic<8>;
+            inst component: $comp::celox_clocked #(STEP: 0) (clk, d, q);
+            initial { component.drive(8'h5a); $assert(q == 8'h5a); }
+        }
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            inst left: Helper;
+            inst right: Helper;
+            initial {
+                clk.next(1);
+                $assert(left.q == 8'h5a);
+                $assert(right.q == 8'h5a);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn concurrent_reset_reassertion_reaches_component_between_clock_edges() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst slow: $tb::clock_gen #(period: 10);
+            inst fast: $tb::clock_gen #(period: 2);
+            inst rst: $tb::reset_gen(clk: slow);
+            var q: logic<8>;
+            inst component: $comp::celox_reset(clk: slow, rst, q);
+            initial { slow.next(4); }
+            initial {
+                rst.assert(1);
+                fast.next(1);
+                $assert(q == 101, "before reset: q=%d", q);
+                rst.assert(1);
+            }
+            initial {
+                fast.next(7);
+                $assert(q == 2, "between edges: q=%d", q);
+                $finish();
+            }
+        }
+    "#;
+    for native in [true, false] {
+        let (_dir, metadata) = component_metadata();
+        let builder = Simulator::builder(code, "t").with_metadata(metadata);
+        let result = if native {
+            builder.run_test()
+        } else {
+            builder.run_test_cranelift()
+        };
+        assert_eq!(result.unwrap(), TestResult::Pass);
+    }
+}
+
+#[test]
+fn concurrent_reset_only_replaces_its_own_component_clock_domain() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"#[test(t)] module t {
+        inst a: $tb::clock_gen #(period: 2);
+        inst b: $tb::clock_gen #(period: 10);
+        inst ra: $tb::reset_gen(clk: a);
+        inst rb: $tb::reset_gen(clk: b);
+        var q: logic<8>;
+        inst component: $comp::celox_dual_reset(clk: a, rst: ra, clk_b: b, rst_b: rb, q);
+        initial { rb.assert(1); }
+        initial { a.next(2); $assert(q == 102, "other reset stole clock: %d", q); $finish(); }
+    }"#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }

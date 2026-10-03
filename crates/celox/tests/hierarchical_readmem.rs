@@ -150,11 +150,14 @@ fn hierarchical_readmemh_uses_each_calling_instance_and_preserves_write_order(si
             }}
             #[test(Top)]
             module Top {{
+                inst clk: $tb::clock_gen;
                 var a: logic<16>;
                 var b: logic<16>;
                 inst first: Bank (words: a);
                 inst second: Bank (words: b);
                 initial {{
+                    // Let the child processes initialize before overwriting one bank.
+                    clk.next();
                     $readmemh("{second}", first.memory.mem);
                     $finish();
                 }}

@@ -1,0 +1,67 @@
+{
+  "veryl_version": "0.22.0",
+  "veryl_revision": "967e477a4457ce59eec808b7be2ec0dbe7ff938e",
+  "veryl_runs": [
+    {
+      "case": "mixed",
+      "aot_c_async": false,
+      "exit_code": 1,
+      "diagnostics": [
+        "error: time 2: x=1 y=2"
+      ]
+    },
+    {
+      "case": "mixed",
+      "aot_c_async": true,
+      "exit_code": 1,
+      "diagnostics": [
+        "error: time 2: x=1 y=2"
+      ]
+    },
+    {
+      "case": "reset",
+      "aot_c_async": false,
+      "exit_code": 1,
+      "diagnostics": [
+        "error: between edges: count=1"
+      ]
+    },
+    {
+      "case": "reset",
+      "aot_c_async": true,
+      "exit_code": 1,
+      "diagnostics": [
+        "error: between edges: count=1"
+      ]
+    }
+  ],
+  "independent_sv_runs": [
+    {
+      "case": "mixed_edges",
+      "tool": "icarus",
+      "exit_code": 0,
+      "output": "PASS time 2: x=1 y=0\nPASS x=1 y=2"
+    },
+    {
+      "case": "mixed_edges",
+      "tool": "verilator",
+      "exit_code": 0,
+      "output": "PASS time 2: x=1 y=0\nPASS x=1 y=2"
+    },
+    {
+      "case": "reset_between_edges",
+      "tool": "icarus",
+      "exit_code": 0,
+      "output": "PASS time 14: count=0"
+    },
+    {
+      "case": "reset_between_edges",
+      "tool": "verilator",
+      "exit_code": 0,
+      "output": "PASS time 14: count=0"
+    }
+  ],
+  "sv_scope": "Hand-written timing corroboration, not full Veryl-to-SV adapter verification.",
+  "celox_regression_before_fix": "reset_between_edges failed with count=1 on interpreter, native, Cranelift and Wasm",
+  "celox_regression_after_fix": "reset_between_edges and mixed_edges pass on all four backends"
+}

@@ -1,0 +1,47 @@
+{
+  "case": "concurrent_initial::mixed_edges",
+  "veryl_version": "0.22.0",
+  "expected": {
+    "x": 1,
+    "y": 2
+  },
+  "celox": {
+    "interpreter": {
+      "x": 1,
+      "y": 2
+    }
+  },
+  "veryl_native_runner": {
+    "backend": "cc",
+    "aot_c_async": false,
+    "status": "fail",
+    "diagnostic": "x=3 y=2"
+  },
+  "standard": "The minimal hand-written SV fixture follows IEEE 1800-2023 4.5 and 4.9.4. This alone is not proof of Veryl native-testbench conformance or nonconformance.",
+  "independent_check": {
+    "source": "concurrent_initial_mixed_edges.sv",
+    "scope": "Minimal hand-written SV corroboration with an observation at time 2 before the inverted edge and another at time 6 after coincident edges. Not a translation of the full Veryl fixture.",
+    "icarus": {
+      "command": "iverilog -g2012 -s Top -o run.vvp concurrent_initial_mixed_edges.sv && vvp run.vvp",
+      "result": "PASS time 2: x=1 y=0; PASS x=1 y=2"
+    },
+    "verilator": {
+      "command": "verilator --binary --timing --assert -Wno-fatal --top-module Top concurrent_initial_mixed_edges.sv && obj_dir/VTop",
+      "result": "PASS time 2: x=1 y=0; PASS x=1 y=2"
+    }
+  },
+  "time_2_probe": {
+    "expected": {
+      "x": 1,
+      "y": 0
+    },
+    "celox_all_four_backends": {
+      "x": 1,
+      "y": 0
+    },
+    "veryl_cc_sync_and_async": "time 2: x=1 y=2",
+    "interpretation": "The inverted clock fires before its time-3 source falling edge. This distinguishes timing from simultaneous-edge ordering."
+  },
+  "veryl_revision": "967e477a4457ce59eec808b7be2ec0dbe7ff938e",
+  "investigation": "concurrent_initial_timing.md"
+}

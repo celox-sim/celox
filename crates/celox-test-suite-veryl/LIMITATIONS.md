@@ -53,6 +53,7 @@ Categories describe the observed blocker. A compilation rejection is not automat
 | [icarus_function_inout](#icarus-function-inout) | compile | 0 | 2 |
 | [veryl_negative_for_bounds](#veryl-negative-for-bounds) | emission | 2 | 2 |
 | [veryl_runtime_system_calls](#veryl-runtime-system-calls) | emission | 4 | 4 |
+| [veryl_native_clock_components](#veryl-native-clock-components) | emission | 10 | 10 |
 | [icarus_two_state_zero_division](#icarus-two-state-zero-division) | execute | 0 | 1 |
 
 ## Maintenance
@@ -283,3 +284,43 @@ This two-state fixture follows Verilator and expects zero on division by zero. I
 Category: `state_model_difference`. Observed stage: `execute`. Versions: Veryl 0.21.0; Icarus 13.0.
 
 Affected cases: icarus 1. See the manifest for exact IDs.
+
+## veryl-native-clock-components
+
+The ten `concurrent_initial` cases exercise native `$tb::clock_gen` and
+`$tb::reset_gen` methods. The shared SV adapter does not translate those
+components. Both external verification commands stop in Veryl 0.22.0 emission
+with `internal error: entered unreachable code`, before producing SV or running
+Verilator/Icarus. This is an adapter/emitter limitation, not a simulation verdict.
+The [Verilator-path report](verification/repros/concurrent_initial_verilator.json)
+and [Icarus-path report](verification/repros/concurrent_initial_icarus.json)
+retain all nine observations each. Reproduce with `--include-ignored --filter
+concurrent_initial` on either verification binary. The added `gated_drive` case
+was separately attempted through [Verilator](verification/repros/concurrent_initial_gated_drive_verilator.json)
+and [Icarus](verification/repros/concurrent_initial_gated_drive_icarus.json), with the same emission failure.
+
+Six of the Veryl fixtures are also run by
+`cargo test -p celox-bench --test veryl_heliodor
+shared_concurrent_initial_fixtures_match_veryl`, using Veryl 0.22.0's
+AOT-C runner with synchronous and asynchronous compilation. Celox's four execution
+backends run all ten fixtures without exclusions. The legacy Veryl/SV differential harness exclusions remain
+because those adapters do not expose native testbench execution.
+
+The `mixed_edges`, `reset_between_edges`, and `reset_only_clock` cases are not included in the
+six-fixture native-runner parity test. Their assertions remain enabled on all
+four Celox backends. The [timing audit](verification/repros/concurrent_initial_timing.md)
+records the Veryl 0.22.0 scheduler's intended concurrency model, the conflicting
+published multi-clock description, and the two observed timing discrepancies.
+In particular, an observation before the inverted clock's falling edge rules
+out simultaneous-edge ordering as the explanation for `mixed_edges`.
+
+Both [minimal SV timing fixtures](verification/repros/concurrent_initial_timing.json)
+pass Icarus and Verilator. They are hand-written corroboration, not a successful
+translation of the full Veryl fixtures. IEEE NBA rules alone do not establish
+the Veryl native testbench's contract.
+
+The `reset_only_clock` regression covers a configured period with no `next()`
+call for that generator, including differently parameterized child instances.
+Veryl 0.22.0 also derives reset periods from `ClockNext` statements and falls back
+to period 2 for this case. The [focused observation](verification/repros/reset_only_clock.json)
+records the native-runner result; the case stays enabled on all Celox backends.
