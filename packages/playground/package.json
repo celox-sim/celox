@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "typecheck": "node test/generate-sidecars.mjs && tsc -p .",
     "test:vite-components": "vitest run test/vite-plugin-cache.test.ts test/generated-dts.test.ts && vitest run --config test/fixtures/injected-components/vitest.config.ts && node test/fixtures/injected-components/dependency-e2e.mjs",
     "test:lsp-components": "pnpm run test:vite-components && node test/fixtures/injected-components/lsp-e2e.mjs",
     "test:e2e": "pnpm run build && playwright test",
@@ -15,16 +16,17 @@
     "test:wasm": "vitest run --config vitest.wasm.config.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.1",
     "@celox-sim/celox": "workspace:*",
     "@celox-sim/vite-plugin": "workspace:*",
+    "@playwright/test": "^1.55.1",
+    "@types/node": "^25.3.2",
     "monaco-editor": "^0.57.0",
     "sucrase": "^3.35.1",
+    "typescript": "^7.0.0",
     "vite": "^8.0.0",
     "vite-plugin-monaco-editor": "^1.1.0",
     "vite-plugin-monaco-editor-nls": "^3.0.1",
-    "vitest": "^5.0.0",
-    "typescript": "^7.0.0"
+    "vitest": "^5.0.0"
   },
   "dependencies": {
     "@vitest/expect": "^5.0.0",

@@ -20,7 +20,6 @@ import {
 	parseNapiLayout,
 	parseSignalPath,
 	type RawNapiAddon,
-	type RawNapiSimulatorHandle,
 } from "./napi-helpers.js";
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
@@ -33,6 +32,7 @@ import {
 import {
 	FourState,
 	type FourStateSignalValue,
+	type NativeFrontendSimulatorHandle,
 	SimulationTimeoutError,
 	X,
 } from "./types.js";
@@ -752,8 +752,19 @@ module Adder4S (
 }
 `;
 
+function createNativeHandle(
+	addon: RawNapiAddon,
+	...args: ConstructorParameters<RawNapiAddon["NativeSimulatorHandle"]>
+): NativeFrontendSimulatorHandle {
+	const handle = new addon.NativeSimulatorHandle(...args);
+	if (handle.sharedMemory === undefined) {
+		throw new Error("expected a native simulator handle");
+	}
+	return handle;
+}
+
 describe("E2E: 4-state simulation", () => {
-	let raw: RawNapiSimulatorHandle | undefined;
+	let raw: NativeFrontendSimulatorHandle | undefined;
 	let addon: RawNapiAddon;
 
 	try {
@@ -774,7 +785,8 @@ module InitTest (
     b: input bit<8>,
 ) {}
 `;
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: source, path: "" }],
 			"InitTest",
 			{
@@ -816,7 +828,8 @@ module InitTest (
 	});
 
 	test("AND: 0 & X = 0 (dominant zero)", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: AND_OR_SOURCE, path: "" }],
 			"AndOr",
 			{
@@ -855,7 +868,8 @@ module InitTest (
 	});
 
 	test("OR: 1 | X = 1 (dominant one)", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: AND_OR_SOURCE, path: "" }],
 			"AndOr",
 			{
@@ -887,7 +901,8 @@ module InitTest (
 	});
 
 	test("logic-to-bit assignment strips X mask", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: LOGIC_BIT_MIX_SOURCE, path: "" }],
 			"LogicBitMix",
 			{
@@ -912,7 +927,8 @@ module InitTest (
 	});
 
 	test("bit-to-logic assignment has no X", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: LOGIC_BIT_MIX_SOURCE, path: "" }],
 			"LogicBitMix",
 			{
@@ -938,7 +954,8 @@ module InitTest (
 	});
 
 	test("arithmetic with X produces all-X output", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: ADDER_4STATE_SOURCE, path: "" }],
 			"Adder4S",
 			{
@@ -968,7 +985,8 @@ module InitTest (
 	});
 
 	test("defined inputs in 4-state mode behave like 2-state", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: ADDER_4STATE_SOURCE, path: "" }],
 			"Adder4S",
 			{
@@ -998,11 +1016,9 @@ module InitTest (
 	});
 
 	test("FF captures X from input, reset clears X", () => {
-		raw = new addon.NativeSimulatorHandle(
-			[{ content: FF_SOURCE, path: "" }],
-			"FF",
-			{ fourState: true },
-		);
+		raw = createNativeHandle(addon, [{ content: FF_SOURCE, path: "" }], "FF", {
+			fourState: true,
+		});
 		const layout = parseNapiLayout(raw.layoutJson);
 		const buf = raw.sharedMemory().buffer;
 		const view = new DataView(buf);
@@ -1052,7 +1068,8 @@ module InitTest (
 	});
 
 	test("FourState write through DUT sets value and mask", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: ADDER_4STATE_SOURCE, path: "" }],
 			"Adder4S",
 			{
@@ -1076,7 +1093,8 @@ module InitTest (
 	});
 
 	test("setting defined value clears X mask", () => {
-		raw = new addon.NativeSimulatorHandle(
+		raw = createNativeHandle(
+			addon,
 			[{ content: ADDER_4STATE_SOURCE, path: "" }],
 			"Adder4S",
 			{
@@ -1184,7 +1202,8 @@ describe("E2E: 4-state high-level DUT API", () => {
 
 	test("multiplexer with X selector produces X output", () => {
 		const addon = loadNativeAddon();
-		const raw = new addon.NativeSimulatorHandle(
+		const raw = createNativeHandle(
+			addon,
 			[{ content: FOUR_STATE_MUX_SOURCE, path: "" }],
 			"MuxX",
 			{
@@ -2847,6 +2866,12 @@ pub module UnrelatedModule (
 }
 `;
 
+interface UnrelatedModulePorts {
+	rst: bigint;
+	d_in: bigint;
+	readonly d_out: bigint;
+}
+
 describe("E2E: Proto package ordering (issue #22)", () => {
 	test("single-file source fails when project has proto packages in wrong order", () => {
 		// Reproduce the original bug: when proto_pkg definitions come after
@@ -2863,10 +2888,7 @@ describe("E2E: Proto package ordering (issue #22)", () => {
 	test("multi-source: unrelated module compiles with proto packages in project", () => {
 		// New behavior: all source files are passed as separate entries.
 		// The Rust from_sources() handles dependency ordering correctly.
-		const sim = Simulator.fromSource<{
-			d_in: bigint;
-			readonly d_out: bigint;
-		}>(
+		const sim = Simulator.fromSource<UnrelatedModulePorts>(
 			PROTO_PKG_SOURCE + GENERIC_MODULE_SOURCE + UNRELATED_MODULE_SOURCE,
 			"UnrelatedModule",
 		);
@@ -2889,6 +2911,7 @@ describe("E2E: Proto package ordering (issue #22)", () => {
 		// The concrete module that actually uses the proto package should
 		// also compile and simulate correctly.
 		const sim = Simulator.fromSource<{
+			rst: bigint;
 			d_in: bigint;
 			readonly d_out: bigint;
 		}>(
@@ -2916,7 +2939,7 @@ describe("E2E: Proto package ordering (issue #22)", () => {
 		const addon = loadNativeAddon();
 		const nativeCreate = createSimulatorBridge(addon);
 
-		const sim = Simulator.create(
+		const sim = Simulator.create<UnrelatedModulePorts>(
 			{
 				__celox_module: true,
 				name: "UnrelatedModule",

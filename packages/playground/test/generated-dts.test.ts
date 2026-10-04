@@ -39,7 +39,7 @@ describe("generated declarations", () => {
 			sources: [],
 			projectPath: fixtureRoot,
 			ports: mod.ports,
-			events: mod.events,
+			events: [...mod.events],
 		};
 		const sim = Simulator.create(definition);
 		try {

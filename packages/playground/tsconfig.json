@@ -4,9 +4,12 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "noEmit": true,
     "esModuleInterop": true,
     "allowArbitraryExtensions": true,
-    "types": ["vitest/globals"]
+    "rootDirs": ["src", ".celox/src"],
+    "types": ["node", "vite/client", "vitest/globals"]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "*.config.ts"],
+  "exclude": ["test/fixtures"]
 }

@@ -260,6 +260,9 @@ importers:
       '@playwright/test':
         specifier: ^1.55.1
         version: 1.63.0
+      '@types/node':
+        specifier: ^25.3.2
+        version: 25.9.8
       monaco-editor:
         specifier: ^0.57.0
         version: 0.57.0
