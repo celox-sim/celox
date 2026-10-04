@@ -17,6 +17,34 @@ pub(super) fn functions_from_module_node(
             .into_iter()
             .map(move |child| (item, child))
     }) {
+        if let RefNode::TaskDeclaration(declaration) = child {
+            let task_dimensions = item.dimensions(packed_dimensions);
+            let const_env = &item.env;
+            let statements = match &declaration.nodes.2 {
+                sv_parser::TaskBodyDeclaration::WithPort(body) => &body.nodes.5,
+                sv_parser::TaskBodyDeclaration::WithoutPort(body) => &body.nodes.4,
+            };
+            for statement in statements {
+                validate_function_statement_or_null(statement, syntax_tree, &task_dimensions)?;
+            }
+            if let Some(mut task) = task_from_declaration(
+                declaration,
+                syntax_tree,
+                const_env,
+                &type_aliases,
+                &task_dimensions,
+            ) {
+                item.qualify_function(&mut task);
+                task.name = item.name(&task.name);
+                let name = task.name.clone();
+                if functions.insert(name.clone(), task).is_some() {
+                    return Err(AnalyzerError::Unsupported(format!(
+                        "duplicate function declaration `{name}`"
+                    )));
+                }
+            }
+            continue;
+        }
         let RefNode::FunctionDeclaration(declaration) = child else {
             continue;
         };
@@ -231,6 +259,11 @@ fn validate_function_declaration_statements(
     type_aliases: &HashMap<String, Type>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
+    let function_name = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.2,
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => &body.nodes.2,
+    };
+    let function_name = identifier_text(RefNode::FunctionIdentifier(function_name), syntax_tree);
     let (statements, params, local_types) = match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => {
             let params = body
@@ -272,6 +305,8 @@ fn validate_function_declaration_statements(
     };
     let mut assignment_targets = local_types.into_keys().collect::<HashSet<_>>();
     assignment_targets.extend(params.into_iter().map(|param| param.name));
+    // Assigning the function's own name sets its return value.
+    assignment_targets.extend(function_name);
     for node in RefNode::FunctionDeclaration(declaration) {
         let RefNode::BlockingAssignment(assignment) = node else {
             continue;
@@ -473,12 +508,19 @@ pub(super) fn function_from_declaration(
             )?);
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
-            let expr = function_body_expr(
-                &body.nodes.6,
+            let output_names = params
+                .iter()
+                .filter(|param| param.direction.is_written())
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
+            let (expr, outputs) = function_body_expr(
+                &function_statement_list(&body.nodes.6),
                 syntax_tree,
                 &function_packed_dimensions,
                 &local_types,
                 &local_names,
+                Some(&name),
+                &output_names,
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
@@ -495,6 +537,7 @@ pub(super) fn function_from_declaration(
                 name,
                 params,
                 body: expr,
+                outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
@@ -542,12 +585,19 @@ pub(super) fn function_from_declaration(
             );
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
-            let expr = function_body_expr(
-                &body.nodes.5,
+            let output_names = params
+                .iter()
+                .filter(|param| param.direction.is_written())
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
+            let (expr, outputs) = function_body_expr(
+                &function_statement_list(&body.nodes.5),
                 syntax_tree,
                 &function_packed_dimensions,
                 &local_types,
                 &local_names,
+                Some(&name),
+                &output_names,
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
@@ -564,6 +614,7 @@ pub(super) fn function_from_declaration(
                 name,
                 params,
                 body: expr,
+                outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
@@ -571,6 +622,95 @@ pub(super) fn function_from_declaration(
             })
         }
     }
+}
+
+/// A `task` without timing control, treated as a function that returns
+/// nothing: its `output` / `inout` arguments are written by the call statement.
+pub(super) fn task_from_declaration(
+    declaration: &sv_parser::TaskDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Function> {
+    let (name, params, block_items, statements) = match &declaration.nodes.2 {
+        sv_parser::TaskBodyDeclaration::WithPort(body) => (
+            identifier_text(RefNode::TaskIdentifier(&body.nodes.1), syntax_tree)?,
+            body.nodes
+                .2
+                .nodes
+                .1
+                .as_ref()
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
+                .unwrap_or_default(),
+            body.nodes.4.iter().collect::<Vec<_>>(),
+            task_statement_list(&body.nodes.5),
+        ),
+        sv_parser::TaskBodyDeclaration::WithoutPort(body) => (
+            identifier_text(RefNode::TaskIdentifier(&body.nodes.1), syntax_tree)?,
+            tf_item_params(&body.nodes.3, syntax_tree, const_env, type_aliases),
+            body.nodes
+                .3
+                .iter()
+                .filter_map(|item| match item {
+                    sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
+                    sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            task_statement_list(&body.nodes.4),
+        ),
+    };
+    let mut local_types = function_local_types_from_block_item_iter(
+        block_items.iter().copied(),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )?;
+    let mut task_packed_dimensions = packed_dimensions.clone();
+    task_packed_dimensions.extend(params.iter().map(|param| {
+        (
+            param.name.clone(),
+            VariableDimensions {
+                packed: param.packed_dimensions.clone(),
+                unpacked: Vec::new(),
+                signed: param.signed,
+                is_2state: param.is_2state,
+                members: Vec::new(),
+            },
+        )
+    }));
+    task_packed_dimensions.extend(function_local_packed_dimensions_from_block_item_iter(
+        block_items.iter().copied(),
+        syntax_tree,
+        const_env,
+        type_aliases,
+    )?);
+    let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
+    insert_function_param_types(&params, &mut local_types);
+    let output_names = params
+        .iter()
+        .filter(|param| param.direction.is_written())
+        .map(|param| param.name.clone())
+        .collect::<Vec<_>>();
+    let (body, outputs) = function_body_expr(
+        &statements,
+        syntax_tree,
+        &task_packed_dimensions,
+        &local_types,
+        &local_names,
+        None,
+        &output_names,
+    )?;
+    Some(Function {
+        name,
+        params,
+        body,
+        outputs,
+        return_width: None,
+        return_first_packed_dimension_width: None,
+        return_signed: false,
+        return_is_2state: false,
+    })
 }
 
 fn insert_function_param_types(
@@ -784,7 +924,12 @@ pub(super) fn tf_params(
     let mut previous_type = None;
     let mut previous_is_2state = false;
     let mut previous_packed_dimensions = Vec::new();
+    let mut direction = ParamDirection::Input;
     for port in list.nodes.0.contents() {
+        // An omitted direction repeats the previous argument's.
+        if let Some(declared) = port.nodes.1.as_ref().and_then(ParamDirection::from_tf_port) {
+            direction = declared;
+        }
         let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
         let inferred_type = value_type_from_data_type_or_implicit(
             &port.nodes.3,
@@ -857,6 +1002,7 @@ pub(super) fn tf_params(
         previous_is_2state = is_2state;
         previous_packed_dimensions = packed_dimensions.clone();
         params.push(FunctionParam {
+            direction,
             name,
             width: r#type.map(|r#type| r#type.width),
             signed: r#type.is_some_and(|r#type| r#type.signed),
@@ -908,6 +1054,8 @@ pub(super) fn tf_item_params(
                 continue;
             };
             params.push(FunctionParam {
+                direction: ParamDirection::from_tf_port(&declaration.nodes.1)
+                    .unwrap_or(ParamDirection::Input),
                 name,
                 width: r#type.map(|r#type| r#type.width),
                 signed: r#type.is_some_and(|r#type| r#type.signed),
@@ -1021,13 +1169,43 @@ pub(super) fn integer_atom_expr_type(node: RefNode<'_>) -> Option<ExprType> {
     })
 }
 
-fn function_body_expr(
+/// The statements of a function body.
+fn function_statement_list(
     statements: &[sv_parser::FunctionStatementOrNull],
+) -> Vec<&sv_parser::Statement> {
+    statements
+        .iter()
+        .filter_map(|statement| {
+            let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
+                return None;
+            };
+            Some(&statement.nodes.0)
+        })
+        .collect()
+}
+
+/// The statements of a task body.
+fn task_statement_list(statements: &[sv_parser::StatementOrNull]) -> Vec<&sv_parser::Statement> {
+    statements
+        .iter()
+        .filter_map(|statement| {
+            let sv_parser::StatementOrNull::Statement(statement) = statement else {
+                return None;
+            };
+            Some(&**statement)
+        })
+        .collect()
+}
+
+fn function_body_expr(
+    statements: &[&sv_parser::Statement],
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
     local_names: &HashSet<String>,
-) -> Option<Expr> {
+    return_variable: Option<&str>,
+    output_names: &[String],
+) -> Option<(Expr, Vec<(String, Expr)>)> {
     let mut locals = local_types
         .iter()
         .map(|(name, r#type)| {
@@ -1039,22 +1217,32 @@ fn function_body_expr(
             (name.clone(), initial)
         })
         .collect::<HashMap<_, _>>();
-    let statements = statements
-        .iter()
-        .filter_map(|statement| {
-            let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
-                return None;
-            };
-            Some(&statement.nodes.0)
-        })
-        .collect::<Vec<_>>();
-    function_expr_from_sequence(
-        &statements,
+    if let Some(name) = return_variable {
+        // The value of an unassigned return variable is unknown.
+        locals.insert(name.to_string(), Expr::Literal("'x".to_string()));
+    }
+    let returned = function_expr_from_sequence(
+        statements,
         &mut locals,
         syntax_tree,
         packed_dimensions,
         local_types,
-    )
+    );
+    // The values the `output` / `inout` arguments hold when the body ends.
+    let outputs = output_names
+        .iter()
+        .map(|name| Some((name.clone(), locals.get(name).cloned()?)))
+        .collect::<Option<Vec<_>>>()?;
+    if returned.is_some() && !outputs.is_empty() {
+        // An early `return` would need the arguments' values at that point.
+        return None;
+    }
+    // Falling off the end returns whatever was assigned to the function name;
+    // a function with only `output` arguments returns nothing.
+    let value = returned
+        .or_else(|| return_variable.and_then(|name| locals.get(name).cloned()))
+        .or_else(|| (!outputs.is_empty()).then(|| Expr::Literal("'x".to_string())))?;
+    Some((value, outputs))
 }
 
 /// Lower a returning branch with the remaining statements as its continuation.
@@ -1176,6 +1364,7 @@ fn function_expr_from_sequence(
                                 Some(case_item_condition(
                                     selector.clone(),
                                     substitute_expr_idents(label, locals),
+                                    case_keyword_is_wildcard(&case.nodes.1),
                                 ))
                             })
                             .collect::<Option<Vec<_>>>()?
@@ -1518,7 +1707,13 @@ fn function_expr_from_case_statement(
                         )
                     })
                     .map(|expr| substitute_expr_idents(expr, locals))
-                    .map(|expr| case_item_condition(case_expr.clone(), expr))
+                    .map(|expr| {
+                        case_item_condition(
+                            case_expr.clone(),
+                            expr,
+                            case_keyword_is_wildcard(&statement.nodes.1),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let condition = conditions.into_iter().reduce(|left, right| Expr::Binary {
                     left: Box::new(left),
@@ -1596,10 +1791,20 @@ fn function_expr_from_case_statement(
     })
 }
 
-pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
+/// Whether a `case` keyword treats `z`/`?` (and `x` for `casex`) in a case
+/// item as a wildcard.
+pub(super) fn case_keyword_is_wildcard(keyword: &sv_parser::CaseKeyword) -> bool {
+    !matches!(keyword, sv_parser::CaseKeyword::Case(_))
+}
+
+pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bool) -> Expr {
     Expr::Binary {
         left: Box::new(case_expr),
-        op: BinaryOp::EqCase,
+        op: if wildcard {
+            BinaryOp::EqWildcard
+        } else {
+            BinaryOp::EqCase
+        },
         right: Box::new(item_expr),
     }
 }

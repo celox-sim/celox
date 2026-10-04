@@ -172,6 +172,18 @@ impl Item<'_> {
                 self.expr(then_expr);
                 self.expr(else_expr);
             }
+            Expr::Inside { expr, items } => {
+                self.expr(expr);
+                for item in items {
+                    match item {
+                        InsideItem::Value(value) => self.expr(value),
+                        InsideItem::Range { low, high } => {
+                            self.expr(low);
+                            self.expr(high);
+                        }
+                    }
+                }
+            }
             Expr::Call { name, args } => {
                 *name = self.name(name);
                 args.iter_mut().for_each(|e| self.expr(e));

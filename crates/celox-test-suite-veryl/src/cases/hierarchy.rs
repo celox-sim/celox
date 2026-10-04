@@ -92,6 +92,41 @@ assign o_data = {data[2], data[1]};
 
 
 
+    fn test_instance_array_broadcast_and_unpacked_array_connection(sim) {
+
+        @setup { let code = r#"
+module Child (
+a: input  logic<4>,
+en: input  logic,
+y: output logic<4>
+) {
+assign y = if en ? ~a : a;
+}
+module Top (
+a: input  logic<4>,
+en: input  logic,
+y: output logic<4>[2]
+) {
+inst u: Child [2] (
+a,
+en,
+y,
+);
+}
+"#; }
+        @build Design::new(code, "Top");
+    let a = sim.signal("a");
+    let en = sim.signal("en");
+
+    sim.modify(|io| { io.set(a, 0x5u8); io.set(en, 1u8); }).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
+    sim.modify(|io| io.set(en, 0u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x55u8.into());
+
+    }
+
+
+
     fn test_instance_input_function_output_writeback(sim) {
 
         // veryl-simulator currently evaluates the connection value but does

@@ -61,6 +61,8 @@ mod operators;
 mod packed_structs;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
+#[path = "frontends/systemverilog/synthesizable.rs"]
+mod synthesizable;
 #[path = "frontends/systemverilog/system_functions.rs"]
 mod system_functions;
 #[path = "frontends/systemverilog/types.rs"]

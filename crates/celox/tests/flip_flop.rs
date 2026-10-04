@@ -3982,7 +3982,6 @@ fn test_ff_if_reset_with_nested_if(sim) {
 }
 
 fn test_ff_struct_constructor_expression(sim) {
-    @ignore_on(sv);
     @case "flip_flop::test_ff_struct_constructor_expression";
 }
 

@@ -21,12 +21,12 @@ fn test_ff_struct_logic_to_bit_coercion_clears_mask(sim) {
 }
 
 fn test_four_state_mixing(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "four_state::test_four_state_mixing";
 }
 
 fn test_four_state_mixing_propagation(sim) {
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "four_state::test_four_state_mixing_propagation";
 }
 
@@ -249,17 +249,14 @@ fn test_four_state_wide_comparison_with_x(sim) {
 // P2: Multi-bit selector (case) with X
 // ==========================================================================
 fn test_four_state_multibit_mux_with_x(sim) {
-    @ignore_on(sv);
     @case "four_state::test_four_state_multibit_mux_with_x";
 }
 
 fn test_four_state_procedural_case_x_uses_default(sim) {
-    @ignore_on(sv);
     @case "four_state::test_four_state_procedural_case_x_uses_default";
 }
 
 fn test_four_state_procedural_if_known_nonzero_with_x_is_true(sim) {
-    @ignore_on(sv);
     @case "four_state::test_four_state_procedural_if_known_nonzero_with_x_is_true";
 }
 

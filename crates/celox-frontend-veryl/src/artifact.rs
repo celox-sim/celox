@@ -431,6 +431,7 @@ pub(crate) fn project_module_with_ids(
                 .iter()
                 .map(|name| veryl_parser::resource_table::get_str_value(*name).unwrap_or_default())
                 .collect(),
+            instance_index_bases: Default::default(),
             comb_blocks,
             comb_observers,
             runtime_errors: module
