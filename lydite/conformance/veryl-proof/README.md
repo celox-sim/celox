@@ -1,39 +1,39 @@
 # Proof-backed Veryl corpus conformance
 
-This job executes **all665 original Rust test bodies** from pinned Celox revision
-`124a1315096d21b85d9d0d84fd7139363a181cad`. Its acceptance contract is
-**663 actual passes /665**, with two explicitly blocked positive fixtures.
-The raw test executable still exits1 and reports those two cases as failed.
-The coverage gate accepts only their exact source/design identities and
-`InvalidForRange::NegativeBound` diagnostics. It never changes their expectations
-into expected compiler rejections.
+This job executes **every case of the in-tree reusable suite**
+(`crates/celox-test-suite-veryl`) with reads backed by finite proofs, compiled by
+the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
+reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
+**675 actual passes / 696** and 21 recorded exceptions. The raw test executable
+still exits 1 and reports the exceptions as failed. The coverage gate accepts each
+exception only with its exact recorded failure and design identities; it never
+changes an expectation into an expected compiler rejection.
 
-The663 passes comprise652 observation-checked cases, three smoke-only cases,
-and eight genuine expected compilation rejections. These are test-suite results,
-not a claim of unbounded equivalence, complete Veryl support, or verification of
-all possible stimuli. The independent narrow `../veryl` job is retained.
+The 675 passes comprise 664 observation-checked cases, three smoke-only cases and
+eight genuine expected compilation rejections. These are test-suite results, not a
+claim of unbounded equivalence, complete Veryl support, or verification of all
+possible stimuli. The independent narrow `../veryl` job is retained.
 
 ## Reproduce
 
-Requirements: the repository Rust toolchain (with rustfmt), Python3.12, Git, access to the pinned public
-Celox source and ordinary crates.io dependencies. No Python packages or external
-SMT solver are required.
+Requirements: the repository Rust toolchain (with rustfmt), Python3.12, Git and
+ordinary crates.io dependencies. No Python packages or external SMT solver are
+required.
 
 ```sh
 ./conformance/veryl-proof/run_ci.sh /tmp/veryl-proof-evidence
 ```
 
-Choose a fresh evidence directory. The same command runs in CI. It prepares
-checksum-verified sources, applies named patches, builds three independent locked
-Cargo workspaces, runs semantic and failure-control tests, executes the full
-corpus, compares the reviewed coverage manifest, runs independent compiler/word
-matrices, and replays saved finite queries. The solver service is built in release
-mode for predictable runtime. Every build has an explicit target directory.
-`CELOX_SOURCE_REPOSITORY` may point to a local mirror, but the commit and every
-original suite file must still match. The job never downloads prebuilt adapters,
-reads historical results as proof, or automatically blesses a new golden.
+Choose a fresh evidence directory. The same command runs in CI. It records the
+in-tree Celox revision, uncommitted compiler/suite paths and suite file hashes in
+`work/provenance.json`, builds `lydite-celox` (the SIR exporter and suite runner)
+and the release solver service in the workspace, runs semantic and
+failure-control tests, executes the whole suite, compares the reviewed coverage
+manifest, runs independent compiler/word matrices, and replays saved finite
+queries. The job never downloads prebuilt adapters, reads historical results as
+proof, or automatically blesses a new golden.
 
-Generated dependencies and compiler caches live under `work/`, binaries under
+Run state and compiler caches live under `work/`, binaries under the repository
 `target/`; neither is uploaded or checked in. A checkout does not require the
 repository's historical `results/` evidence. CI has read-only contents access,
 no repository secrets, no credential persistence, no cache restore, and an
@@ -42,9 +42,9 @@ run-status artifact.
 
 ## Architecture and semantics
 
-1. The Rust harness links the untouched upstream reusable test suite. Its original
-   reads, writes, clocks, host computations, assertions, panics and compile-error
-   expectations execute normally. No expected-output values are sent over the
+1. The Rust harness (`lydite-celox-suite`) links the unchanged reusable test suite.
+   Its reads, writes, clocks, host computations, assertions, panics and
+   compile-error expectations execute normally. No expected-output values are sent over the
    Backend protocol or generated from the hardware implementation.
 2. A compile-only Rust frontend uses the actual Veryl parser/analyzer and Celox
    typed elaboration, hierarchy flattening and ScheduledRtl/SIR generation. It
@@ -52,7 +52,7 @@ run-status artifact.
    state regions, event aliases, NBA snapshots and signal paths come from this
    typed pipeline. The reusable suite's existing two FF-function semantic
    extensions are explicit and recorded in `allowed_diagnostics`; this
-   is a patched frontend contract, not stock Veryl acceptance.
+   is a frontend contract, not stock Veryl acceptance.
 3. Python builds Boolean/bit-vector equations from generic SIR operations.
    Writes and scheduled state updates create SSA definitions. Sparse immutable
    interval storage retains array/state snapshots without dense allocation.
@@ -62,7 +62,7 @@ run-status artifact.
 4. Before any read, branch or dynamic address is concretized, the finite service
    proves SAT(prefix relation), validates that SAT assignment against the original
    formula, then proves UNSAT(prefix AND value differs from the candidate).
-   Only a uniquely proved bit pattern is returned to the original Rust code.
+   Only a uniquely proved bit pattern is returned to the suite case.
    The relation never adopts a merely selected model state. All earlier external
    observations remain separate from the hardware equations.
 5. Named `tick(event)` and lazy combinational evaluation implement the upstream
@@ -86,29 +86,49 @@ jobs/tests may separately use external solvers; they are not this path.
 
 ## Coverage and audit contract
 
-`upstream-sources.json` pins all original source bytes, including Rust assertions.
-`coverage-manifest.json` pins every case, original expectation/category, source
-location/hash, actual design/protocol identity, read/operation counts, and exact
+`coverage-manifest.json` pins every case, expectation/category, source
+location and parsed-script hash, actual design/protocol identity, read/operation counts, and exact
 compiler-rejection disposition. It contains hashes and counts, not expected
 hardware output tables. Protocol hashes may indirectly reflect read-dependent
 stimuli; they are execution-coverage drift guards requiring review, not independent
 specification oracles. They are never fed into Backend constraints and never
-replace original Rust assertions. Every invocation checks the exact665-case set, duplicate
+replace suite assertions. Every invocation checks the exact suite case set, duplicate
 or missing cases, backend close verdicts, validated SAT/UNSAT query audit,
 observation uniqueness and poisoned-observation counterexamples. A wrong
 expected sample must produce a validated SAT counterexample for every observed
-case. HDL mutation controls also show unchanged original Rust assertions failing.
+case. HDL mutation controls also show unchanged suite assertions failing.
 
-The two blocked cases are:
+`case-exceptions.json` lists each case allowed to fail, with its kind, reason
+and exact failure message:
 
-- `flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops`
-- `synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops`
+- `veryl_language_restriction`: Veryl rejects the design. Two cases need
+  negative constant loop bounds (`InvalidForRange::NegativeBound`), and four call
+  runtime `$clog2`/`$onehot` outside a function, which Veryl rejects as
+  unsynthesizable (veryl-lang/veryl#2604).
+- `unsupported_by_proof_backend`: twelve cases drive their design from a native
+  Veryl testbench (`Backend::run_testbench`), which this backend does not run.
+- `known_celox_failure`: three cases that the Celox frontend gets wrong today and
+  that Celox's own tests also ignore on every backend.
 
-Both require negative constant loop bounds that the pinned language elaborates
-as unsigned. A different diagnostic, a legal-source mutation, or an unexpected
-successful compile fails the stale blocked contract. There is no catch-all skip
-or allow-failure step. Eight independent negative fixtures pass only after real
+A different failure, a legal-source mutation, or an unexpected success fails the
+stale exception, which must then be reviewed. There is no catch-all skip or
+allow-failure step. Eight independent negative fixtures pass only after real
 source rejection; a compiler crash or empty diagnostic never qualifies.
+
+### Updating the contract
+
+Adding, editing or removing a suite case, or changing what the frontend accepts,
+changes the contract. Rerun the gate, then review the candidate before adopting
+it:
+
+```sh
+./conformance/veryl-proof/run_ci.sh /tmp/new-proof   # fails on the manifest mismatch
+diff <(jq -S . conformance/veryl-proof/coverage-manifest.json) <(jq -S . /tmp/new-proof/coverage/coverage-candidate.json)
+```
+
+Copy `coverage-candidate.json` over `coverage-manifest.json` only after checking
+that every disposition change is intended. A new failure must be fixed, or
+recorded in `case-exceptions.json` with its kind, reason and exact failure.
 
 Evidence includes raw per-case results, original design inputs, scheduled SIR,
 backend protocol identity, finite queries and epoch relations (gzip), dependency
@@ -119,19 +139,12 @@ relation encoder, finite SAT implementation and UNSAT result remain in the
 trusted computing base. SAT models are additionally evaluated against the
 original formula.
 
-## Pinned dependency patches
+## Compiler and suite source
 
-`dependencies.json` records the exact upstream revision, Veryl0.21.0 crate SHA256,
-and separate ordered patch hashes. `prepare.py` rejects mismatches before use and
-rechecks that original suite sources were not patched. The stack fixes scalar
-inout bindings, function snapshot substitution, formal-width constant context,
-first-dimension `$size`, direct runtime `$onehot`/`$clog2` acceptance, and numeric
-cast signedness. The runtime-function patch is an explicit frontend extension;
-constant-only contexts remain rejected. See
+The exporter and suite runner build from the in-tree Celox crates with the
+workspace Veryl, without patches. See
 [`../../audit/veryl_proof_independent`](../../audit/README.md)
 for separate investigations and compiler/formula boundary checks.
 
-Celox code uses its MIT/Apache-2.0 licenses; the Veryl analyzer and imported suite
-carry the included Veryl MIT license. Original sources are fetched at the pinned
-revision rather than vendoring a clone. Only adapter code, dependency locks,
-small patches, licenses and deterministic manifests are committed.
+Celox code uses its MIT/Apache-2.0 licenses; the Veryl analyzer and suite designs
+carry the included Veryl MIT license.

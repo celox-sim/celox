@@ -525,7 +525,7 @@ def main():
     parser.add_argument('--composition-faults', nargs='*', default=list(COMPOSITION_FAULTS), choices=list(COMPOSITION_FAULTS))
     parser.add_argument('--skip-composition', action='store_true')
     parser.add_argument('--require-success', action='store_true')
-    parser.add_argument('--frontend', type=Path, default=ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend')
+    parser.add_argument('--frontend', type=Path, default=ROOT / '../target/debug/lydite-celox-export')
     parser.add_argument('--lifter', type=Path, default=ROOT / '../target/release/lydite-celox-lift')
     parser.add_argument('--checker', type=Path, default=ROOT / '../target/release/lydite')
     args = parser.parse_args()

@@ -165,7 +165,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--widths', nargs='+', type=int, default=[4, 8, 16, 32])
     parser.add_argument('--faults', nargs='*', choices=FAULTS, default=list(FAULTS))
-    parser.add_argument('--frontend', type=Path, default=ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend')
+    parser.add_argument('--frontend', type=Path, default=ROOT/'../target/debug/lydite-celox-export')
     parser.add_argument('--lifter', type=Path, default=ROOT/'../target/debug/lydite-celox-lift')
     parser.add_argument('--checker', type=Path, default=ROOT/'../target/release/lydite')
     args = parser.parse_args()

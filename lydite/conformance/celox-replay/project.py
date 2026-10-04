@@ -11,9 +11,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-PIN = '124a1315096d21b85d9d0d84fd7139363a181cad'
-FRONTEND = ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
-ADAPTER = ROOT / 'conformance/veryl-proof/target/debug/lydite-celox-replay'
+FRONTEND = ROOT / '../target/debug/lydite-celox-export'
+ADAPTER = ROOT / '../target/debug/lydite-celox-replay'
 CORE = ROOT / '../target/release/lydite-replay'
 CHECKER = ROOT / '../target/release/lydite'
 LIFTER = ROOT / '../target/release/lydite-celox-lift'
@@ -112,11 +111,10 @@ def load_manifest(path):
     return manifest, design, project_file(root, manifest['specification'])
 
 def check_dependencies():
-    work = ROOT / 'conformance/veryl-proof/work'
-    revision = subprocess.check_output(['git', '-C', str(work / 'celox'), 'rev-parse', 'HEAD'], text=True).strip()
-    pins = json.loads((ROOT / 'conformance/veryl-proof/dependencies.json').read_text())
-    if revision != PIN or json.loads((work / 'provenance.json').read_text())['dependencies'] != pins:
-        raise ValueError('dependency provenance mismatch; prepare the pinned dependencies')
+    # The tools are built from the in-tree Celox; replay needs only their binaries.
+    missing = [str(p) for p in (FRONTEND, ADAPTER, CORE, CHECKER, LIFTER) if not p.is_file()]
+    if missing:
+        raise ValueError('missing replay tools; build them first: ' + ', '.join(missing))
 
 def mappings(manifest, doc, compiled):
     if doc.get('version') != 3 or doc.get('kind') != 'specification' or not isinstance(doc.get('implementation'), dict):
@@ -212,7 +210,7 @@ def prepare_project(manifest_path, out):
             impl['next'] = lifted['next']
             impl['wires'] = {**lifted['wires'], **lifted['outputs']}
     write(out / 'model.json', doc)
-    identity = {'celox_revision': PIN, 'manifest_sha256': sha(canonical(manifest)), 'sources_sha256': sha(canonical(design)), 'specification_sha256': sha(spec_path.read_bytes()), 'bindings_sha256': sha(canonical(bindings)), 'document_sha256': sha(canonical(doc)), 'dependency_patches_sha256': sha((ROOT / 'conformance/veryl-proof/dependencies.json').read_bytes())}
+    identity = {'manifest_sha256': sha(canonical(manifest)), 'sources_sha256': sha(canonical(design)), 'specification_sha256': sha(spec_path.read_bytes()), 'bindings_sha256': sha(canonical(bindings)), 'document_sha256': sha(canonical(doc))}
     project = {'name': manifest['name'], 'goal': manifest['property'], 'depth': manifest['depth'], 'manifest': manifest, 'design': design, 'document': doc, 'identity': identity}
     write(out / 'project-identity.json', identity)
     return project
@@ -230,7 +228,7 @@ class SimulationDivergence(ValueError):
 def compare_simulation(expected, actual, state_mapping, signal_mapping=None):
     if isinstance(state_mapping, list):
         state_mapping = {n: n for n in state_mapping}
-    if actual.get('status') != 'simulated' or actual.get('celox_revision') != PIN or len(actual.get('trace', [])) != len(expected):
+    if actual.get('status') != 'simulated' or len(actual.get('trace', [])) != len(expected):
         return {'status': 'simulator_divergence', 'reason': 'simulation identity/trace length mismatch'}
     for f, observed in zip(expected, actual['trace']):
         e = f['edge']

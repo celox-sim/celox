@@ -10,7 +10,7 @@ def read(path):
 queries=read(args.proof/'proof-audit.json')
 epochs={int(p.name.split('-')[1].split('.')[0]):read(p if p.suffix!='.gz' else p.with_suffix('')) for p in args.proof.glob('epoch-*.json*')}
 last=read(args.proof/'relation.json');epochs[last['epoch']]=last
-solver=subprocess.Popen([str(ROOT/'target/release/veryl-proof-finite-service')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+solver=subprocess.Popen([str(ROOT/'../../../target/release/lydite-finite-service')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
 try:
  for index,query in enumerate(queries):
   epoch=epochs[query['epoch']];constraints=epoch['constraints'][:query['constraint_count']]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible full-corpus proof-backed conformance; no prebuilt binary or oracle.
+# Reproducible proof-backed conformance of the in-tree suite; no prebuilt binary or oracle.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -34,16 +34,14 @@ python3 --version | tee "$OUT/python-version.txt"
 cd "$HERE"
 python3 prepare.py
 cp work/provenance.json "$OUT/provenance.json"
-for crate in frontend harness; do
-    cargo build --locked --manifest-path "$crate/Cargo.toml" --target-dir "$HERE/target"
-    cargo fmt --manifest-path "$crate/Cargo.toml" --check
-done
-cargo build --release --locked --manifest-path solver-service/Cargo.toml --target-dir "$HERE/target"
-cargo fmt --manifest-path solver-service/Cargo.toml --check
-export SIR_EXPORTER_BIN="$HERE/target/debug/veryl-proof-frontend"
+# The exporter and suite runner build from the in-tree Celox.
+cargo build --locked -p lydite-celox
+cargo build --release --locked -p lydite --bin lydite-finite-service
+cargo fmt --check -p lydite-celox -p lydite
+export SIR_EXPORTER_BIN="$REPO/../target/debug/lydite-celox-export"
 export PYTHONPATH="$HERE"
 export XDG_CACHE_HOME="$HERE/work/cache"
-python3 - "$OUT" "$SIR_EXPORTER_BIN" "$HERE/target/debug/veryl-proof-suite" "$HERE/target/release/veryl-proof-finite-service" <<'PY'
+python3 - "$OUT" "$SIR_EXPORTER_BIN" "$REPO/../target/debug/lydite-celox-suite" "$REPO/../target/release/lydite-finite-service" <<'PY'
 import hashlib,json,pathlib,sys
 out=pathlib.Path(sys.argv[1]);(out/'executables.json').write_text(json.dumps({pathlib.Path(p).name:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in sys.argv[2:]},indent=2)+'\n')
 PY
@@ -65,4 +63,4 @@ done
 python3 "$REPO/audit/veryl_proof_independent/check_wide_encoding.py" --module-dir "$HERE" --out "$OUT/audit-wide"
 python3 replay_audit.py "$OUT/coverage/raw/advanced_interface__test_interface_bidirectional/design-1/proof" | tee "$OUT/query-replay.json"
 test ! -e "$Z3_TRIPWIRE_MARKER"
-echo '663/665 actual passes; two exact pinned language restrictions remain raw failures. Coverage contract satisfied.'
+python3 -c "import json,sys;s=json.load(open(sys.argv[1]));print(f\"{s['actual_passes']}/{s['total']} actual passes; {s['raw_failures']} recorded exceptions. Coverage contract satisfied.\")" "$OUT/coverage/coverage-summary.json"

@@ -1,4 +1,4 @@
-//! Executes the ORIGINAL Rust case bodies, backed exclusively by proved reads.
+//! Executes the reusable suite cases, backed exclusively by proved reads.
 //! No AST assertion transformation, simulator, or expected-value extraction.
 use celox_test_suite_veryl::{
     Backend, BigUint, CompilationRejected, Design, Result, SignalPath, cases,
@@ -73,7 +73,8 @@ impl ProofBackend {
         out: &Path,
         sticky: Arc<Mutex<Vec<String>>>,
     ) -> Result<Box<dyn Backend>> {
-        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../server.py");
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../lydite/conformance/veryl-proof/server.py");
         let mut child = Command::new("python3")
             .arg(script)
             .arg(out)
@@ -160,7 +161,22 @@ fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.as_slice() == ["--list"] {
-        println!("{}",serde_json::to_string(&cases().map(|c|json!({"case":c.name,"expectation":format!("{:?}",c.expectation),"category":format!("{:?}",c.category)})).collect::<Vec<_>>()).unwrap());
+        // `script` is the parsed case (design sources and stimulus); the
+        // coverage gate pins its hash so edited cases need a new review.
+        let listed = cases()
+            .map(|c| {
+                let script = c.script();
+                let group = c.name.split("::").next().unwrap_or(c.name);
+                json!({
+                    "case": c.name,
+                    "expectation": format!("{:?}", c.expectation),
+                    "category": format!("{:?}", c.category),
+                    "source": {"file": format!("src/cases/{group}.vtest"), "line": script.pos.line},
+                    "script": format!("{script:?}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string(&listed).unwrap());
         return;
     }
     if args.is_empty() {

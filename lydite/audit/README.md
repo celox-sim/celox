@@ -21,7 +21,7 @@ symbolic/RV gates; a failed dependency fetch is a setup failure, never a pass.
 |---|---|
 | Language, Rust and documentation | [Development checks](../docs/usage.md#required-checks) |
 | Original finite Veryl adapter | `./conformance/veryl/run_ci.sh /tmp/new-veryl`; [scope/dependencies](../conformance/veryl/README.md) |
-| Original 665-case proof-backed corpus | `./conformance/veryl-proof/run_ci.sh /tmp/new-proof-corpus`; [coverage contract](../conformance/veryl-proof/README.md) |
+| Proof-backed reusable suite | `./conformance/veryl-proof/run_ci.sh /tmp/new-proof-corpus`; [coverage contract](../conformance/veryl-proof/README.md) |
 | Symbolic RTL, capacity, register and memory reuse | `./conformance/veryl-symbolic/run_ci.sh /tmp/new-symbolic`; [adapter](../conformance/veryl-symbolic/README.md) |
 | Native/API lemma diagnostics | `python3 -m audit.lemma_candidates.ci --out /tmp/new-lemmas` |
 | Selected RV32I architecture, memory, latency and mutations | `./conformance/veryl-symbolic/run_rv32i_ci.sh /tmp/new-rv32i` |

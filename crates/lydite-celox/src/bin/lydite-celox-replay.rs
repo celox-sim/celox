@@ -130,7 +130,7 @@ fn run(v: &Value) -> Result<Value> {
         trace.push(json!({"edge":edge,"before":before,"after":after}));
     }
     Ok(
-        json!({"version":1,"status":"simulated","backend":"celox-native-o0","celox_revision":"124a1315096d21b85d9d0d84fd7139363a181cad","trace":trace}),
+        json!({"version":1,"status":"simulated","backend":"celox-native-o0","celox_version":env!("CARGO_PKG_VERSION"),"trace":trace}),
     )
 }
 fn main() {

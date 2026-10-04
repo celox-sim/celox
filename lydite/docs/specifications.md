@@ -440,15 +440,14 @@ The independently authored native specification supplies the property, and the
 original transition replay supplies the trace to compare. A simulator/model
 mismatch is `simulator_divergence`, not a reproduced property failure. Celox and
 the lifter share frontend dependencies, so agreement is not an independent proof
-of frontend correctness. The source/property/binding/model hashes, pinned Celox
-revision and dependency patch identity are checked before saved stimuli run.
+of frontend correctness. The source/property/binding/model hashes are checked
+before saved stimuli run; a newer Celox replays the same saved stimuli.
 Regressions retain stimuli and identities rather than simulator-generated goldens.
 
-The gate uses Celox `124a1315096d21b85d9d0d84fd7139363a181cad` (0.8.2), Veryl
-0.21.0, and the existing named frontend patches. No upstream files or original
-suite cases are changed. The adapter has a separate locked workspace retaining
-upstream package versions. Its host-runtime dependencies must be available; a
-missing simulator or build/runtime error fails CI rather than skipping replay.
+The gate uses the in-tree Celox and the workspace Veryl through the
+`lydite-celox` binaries (`lydite-celox-export`, `lydite-celox-replay`). Their
+host-runtime dependencies must be available; a missing simulator or build/runtime
+error fails CI rather than skipping replay.
 Run `./conformance/celox-replay/run_ci.sh /tmp/fresh-celox-replay` with the repository Rust toolchain.
 
 Fixtures exercise an enabled counter's wrong update and a single-outstanding
@@ -465,13 +464,11 @@ by CI.
 
 The fixture gate and external projects use the same public CLI,
 [project.py](../conformance/celox-replay/project.py). No fixture name, source layout,
-or physical port naming convention is required. First build the pinned tools
-from `lydite/`:
+or physical port naming convention is required. First build the tools from
+`lydite/`:
 
 ```sh
-python3 conformance/veryl-proof/prepare.py
-cargo build --locked --manifest-path conformance/veryl-proof/frontend/Cargo.toml --target-dir conformance/veryl-proof/target
-cargo build --locked --manifest-path conformance/celox-replay/adapter/Cargo.toml --target-dir conformance/veryl-proof/target
+cargo build --locked -p lydite-celox
 cargo build --release --locked -p lydite -p lydite-celox
 ```
 
@@ -649,7 +646,7 @@ input objects: initial reset, then nonreset edges. Search saves a regression onl
 for a reproduced failure and never overwrites a file. Replay checks source,
 specification, bindings, library/oracle code and dependency identities. Changed
 identities are rejected. A failure is replayed against the original property,
-then the actual pinned Celox source simulation; an independent integer/snapshot
+then the actual Celox source simulation; an independent integer/snapshot
 oracle checks those bus samples. Source behavior, not a chosen relational-spec
 witness, determines the comparison values.
 
@@ -1090,7 +1087,7 @@ other channels, physical asynchronous reset assertion/deassertion, glitches and 
 timing, transaction-identity ordering and functional address/data/strobe behavior,
 fairness/liveness, X/Z, CDC, bursts, IDs and other AXI variants. Source replay uses
 a single positive-edge clock, ordinary bit synchronous reset, scalar two-state
-ports, one initial reset and the pinned Celox/Veryl subset. Standalone
+ports, one initial reset and the Celox/Veryl subset. Standalone
 `trace_document(config)` / `bind(...)` provide the generated contract API;
 `axi4lite_reference.check_trace(...)` accepts full sampled traces, including
 explicit reset epochs. Neither constitutes an asynchronous-reset timing check.

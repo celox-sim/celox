@@ -1,6 +1,6 @@
 import json,os,pathlib,subprocess,tempfile,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-BINARY=ROOT/'target/debug/veryl-proof-suite'
+BINARY=ROOT/'../../../target/debug/lydite-celox-suite'
 REJECTION='hierarchy::test_dynamic_minus_colon_output_port_rmw'
 class BridgeTests(unittest.TestCase):
  def test_unknown_and_duplicate_selection_fail(self):

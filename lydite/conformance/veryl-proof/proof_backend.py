@@ -80,7 +80,7 @@ class Storage:
 class Proof:
     def __init__(self,out):
         self.out=pathlib.Path(out);self.out.mkdir(parents=True,exist_ok=False)
-        self.p=subprocess.Popen([str(ROOT/'target/release/veryl-proof-finite-service')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        self.p=subprocess.Popen([str(ROOT/'../../../target/release/lydite-finite-service')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         self.decls={};self.constraints=[];self.queries=[];self.unique_cache={};self.encoder=Encoder(self);self.proven_vars={};self.active_vars=[];self.epoch=0;self.compact_threshold=128;self.definitions={};self.negative_control=None
     def close(self):
         self.p.stdin.close();code=self.p.wait(timeout=10);self.p.stdout.close();self.p.stderr.close()

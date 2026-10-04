@@ -35,7 +35,7 @@ def cpu_state(text=None):
     return {k: types[k] for k in sorted(names)}
 
 def compile_machine(out, frontend=None, lifter=None, text=None):
-    frontend = frontend or ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
+    frontend = frontend or ROOT / '../target/debug/lydite-celox-export'
     lifter = lifter or ROOT / '../target/release/lydite-celox-lift'
     text = source() if text is None else text
     out = Path(out); out.mkdir(parents=True, exist_ok=False)

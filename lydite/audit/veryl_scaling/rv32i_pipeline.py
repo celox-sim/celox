@@ -51,7 +51,7 @@ def source():
 
 
 def compile_machine(out, frontend=None, lifter=None, text=None):
-    frontend = frontend or ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
+    frontend = frontend or ROOT / '../target/debug/lydite-celox-export'
     lifter = lifter or ROOT / '../target/release/lydite-celox-lift'
     text = source() if text is None else text
     out = Path(out)
@@ -547,7 +547,7 @@ class NormalizationSession:
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=False)
         self.checker = Path(checker or ROOT / '../target/release/lydite').resolve()
-        self.frontend = Path(frontend or ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend').resolve()
+        self.frontend = Path(frontend or ROOT / '../target/debug/lydite-celox-export').resolve()
         self.lifter = Path(lifter or ROOT / '../target/release/lydite-celox-lift').resolve()
         self._handles = {}
         self._source = source()
@@ -735,7 +735,7 @@ def validate_negative_lemma(report):
 
 
 def _mutation_fingerprints(checker, frontend, lifter):
-    paths = [Path(checker), Path(frontend or ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'),
+    paths = [Path(checker), Path(frontend or ROOT / '../target/debug/lydite-celox-export'),
              Path(lifter or ROOT / '../target/release/lydite-celox-lift'), Path(__file__), Path(c.__file__),
              ROOT / 'audit/veryl_scaling/rv32i_spec.py', ROOT / 'conformance/veryl-symbolic/rv32i_pipeline.veryl']
     return {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}

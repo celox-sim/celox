@@ -77,7 +77,7 @@ def one(axis,n,bad,out,mutant_hint="query"):
     write=lambda name,obj:(out/name).write_text(json.dumps(obj,indent=2)+'\n')
     write('design.json',{'top':'Top','four_state':False,'sources':[{'path':'source.veryl','text':source}]})
     result={'axis':axis,'size':n,'width':W,'mutant':bad,'search_hint':mutant_hint if bad else 'query','state_bits':W*len(state),'scope':'isolated_component_contract_not_CPU','phases':{}}
-    compiled,phase=execute([ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend',out/'design.json'],out/'compiled.json')
+    compiled,phase=execute([ROOT/'../target/debug/lydite-celox-export',out/'design.json'],out/'compiled.json')
     result['phases']['frontend']=phase
     if compiled is None:result['status']='frontend_failed';write('summary.json',result);return result
     cfg={'event':'clk','inputs':{k:{'type':v} for k,v in inputs.items()},'state':bindings,'outputs':{}}

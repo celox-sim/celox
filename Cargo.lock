@@ -2567,9 +2567,19 @@ dependencies = [
 name = "lydite-celox"
 version = "0.10.1"
 dependencies = [
+ "celox",
+ "celox-design",
+ "celox-frontend-core",
+ "celox-frontend-veryl",
+ "celox-runtime",
+ "celox-sir",
+ "celox-test-suite-veryl",
  "lydite-ir",
  "lydite-solver",
  "serde_json",
+ "veryl-analyzer",
+ "veryl-metadata",
+ "veryl-parser",
 ]
 
 [[package]]

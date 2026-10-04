@@ -19,7 +19,7 @@ PY
 }
 trap finish EXIT
 cd "$REPO"
-FRONTEND="$REPO/conformance/veryl-proof/target/debug/veryl-proof-frontend"
+FRONTEND="$REPO/../target/debug/lydite-celox-export"
 test -x "$FRONTEND"
 cp conformance/veryl-proof/work/provenance.json "$OUT/frontend-provenance.json"
 cargo build --release --locked -p lydite -p lydite-celox

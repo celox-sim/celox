@@ -47,7 +47,7 @@ def capture_provenance(out, checker):
         fingerprints[str(path.resolve())] = digest
         (snapshots / (digest + '-' + path.name)).write_bytes(data)
     tools = [checker, root / '../target/release/lydite-celox-lift',
-             root / 'conformance/veryl-proof/target/debug/veryl-proof-frontend']
+             root / '../target/debug/lydite-celox-export']
     for path in tools:
         fingerprints[str(path.resolve())] = hashlib.sha256(path.read_bytes()).hexdigest()
     def git(*args):

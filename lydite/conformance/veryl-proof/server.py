@@ -25,7 +25,7 @@ for line in sys.stdin:
     try:
         if command=='compile':
             (out/'design.json').write_text(json.dumps(request['design']))
-            process=subprocess.run([os.environ.get('SIR_EXPORTER_BIN',str(ROOT/'target/debug/veryl-proof-frontend')),str(out/'design.json')],capture_output=True,text=True,timeout=45)
+            process=subprocess.run([os.environ.get('SIR_EXPORTER_BIN',str(ROOT/'../../../target/debug/lydite-celox-export')),str(out/'design.json')],capture_output=True,text=True,timeout=45)
             (out/'frontend.stderr').write_text(process.stderr)
             if process.returncode:
                 message=process.stderr.strip()

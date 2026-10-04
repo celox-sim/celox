@@ -54,7 +54,7 @@ def run(out, checker):
         raise ValueError('nondefault LYDITE environment is not permitted')
     if p.sha(checker) != CHECKER_SHA256:
         raise ValueError('checker differs from audited frozen binary')
-    frontend = p.ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
+    frontend = p.ROOT / '../target/debug/lydite-celox-export'
     lifter = p.ROOT / '../target/release/lydite-celox-lift'
     paths = [Path(__file__), Path(p.__file__), Path(c.__file__), Path(s.__file__),
              Path(c.RUNNER.__file__), Path(c.registers.__file__),

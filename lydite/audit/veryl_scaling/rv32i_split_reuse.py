@@ -141,7 +141,7 @@ class ProofSession:
         from audit.veryl_scaling import rv32i_memory
         self.out=Path(out);self.out.mkdir(parents=True,exist_ok=False)
         self.checker=Path(checker or p.ROOT/'../target/release/lydite').resolve()
-        self.frontend=Path(frontend or p.ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend').resolve()
+        self.frontend=Path(frontend or p.ROOT/'../target/debug/lydite-celox-export').resolve()
         self.lifter=Path(lifter or p.ROOT/'../target/release/lydite-celox-lift').resolve()
         self.conjunctive_lemmas=bool(conjunctive_lemmas);self._handles={};self._records={};self._equation_handles={}
         self.cpu=None;self._cpu_hash=None;self._normalization=None;self._canonical_bank=False;self._bank_record=None;self._transport_view=False;self._control_invariant=False;self._dispatch_record=None;self._operand_views=False;self._history_record=None;self._proof_programs=False

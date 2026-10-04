@@ -4,7 +4,7 @@ import unittest
 import json
 from pathlib import Path
 import tempfile
-from project import PIN, compare_simulation, validate_saved, load_manifest, mappings, prepare_project, write
+from project import compare_simulation, validate_saved, load_manifest, mappings, prepare_project, write
 from run import fixture_project, cli
 
 class ReplayControls(unittest.TestCase):
@@ -21,7 +21,7 @@ class ReplayControls(unittest.TestCase):
     def test_divergence_is_not_a_reproduced_property_failure(self):
         expected = [{'edge': 0, 'state_after': {'count': {'value': 0}}, 'state_before': None, 'controls': None},
                     {'edge': 1, 'state_after': {'count': {'value': 2}}, 'state_before': {'count': {'value': 0}}, 'controls': None}]
-        actual = {'status': 'simulated', 'celox_revision': PIN, 'trace': [
+        actual = {'status': 'simulated', 'trace': [
             {'edge': 0, 'before': {}, 'after': {'count': '0'}},
             {'edge': 1, 'before': {'count': '0'}, 'after': {'count': '2'}}]}
         self.assertEqual(compare_simulation(expected, actual, ['count'])['status'], 'simulation_matches_validated_trace')
