@@ -72,6 +72,13 @@ external-frontend tests (including loading a separately built N-API addon), and
 then publishes in dependency order. A retry skips crate versions already present
 on crates.io.
 
+PR CI and the release package job run `node scripts/check-package-includes.mjs`.
+In publishable crates, `include!`, `include_str!`, and `include_bytes!` must use
+literal paths to files inside the crate and listed by `cargo package --list`.
+This includes tests, examples, and benches, even behind disabled features.
+Cross-crate paths, escaping symlinks, and computed paths are rejected before
+publication; this check does not require same-version dependencies on crates.io.
+
 Release Please updates the workspace version, exact internal dependency
 requirements, and all matching entries in `Cargo.lock`. `scripts/check-release-version.mjs`
 rejects a release if any of those values differs from `VERSION`.

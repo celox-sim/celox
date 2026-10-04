@@ -4,6 +4,10 @@ use celox::testbench::{
 };
 use celox::{Simulator, TestResult};
 
+// These runtime-specific tests use package-local snapshots of the shared suite's
+// testbench fixtures. Keep them in celox's archive: sibling crate directories
+// are unavailable when crates.io verifies the packaged tests.
+
 #[test]
 fn later_process_failure_is_not_hidden_by_an_earlier_wait() {
     let code = r#"#[test(Top)] module Top {
@@ -50,9 +54,7 @@ fn all_processes_falling_through_is_not_explicit_completion() {
 
 #[test]
 fn tick_limit_counts_shared_edges_once() {
-    let code = include_str!(
-        "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_shared_clock.veryl"
-    );
+    let code = include_str!("../testdata/veryl/concurrent_initial_shared_clock.veryl");
     for limit in [0, 1, 2] {
         let mut sim = Simulator::builder(code, "Top").build_interpreter().unwrap();
         let tb = compile_initial_testbench(&sim).unwrap();
@@ -129,21 +131,11 @@ fn suspended_wide_loop_keeps_the_existing_progress_guard() {
 #[test]
 fn native_image_roundtrip_preserves_concurrent_processes_and_periods() {
     for code in [
-        include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_shared_clock.veryl"
-        ),
-        include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_clock_periods.veryl"
-        ),
-        include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_hierarchy.veryl"
-        ),
-        include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_between_edges.veryl"
-        ),
-        include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_only_clock.veryl"
-        ),
+        include_str!("../testdata/veryl/concurrent_initial_shared_clock.veryl"),
+        include_str!("../testdata/veryl/concurrent_initial_clock_periods.veryl"),
+        include_str!("../testdata/veryl/concurrent_initial_hierarchy.veryl"),
+        include_str!("../testdata/veryl/concurrent_initial_reset_between_edges.veryl"),
+        include_str!("../testdata/veryl/concurrent_initial_reset_only_clock.veryl"),
     ] {
         let original = Simulator::builder(code, "Top").build_native().unwrap();
         let bytes = original
@@ -282,14 +274,12 @@ fn reset_between_edges_respects_polarity_and_sync_mode_without_a_clock_event() {
     use celox::ResetType;
     // Isolate the assertion at time 12: neither clock polarity is scheduled
     // then. A separate observer resumes at time 14, before slow's time-20 edge.
-    let source = include_str!(
-        "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_between_edges.veryl"
-    )
-    .replace(
-        "    inst slow:",
-        "    inst observer: $tb::clock_gen #(period: 14);\n    inst slow:",
-    )
-    .replace("fast.next(7);", "observer.next(1);");
+    let source = include_str!("../testdata/veryl/concurrent_initial_reset_between_edges.veryl")
+        .replace(
+            "    inst slow:",
+            "    inst observer: $tb::clock_gen #(period: 14);\n    inst slow:",
+        )
+        .replace("fast.next(7);", "observer.next(1);");
     fn check<B: celox::SimBackend>(mut sim: Simulator<B>, reset_type: ResetType, four_state: bool) {
         let tb = compile_initial_testbench(&sim).unwrap();
         assert_eq!(
@@ -418,10 +408,7 @@ fn child_hierarchical_readmem_waits_for_its_process() {
 
 #[test]
 fn clock_period_accepts_module_constant_array_element() {
-    let code = include_str!(
-        "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset_only_clock.veryl"
-    )
-    .replace(
+    let code = include_str!("../testdata/veryl/concurrent_initial_reset_only_clock.veryl").replace(
         "const PERIOD: u32 = P + 0;",
         "const PERIODS: u8[2] = '{P as u8, (P + 2) as u8}; const PERIOD: u32 = PERIODS[0];",
     );

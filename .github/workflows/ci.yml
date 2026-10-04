@@ -89,7 +89,11 @@ jobs:
           nix build --no-link --no-update-lock-file .#checks.x86_64-linux.rust-toolchain
 
       - uses: ./.github/actions/setup-rust
-        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.scripts == 'true'
+
+      - name: Check public crate compile-time includes
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.scripts == 'true'
+        run: node scripts/check-package-includes.mjs
 
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
