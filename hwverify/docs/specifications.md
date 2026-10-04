@@ -694,6 +694,115 @@ remain recorded despite later counterpart violations. Native guarantee replay
 stops at its first failure; inspect a separate objective or the complete concrete
 trace oracle when examining later events.
 
+### Source-bound request correspondence and application offers
+
+`protocols/source_contracts.py` provides two reusable canonical native-v3 template
+APIs. They preserve the original specification and return **separate documents**
+for each obligation. No sibling obligation is assumed. The source adapter
+`protocols/source_contract_project.py` binds them to external scalar Veryl projects,
+using the existing frontend, reset/next lifting, native failure search and actual
+Celox replay. These contracts are explicitly supplied design semantics; an AXI
+pin list cannot establish a register map, transaction origin or application offer.
+
+`fifo_read(document, name, capacity, request_width, response_width, bindings,
+request_valid, request_payload, response_ready, response_function)` supports
+capacities 1–16 and scalar widths 1–64. `bindings` maps `count`, `slot_0` through
+`slot_N`, `ready`, `valid`, and `data` to state-only implementation expressions.
+The independently authored response function uses only the `request` placeholder
+and native literals/operators. The obligations are:
+
+- `storage`: reset empties the FIFO; actual request handshakes append payloads;
+  actual response handshakes retire the oldest; surviving occupied slots retain
+  their contents. Simultaneous pop/push, including a full queue, is supported.
+- `capacity`: occupancy stays within the declared bound and no accepted request
+  overruns a full queue without simultaneous retirement. This is a design capacity
+  contract, not an AXI limit or a truncating observer.
+- `response`: whenever an actual response is offered, the queue is nonempty and
+  its data equals the supplied function of the oldest stored request.
+- `stall`: an unaccepted offered response remains valid with unchanged data.
+
+No empty bypass or eventual-response requirement is introduced. Inactive slot bits
+are unconstrained. The source adapter requires explicit actual state mappings and
+actual output ports; it rejects input-dependent output abstractions, wrong widths,
+duplicate slot aliases, and response functions referring to DUT state. Each bound
+output is also lowered separately with reset asserted. The native typed evaluator
+checks that its settled reset value equals the normal state-only abstraction
+applied to reset-established registers. Input-dependent or differing reset values
+are rejected as unsupported bindings, before any obligation can pass. This does
+not impose an AXI reset value on payload/READY: it rejects a phase-dependent output
+that the single state-only binding cannot represent. Equal reset values, including
+compatible reset muxes, remain supported. `reset-output-bindings.json`,
+`reset-output-model.json` and `reset-output-check.json` retain this evidence;
+concrete replay additionally compares the claimed physical outputs with Celox's
+post-reset-edge sample in `reset-output-comparison.json`. No reset waveform or
+asynchronous timing claim is added. A same-width
+wrong slot mapping is still a possible author error: checked storage transitions,
+not the field name, provide its behavioral evidence. Conclude correspondence only
+when **all** obligations succeed for the same source/binding identity and scope.
+
+The self-contained `examples/source-contracts/read-contract.json` binds a two-slot
+read subordinate to a separately written ROM map: address 0 gives 17, address 4
+gives 34, all other addresses give 0. Actual source slots hold accepted addresses
+until response retirement. A mutant selects and removes the younger request,
+returning 34 then 17 while keeping ordinary response counts, prerequisites and
+stalled-payload stability legal. Both response correspondence and storage refinement
+expose it. No response-time tag is assigned by a monitor. Repeated-address tests
+retain multiplicity and FIFO positions, but equal response values cannot distinguish
+physical origins; this example does not establish arbitrary memory/peripheral effects
+or write-response origin from identical OKAY codes.
+
+`idle_offer_step(document, name, bindings, offer, completion)` binds actual `busy`
+and `valid_0` through `valid_N` expressions. It separately checks `resource` accounting
+(completion wins the busy update) and `launch`: an application offer when not busy
+and with no pending bound VALID establishes those VALIDs on the next edge. This is
+an **explicit one-step application adapter contract**, not normative AXI latency,
+fairness, general progress, or independence from all historical READY values.
+The application defines offer/completion meaning. Configuring a READY-gated offer
+would not justify that meaning and must not be presented as proof of AXI causality.
+The read/write examples bind real `start_read`/`start_write` inputs, busy registers,
+and corresponding VALID outputs; mutants gate initiation on READY. VALID aliases
+must resolve to distinct physical output ports: two alias names for one pin cannot
+establish two offers. Distinct physical pins with equal normal expressions remain
+supported; expression equality alone is not an endpoint collision. Actual READY-low
+covers demonstrate available work and detect the registered wait even though ordinary
+sampled AXI and source combinational-path checks pass. This first template does not
+claim simultaneous busy-slot replacement or arbitrary pipeline offer behavior.
+
+Use the supplied binding files as external-project templates. Each names a source
+project and either a `fifo_read` or `idle_offer_step` contract with explicit aliases.
+For example:
+
+```sh
+python3 protocols/source_contract_project.py search \
+  examples/source-contracts/read-contract.json --obligation response \
+  --out /tmp/read-response --regression /tmp/read-response.regression.json
+python3 protocols/source_contract_project.py search \
+  examples/source-contracts/write-offer.json --obligation launch \
+  --out /tmp/write-launch
+# Also run storage/capacity/stall, and the offer resource obligation separately.
+```
+
+`stimulus --inputs file.json` checks concrete external inputs; `replay --regression
+file.json` requires an exact saved failure identity. Source, manifest, specification,
+contract/function, selected obligation and contract helper/driver hashes participate
+in identity. Reports retain the selected obligation, declared bindings/semantics,
+independent obligation names, actual simulator comparison and bounded scope. A
+single successful obligation is not a combined verdict. The original specification
+also remains checked: a failure may originate there or in the selected contract,
+so inspect the native model and trace before attributing it. No failure means bounded
+no-failure, not an unbounded theorem. Positive concrete covers establish only their
+recorded executions, not general progress. One initial reset is supported; repeated
+reset epochs remain rejected by the source replay route.
+
+`conformance/source-contracts/run.py` tests independent depth-10 FIFO searches,
+read/write offer searches, two outstanding requests, stalls, repeated addresses,
+simultaneous events, full-queue backpressure, reset polarity, mutations, incorrect
+bindings, reset-phase mismatches on VALID/data/READY under both polarities, physical
+endpoint aliases, and stale witnesses. Its separate complete AXI depth-10 search currently
+returns `Unknown` from the finite solver term-depth budget; this is retained in
+`results.json`, not counted as a protocol proof. Actual scenario traces independently
+pass the ordinary AXI checks. Other example/test results do not discharge this limit.
+
 ### Explicit optional response-output profile
 
 Version 1 AXI bindings still require the full signal set. Version 2 supports one
@@ -843,9 +952,10 @@ earlier definite faults remain recorded. Native trace replay uses one
 initial reset; the independent oracle additionally tests repeated reset epochs.
 
 This does not prove subordinate byte-write effects, memory contents, or response
-transaction origin. The conformance inventory retains separate unchecked entries
-for those claims. Its remaining `next_evidence` fields describe explicit
-optional-signal/default profiles and independently bound response origins. None of those plans is an implemented compliance claim.
+transaction origin. The separate source-bound FIFO template above supplies bounded
+read correspondence evidence only with an independent response function and actual
+RTL storage/output bindings. Write/effect origins and further optional profiles
+remain explicit gaps in the conformance inventory.
 
 ### AXI limits and validation
 
@@ -973,9 +1083,10 @@ for every protocol input/output pair and uses this same checker. It emits
 `structure-model.json`, `structural-graph.json` and `structural-result.json` beside
 the sampled evidence. A path reports `structural_violation`; incomplete structural
 coverage prevents a successful combined result. Clock/reset physical timing and
-registered wait-on-READY remain separate unchecked obligations. The regression
-suite deliberately includes a registered READY wait that passes this structural
-check: it must not be mistaken for proof of temporal offer causality.
+registered wait-on-READY are not established by this structural checker. The
+regression suite includes registered READY waits that pass this check and fail the
+separate, explicitly declared application offer contracts above. Those contracts
+do not establish unrestricted temporal offer causality for arbitrary DUTs.
 
 The [machine-readable AXI conformance inventory](../protocols/axi4lite-conformance.json)
 records exact sections, profiles, tests and outstanding gaps. It is explicitly

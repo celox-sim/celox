@@ -1,0 +1,57 @@
+// Two outstanding reads from the example ROM: 0 -> 17, 4 -> 34, others -> 0.
+// Requests stay in source slots until response acceptance. Writes are protocol-only.
+module OrderedReadSubordinate (
+    clk: input clock, rst_n: input bit,
+    awvalid: input bit, awready: output bit, awaddr: input bit<8>, awprot: input bit<3>,
+    wvalid: input bit, wready: output bit, wdata: input bit<32>, wstrb: input bit<4>,
+    bvalid: output bit, bready: input bit, bresp: output bit<2>,
+    arvalid: input bit, arready: output bit, araddr: input bit<8>, arprot: input bit<3>,
+    rvalid: output bit, rready: input bit, rdata: output bit<32>, rresp: output bit<2>,
+) {
+    var a_full: bit;
+    var d_full: bit;
+    var count: bit<2>;
+    var slot0: bit<8>;
+    var slot1: bit<8>;
+    var armed: bit;
+    var selected_addr: bit<8>;
+    var select_young: bit;
+    var served_young: bit;
+    assign select_young = 0;
+    always_comb {
+        if select_young { selected_addr = slot1; }
+        else { selected_addr = slot0; }
+    }
+    assign awready = !a_full;
+    assign wready = !d_full;
+    assign bvalid = a_full && d_full;
+    assign bresp = 2'd0;
+    assign arready = count != 2'd2;
+    assign rresp = 2'd0;
+    always_ff (clk) {
+        if !rst_n { a_full = 0; d_full = 0; count = 0; slot0 = 0; slot1 = 0; armed = 0; served_young = 0; rvalid = 0; rdata = 0; }
+        else {
+            if awvalid && awready { a_full = 1; }
+            if wvalid && wready { d_full = 1; }
+            if bvalid && bready { a_full = 0; d_full = 0; }
+            armed = count != 0;
+            if arvalid && arready && !(rvalid && rready) { count = count + 2'd1; }
+            if rvalid && rready && !(arvalid && arready) { count = count - 2'd1; }
+            if rvalid && rready && !served_young { slot0 = slot1; }
+            if arvalid && arready {
+                if count == 0 || (count == 1 && rvalid && rready) { slot0 = araddr; }
+                else { slot1 = araddr; }
+            }
+            if !rvalid && armed && count != 0 {
+                rvalid = 1;
+                served_young = select_young;
+                if selected_addr == 8'd0 { rdata = 32'd17; }
+                else {
+                    if selected_addr == 8'd4 { rdata = 32'd34; }
+                    else { rdata = 32'd0; }
+                }
+            }
+            if rvalid && rready { rvalid = 0; }
+        }
+    }
+}

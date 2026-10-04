@@ -100,10 +100,12 @@
         "A3.3.1"
       ],
       "applicability": "per-role intra/cross-channel dependency diagram",
-      "enforcement": "unchecked",
-      "evidence_or_gap": "registered wait-on-READY needs declared offer and permitted handshake-history contract; not blanket historical noninterference",
+      "enforcement": "partial",
+      "evidence_or_gap": "Explicit native application idle-offer resource/launch contracts with actual source bindings detect registered READY waits. One-step launch is a declared application contract, not an AXI deadline or complete history-sensitive dependency proof. Real DUT offer/resource meaning remains required.",
       "tests": [
-        "registered_ready_wait"
+        "registered_ready_wait",
+        "write_registered_ready_wait",
+        "read_registered_ready_wait"
       ]
     },
     {
@@ -172,10 +174,16 @@
         "A6.6.1"
       ],
       "applicability": "single fixed ID AXI4-Lite, including multiple outstanding",
-      "enforcement": "unchecked",
-      "evidence_or_gap": "counts do not identify responses; require source-derived transaction-origin binding or independent correspondence contract; never invent ordered tags from response order",
-      "tests": [],
-      "next_evidence": "Bind actual RTL response/effect origin to independently accepted ordered request identities; test swapped origins while preserving response counts. Queue position assigned at response time is not evidence of origin. Distinguish response order from memory/peripheral execution and byte-write effects."
+      "enforcement": "partial",
+      "evidence_or_gap": "Reusable source-bound FIFO storage/capacity/response/stall obligations plus independently authored response function. Two-slot ROM example detects actual younger-first responses while ordinary sampled AXI checks pass. No response-time monitor tags; equal responses and arbitrary write/effect origin remain unresolved.",
+      "tests": [
+        "read_all_independent_obligations",
+        "two_outstanding_stalls",
+        "reversed_source_responses",
+        "wrong_storage_binding",
+        "repeat_address"
+      ],
+      "next_evidence": "Bind real DUT read/write response and effect origins to independently specified request semantics. The two-slot read ROM example is bounded evidence only; equal response values cannot establish physical origin. Write completion, memory/peripheral execution and byte effects still need explicit mappings and independent contracts."
     },
     {
       "id": "location_ordering",
