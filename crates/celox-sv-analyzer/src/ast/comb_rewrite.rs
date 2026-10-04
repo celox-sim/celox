@@ -4,6 +4,11 @@ use super::*;
 
 const COMB_PREVIOUS_VALUE: &str = "\0celox_comb_previous_value";
 
+/// Upper bound on the size of a tracked `always_comb` value. Tracking a value
+/// across many partial writes can multiply its size on every write; stopping
+/// with a diagnostic is preferable to exhausting memory.
+const MAX_TRACKED_COMB_VALUE_NODES: usize = 300_000;
+
 /// Substitute the value established by earlier writes to `target` into reads
 /// that occur before the merged write is emitted. This handles procedural
 /// sequences such as `x = 0; y = x; if (c) x = 1;` without making `y` observe
@@ -158,12 +163,11 @@ pub(super) fn substitute_intermediate_comb_value_reads(
                         initialized |= covers_target;
                         updated
                     }
-                    Some(condition) => Expr::Mux {
-                        condition: Box::new(condition.clone()),
-                        then_expr: Box::new(updated),
-                        else_expr: Box::new(established),
-                    },
+                    Some(condition) => {
+                        merge_conditional(condition, updated, established, packed_dimensions)
+                    }
                 };
+                check_tracked_value_budget(&established, whole_established.as_ref())?;
             }
             continue;
         }
@@ -189,11 +193,9 @@ pub(super) fn substitute_intermediate_comb_value_reads(
         {
             whole_established = Some(match write.condition() {
                 None => updated,
-                Some(condition) => Expr::Mux {
-                    condition: Box::new(condition.clone()),
-                    then_expr: Box::new(updated),
-                    else_expr: Box::new(current_whole),
-                },
+                Some(condition) => {
+                    merge_conditional(condition, updated, current_whole, packed_dimensions)
+                }
             });
         }
         if let Some(chain_start) = write.exhaustive_fallback_start {
@@ -226,6 +228,7 @@ pub(super) fn substitute_intermediate_comb_value_reads(
                 );
             }
         }
+        check_tracked_value_budget(&established, whole_established.as_ref())?;
         prior_target_writes.push((index, tracked_write));
         if let Some(assignment) = original_target_assignment {
             guarded_assignment.assignment = assignment;
@@ -309,6 +312,14 @@ fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDime
                 (Some(msb), Some(lsb)) => Some((msb, lsb)),
                 _ => None,
             };
+            if !signed
+                && let Some((msb, lsb)) = bounds
+                && let (Ok(msb), Ok(lsb)) = (usize::try_from(msb), usize::try_from(lsb))
+                && msb >= lsb
+                && let Some(narrowed) = narrow_bit_select(&expr, msb, lsb, packed_dimensions)
+            {
+                return narrowed;
+            }
             if let (Some((msb, lsb)), Expr::Concat(parts)) = (bounds, &expr)
                 && let (Ok(msb), Ok(lsb)) = (usize::try_from(msb), usize::try_from(lsb))
                 && msb >= lsb
@@ -868,15 +879,12 @@ fn dynamic_selected_value_after_write(
             op: BinaryOp::EqCase,
             right: Box::new(const_expr_to_expr(const_expr_from_i128(candidate_lsb))),
         };
-        result = Expr::Mux {
-            condition: Box::new(Expr::Binary {
-                left: Box::new(matches_msb),
-                op: BinaryOp::LogicAnd,
-                right: Box::new(matches_lsb),
-            }),
-            then_expr: Box::new(updated),
-            else_expr: Box::new(result),
+        let condition = Expr::Binary {
+            left: Box::new(matches_msb),
+            op: BinaryOp::LogicAnd,
+            right: Box::new(matches_lsb),
         };
+        result = merge_conditional(&condition, updated, result, packed_dimensions);
         matched = true;
     }
     matched.then_some((result, false))
@@ -926,6 +934,136 @@ fn selected_value_read(
         lsb: const_expr_from_i128(lsb),
         signed: false,
     })
+}
+
+/// Build `condition ? then : else` for two values of the same static width,
+/// splitting at the piece boundaries of either side so that unchanged pieces
+/// are shared instead of wrapped in a `Mux`.
+///
+/// A conditional partial write produces `cond ? {hi(v), new, lo(v)} : v`,
+/// which references `v` three times. Emitting `{hi(v), cond ? new : mid(v),
+/// lo(v)}` keeps one copy of `v` and the tracked value grows linearly.
+fn merge_conditional(
+    condition: &Expr,
+    then_expr: Expr,
+    else_expr: Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Expr {
+    let plain = |then_expr: Expr, else_expr: Expr| Expr::Mux {
+        condition: Box::new(condition.clone()),
+        then_expr: Box::new(then_expr),
+        else_expr: Box::new(else_expr),
+    };
+    if strip_noop_resize(then_expr.clone(), packed_dimensions)
+        == strip_noop_resize(else_expr.clone(), packed_dimensions)
+    {
+        return then_expr;
+    }
+    let width = match (
+        expr_static_width(&then_expr, packed_dimensions),
+        expr_static_width(&else_expr, packed_dimensions),
+    ) {
+        (Some(then_width), Some(else_width)) if then_width == else_width && then_width > 0 => {
+            then_width
+        }
+        _ => return plain(then_expr, else_expr),
+    };
+    let cuts = (|| {
+        let mut cuts = std::collections::BTreeSet::new();
+        for side in [&then_expr, &else_expr] {
+            let Expr::Concat(parts) = side else {
+                continue;
+            };
+            let mut offset = 0usize;
+            for part in parts.iter().rev() {
+                offset += expr_static_width(part, packed_dimensions)?;
+                if offset < width {
+                    cuts.insert(offset);
+                }
+            }
+        }
+        Some(cuts)
+    })();
+    let Some(cuts) = cuts else {
+        return plain(then_expr, else_expr);
+    };
+    if cuts.is_empty() {
+        return plain(then_expr, else_expr);
+    }
+    let select = |expr: &Expr, msb: usize, lsb: usize| {
+        narrow_bit_select(expr, msb, lsb, packed_dimensions).unwrap_or_else(|| Expr::Select {
+            expr: Box::new(expr.clone()),
+            msb: const_expr_from_i128(msb as i128),
+            lsb: const_expr_from_i128(lsb as i128),
+            signed: false,
+        })
+    };
+    let mut pieces = Vec::new();
+    let mut low = 0usize;
+    for high_exclusive in cuts.into_iter().chain(std::iter::once(width)) {
+        let (msb, lsb) = (high_exclusive - 1, low);
+        let then_piece = strip_noop_resize(select(&then_expr, msb, lsb), packed_dimensions);
+        let else_piece = strip_noop_resize(select(&else_expr, msb, lsb), packed_dimensions);
+        let piece = if then_piece == else_piece {
+            then_piece
+        } else {
+            plain(then_piece, else_piece)
+        };
+        match piece {
+            Expr::Concat(inner) => pieces.extend(inner.into_iter().rev()),
+            piece => pieces.push(piece),
+        }
+        low = high_exclusive;
+    }
+    pieces.reverse();
+    Expr::Concat(pieces)
+}
+
+fn check_tracked_value_budget(
+    established: &Expr,
+    whole_established: Option<&Expr>,
+) -> Result<(), AnalyzerError> {
+    let mut remaining = MAX_TRACKED_COMB_VALUE_NODES;
+    let mut stack = vec![established];
+    stack.extend(whole_established);
+    while let Some(expr) = stack.pop() {
+        remaining = remaining.checked_sub(1).ok_or_else(|| {
+            AnalyzerError::Unsupported(
+                "always_comb value tracking exceeded the expression size limit".to_string(),
+            )
+        })?;
+        match expr {
+            Expr::Ident(_) | Expr::Literal(_) => {}
+            Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                stack.push(expr);
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => stack.extend(parts),
+            Expr::Call { args, .. } => stack.extend(args),
+            Expr::Binary { left, right, .. } => stack.extend([&**left, &**right]),
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => stack.extend([&**condition, &**then_expr, &**else_expr]),
+        }
+    }
+    Ok(())
+}
+
+/// Drop `Resize` wrappers that do not change the width, so that equal values
+/// built through different paths compare equal.
+fn strip_noop_resize(mut expr: Expr, packed_dimensions: &PackedDimensions) -> Expr {
+    while let Expr::Resize {
+        expr: inner, width, ..
+    } = &expr
+        && expr_static_width(inner, packed_dimensions) == Some(*width)
+    {
+        let Expr::Resize { expr: inner, .. } = expr else {
+            unreachable!();
+        };
+        expr = *inner;
+    }
+    expr
 }
 
 /// Select `[msb:lsb]` of `value`, pushing the selection through concatenations
@@ -1002,11 +1140,36 @@ fn narrow_bit_select(
             if !covers(then_expr) || !covers(else_expr) {
                 return None;
             }
-            Some(Expr::Mux {
-                condition: condition.clone(),
-                then_expr: Box::new(select(then_expr, msb, lsb)),
-                else_expr: Box::new(select(else_expr, msb, lsb)),
-            })
+            Some(merge_conditional(
+                condition,
+                select(then_expr, msb, lsb),
+                select(else_expr, msb, lsb),
+                packed_dimensions,
+            ))
+        }
+        // Bits below the operand width are unchanged by a resize.
+        Expr::Resize { expr, .. } => {
+            let inner = expr_static_width(expr, packed_dimensions)?;
+            (msb < inner).then(|| select(expr, msb, lsb))
+        }
+        Expr::Select {
+            expr,
+            msb: inner_msb,
+            lsb: inner_lsb,
+            ..
+        } => {
+            let inner_msb = usize::try_from(eval_ast_const_expr(
+                inner_msb,
+                &packed_dimensions.const_env,
+            )?)
+            .ok()?;
+            let inner_lsb = usize::try_from(eval_ast_const_expr(
+                inner_lsb,
+                &packed_dimensions.const_env,
+            )?)
+            .ok()?;
+            let width = inner_msb.checked_sub(inner_lsb)?.checked_add(1)?;
+            (msb < width).then(|| select(expr, inner_lsb + msb, inner_lsb + lsb))
         }
         _ => None,
     }

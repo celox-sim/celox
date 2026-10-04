@@ -2220,6 +2220,31 @@ fn unrolled_bit_writes_do_not_grow_tracked_value_exponentially() {
 }
 
 #[test]
+fn guarded_partial_writes_keep_tracked_value_linear() {
+    // Each guarded lane write used to reference the tracked value three times.
+    let mut source = String::from(
+        "module Top(input logic en, input logic [4:0] sel, input logic [5:0] v, \
+         input logic [95:0] base, output logic [95:0] lanes);\n\
+         always_comb begin lanes = base; if (en) begin\n",
+    );
+    for lane in 0..16 {
+        source.push_str(&format!(
+            "if (sel == 5'd{lane}) lanes[{} +: 6] = v;\n",
+            lane * 6
+        ));
+    }
+    source.push_str("end end endmodule\n");
+    let start = std::time::Instant::now();
+    analyze_source(&source, Path::new("guarded_lane_writes.sv"))
+        .expect("guarded lane writes must analyze");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "analysis took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn restricts_enum_alias_types_to_the_declared_base() {
     let ir = analyze_source(
         r#"
