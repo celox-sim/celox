@@ -1,0 +1,369 @@
+(group function_arguments (category functions))
+
+(case test_comb_inout_statement_copies_input_before_mutating_formal
+  (source "test.veryl" #"
+        module Top (d: input logic<8>, q: output logic<8>, original: output logic<8>) {
+            function update (
+                value: inout logic<8>,
+                snapshot: input logic<8>,
+                observed: output logic<8>,
+            ) {
+                value += 8'd3;
+                observed = snapshot;
+                value += snapshot;
+            }
+
+            always_comb {
+                q = d;
+                update(q, q, original);
+            }
+        }
+    "#)
+  (top Top)
+  (for value (list 0 7 126 255 7)
+    (modify (set d value))
+    (assert_eq q (trunc 8 (+ (trunc 8 (* value 2)) 3)))
+    (assert_eq original value)))
+
+(case test_ff_inout_expression_copyout_commits_with_nonblocking_assignments
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            increment: input logic<8>,
+            state: output logic<8>,
+            returned: output logic<8>,
+            sampled: output logic<8>,
+        ) {
+            function advance (value: inout logic<8>, delta: input logic<8>) -> logic<8> {
+                let previous: logic<8> = value;
+                value += delta;
+                return previous;
+            }
+
+            // Veryl rejects effectful function calls in always_ff. Compute the
+            // copyout in always_comb, then commit the next state on the clock.
+            var next: logic<8>;
+            var previous: logic<8>;
+            always_comb {
+                next = state;
+                previous = advance(next, increment);
+            }
+            always_ff (clk) {
+                returned = previous;
+                state = next;
+                sampled = state;
+            }
+        }
+    "#)
+  (top Top)
+  (let expected 0)
+  (for delta (list 7 9 250 0 3)
+    (modify (set increment delta))
+    (assert_eq state expected)
+    (tick clk)
+    (assert_eq returned expected)
+    (assert_eq sampled expected)
+    (set! expected (trunc 8 (+ expected delta)))
+    (assert_eq state expected)))
+
+(case test_comb_output_copyout_freezes_aliased_inputs_and_return
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>, b: input logic<8>,
+            first: output logic<8>, second: output logic<8>, sum: output logic<8>,
+        ) {
+            function swap (
+                old_first: input logic<8>, old_second: input logic<8>,
+                new_first: output logic<8>, new_second: output logic<8>,
+            ) -> logic<8> {
+                new_first = old_second;
+                new_second = old_first;
+                return old_first + old_second;
+            }
+            always_comb {
+                first = a;
+                second = b;
+                sum = swap(first, second, first, second);
+            }
+        }
+    "#)
+  (top Top)
+  (for (x y) (list (7 9) (255 2) (0 128) (9 7))
+    (modify
+      (set a x)
+      (set b y))
+    (assert_eq first y)
+    (assert_eq second x)
+    (assert_eq sum (trunc 8 (+ x y)))))
+
+(case test_comb_nested_output_copyout_stops_at_early_return
+  ; Veryl 0.21.0 loses the nested output on the early-return path (0 vs 11).
+  (source "test.veryl" #"
+        module Top (
+            d: input logic<8>, early: input logic,
+            copied: output logic<8>, result: output logic<8>,
+        ) {
+            function inner (x: input logic<8>, stop: input logic, dst: output logic<8>) -> logic<8> {
+                dst = x + 8'd1;
+                if stop {
+                    return x + 8'd2;
+                }
+                dst = x + 8'd3;
+                return x + 8'd4;
+            }
+            function outer (x: input logic<8>, stop: input logic, dst: output logic<8>) -> logic<8> {
+                let returned: logic<8> = inner(x, stop, dst);
+                return returned + dst;
+            }
+            always_comb {
+                result = outer(d, early, copied);
+            }
+        }
+    "#)
+  (top Top)
+  (for (value stop) (list (10 1) (10 0) (254 1) (255 0) (10 1))
+    (modify
+      (set d value)
+      (set early stop))
+    (let written (trunc 8 (+ value (? (!= stop 0) 1 3))))
+    (let returned (trunc 8 (+ value (? (!= stop 0) 2 4))))
+    (assert_eq copied written)
+    (assert_eq result (trunc 8 (+ written returned)))))
+
+(case test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body
+  (source "test.veryl" #"
+        module Top (choose: input logic, copied: output logic<16>, returned: output logic) {
+            function produce (x: input logic, dst: output logic<8>) -> logic {
+                dst = if x ? 8'shff : 8'sh80;
+                return x;
+            }
+            always_comb {
+                returned = produce(choose, copied);
+            }
+        }
+    "#)
+  (top Top)
+  (for value (list 0 1 0 1)
+    (modify (set choose value))
+    (let expected (? (!= value 0) 0xff 0x80))
+    (assert_eq copied expected)
+    (assert_eq returned value)))
+
+(case test_ff_expression_output_copyout_extends_before_splitting_concat
+  ; Veryl 0.21.0 does not extend/split the formal into concatenated actuals.
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock, d: input logic<8>,
+            high: output logic<8>, low: output logic<8>, returned: output logic<8>,
+        ) {
+            function produce (x: input logic<8>, dst: output signed logic<8>) -> logic<8> {
+                dst = x;
+                return x;
+            }
+            always_ff (clk) {
+                returned = produce(d, {high, low});
+            }
+        }
+    "#)
+  (top Top)
+  (for (value mask) (list (0x7f 0) (0x80 0) (0x80 0x80) (0 0x80) (0xa5 0x0c))
+    (modify (set d (fourstate value mask)))
+    (tick clk)
+    (let high_value (? (!= (& value 0x80) 0) 0xff 0))
+    (let high_mask (? (!= (& mask 0x80) 0) 0xff 0))
+    (assert_eq high (fourstate high_value high_mask))
+    (do
+      (assert_eq low (fourstate value mask) "{name}"))
+    (do
+      (assert_eq returned (fourstate value mask) "{name}"))))
+
+(case test_ff_statement_output_copyout_freezes_all_inputs
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock, first: output logic<8>,
+            second: output logic<8>, sampled: output logic<8>,
+        ) {
+            function swap (
+                old_first: input logic<8>, old_second: input logic<8>,
+                new_first: output logic<8>, new_second: output logic<8>,
+            ) {
+                new_first = old_second;
+                new_second = old_first;
+            }
+            always_ff (clk) {
+                swap(first, second, first, second);
+                sampled = first;
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    (set first 0x35)
+    (set second 0xa7))
+  (for (old_first old_second) (list (0x35 0xa7) (0xa7 0x35) (0x35 0xa7))
+    (tick clk)
+    (assert_eq first old_second)
+    (assert_eq second old_first)
+    (assert_eq sampled old_first)))
+
+(case test_ff_nested_output_copyout_is_visible_before_outer_copyout
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock, d: input logic<8>, copied: output logic<8>,
+            returned: output logic<8>, sampled: output logic<8>,
+        ) {
+            function inner (x: input logic<8>, dst: output logic<8>) {
+                dst = x + 8'd1;
+            }
+            function outer (x: input logic<8>, dst: output logic<8>) -> logic<8> {
+                inner(x, dst);
+                dst += 8'd2;
+                return dst + 8'd4;
+            }
+            always_ff (clk) {
+                returned = outer(d, copied);
+                sampled = copied;
+            }
+        }
+    "#)
+  (top Top)
+  (let previous 0)
+  (for value (list 7 254 0 7)
+    (modify (set d value))
+    (tick clk)
+    (assert_eq sampled previous)
+    (set! previous (trunc 8 (+ value 3)))
+    (assert_eq copied previous)
+    (assert_eq returned (trunc 8 (+ value 7)))))
+
+(case test_comb_statement_output_copyout_obeys_named_argument_order
+  (source "test.veryl" #"
+        module Top (
+            d: input logic<8>, positional: output logic<8>, named: output logic<8>,
+            distinct_first: output logic<8>, distinct_second: output logic<8>,
+        ) {
+            function split (x: input logic<8>, first: output logic<8>, second: output logic<8>) {
+                first = x + 8'd1;
+                second = x + 8'd2;
+            }
+            always_comb {
+                split(d, positional, positional);
+                split(second: named, x: d, first: named);
+                split(second: distinct_second, x: d, first: distinct_first);
+            }
+        }
+    "#)
+  (top Top)
+  (for value (list 0 7 254 255)
+    (modify (set d value))
+    (let first (trunc 8 (+ value 1)))
+    (let second (trunc 8 (+ value 2)))
+    (expand signal (positional named)
+      (let actual (trunc 8 (get {signal})))
+      (assert (|| (== actual first) (== actual second))
+        "copy-out must leave one complete output value"))
+    (assert_eq (trunc 8 (get distinct_first)) first)
+    (assert_eq (trunc 8 (get distinct_second)) second)))
+
+(case test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements
+  (source "test.veryl" #"
+        module Top (
+            d: input logic<16>, index: input logic<2>,
+            word: output logic<32>, items: output logic<8>[4],
+        ) {
+            function write (x: input logic<16>, dst: output logic<16>) {
+                dst = x;
+            }
+            always_comb {
+                word = 32'h89ab_cdef;
+                items = '{8'ha0, 8'hb1, 8'hc2, 8'hd3};
+                write(d, {word[index step 8], items[index]});
+            }
+        }
+    "#)
+  (top Top)
+  (for slot (range 0 4)
+    (for value (list 0x1234 0xff00 0x00ff 0)
+      (modify
+        (set d value)
+        (set index slot))
+      (let shift (* slot 8))
+      (let keep (~ (<< 0xff shift)))
+      (assert_eq word (| (& 0x89ab_cdef keep) (<< (>> value 8) shift)) "word")
+      (assert_eq items (| (& 0xd3c2_b1a0 keep) (<< (& value 0xff) shift)) "items"))))
+
+(case test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock, d: input logic<8>, narrow: output logic<4>,
+            signed_wide: output logic<16>, unsigned_wide: output logic<16>,
+            ff_narrow: output logic<4>,
+            ff_signed_wide: output logic<16>, ff_unsigned_wide: output logic<16>,
+        ) {
+            function split (
+                x: input logic<8>, truncated: output logic<8>,
+                negative: output signed logic<8>, positive: output logic<8>,
+            ) {
+                truncated = x;
+                negative = x;
+                positive = x;
+            }
+            always_comb {
+                split(d, narrow, signed_wide, unsigned_wide);
+            }
+            always_ff (clk) {
+                split(d, ff_narrow, ff_signed_wide, ff_unsigned_wide);
+            }
+        }
+    "#)
+  (top Top)
+  ; Both X and Z sign bits must extend their payload and unknown mask.
+  (for (value mask)
+      (list (0 0) (0x7f 0) (0x80 0) (0xf3 0) (0xff 0) (0x80 0x80) (0 0x80) (0xa5 0x0c))
+    (modify (set d (fourstate value mask)))
+    (tick clk)
+    (expand name (narrow ff_narrow)
+      (assert_eq {name} (fourstate (& value 0xf) (& mask 0xf)) "{name}"))
+    (expand name (signed_wide ff_signed_wide)
+      (assert_eq {name}
+        (fourstate (trunc 16 (sext 8 value)) (trunc 16 (sext 8 mask)))
+        "{name}"))
+    (expand name (unsigned_wide ff_unsigned_wide)
+      (assert_eq {name} (fourstate value mask) "{name}"))))
+
+(case test_ff_output_copyout_to_dynamic_slice_preserves_other_bits
+  (tags deferred_function_effects)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock, d: input logic<8>, index: input logic<2>,
+            word: output logic<32>, sampled: output logic<32>, returned: output logic<8>,
+        ) {
+            function write (x: input logic<8>, dst: output logic<8>) -> logic<8> {
+                dst = x;
+                return x ^ 8'hff;
+            }
+            always_ff (clk) {
+                returned = write(d, word[index step 8]);
+                sampled = word;
+            }
+        }
+    "#)
+  (top Top)
+  (let expected 0x89ab_cdef)
+  (modify (set word expected))
+  (for (slot value) (list (0 0x12) (3 0x34) (1 0xff) (2 0) (0 0x56))
+    (modify
+      (set index slot)
+      (set d value))
+    (tick clk)
+    (assert_eq sampled expected)
+    (set! expected (| (& expected (~ (<< 0xff (* slot 8)))) (<< value (* slot 8))))
+    (assert_eq word expected)
+    (assert_eq returned (^ value 0xff))))

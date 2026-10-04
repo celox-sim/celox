@@ -64,7 +64,7 @@ fn existing_case_runs_on_an_unrelated_backend() {
 }
 
 #[test]
-#[should_panic(expected = "assertion `left == right` failed")]
+#[should_panic(expected = "assert_eq o_or: expected 0xff, got 0x0")]
 fn incorrect_backend_output_fails_the_original_assertion() {
     case("operators::test_bitwise_operations")
         .unwrap()

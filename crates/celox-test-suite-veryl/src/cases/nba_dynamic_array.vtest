@@ -1,0 +1,532 @@
+(group nba_dynamic_array (category arrays))
+
+(case test_subbyte_arithmetic_padding_does_not_corrupt_concat
+  (source "test.veryl" #"
+module Top (
+    bound: input  logic<4>,
+    o    : output logic<72>,
+) {
+    var occupied: logic    [8];
+    var rs1_rdy : logic    [8];
+    var rs2_rdy : logic    [8];
+    var rob_idx : logic<5> [8];
+    var cand    : logic<9> [8];
+
+    always_comb {
+        for i in 0..8 {
+            occupied[i] = 1'b0;
+            rs1_rdy[i]  = 1'b0;
+            rs2_rdy[i]  = 1'b0;
+            rob_idx[i]  = 5'd0;
+            cand[i]     = 9'd0;
+        }
+        occupied[1] = 1'b1;
+        rs1_rdy[0]  = 1'b1;
+        rs2_rdy[0]  = 1'b1;
+        rs2_rdy[1]  = 1'b1;
+
+        for i in 0..bound {
+            let age    : logic<5> = rob_idx[i] - 5'd2;
+            let ready: logic = occupied[i] && rs1_rdy[i] && rs2_rdy[i];
+            cand[i] = {ready, age, i as 3};
+        }
+        o = {cand[7], cand[6], cand[5], cand[4], cand[3], cand[2], cand[1], cand[0]};
+    }
+}
+"#)
+  (top Top)
+  (modify (set bound 8))
+  (let expected 0)
+  (for i (range 0 8)
+    (let candidate (| (<< 30 3) i))
+    (set! expected (| expected (<< candidate (* i 9)))))
+  (assert_eq o expected)
+  (modify (set bound 1))
+  (assert_eq o (trunc 16 (<< 30 3)))
+  (modify (set bound 0))
+  (assert_eq o 0))
+
+(case test_child_dynamic_ff_read_reaches_parent_after_same_edge_enable
+  (source "test.veryl" #"
+module Cache (
+    clk  : input  clock,
+    wen  : input  logic,
+    index: input  logic<3>,
+    din  : input  logic<64>,
+    probe: input  logic<3>,
+    rdata0: output logic<64>,
+    rdata1: output logic<64>,
+) {
+    var mem: logic<64> [8];
+    always_ff (clk) {
+        if wen {
+            mem[index] = din;
+        }
+    }
+    assign rdata0 = mem[probe];
+    assign rdata1 = mem[probe];
+}
+
+module Top (
+    clk  : input  clock,
+    arm  : input  logic,
+    wen  : input  logic,
+    index: input  logic<3>,
+    din  : input  logic<64>,
+    probe: input  logic<3>,
+    q    : output logic<64>,
+) {
+    var active: logic;
+    var rdata0: logic<64>;
+    var rdata1: logic<64>;
+    inst cache: Cache (clk, wen, index, din, probe, rdata0, rdata1);
+    always_ff (clk) {
+        active = arm;
+    }
+    assign q = if active ? rdata1 : rdata0;
+}
+"#)
+  (top Top)
+  (modify
+    (set arm 1)
+    (set wen 1)
+    (set index 3)
+    (set probe 3)
+    (set din 0xdeadbeef12345678))
+  (tick clk)
+  (assert_eq q 0xdeadbeef12345678))
+
+(case test_static_ff_writes_are_applied_after_all_rhs_evaluation
+  (source "test.veryl" #"
+module Top (
+    clk : input  clock,
+    en  : input  logic,
+    a   : input  logic<8>,
+    b   : input  logic<8>,
+    q   : output logic<8>,
+) {
+    var r: logic<8>;
+
+    always_ff (clk) {
+        if en {
+            r = a;
+        } else {
+            r = b;
+        }
+    }
+
+    always_ff (clk) {
+        q = r;
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set en 1)
+    (set a 0x31)
+    (set b 0x72))
+  (tick clk)
+  (assert_eq q 0)
+  (modify
+    (set en 0)
+    (set a 0x44)
+    (set b 0x9a))
+  (tick clk)
+  (assert_eq q 0x31)
+  (tick clk)
+  (assert_eq q 0x9a))
+
+(case test_dynamic_array_write_is_deferred_across_ff_blocks
+  (source "test.veryl" #"
+module Top (
+    clk  : input  clock,
+    we   : input  logic,
+    we2  : input  logic,
+    addr : input  logic<2>,
+    din  : input  logic<8>,
+    q    : output logic<8>,
+) {
+    var mem: logic<8> [4];
+
+    always_ff (clk) {
+        if we {
+            mem[addr] = din;
+        }
+        // A second write enable shares the array. It stays disabled below, so
+        // it does not change the expected value in this scenario.
+        if we2 {
+            mem[addr] = din + 1;
+        }
+    }
+
+    always_ff (clk) {
+        q = mem[addr];
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set we 1)
+    (set we2 0)
+    (set addr 2)
+    (set din 0x33))
+  (tick clk)
+  ; The first write must not feed q on the same edge.
+  (assert_eq q 0 "the first write must not feed a separate always_ff on the same edge")
+  ; mem[2] changes 0x33 -> 0xA5 at this edge. q must sample old mem[2].
+  (modify (set din 0xA5))
+  (tick clk)
+  (assert_eq q 0x33 "a separate always_ff block must see the pre-edge array element")
+  ; The deferred write becomes visible on the following edge.
+  (modify (set we 0))
+  (tick clk)
+  (assert_eq q 0xA5))
+
+(case test_partial_sparse_chunks_do_not_overlap_adjacent_variables
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk  : input  clock,
+    addr : input  logic<2>,
+    din  : input  logic<3>,
+    qa   : output logic<3>,
+    qb   : output logic<3>,
+) {
+    var a: logic<3> [3];
+    var b: logic<3> [3];
+
+    always_ff (clk) {
+        a[addr] = din;
+        b[addr] = din + 1;
+    }
+
+    always_ff (clk) {
+        qa = a[addr];
+        qb = b[addr];
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set addr 2)
+    (set din 3))
+  (tick clk)
+  (modify (set din 5))
+  (tick clk)
+  (assert_eq qa 3)
+  (assert_eq qb 4)
+  (modify (set addr 0))
+  (tick clk)
+  (modify (set addr 2))
+  (tick clk)
+  (assert_eq qa 5)
+  (assert_eq qb 6))
+
+(case test_always_ff_let_bindings_are_visible_immediately
+  (source "test.veryl" #"
+module Top (
+    clk: input  clock,
+    x  : input  logic<8>,
+    q  : output logic<8>,
+) {
+    always_ff (clk) {
+        let a: logic<8> = x + 8'd1;
+        let b: logic<8> = a + 8'd1;
+        q = b;
+    }
+}
+"#)
+  (top Top)
+  (modify (set x 0x35))
+  (tick clk)
+  (assert_eq q 0x37 "always_ff let bindings must use blocking procedural-local semantics")
+  (modify (set x 0x80))
+  (tick clk)
+  (assert_eq q 0x82))
+
+(case test_packed_rat_checkpoint_round_trip
+  (source "test.veryl" #"
+module Top (
+    clk    : input  clock,
+    capture: input  logic,
+    restore: input  logic,
+    idx    : input  logic<5>,
+    x3_map : input  logic<6>,
+    q0     : output logic<6>,
+    q3     : output logic<6>,
+    q31    : output logic<6>,
+) {
+    var map   : logic<6> [32];
+    var packed_map: logic<192>;
+    var checkpoint: logic<192> [32];
+
+    always_comb {
+        for r in 0..32 {
+            map[r] = r as 6;
+        }
+        map[3] = x3_map;
+        for r in 0..32 {
+            packed_map[r * 6 +: 6] = map[r];
+        }
+    }
+
+    always_ff (clk) {
+        if capture {
+            checkpoint[idx] = packed_map;
+        }
+        if restore {
+            q0  = checkpoint[idx][0  * 6 +: 6];
+            q3  = checkpoint[idx][3  * 6 +: 6];
+            q31 = checkpoint[idx][31 * 6 +: 6];
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set capture 1)
+    (set restore 0)
+    (set idx 17)
+    (set x3_map 7))
+  (tick clk)
+  (modify
+    (set capture 0)
+    (set restore 1))
+  (tick clk)
+  (assert_eq q0 0)
+  (assert_eq q3 7)
+  (assert_eq q31 31))
+
+(case test_line_write_loop_updates_large_sparse_ff_array
+  (source "test.veryl" #"
+module Top (
+    clk  : input  clock,
+    wen  : input  logic,
+    waddr: input  logic<64>,
+    data0: input  logic<64>,
+    strb0: input  logic<8>,
+    probe: input  logic<20>,
+    q_lo : output logic<32>,
+    q_hi : output logic<32>,
+    q_dynamic: output logic<32>,
+) {
+    var mem  : logic<32> [1048576];
+    var wdata: logic<64> [8];
+    var wstrb: logic<8>  [8];
+    always_comb {
+        for i in 0..8 {
+            wdata[i] = 0;
+            wstrb[i] = 0;
+        }
+        wdata[0] = data0;
+        wstrb[0] = strb0;
+    }
+    always_ff (clk) {
+        if wen {
+            for l in 0..8 {
+                if wstrb[l] != 0 {
+                    let w_lo : logic<20> = {waddr[21:6], l as 3, 1'b0};
+                    let w_hi : logic<20> = {waddr[21:6], l as 3, 1'b1};
+                    let w_old: logic<64> = {mem[w_hi], mem[w_lo]};
+                    let w_new: logic<64> = {
+                        if wstrb[l][7] ? wdata[l][63:56] : w_old[63:56],
+                        if wstrb[l][6] ? wdata[l][55:48] : w_old[55:48],
+                        if wstrb[l][5] ? wdata[l][47:40] : w_old[47:40],
+                        if wstrb[l][4] ? wdata[l][39:32] : w_old[39:32],
+                        if wstrb[l][3] ? wdata[l][31:24] : w_old[31:24],
+                        if wstrb[l][2] ? wdata[l][23:16] : w_old[23:16],
+                        if wstrb[l][1] ? wdata[l][15:8]  : w_old[15:8],
+                        if wstrb[l][0] ? wdata[l][7:0]   : w_old[7:0]
+                    };
+                    mem[w_lo] = w_new[31:0];
+                    mem[w_hi] = w_new[63:32];
+                }
+            }
+        }
+    }
+    assign q_lo = mem[20'd1024];
+    assign q_hi = mem[20'd1025];
+    assign q_dynamic = mem[probe];
+}
+"#)
+  (top Top)
+  (modify
+    (set wen 1)
+    (set waddr 0x0400000080001000)
+    (set data0 1)
+    (set strb0 0x0f)
+    (set probe 1024))
+  (tick clk)
+  (assert_eq q_lo 1 "low word was not committed")
+  (assert_eq q_dynamic 1 "dynamic low read was not invalidated")
+  (modify
+    (set data0 0xaabbccdd00000000)
+    (set strb0 0xf0)
+    (set probe 1025))
+  (tick clk)
+  (assert_eq q_hi 0xaabbccdd "high word was not committed")
+  (assert_eq q_dynamic 0xaabbccdd "dynamic high read was not invalidated"))
+
+(case test_wide_dynamic_ff_checkpoint_round_trip
+  (source "test.veryl" #"
+module Top (
+    clk    : input  clock,
+    capture: input  logic,
+    restore: input  logic,
+    idx    : input  logic<5>,
+    d0     : input  logic<64>,
+    d1     : input  logic<64>,
+    d2     : input  logic<64>,
+    q0     : output logic<64>,
+    q1     : output logic<64>,
+    q2     : output logic<64>,
+) {
+    var checkpoint: logic<192> [32];
+
+    always_ff (clk) {
+        if capture {
+            checkpoint[idx] = {d2, d1, d0};
+        }
+        if restore {
+            q0 = checkpoint[idx][63:0];
+            q1 = checkpoint[idx][127:64];
+            q2 = checkpoint[idx][191:128];
+        }
+    }
+}
+"#)
+  (top Top)
+  (for (index w0 w1 w2)
+      (list (0 0x0123_4567_89ab_cdef 0xfedc_ba98_7654_3210 0x55aa_00ff_cc33_9669)
+            (1 0x8000_0000_0000_0001 0x7fff_ffff_ffff_fffe 0xdead_beef_cafe_babe)
+            (31 0x1111_2222_3333_4444 0x5555_6666_7777_8888 0x9999_aaaa_bbbb_cccc))
+    (modify
+      (set idx index)
+      (set d0 w0)
+      (set d1 w1)
+      (set d2 w2)
+      (set capture 1)
+      (set restore 0))
+    (tick clk)
+    (modify
+      (set capture 0)
+      (set restore 1))
+    (tick clk)
+    (assert_eq q0 w0 "checkpoint low word")
+    (assert_eq q1 w1 "checkpoint middle word")
+    (assert_eq q2 w2 "checkpoint high word")))
+
+(case test_unaligned_309_bit_dynamic_ff_round_trip
+  (source "test.veryl" #"
+module Top (
+    clk    : input  clock,
+    capture: input  logic,
+    capture2: input logic,
+    restore: input  logic,
+    idx    : input  logic<3>,
+    idx2   : input  logic<3>,
+    d      : input  logic<309>,
+    d2     : input  logic<309>,
+    q      : output logic<309>,
+) {
+    var entries: logic<309> [8];
+
+    always_ff (clk) {
+        if capture {
+            entries[idx] = d;
+        }
+        if capture2 {
+            entries[idx2] = d2;
+        }
+        if restore {
+            q = entries[idx];
+        }
+    }
+}
+"#)
+  (top Top)
+  (for index (list 0 1 2 7)
+    (let value (| (<< 1 308) (<< 1 (+ 244 index)) (<< 1 64) (+ 0x135 index)))
+    (modify
+      (set idx index)
+      (set d value)
+      (set capture 1)
+      (set capture2 0)
+      (set restore 0))
+    (tick clk)
+    (modify
+      (set capture 0)
+      (set restore 1))
+    (tick clk)
+    (assert_eq q value "entries must round-trip exactly"))
+  (let first (| (<< 1 308) (<< 0x8000_0000 244) 0x55))
+  (let second (| (<< 1 307) (<< 0x2000_0000 244) 0xaa))
+  (modify
+    (set idx 1)
+    (set idx2 2)
+    (set d first)
+    (set d2 second)
+    (set capture 1)
+    (set capture2 1)
+    (set restore 0))
+  (tick clk)
+  (for (index expected) (list (1 first) (2 second))
+    (modify
+      (set idx index)
+      (set capture 0)
+      (set capture2 0)
+      (set restore 1))
+    (tick clk)
+    (assert_eq q expected "adjacent entries must not overlap")))
+
+(case test_dynamic_ff_array_partial_squash_preserves_head_and_branch
+  (source "test.veryl" #"
+module Top (
+    clk        : input  clock,
+    set_en     : input  logic,
+    set_idx    : input  logic<5>,
+    squash_en  : input  logic,
+    head_idx   : input  logic<5>,
+    squash_idx : input  logic<5>,
+    probe_idx  : input  logic<5>,
+    probe_valid: output logic,
+) {
+    var valid: logic [32];
+
+    always_ff (clk) {
+        if set_en {
+            valid[set_idx] = 1'b1;
+        }
+        if squash_en {
+            let squash_age: logic<5> = squash_idx - head_idx;
+            for i in 0..32 {
+                let age: logic<5> = (i as 5) - head_idx;
+                if age >: squash_age {
+                    valid[i] = 1'b0;
+                }
+            }
+        }
+    }
+
+    assign probe_valid = valid[probe_idx];
+}
+"#)
+  (top Top)
+  (for index (range 0 32)
+    (modify
+      (set set_en 1)
+      (set set_idx index)
+      (set squash_en 0))
+    (tick clk))
+  (modify
+    (set set_en 0)
+    (set squash_en 1)
+    (set head_idx 18)
+    (set squash_idx 21))
+  (tick clk)
+  (for index (range 18 22)
+    (modify (set probe_idx index))
+    (assert_eq probe_valid 1 "partial squash cleared a preserved ROB slot"))
+  (for index (range 22 50)
+    (modify (set probe_idx (% index 32)))
+    (assert_eq probe_valid 0 "partial squash retained a younger ROB slot")))

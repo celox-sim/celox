@@ -1,0 +1,170 @@
+(group multi_clock (category sequential))
+
+(case test_independent_clock_domains
+  (source "test.veryl" #"
+module Top (
+clk_a: input  'a clock,
+clk_b: input  'b clock,
+rst:   input  'a reset,
+da:    input  'a logic<8>,
+db:    input  'b logic<8>,
+qa:    output 'a logic<8>,
+qb:    output 'b logic<8>
+) {
+var ra: 'a logic<8>;
+var rb: 'b logic<8>;
+always_ff (clk_a, rst) {
+if_reset {
+ra = 8'd0;
+} else {
+ra = da;
+}
+}
+unsafe (cdc) {
+always_ff (clk_b, rst) {
+if_reset {
+rb = 8'd0;
+} else {
+rb = db;
+}
+}
+}
+assign qa = ra;
+assign qb = rb;
+}
+"#)
+  (top Top)
+  ; Reset both (AsyncLow: rst=0 means active)
+  (modify
+    (set rst 0)
+    (set da 0xAA)
+    (set db 0xBB))
+  (tick clk_a)
+  (tick clk_b)
+  (assert_eq qa 0)
+  (assert_eq qb 0)
+  ; Release reset
+  (modify (set rst 1))
+  ; Only tick clk_a: qa should update, qb should stay 0
+  (tick clk_a)
+  (assert_eq qa 0xAA)
+  (assert_eq qb 0)
+  ; Only tick clk_b: qb should update, qa stays
+  (tick clk_b)
+  (assert_eq qa 0xAA)
+  (assert_eq qb 0xBB))
+
+(case test_clock_domain_crossing_pattern
+  (source "test.veryl" #"
+module Top (
+clk_fast: input  'a clock,
+clk_slow: input  'b clock,
+rst:      input  'a reset,
+count_out:  output 'a logic<4>,
+sample_out: output 'b logic<4>
+) {
+var counter: 'a logic<4>;
+var sample:  'b logic<4>;
+// Fast domain: counter increments
+always_ff (clk_fast, rst) {
+if_reset {
+counter = 4'd0;
+} else {
+counter = counter + 4'd1;
+}
+}
+// Slow domain: samples the counter (CDC)
+unsafe (cdc) {
+always_ff (clk_slow, rst) {
+if_reset {
+sample = 4'd0;
+} else {
+sample = counter;
+}
+}
+}
+assign count_out  = counter;
+assign sample_out = sample;
+}
+"#)
+  (top Top)
+  ; Reset (AsyncLow: rst=0 means active)
+  (modify (set rst 0))
+  (tick clk_fast)
+  (tick clk_slow)
+  (assert_eq count_out 0)
+  (assert_eq sample_out 0)
+  ; Release reset
+  (modify (set rst 1))
+  ; Tick fast 3 times (counter goes 1→2→3)
+  (tick clk_fast)
+  (tick clk_fast)
+  (tick clk_fast)
+  (assert_eq count_out 3)
+  ; sample hasn't been clocked, still 0
+  (assert_eq sample_out 0)
+  ; Now tick slow once — captures counter=3
+  (tick clk_slow)
+  (assert_eq sample_out 3)
+  ; Tick fast 2 more times (counter goes 4→5)
+  (tick clk_fast)
+  (tick clk_fast)
+  (assert_eq count_out 5)
+  ; sample still holds 3
+  (assert_eq sample_out 3))
+
+(case test_separate_resets_per_domain
+  (source "test.veryl" #"
+module Top (
+clk_a: input  'a clock,
+clk_b: input  'b clock,
+rst_a: input  'a reset,
+rst_b: input  'b reset,
+da:    input  'a logic<8>,
+db:    input  'b logic<8>,
+qa:    output 'a logic<8>,
+qb:    output 'b logic<8>
+) {
+var ra: 'a logic<8>;
+var rb: 'b logic<8>;
+always_ff (clk_a, rst_a) {
+if_reset {
+ra = 8'hAA;
+} else {
+ra = da;
+}
+}
+always_ff (clk_b, rst_b) {
+if_reset {
+rb = 8'hBB;
+} else {
+rb = db;
+}
+}
+assign qa = ra;
+assign qb = rb;
+}
+"#)
+  (top Top)
+  ; Reset only domain A (AsyncLow: rst=0 means active)
+  (modify
+    (set rst_a 0)
+    (set rst_b 1)
+    (set da 0x11)
+    (set db 0x22))
+  (tick clk_a)
+  (tick clk_b)
+  (assert_eq qa 0xAA)
+  ; A in reset
+  (assert_eq qb 0x22)
+  ; B captures data
+  ; Release A, assert B
+  (modify
+    (set rst_a 1)
+    (set rst_b 0))
+  (tick clk_a)
+  (tick clk_b)
+  (assert_eq qa 0x11)
+  ; A captures data
+  (assert_eq qb 0xBB))
+  ; B in reset

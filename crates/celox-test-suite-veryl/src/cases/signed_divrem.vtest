@@ -1,0 +1,354 @@
+(group signed_divrem (category operators))
+
+(case signed_divrem_i8
+  ; Veryl 0.20.3 ignores the explicit unsigned cast in division.
+  (source "test.veryl" #"
+module Top (
+    a: input i8,
+    b: input i8,
+    ub: input logic<8>,
+    a5: input signed logic<5>,
+    b5: input signed logic<5>,
+    q: output i8,
+    r: output i8,
+    uq: output logic<8>,
+    ur: output logic<8>,
+    mixed_q: output logic<8>,
+    mixed_r: output logic<8>,
+    mixed5_q: output logic<8>,
+    mixed5_r: output logic<8>,
+    q5: output signed logic<5>,
+    r5: output signed logic<5>,
+) {
+    assign q = a / b;
+    assign r = a % b;
+    assign uq = (a as u8) / (b as u8);
+    assign ur = (a as u8) % (b as u8);
+    assign mixed_q = a / ub;
+    assign mixed_r = a % ub;
+    assign mixed5_q = a5 / ub;
+    assign mixed5_r = a5 % ub;
+    assign q5 = a5 / b5;
+    assign r5 = a5 % b5;
+}
+"#)
+  (top Top)
+  ; Signed division truncates toward zero, and the remainder has the
+  ; dividend's sign. The explicitly unsigned expressions must retain
+  ; the same bits but use unsigned arithmetic.
+  (modify
+    (set a 0xf9)
+    ; -7
+    (set b 0x02)
+    ; 2
+    (set ub 0x02)
+    (set a5 0x19)
+    ; -7 in 5 bits
+    (set b5 0x02))
+  (assert_eq q 0xfd)
+  ; -3
+  (assert_eq r 0xff)
+  ; -1
+  (assert_eq uq 124)
+  (assert_eq ur 1)
+  ; Mixed signed/unsigned operands select unsigned arithmetic.
+  (assert_eq mixed_q 124)
+  (assert_eq mixed_r 1)
+  (assert_eq mixed5_q 12)
+  ; unsigned 5'b11001 / 2
+  (assert_eq mixed5_r 1)
+  (assert_eq q5 0x1d)
+  ; -3 in 5 bits
+  (assert_eq r5 0x1f)
+  ; -1 in 5 bits
+  (modify
+    (set a 0x07)
+    ; 7
+    (set b 0xfe))
+    ; -2
+  (assert_eq q 0xfd)
+  ; -3
+  (assert_eq r 1)
+  (modify
+    (set a 0xf9)
+    ; -7
+    (set b 0xfe))
+    ; -2
+  (assert_eq q 3)
+  (assert_eq r 0xff)
+  ; -1
+  ; Fixed-width arithmetic wraps MIN / -1 instead of exposing the host
+  ; CPU/WebAssembly overflow trap.
+  (modify
+    (set a 0x80)
+    (set b 0xff))
+  (assert_eq q 0x80)
+  (assert_eq r 0)
+  (modify
+    (set a5 0x10)
+    ; MIN for 5 bits
+    (set b5 0x1f))
+    ; -1
+  (assert_eq q5 0x10)
+  (assert_eq r5 0)
+  ; Celox's established totalized integer semantics use zero for both
+  ; quotient and remainder when the divisor is zero.
+  (modify
+    (set a 0xf9)
+    (set b 0))
+  (assert_eq q 0)
+  (assert_eq r 0))
+
+(case signed_divrem_i64
+  (source "test.veryl" #"
+module Top (
+    a: input i64,
+    b: input i64,
+    q: output i64,
+    r: output i64,
+) {
+    assign q = a / b;
+    assign r = a % b;
+}
+"#)
+  (top Top)
+  (modify
+    (set a (trunc 64 -9))
+    (set b 4))
+  (assert_eq q (trunc 64 -2))
+  (assert_eq r (trunc 64 -1))
+  (modify
+    (set a (trunc 64 -9223372036854775808))
+    (set b (trunc 64 -1)))
+  (assert_eq q (trunc 64 -9223372036854775808))
+  (assert_eq r 0))
+
+(case signed_divrem_i128
+  (tags two_state_zero_division)
+  (source "test.veryl" #"
+module Top (
+    a: input signed logic<128>,
+    b: input signed logic<128>,
+    a65: input signed logic<65>,
+    b65: input signed logic<65>,
+    q: output signed logic<128>,
+    r: output signed logic<128>,
+    q65: output signed logic<65>,
+    r65: output signed logic<65>,
+) {
+    assign q = a / b;
+    assign r = a % b;
+    assign q65 = a65 / b65;
+    assign r65 = a65 % b65;
+}
+"#)
+  (top Top)
+  (let modulus65 (<< 1 65))
+  (modify
+    (set a (- 0xffffffffffffffffffffffffffffffff 99))
+    ; -100
+    (set b 7)
+    (set a65 (- modulus65 100))
+    (set b65 7))
+  (assert_eq q (- 0xffffffffffffffffffffffffffffffff 13))
+  ; -14
+  (assert_eq r (- 0xffffffffffffffffffffffffffffffff 1))
+  ; -2
+  (assert_eq q65 (- modulus65 14))
+  (assert_eq r65 (- modulus65 2))
+  (let min (trunc 128 (<< 1 127)))
+  (modify
+    (set a min)
+    (set b 0xffffffffffffffffffffffffffffffff))
+    ; -1
+  (assert_eq q min)
+  (assert_eq r 0)
+  ; Two-state execution follows Verilator's zero-divisor behavior.
+  ; The four-state case below separately requires the SV-specified X.
+  (modify
+    (set a (- 0xffffffffffffffffffffffffffffffff 99))
+    (set b 0))
+  (assert_eq q 0)
+  (assert_eq r 0))
+
+(case signed_divrem_always_ff
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    a: input i8,
+    b: input i8,
+    q: output i8,
+    r: output i8,
+) {
+    always_ff (clk, rst) {
+        if_reset {
+            q = 0;
+            r = 0;
+        } else {
+            q = a / b;
+            r = a % b;
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 1)
+    (set a 0xf9)
+    ; -7
+    (set b 2))
+  (tick clk)
+  (assert_eq q 0xfd)
+  (assert_eq r 0xff))
+
+(case signed_divrem_four_state_unknown
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    a: input signed logic<128>,
+    b: input signed logic<128>,
+    q: output signed logic<128>,
+    r: output signed logic<128>,
+) {
+    assign q = a / b;
+    assign r = a % b;
+}
+"#)
+  (top Top)
+  (let all (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (modify
+    (set a (fourstate 100 0))
+    (set b (fourstate 7 1)))
+  (assert_eq q (fourstate all all))
+  (assert_eq r (fourstate all all)))
+
+(case signed_divrem_four_state_zero_divisor
+  (four_state)
+  (source "test.veryl" #"module Top (sa8: input signed logic<8>,
+sb8: input signed logic<8>,
+sq8: output signed logic<8>,
+sr8: output signed logic<8>,
+sq_zero8: output signed logic<8>,
+sr_zero8: output signed logic<8>,
+ua8: input logic<8>,
+ub8: input logic<8>,
+uq8: output logic<8>,
+ur8: output logic<8>,
+uq_zero8: output logic<8>,
+ur_zero8: output logic<8>,
+sa64: input signed logic<64>,
+sb64: input signed logic<64>,
+sq64: output signed logic<64>,
+sr64: output signed logic<64>,
+sq_zero64: output signed logic<64>,
+sr_zero64: output signed logic<64>,
+ua64: input logic<64>,
+ub64: input logic<64>,
+uq64: output logic<64>,
+ur64: output logic<64>,
+uq_zero64: output logic<64>,
+ur_zero64: output logic<64>,
+sa65: input signed logic<65>,
+sb65: input signed logic<65>,
+sq65: output signed logic<65>,
+sr65: output signed logic<65>,
+sq_zero65: output signed logic<65>,
+sr_zero65: output signed logic<65>,
+ua65: input logic<65>,
+ub65: input logic<65>,
+uq65: output logic<65>,
+ur65: output logic<65>,
+uq_zero65: output logic<65>,
+ur_zero65: output logic<65>,
+sa128: input signed logic<128>,
+sb128: input signed logic<128>,
+sq128: output signed logic<128>,
+sr128: output signed logic<128>,
+sq_zero128: output signed logic<128>,
+sr_zero128: output signed logic<128>,
+ua128: input logic<128>,
+ub128: input logic<128>,
+uq128: output logic<128>,
+ur128: output logic<128>,
+uq_zero128: output logic<128>,
+ur_zero128: output logic<128>,
+) { 
+                        assign sq8 = sa8 / sb8;
+                        assign sr8 = sa8 % sb8;
+                        assign sq_zero8 = sa8 / 8'd0;
+                        assign sr_zero8 = sa8 % 8'd0;
+                    
+                        assign uq8 = ua8 / ub8;
+                        assign ur8 = ua8 % ub8;
+                        assign uq_zero8 = ua8 / 8'd0;
+                        assign ur_zero8 = ua8 % 8'd0;
+                    
+                        assign sq64 = sa64 / sb64;
+                        assign sr64 = sa64 % sb64;
+                        assign sq_zero64 = sa64 / 64'd0;
+                        assign sr_zero64 = sa64 % 64'd0;
+                    
+                        assign uq64 = ua64 / ub64;
+                        assign ur64 = ua64 % ub64;
+                        assign uq_zero64 = ua64 / 64'd0;
+                        assign ur_zero64 = ua64 % 64'd0;
+                    
+                        assign sq65 = sa65 / sb65;
+                        assign sr65 = sa65 % sb65;
+                        assign sq_zero65 = sa65 / 65'd0;
+                        assign sr_zero65 = sa65 % 65'd0;
+                    
+                        assign uq65 = ua65 / ub65;
+                        assign ur65 = ua65 % ub65;
+                        assign uq_zero65 = ua65 / 65'd0;
+                        assign ur_zero65 = ua65 % 65'd0;
+                    
+                        assign sq128 = sa128 / sb128;
+                        assign sr128 = sa128 % sb128;
+                        assign sq_zero128 = sa128 / 128'd0;
+                        assign sr_zero128 = sa128 % 128'd0;
+                    
+                        assign uq128 = ua128 / ub128;
+                        assign ur128 = ua128 % ub128;
+                        assign uq_zero128 = ua128 / 128'd0;
+                        assign ur_zero128 = ua128 % 128'd0;
+                     }"#)
+  (top Top)
+  (expand width (8 64 65 128)
+    (do
+      (let all (- (<< 1 {width}) 1))
+      ; Known -> zero -> known checks that both value and mask recover.
+      ; IEEE 1800-2023 11.4.3 requires all X for both / and %, including 0/0.
+      (for (numerator divisor) (list (100 7) (-100 0) (0 0) (100 0) (-100 7) (100 -7) (100 1))
+        (let a (trunc {width} numerator))
+        (let b (trunc {width} divisor))
+        (modify
+          (set sa{width} a)
+          (set sb{width} b)
+          (set ua{width} a)
+          (set ub{width} b))
+        (if (== divisor 0)
+          (expand kind (s u)
+            (expand name (q r)
+              (assert_eq {kind}{name}{width} (fourstate all all) "{kind}{name}{width}")))
+          (do
+            (assert_eq sq{width} (trunc {width} (/ numerator divisor)) "sq{width}")
+            (assert_eq sr{width} (trunc {width} (% numerator divisor)) "sr{width}")
+            (assert_eq uq{width} (/ a b) "uq{width}")
+            (assert_eq ur{width} (% a b) "ur{width}")))
+        (expand kind (s u)
+          (expand name (q_zero r_zero)
+            (assert_eq {kind}{name}{width} (fourstate all all) "{kind}{name}{width}"))))
+      ; A divisor with only a high bit set is nonzero, even if its low
+      ; machine word is zero. Also distinguish a high Z bit from known 0.
+      (for mask (list 0 (<< 1 (- {width} 1)))
+        (let divisor (fourstate (? (== mask 0) (<< 1 (- {width} 1)) 0) mask))
+        (modify
+          (set sa{width} 1)
+          (set sb{width} divisor)
+          (set ua{width} 1)
+          (set ub{width} divisor))
+        (expand kind (s u)
+          (assert_eq {kind}q{width} (? (== mask 0) 0 (fourstate all all)) "{kind}q{width}")
+          (assert_eq {kind}r{width} (? (== mask 0) 1 (fourstate all all)) "{kind}r{width}"))))))

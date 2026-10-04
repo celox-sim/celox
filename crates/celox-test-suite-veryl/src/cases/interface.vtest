@@ -1,0 +1,48 @@
+(group interface (category hierarchy))
+
+(case test_interface_connection
+  (source "test.veryl" #"
+    interface Bus {
+        var data: logic<8>;
+        var valid: logic;
+        modport producer {
+            ..output
+        }
+        modport consumer {
+            ..input
+        }
+    }
+
+    module Producer (
+        bus: modport Bus::producer
+    ) {
+        assign bus.data = 8'hAA;
+        assign bus.valid = 1'b1;
+    }
+
+    module Consumer (
+        bus: modport Bus::consumer,
+        out_data: output logic<8>
+    ) {
+        assign out_data = bus.data;
+    }
+
+    module Top (
+        out: output logic<8>
+    ) {
+        inst bus: Bus;
+        inst p: Producer (
+            bus: bus
+        );
+        inst c: Consumer (
+            bus: bus,
+            out_data: out
+        );
+    }
+    "#)
+  (top Top)
+  ; Run simulation
+  ; Verify output
+  (let out_val (get out))
+  ; 0xAA = 170
+  (assert (== out_val 170)))

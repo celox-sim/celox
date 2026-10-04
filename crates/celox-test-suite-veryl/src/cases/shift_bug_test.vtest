@@ -1,0 +1,194 @@
+(group shift_bug_test (category operators))
+
+(case test_shift_in_if_reset
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<8>,
+o: output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 0;
+} else {
+r = a << 2;
+}
+}
+assign o = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 1)
+    (set a 0x0F))
+  (tick clk)
+  (assert_eq o 0 "should be 0 after reset")
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq o 0x3C "shift in if_reset: got {:x}"))
+
+(case test_shift_in_for_loop
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+a: input logic<32>,
+o: output logic<32>
+) {
+always_ff (clk) {
+for _i in 0..1 {
+o = a << 4;
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0x12345678))
+  (tick clk)
+  (assert_eq o 0x23456780 "shift in for: got {:x}"))
+
+(case test_shift_ifreset_for
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<8>,
+o: output logic<8>
+) {
+var r: logic<8>;
+always_ff (clk, rst) {
+if_reset {
+r = 8'h00;
+} else {
+for _i in 0..1 {
+r = a << 1;
+}
+}
+}
+assign o = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 1)
+    (set a 0x55))
+  (tick clk)
+  (assert_eq o 0 "after reset")
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq o 0xAA "if_reset+for+shift: got {:x}"))
+
+(case test_right_shift_in_if_reset
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<16>,
+o_shr: output logic<16>,
+o_shl: output logic<16>
+) {
+var r_shr: logic<16>;
+var r_shl: logic<16>;
+always_ff (clk, rst) {
+if_reset {
+r_shr = 0;
+r_shl = 0;
+} else {
+r_shr = a >> 4;
+r_shl = a << 4;
+}
+}
+assign o_shr = r_shr;
+assign o_shl = r_shl;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 1)
+    (set a 0xABCD))
+  (tick clk)
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq o_shr 0x0ABC "right shift in if_reset: got {:x}")
+  (assert_eq o_shl 0xBCD0 "left shift in if_reset: got {:x}"))
+
+(case test_dynamic_shift_in_if_reset
+  (source "test.veryl" #"
+module Top (
+clk: input  clock,
+rst: input  reset_async_high,
+a: input logic<16>,
+sh: input logic<4>,
+o: output logic<16>
+) {
+var r: logic<16>;
+always_ff (clk, rst) {
+if_reset {
+r = 0;
+} else {
+r = a << sh;
+}
+}
+assign o = r;
+}
+"#)
+  (top Top)
+  (modify
+    (set rst 1)
+    (set a 0x00FF)
+    (set sh 4))
+  (tick clk)
+  (assert_eq o 0 "after reset")
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq o 0x0FF0 "dynamic shift in if_reset: got {:x}"))
+
+(case test_shift_to_array_by_loop_index
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+a: input logic<8>,
+o0: output logic<8>,
+o1: output logic<8>,
+o2: output logic<8>,
+o3: output logic<8>
+) {
+var arr: logic<8> [4];
+always_ff (clk) {
+for i in 0..4 {
+arr[i] = a << i;
+}
+}
+assign o0 = arr[0];
+assign o1 = arr[1];
+assign o2 = arr[2];
+assign o3 = arr[3];
+}
+"#)
+  (top Top)
+  (modify (set a 0x01))
+  (tick clk)
+  (assert_eq o0 0x01 "arr[0] = a << 0")
+  (assert_eq o1 0x02 "arr[1] = a << 1")
+  (assert_eq o2 0x04 "arr[2] = a << 2")
+  (assert_eq o3 0x08 "arr[3] = a << 3"))
+
+(case test_shift_with_wide_const_amount
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+a: input logic<8>,
+o: output logic<8>
+) {
+always_ff (clk) {
+for _i in 0..1 {
+o = a << 2;
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set a 0x0F))
+  (tick clk)
+  (assert_eq o 0x3C "8-bit shift with 32-bit const amount: got {:x}"))

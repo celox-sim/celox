@@ -1,0 +1,609 @@
+(group four_state_expression_semantics (category four_state))
+
+(case indeterminate_short_circuit_lhs_executes_effectful_rhs
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    u: input logic,
+    and_output: output logic,
+    or_output: output logic,
+    and_result: output logic,
+    or_result: output logic,
+) {
+    function set_output (y: output logic) -> logic {
+        y = 1'b1;
+        return 1'b1;
+    }
+
+    always_comb {
+        and_output = 1'b0;
+        or_output = 1'b0;
+        and_result = u && set_output(and_output);
+        or_result = u || set_output(or_output);
+    }
+}
+"#)
+  (top Top)
+  (modify (set u (fourstate 0 1)))
+  (assert_eq and_output 1)
+  (assert_eq or_output 1))
+
+(case indeterminate_ternary_executes_effectful_arms_in_order
+  ; Veryl 0.20.3 retains the prior output effect after sel becomes known.
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    sel: input logic,
+    seed: input logic<8>,
+    q_output: output logic<8>,
+    result: output logic,
+) {
+    function set_two (y: output logic<8>) -> logic {
+        y = 8'd2;
+        return 1'b0;
+    }
+
+    function increment (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b0;
+    }
+
+    always_comb {
+        q_output = seed;
+        result = if sel ? set_two(q_output) : increment(q_output, q_output);
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set seed 1)
+    (set sel (fourstate 1 1)))
+  (assert_eq q_output (fourstate 3 0))
+  (modify (set sel (fourstate 0 1)))
+  (assert_eq q_output (fourstate 3 0))
+  (modify (set sel (fourstate 1 0)))
+  (assert_eq q_output (fourstate 2 0))
+  (modify (set sel (fourstate 0 0)))
+  (assert_eq q_output (fourstate 2 0)))
+
+(case ternary_unknown_condition_merges_branch_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    sel: input logic,
+    a: input logic<8>,
+    b: input logic<8>,
+    c: output logic<8>,
+    f: output logic<8>,
+) {
+    assign c = if sel ? a : b;
+    always_ff (clk) {
+        f = if sel ? a : b;
+    }
+}
+"#)
+  (top Top)
+  (do
+    (let cond_value 1)
+    (modify
+      (set sel (fourstate cond_value 1))
+      (set a (fourstate 0xaa 0))
+      (set b (fourstate 0xbb 0)))
+    (tick clk)
+    ; 0xaa and 0xbb differ only in bits 0 and 4. Equal bits remain
+    ; known; differing bits become X in Celox's (value, mask) form.
+    (do
+      (assert_eq c (fourstate 0xbb 0x11) "{name}, cond={label}"))
+    (do
+      (assert_eq f (fourstate 0xbb 0x11) "{name}, cond={label}"))
+    (modify
+      (set a (fourstate 0xa5 0))
+      (set b (fourstate 0xa5 0)))
+    (tick clk)
+    (do
+      (assert_eq c (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))
+    (do
+      (assert_eq f (fourstate 0xa5 0) "{name}, identical branches, cond={label}")))
+  (do
+    (let cond_value 0)
+    (modify
+      (set sel (fourstate cond_value 1))
+      (set a (fourstate 0xaa 0))
+      (set b (fourstate 0xbb 0)))
+    (tick clk)
+    ; 0xaa and 0xbb differ only in bits 0 and 4. Equal bits remain
+    ; known; differing bits become X in Celox's (value, mask) form.
+    (do
+      (assert_eq c (fourstate 0xbb 0x11) "{name}, cond={label}"))
+    (do
+      (assert_eq f (fourstate 0xbb 0x11) "{name}, cond={label}"))
+    (modify
+      (set a (fourstate 0xa5 0))
+      (set b (fourstate 0xa5 0)))
+    (tick clk)
+    (do
+      (assert_eq c (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))
+    (do
+      (assert_eq f (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))))
+
+(case logical_not_known_one_dominates_unknown_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    narrow: input logic<8>,
+    wide: input logic<130>,
+    c_narrow: output logic,
+    c_wide: output logic,
+    f_narrow: output logic,
+    f_wide: output logic,
+) {
+    assign c_narrow = !narrow;
+    assign c_wide = !wide;
+    always_ff (clk) {
+        f_narrow = !narrow;
+        f_wide = !wide;
+    }
+}
+"#)
+  (top Top)
+  (let narrow_unknown (<< 1 2))
+  (let narrow_known_one (<< 1 7))
+  (let wide_unknown (<< 1 3))
+  (let wide_known_one (<< 1 100))
+  (do
+    (let unknown_value 1)
+    (let unknown_value unknown_value)
+    (modify
+      (set narrow (fourstate (| narrow_known_one (* narrow_unknown unknown_value)) narrow_unknown))
+      (set wide (fourstate (| wide_known_one (* wide_unknown unknown_value)) wide_unknown)))
+    (tick clk)
+    (do
+      (assert_eq c_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (do
+      (assert_eq c_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (do
+      (assert_eq f_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (do
+      (assert_eq f_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (modify
+      (set narrow (fourstate (* narrow_unknown unknown_value) narrow_unknown))
+      (set wide (fourstate (* wide_unknown unknown_value) wide_unknown)))
+    (tick clk)
+    (do
+      (assert_eq c_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
+    (do
+      (assert_eq c_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
+    (do
+      (assert_eq f_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
+    (do
+      (assert_eq f_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}")))
+  (do
+    (let unknown_value 0)
+    (let unknown_value unknown_value)
+    (modify
+      (set narrow (fourstate (| narrow_known_one (* narrow_unknown unknown_value)) narrow_unknown))
+      (set wide (fourstate (| wide_known_one (* wide_unknown unknown_value)) wide_unknown)))
+    (tick clk)
+    (do
+      (assert_eq c_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (do
+      (assert_eq c_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (do
+      (assert_eq f_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (do
+      (assert_eq f_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (modify
+      (set narrow (fourstate (* narrow_unknown unknown_value) narrow_unknown))
+      (set wide (fourstate (* wide_unknown unknown_value) wide_unknown)))
+    (tick clk)
+    (do
+      (assert_eq c_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
+    (do
+      (assert_eq c_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
+    (do
+      (assert_eq f_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
+    (do
+      (assert_eq f_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))))
+
+(case effectful_ternary_takes_known_true_branch_despite_unknown_bits
+  ; Veryl 0.20.3 evaluates the false arm despite a known 1 in cond.
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    clear: input logic,
+    cond: input logic<130>,
+    side_state: output logic,
+    result: output logic,
+) {
+    var side_effect: logic;
+    function set_side_effect (y: output logic) -> logic {
+        y = 1'b1;
+        return 1'b0;
+    }
+    always_ff (clk) {
+        if clear {
+            side_effect = 1'b0;
+            result = 1'b0;
+        } else {
+            result = if cond ? 1'b1 : set_side_effect(side_effect);
+        }
+    }
+    assign side_state = side_effect;
+}
+"#)
+  (top Top)
+  (let known_one (<< 1 100))
+  (let unknown (<< 1 3))
+  (modify (set clear 1))
+  (tick clk)
+  (modify
+    (set clear 0)
+    (set cond (fourstate (| known_one unknown) unknown)))
+  (tick clk)
+  (assert_eq result (fourstate 1 0))
+  (assert_eq side_state (fourstate 0 0) "the unselected effectful arm must not execute"))
+
+(case ff_procedural_control_uses_known_nonzero_truth
+  ; Celox opt-in FF function effects are rejected by the Veryl analyzer.
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    cond: input logic<8>,
+    wide_cond: input logic<130>,
+    if_result: output logic,
+    wide_if_result: output logic,
+    case_result: output logic,
+    function_result: output logic,
+    function_side: output logic,
+) {
+    function choose (c: input logic<8>, side: output logic) -> logic {
+        if c {
+            side = 1'b1;
+            return 1'b1;
+        } else {
+            side = 1'b0;
+            return 1'b0;
+        }
+    }
+    always_ff (clk) {
+        if cond {
+            if_result = 1'b1;
+        } else {
+            if_result = 1'b0;
+        }
+        if wide_cond {
+            wide_if_result = 1'b1;
+        } else {
+            wide_if_result = 1'b0;
+        }
+        case cond {
+            8'h80: case_result = 1'b1;
+            default: case_result = 1'b0;
+        }
+        function_result = choose(cond, function_side);
+    }
+}
+"#)
+  (top Top)
+  (let unknown (<< 1 2))
+  (let known_one (<< 1 7))
+  (let wide_known_one (<< 1 100))
+  (do
+    (let unknown_value 1)
+    (modify
+      (set cond (fourstate (| known_one (* unknown unknown_value)) unknown))
+      (set wide_cond (fourstate (| wide_known_one (* unknown unknown_value)) unknown)))
+    (tick clk)
+    (do
+      (assert_eq if_result (fourstate 1 0) "{name}, known one plus {label}"))
+    (do
+      (assert_eq wide_if_result (fourstate 1 0) "{name}, known one plus {label}"))
+    (do
+      (assert_eq function_result (fourstate 1 0) "{name}, known one plus {label}"))
+    (do
+      (assert_eq function_side (fourstate 1 0) "{name}, known one plus {label}"))
+    (assert_eq case_result (fourstate 0 0) "an unknown equality must not select a case arm ({label})")
+    (modify
+      (set cond (fourstate (* unknown unknown_value) unknown))
+      (set wide_cond (fourstate (* unknown unknown_value) unknown)))
+    (tick clk)
+    (do
+      (assert_eq if_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq wide_if_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq case_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq function_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq function_side (fourstate 0 0) "{name}, only {label}")))
+  (do
+    (let unknown_value 0)
+    (modify
+      (set cond (fourstate (| known_one (* unknown unknown_value)) unknown))
+      (set wide_cond (fourstate (| wide_known_one (* unknown unknown_value)) unknown)))
+    (tick clk)
+    (do
+      (assert_eq if_result (fourstate 1 0) "{name}, known one plus {label}"))
+    (do
+      (assert_eq wide_if_result (fourstate 1 0) "{name}, known one plus {label}"))
+    (do
+      (assert_eq function_result (fourstate 1 0) "{name}, known one plus {label}"))
+    (do
+      (assert_eq function_side (fourstate 1 0) "{name}, known one plus {label}"))
+    (assert_eq case_result (fourstate 0 0) "an unknown equality must not select a case arm ({label})")
+    (modify
+      (set cond (fourstate (* unknown unknown_value) unknown))
+      (set wide_cond (fourstate (* unknown unknown_value) unknown)))
+    (tick clk)
+    (do
+      (assert_eq if_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq wide_if_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq case_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq function_result (fourstate 0 0) "{name}, only {label}"))
+    (do
+      (assert_eq function_side (fourstate 0 0) "{name}, only {label}")))
+  (modify
+    (set cond (fourstate known_one 0))
+    (set wide_cond (fourstate wide_known_one 0)))
+  (tick clk)
+  (assert_eq case_result (fourstate 1 0)))
+
+(case ff_unknown_reset_is_not_active
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    reset_high: input reset_sync_high,
+    reset_low: input reset_sync_low,
+    d: input logic,
+    q_high: output logic,
+    q_low: output logic,
+) {
+    always_ff (clk, reset_high) {
+        if_reset {
+            q_high = 1'b0;
+        } else {
+            q_high = d;
+        }
+    }
+    always_ff (clk, reset_low) {
+        if_reset {
+            q_low = 1'b0;
+        } else {
+            q_low = d;
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 1))
+  (do
+    (let value 1)
+    (modify
+      (set reset_high (fourstate value 1))
+      (set reset_low (fourstate value 1)))
+    (tick clk)
+    (do
+      (assert_eq q_high (fourstate 1 0) "{name}, reset={label}"))
+    (do
+      (assert_eq q_low (fourstate 1 0) "{name}, reset={label}")))
+  (do
+    (let value 0)
+    (modify
+      (set reset_high (fourstate value 1))
+      (set reset_low (fourstate value 1)))
+    (tick clk)
+    (do
+      (assert_eq q_high (fourstate 1 0) "{name}, reset={label}"))
+    (do
+      (assert_eq q_low (fourstate 1 0) "{name}, reset={label}")))
+  (modify
+    (set reset_high (fourstate 1 0))
+    (set reset_low (fourstate 0 0)))
+  (tick clk)
+  (do
+    (assert_eq q_high (fourstate 0 0) "{name}, known active reset"))
+  (do
+    (assert_eq q_low (fourstate 0 0) "{name}, known active reset")))
+
+(case wide_ternary_condition_known_one_dominates_unknown_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    sel: input logic<130>,
+    a: input logic<8>,
+    b: input logic<8>,
+    c: output logic<8>,
+    f: output logic<8>,
+) {
+    assign c = if sel ? a : b;
+    always_ff (clk) {
+        f = if sel ? a : b;
+    }
+}
+"#)
+  (top Top)
+  (let known_one (<< 1 100))
+  (let unknown_bit (<< 1 3))
+  (do
+    (let unknown_value unknown_bit)
+    (modify
+      (set sel (fourstate (| known_one unknown_value) unknown_bit))
+      (set a (fourstate 0xa5 0))
+      (set b (fourstate 0x3c 0)))
+    (tick clk)
+    (do
+      (assert_eq c (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))
+    (do
+      (assert_eq f (fourstate 0xa5 0) "{name}, lower unknown bit is {label}")))
+  (do
+    (let unknown_value 0)
+    (modify
+      (set sel (fourstate (| known_one unknown_value) unknown_bit))
+      (set a (fourstate 0xa5 0))
+      (set b (fourstate 0x3c 0)))
+    (tick clk)
+    (do
+      (assert_eq c (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))
+    (do
+      (assert_eq f (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))))
+
+(case logical_unknown_truth_table_matches_comb_and_ff
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    u: input logic,
+
+    c_and_one: output logic,
+    c_or_zero: output logic,
+    c_zero_and: output logic,
+    c_one_or: output logic,
+    f_and_one: output logic,
+    f_or_zero: output logic,
+    f_zero_and: output logic,
+    f_one_or: output logic,
+) {
+    assign c_and_one = u && 1'b1;
+    assign c_or_zero = u || 1'b0;
+    assign c_zero_and = 1'b0 && u;
+    assign c_one_or = 1'b1 || u;
+
+    always_ff (clk) {
+        f_and_one = u && 1'b1;
+        f_or_zero = u || 1'b0;
+        f_zero_and = 1'b0 && u;
+        f_one_or = 1'b1 || u;
+    }
+}
+"#)
+  (top Top)
+  ; X and Z are both an unknown boolean when no known 1 is present.
+  ; False dominates &&, and true dominates ||.
+  (expand (value label) ((1 X) (0 Z))
+    (modify (set u (fourstate {value} 1)))
+    (tick clk)
+    (expand prefix (c f)
+      (assert_eq {prefix}_and_one 1'bx "{prefix}_and_one, lhs={label}")
+      (assert_eq {prefix}_or_zero 1'bx "{prefix}_or_zero, lhs={label}")
+      (assert_eq {prefix}_zero_and 0 "{prefix}_zero_and, rhs={label}")
+      (assert_eq {prefix}_one_or 1 "{prefix}_one_or, rhs={label}"))))
+
+(case wide_logical_unknown_truth_table_uses_dominant_values
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    u: input logic<130>,
+    c_and_one: output logic,
+    c_or_zero: output logic,
+    c_and_zero: output logic,
+    c_or_one: output logic,
+    f_and_one: output logic,
+    f_or_zero: output logic,
+    f_and_zero: output logic,
+    f_or_one: output logic,
+) {
+    assign c_and_one = u && 1'b1;
+    assign c_or_zero = u || 1'b0;
+    assign c_and_zero = u && 1'b0;
+    assign c_or_one = u || 1'b1;
+    always_ff (clk) {
+        f_and_one = u && 1'b1;
+        f_or_zero = u || 1'b0;
+        f_and_zero = u && 1'b0;
+        f_or_one = u || 1'b1;
+    }
+}
+"#)
+  (top Top)
+  (let unknown_bit (<< 1 100))
+  (expand (value label) ((unknown_bit "X in the high chunk") (0 "Z in the high chunk"))
+    (modify (set u (fourstate {value} unknown_bit)))
+    (tick clk)
+    (expand prefix (c f)
+      (assert_eq {prefix}_and_one 1'bx "{prefix}_and_one, {label}")
+      (assert_eq {prefix}_or_zero 1'bx "{prefix}_or_zero, {label}")
+      (assert_eq {prefix}_and_zero 0 "{prefix}_and_zero, {label}")
+      (assert_eq {prefix}_or_one 1 "{prefix}_or_one, {label}"))))
+
+(case wide_ternary_unknown_condition_merges_every_arm_chunk
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    sel: input logic,
+    a: input logic<130>,
+    b: input logic<130>,
+    c: output logic<130>,
+    f: output logic<130>,
+) {
+    assign c = if sel ? a : b;
+    always_ff (clk) {
+        f = if sel ? a : b;
+    }
+}
+"#)
+  (top Top)
+  (let a_value (| (<< 1 129) (<< 1 128) (<< 1 66) (<< 1 3) 1))
+  (let a_mask (| (<< 1 66) (<< 1 65) (<< 1 3) (<< 1 2)))
+  (let b_value (| (<< 1 128) (<< 1 64) (<< 1 3)))
+  (let b_mask (| (<< 1 66) (<< 1 3) (<< 1 2)))
+  (let full_mask (- (<< 1 130) 1))
+  (let diff (& (| (^ a_value b_value) (^ a_mask b_mask)) full_mask))
+  (let expected (fourstate (& (| a_value diff) full_mask) (& (| a_mask diff) full_mask)))
+  (expand (cond label) ((1 X) (0 Z))
+    (modify
+      (set sel (fourstate {cond} 1))
+      (set a (fourstate a_value a_mask))
+      (set b (fourstate b_value b_mask)))
+    (tick clk)
+    (assert_eq c expected "c, cond={label}")
+    (assert_eq f expected "f, cond={label}")))
+
+(case wide_unaligned_partial_store_and_slice_preserve_four_state_bits
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    seed: input logic<192>,
+    val: input logic<125>,
+    wide: output logic<192>,
+    sliced: output logic<125>,
+) {
+    always_comb {
+        wide = seed;
+        wide[130:6] = val;
+        sliced = wide[130:6];
+    }
+}
+"#)
+  (top Top)
+  (let full_mask (- (<< 1 192) 1))
+  (let val_width_mask (- (<< 1 125) 1))
+  (let keep_mask (^ full_mask (<< val_width_mask 6)))
+  (let seed_mask (| (<< 1 190) (<< 1 129) (<< 1 63) (<< 1 4)))
+  (let seed_value (| (<< 1 191) (<< 1 130) (<< 1 64) (<< 1 5) 1 seed_mask))
+  (let val_value (| (<< 1 124) (<< 1 65) (<< 1 64) (<< 1 1)))
+  (let val_mask (| (<< 1 123) (<< 1 66) (<< 1 63) 1))
+  (modify
+    (set seed (fourstate seed_value seed_mask))
+    (set val (fourstate val_value val_mask)))
+  (assert_eq wide
+    (fourstate
+      (| (& seed_value keep_mask) (<< (& val_value val_width_mask) 6))
+      (| (& seed_mask keep_mask) (<< (& val_mask val_width_mask) 6)))
+    "unaligned wide partial store")
+  (assert_eq sliced (fourstate (& val_value val_width_mask) val_mask)
+    "slice following the partial store"))

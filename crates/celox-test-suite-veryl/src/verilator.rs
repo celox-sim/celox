@@ -10,6 +10,21 @@ impl Verilator {
     /// Build a fresh model. Four-state cases must be classified as unsupported
     /// by the runner; Verilator's two-state execution cannot validate them.
     pub fn build(design: &Design, directory: &Path) -> Result<Self> {
+        Self::build_inner(design, directory, None)
+    }
+
+    /// Build a script case as a generated testbench; run it with
+    /// `run_testbench`. A failed assertion prints an `@suite assert` line to
+    /// `protocol.log`.
+    pub fn build_script(case: &crate::script::ScriptCase, directory: &Path) -> Result<Self> {
+        Self::build_inner(&case.design(), directory, Some(case))
+    }
+
+    fn build_inner(
+        design: &Design,
+        directory: &Path,
+        script: Option<&crate::script::ScriptCase>,
+    ) -> Result<Self> {
         if design.four_state {
             return Err("Verilator cannot validate four-state expectations".into());
         }
@@ -32,7 +47,7 @@ impl Verilator {
         .map_err(|error| {
             crate::verification::EmissionError(crate::verification::panic_message(error.as_ref()))
         })?;
-        let testbench = emitted.is_testbench();
+        let mut testbench = emitted.is_testbench();
         let mut paths = Vec::new();
         let edges = emitted
             .event_edges(&design.top)
@@ -42,6 +57,19 @@ impl Verilator {
             let path = directory.join(format!("source_{index}.sv"));
             write_if_changed(&path, source.as_bytes())?;
             paths.push(path);
+        }
+        let mut top = design.top.clone();
+        // A rejection needs only the design.
+        if let Some(case) =
+            script.filter(|case| case.expectation != crate::Expectation::CompilationError)
+        {
+            let info = crate::script::sv::DesignInfo::from_emitted(&emitted, &design.top)
+                .ok_or("top module not found")?;
+            let path = directory.join("testbench.sv");
+            write_if_changed(&path, crate::script::sv::testbench(case, &info)?.as_bytes())?;
+            paths.push(path);
+            top = crate::script::sv::TESTBENCH_TOP.to_string();
+            testbench = true;
         }
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
@@ -72,7 +100,7 @@ impl Verilator {
                 "Vdut",
                 "--top-module",
             ])
-            .arg(&design.top)
+            .arg(&top)
             .arg("--Mdir")
             .arg(directory.join("obj"))
             .arg("-CFLAGS")

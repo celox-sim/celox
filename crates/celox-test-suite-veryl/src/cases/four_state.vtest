@@ -1,0 +1,2395 @@
+(group four_state (category four_state))
+
+(case test_four_state_and_or
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic,
+            b: input logic,
+            y_and: output logic,
+            y_or: output logic
+        ) {
+            assign y_and = a & b;
+            assign y_or = a | b;
+        }
+    "#)
+  (top Top)
+  ; Test: 0 & X = 0, 0 | X = X
+  ; a = 0 (Val=0, Mask=0)
+  ; b = X (Val=1, Mask=1) — new encoding: X has v=1
+  (modify
+    (set a (fourstate 0 0))
+    (set b (fourstate 1 1)))
+  (let v_and (payload (get y_and)))
+  (let m_and (xmask (get y_and)))
+  (assert (== m_and 0) "0 & X should have mask 0")
+  (assert (== v_and 0) "0 & X should have value 0")
+  (let v_or (payload (get y_or)))
+  (let m_or (xmask (get y_or)))
+  (assert (== m_or 1) "0 | X should have mask 1 (X)")
+  (assert (== v_or 1) "0 | X should have value 1 (X encoding)"))
+
+(case test_four_state_initial_and_set
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input bit<8>
+        ) {}
+    "#)
+  (top Top)
+  ; 1. Initial value is X for logic in new encoding
+  (let v_init_a (payload (get a)))
+  (let m_init_a (xmask (get a)))
+  (assert (== v_init_a 0xFF))
+  (assert (== m_init_a 0xFF))
+  ; `bit` type should be initialized to 0, mask 0
+  (let v_init_b (payload (get b)))
+  (let m_init_b (xmask (get b)))
+  (assert (== v_init_b 0))
+  (assert (== m_init_b 0) "bit type should not be initialized to X")
+  ; 2. set (2-state API) updates value, leaves mask as 0
+  (modify (set a 42))
+  (let v_set (payload (get a)))
+  (let m_set (xmask (get a)))
+  (assert (== v_set 42))
+  (assert (== m_set 0))
+  ; 3. set_four_state (4-state API) updates both value and mask
+  (modify (set a (fourstate 0xA5 0x0F)))
+  (let v_four_set (payload (get a)))
+  (let m_four_set (xmask (get a)))
+  (assert (== v_four_set 0xA5))
+  (assert (== m_four_set 0x0F))
+  ; Now `set` and `set_wide` should clear the mask bits that might have been
+  ; previously set by `set_four_state` or logic.
+  (modify (set a 100))
+  (let v_set2 (payload (get a)))
+  (let m_set2 (xmask (get a)))
+  (assert (== v_set2 100))
+  (assert (== m_set2 0) "Mask should be cleared by set()"))
+
+(case test_ff_struct_logic_to_bit_coercion_clears_mask
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            in_logic: input logic<8>,
+            out_bit: output bit<8>
+        ) {
+            struct S {
+                x: bit<8>,
+            }
+            var r: S;
+            always_ff (clk) {
+                r = S'{x: in_logic};
+            }
+            assign out_bit = r.x;
+        }
+    "#)
+  (top Top)
+  (modify (set in_logic (fourstate 0xA5 0x0F)))
+  (tick clk)
+  (let _value (payload (get out_bit)))
+  (let mask (xmask (get out_bit)))
+  (assert (== mask 0) "logic -> bit coercion must clear X/Z mask"))
+
+(case test_four_state_mixing
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a_logic: input logic<8>,
+            b_bit: input bit<8>,
+            y_logic_from_bit: output logic<8>,
+            y_bit_from_logic: output bit<8>
+        ) {
+            // Assigning a logic (4-state) to a bit (2-state) should drop the X state.
+            assign y_bit_from_logic = a_logic as u8;
+            // Assigning a bit (2-state) to a logic (4-state) should have mask 0.
+            assign y_logic_from_bit = b_bit;
+        }
+    "#)
+  (top Top)
+  ; Set `a_logic` to all X's
+  ; Set `b_bit` to defined value 0xAA
+  (modify
+    (set a_logic (fourstate 0 0xFF))
+    (set b_bit (fourstate 0xAA 0)))
+  ; Verify `y_logic_from_bit` is exactly 0xAA with mask 0
+  (let v_y_logic (payload (get y_logic_from_bit)))
+  (let m_y_logic (xmask (get y_logic_from_bit)))
+  (assert (== v_y_logic 0xAA))
+  (assert (== m_y_logic 0) "bit to logic assignment should have 0 mask")
+  ; Verify `y_bit_from_logic` drops the X mask and becomes a definite value (typically 0)
+  (let _v_y_bit (payload (get y_bit_from_logic)))
+  (let m_y_bit (xmask (get y_bit_from_logic)))
+  (assert (== m_y_bit 0) "logic to bit assignment should drop X mask"))
+
+(case test_four_state_mixing_propagation
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a_logic: input logic<8>,
+            y_logic: output logic<8>
+        ) {
+            var temp_bit: bit<8>;
+            assign temp_bit = a_logic as u8;
+            assign y_logic = temp_bit;
+        }
+    "#)
+  (top Top)
+  ; Set `a_logic` to all X's
+  (modify (set a_logic (fourstate 0 0xFF)))
+  (let m_y_logic (xmask (get y_logic)))
+  ; If JIT incorrectly propagates X through 'temp_bit', mask will be 0xFF.
+  ; Verilog semantics: 'temp_bit' is 2-state, so it cannot hold X. It becomes 0.
+  ; 'y_logic' becomes 0, so mask must be 0.
+  (assert (== m_y_logic 0) "X should be stripped when propagating through a bit intermediate variable"))
+
+(case test_read_a
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>
+        ) {}
+    "#)
+  (top Top)
+  (modify (set a (fourstate 0xA5 0x0F)))
+  (let _v (payload (get a)))
+  (let m (xmask (get a)))
+  (assert (== m 0x0F) "mask of A should be 15, not 255"))
+
+(case test_four_state_arithmetic_ops
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_add: output logic<8>
+        ) {
+            assign y_add = a + b;
+        }
+    "#)
+  (top Top)
+  ; Test: 10 + X = X (Arithmetic operations with ANY X input yields all X's output)
+  (modify
+    (set a (fourstate 10 0))
+    ; b = X at LSB: (v=1, m=1)
+    (set b (fourstate 1 1)))
+  (let v_add (payload (get y_add)))
+  (let m_add (xmask (get y_add)))
+  (assert (== m_add 0xFF) "Arithmetic addition with X input should yield all X mask")
+  ; All bits are X, so value is normalized: v |= m → 0xFF
+  (assert (== v_add 0xFF) "Value is normalized at X positions (v |= m)"))
+
+(case test_four_state_unary_ops
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y_bitnot: output logic<8>,
+            y_redor: output logic
+        ) {
+            assign y_bitnot = ~a;
+            assign y_redor = |a;
+        }
+    "#)
+  (top Top)
+  ; a = 0xA5 (10100101) with mask 0x0F (00001111) (so lower nibble is X, upper is 1010)
+  (modify (set a (fourstate 0xA5 0x0F)))
+  (let _v_bitnot (payload (get y_bitnot)))
+  (let m_bitnot (xmask (get y_bitnot)))
+  ; ~a: Value bits flip, mask bits remain the same.
+  (assert (== m_bitnot 0x0F) "Bitwise NOT should preserve mask bits")
+  ; Upper nibble of 0xA5 inverted -> 0x50.
+  ; Lower nibble is masked (value usually preserved or zeroed).
+  ; Veryl Translator currently flips the valid bits and preserves the rest.
+  (let _m_redor (xmask (get y_redor))))
+  ; Reduction operations with X (and no definite dominant bit) normally yield X.
+  ; Since upper nibble contains 1s (1010), |a actually evaluates to 1 deterministically in standard Verilog.
+  ; Let's see how the current fallback logic handles reduction.
+  ; Many JIT implementations just fallback to X if ANY bit is X for simplification.
+
+(case test_four_state_xor_partial_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = a ^ b;
+        }
+    "#)
+  (top Top)
+  ; a = 0xFF (mask=0x0F → lower nibble X), b = 0x00 (mask=0)
+  ; XOR: mask = mask_a | mask_b = 0x0F
+  (modify
+    (set a (fourstate 0xFF 0x0F))
+    (set b (fourstate 0x00 0x00)))
+  (let m_y (xmask (get y)))
+  (assert (== m_y 0x0F) "XOR mask should be union of input masks"))
+
+(case test_four_state_concat
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<4>,
+            b: input logic<4>,
+            y: output logic<8>
+        ) {
+            assign y = {a, b};
+        }
+    "#)
+  (top Top)
+  ; a = 0xA (mask=0xF → all X), b = 0x5 (mask=0x0 → defined)
+  ; Result: y = {X, 0x5}, mask should have upper nibble X, lower defined
+  (modify
+    (set a (fourstate 0xA 0xF))
+    (set b (fourstate 0x5 0x0)))
+  (let v_y (payload (get y)))
+  (let m_y (xmask (get y)))
+  (assert (== m_y 0xF0) "Concat: upper nibble should be X (from a), lower nibble defined (from b)")
+  ; Lower nibble value should be 5
+  (assert_eq (& v_y 0x0F) 0x05))
+
+(case test_four_state_shift_by_constant
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y_shr: output logic<8>,
+            y_shl: output logic<8>
+        ) {
+            assign y_shr = a >> 4;
+            assign y_shl = a << 4;
+        }
+    "#)
+  (top Top)
+  ; a = 0xA5 (mask = 0x0F → lower nibble X)
+  (modify (set a (fourstate 0xA5 0x0F)))
+  ; a >> 4: value shifts right, mask shifts right too
+  ; mask 0x0F >> 4 = 0x00
+  (let m_shr (xmask (get y_shr)))
+  (assert (== m_shr 0x00) "Right shift by 4 should shift X mask out")
+  ; a << 4: mask 0x0F << 4 = 0xF0
+  (let m_shl (xmask (get y_shl)))
+  (assert (== m_shl 0xF0) "Left shift by 4 should shift X mask to upper nibble"))
+
+(case test_four_state_shift_by_x_amount
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = a >> b;
+        }
+    "#)
+  (top Top)
+  ; a = 0xFF (defined), b = X (mask=0xFF) → shift amount unknown → all X
+  (modify
+    (set a (fourstate 0xFF 0x00))
+    (set b (fourstate 0x00 0xFF)))
+  (let m_y (xmask (get y)))
+  (assert (== m_y 0xFF) "Shift by X amount should produce all-X mask"))
+
+(case test_four_state_comparison_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_eq: output logic,
+            y_lt: output logic
+        ) {
+            assign y_eq = a == b;
+            assign y_lt = a <: b;
+        }
+    "#)
+  (top Top)
+  ; The known bits agree: a = 0, b = 0000000X. Equality is indeterminate.
+  (modify
+    (set a (fourstate 0 0))
+    (set b (fourstate 1 1)))
+  (let m_eq (xmask (get y_eq)))
+  (let m_lt (xmask (get y_lt)))
+  ; Equality is X when unknown bits can change the result.
+  (assert (== m_eq 1) "Equality comparison with X input should yield X")
+  (assert (== m_lt 1) "Less-than comparison with X input should yield X"))
+
+(case test_four_state_mux_x_condition
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic,
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = if sel ? a : b;
+        }
+    "#)
+  (top Top)
+  ; sel = X (v=1,m=1), a = 0xAA, b = 0xBB. Equal branch bits are
+  ; preserved; only differing bits become X.
+  (modify
+    (set sel (fourstate 1 1))
+    (set a (fourstate 0xAA 0))
+    (set b (fourstate 0xBB 0)))
+  (let v_y (payload (get y)))
+  (let m_y (xmask (get y)))
+  (assert (== v_y 0xBB))
+  (assert (== m_y 0x11) "Mux with X condition must merge branch bits"))
+
+(case test_four_state_mux_x_in_branch
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic,
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = if sel ? a : b;
+        }
+    "#)
+  (top Top)
+  ; sel = 1 (defined), a = X (mask=0xFF), b = 0xBB (defined)
+  ; → selects a which is X
+  (modify
+    (set sel (fourstate 1 0))
+    (set a (fourstate 0 0xFF))
+    (set b (fourstate 0xBB 0)))
+  (let m_y (xmask (get y)))
+  (assert (== m_y 0xFF) "Mux sel=1 selecting X branch should propagate X")
+  ; sel = 0 (defined), selects b which is defined → mask should be 0
+  (modify (set sel (fourstate 0 0)))
+  (let v_y (payload (get y)))
+  (let m_y (xmask (get y)))
+  (assert (== m_y 0) "Mux sel=0 selecting defined branch should have mask=0")
+  (assert (== v_y 0xBB)))
+
+(case test_four_state_wide_128bit
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_and: output logic<128>,
+            y_or:  output logic<128>
+        ) {
+            assign y_and = a & b;
+            assign y_or  = a | b;
+        }
+    "#)
+  (top Top)
+  ; a = all-ones (defined), b = 0 with X in upper 64 bits
+  (let val_a (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (let mask_a 0)
+  (let val_b 0)
+  (let mask_b (<< 0xffffffffffffffff 64))
+  ; upper 64 bits are X
+  (modify
+    (set a (fourstate val_a mask_a))
+    (set b (fourstate val_b mask_b)))
+  ; AND: 1 & X = X (upper 64), 1 & 0 = 0 (lower 64)
+  (let m_and (xmask (get y_and)))
+  (let expected_mask_upper (<< 0xffffffffffffffff 64))
+  (assert (== m_and expected_mask_upper) "128-bit AND: upper 64 bits should be X, lower should be 0")
+  ; OR: 1 | X → mask=0 (dominant 1 in OR), lower: 1 | 0 = 1
+  (let m_or (xmask (get y_or)))
+  (assert (== m_or 0) "128-bit OR: 1|X = 1, so mask should be 0"))
+
+(case test_four_state_always_comb_chain
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic<8>
+        ) {
+            var tmp: logic<8>;
+            always_comb {
+                tmp = a & b;
+                y   = tmp | 8'hF0;
+            }
+        }
+    "#)
+  (top Top)
+  ; a = 0xFF (defined), b = 0xFF with X in bit 0
+  ; tmp = 0xFF & (0xFF, mask=0x01) → AND: mask bit0 from b only (since a[0]=1, b[0]=X → X)
+  ; y = tmp | 0xF0 → mask: OR with 1 clears X for bits [7:4]; bit[0] X | 0 = X
+  (modify
+    (set a (fourstate 0xFF 0x00))
+    (set b (fourstate 0xFF 0x01)))
+  (let m_y (xmask (get y)))
+  ; After AND: mask = 0x01 (bit 0 is X from b because a[0]=1)
+  ; After OR with 0xF0: bit 0 was X, OR with 0→still X. Bits 7:4 are OR'd with 1→defined.
+  ; So final mask should have only bit 0 as X = 0x01
+  (assert (== m_y 0x01) "always_comb chain should propagate X through AND then OR correctly"))
+
+(case test_four_state_ff_capture_and_reset
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff {
+                if_reset {
+                    q = 8'd0;
+                } else {
+                    q = d;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; 1. Reset: q should become 0 with mask=0 (AsyncLow: rst=0 means active)
+  (modify
+    (set rst (fourstate 0 0))
+    (set d (fourstate 0 0xFF))
+    (set q (fourstate 0 0)))
+  (tick clk)
+  (let v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== v_q 0) "After reset, q value should be 0")
+  (assert (== m_q 0) "After reset, q mask should be 0 (constant reset value)")
+  ; 2. Normal: d = X → q should capture X (deactivate reset: rst=1)
+  (modify
+    (set rst (fourstate 1 0))
+    (set d (fourstate 0xA5 0x0F)))
+  (tick clk)
+  (let _v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== m_q 0x0F) "FF should capture X mask from d")
+  ; 3. Reset again: should clear X (activate reset: rst=0)
+  (modify (set rst (fourstate 0 0)))
+  (tick clk)
+  (let v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== v_q 0))
+  (assert (== m_q 0) "Reset should clear X mask in FF"))
+
+(case test_four_state_all_defined
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_add: output logic<8>,
+            y_and: output logic<8>,
+            y_xor: output logic<8>
+        ) {
+            assign y_add = a + b;
+            assign y_and = a & b;
+            assign y_xor = a ^ b;
+        }
+    "#)
+  (top Top)
+  ; All defined (mask=0)
+  (modify
+    (set a (fourstate 0xA5 0))
+    (set b (fourstate 0x5A 0)))
+  (let v_add (payload (get y_add)))
+  (let m_add (xmask (get y_add)))
+  (assert (== v_add 0xFF))
+  (assert (== m_add 0) "All defined: add mask should be 0")
+  (let v_and (payload (get y_and)))
+  (let m_and (xmask (get y_and)))
+  (assert (== v_and 0x00))
+  (assert (== m_and 0) "All defined: and mask should be 0")
+  (let v_xor (payload (get y_xor)))
+  (let m_xor (xmask (get y_xor)))
+  (assert (== v_xor 0xFF))
+  (assert (== m_xor 0) "All defined: xor mask should be 0"))
+
+(case test_four_state_wide_128bit_simple
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y: output logic<128>
+        ) {
+            assign y = a & b;
+        }
+    "#)
+  (top Top)
+  (let val_a (| (<< 0x12345678 64) 0x9abcdef0))
+  (let val_b (| (<< 0xFFFFFFFF 64) 0))
+  (let mask_zero 0)
+  (modify
+    (set a (fourstate val_a mask_zero))
+    (set b (fourstate val_b mask_zero)))
+  (let v_y (payload (get y)))
+  (let m_y (xmask (get y)))
+  (let expected_v (& val_a val_b))
+  (assert (== v_y expected_v) "128-bit simple AND value")
+  (assert (== m_y 0) "128-bit simple AND mask should be 0"))
+
+(case test_four_state_wide_shifts
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            sh: input logic<8>,
+            y_shr: output logic<128>,
+            y_shl: output logic<128>
+        ) {
+            assign y_shr = a >> sh;
+            assign y_shl = a << sh;
+        }
+    "#)
+  (top Top)
+  ; IEEE 1800-2023 11.4.10: shifts preserve retained X and Z bits.
+  ; Case 1: Shift by 0; bits 71:64 contain alternating X/Z.
+  (let val_a (| (<< 0xAA 64) 0x55))
+  (let mask_a (<< 0xFF 64))
+  (modify
+    (set a (fourstate val_a mask_a))
+    (set sh (fourstate 0 0)))
+  (let v_shr (payload (get y_shr)))
+  (let m_shr (xmask (get y_shr)))
+  (assert (== v_shr val_a))
+  (assert (== m_shr mask_a))
+  ; Case 2: Shift by 64 (entire word boundary)
+  (modify (set sh (fourstate 64 0)))
+  (let v_shr (payload (get y_shr)))
+  (let m_shr (xmask (get y_shr)))
+  (assert (== v_shr 0xAA))
+  (assert (== m_shr 0xFF))
+  ; Case 3: Shift by amount with X -> Result should be all X
+  (modify (set sh (fourstate 1 1)))
+  (let v_shr (payload (get y_shr)))
+  (let m_shr (xmask (get y_shr)))
+  (let all_x (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (assert (== v_shr all_x) "Shift by X should result in all-X payload")
+  (assert (== m_shr all_x) "Shift by X should result in all-X mask"))
+
+(case test_four_state_wide_arith
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_add: output logic<128>,
+            y_sub: output logic<128>
+        ) {
+            assign y_add = a + b;
+            assign y_sub = a - b;
+        }
+    "#)
+  (top Top)
+  ; partial X in a
+  (let val_a 1)
+  (let mask_a (<< 0xffffffffffffffff 64))
+  (let val_b 1)
+  (let mask_b 0)
+  (modify
+    (set a (fourstate val_a mask_a))
+    (set b (fourstate val_b mask_b)))
+  (let m_add (xmask (get y_add)))
+  (let all_x (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (assert (== m_add all_x) "Arithmetic with partial X should result in all-X for multi-word"))
+
+(case test_four_state_wide_signed
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input signed logic<128>,
+            b: input signed logic<128>,
+            y_sar: output signed logic<128>,
+            y_lts: output logic
+        ) {
+            assign y_sar = a >>> 64;
+            assign y_lts = a <: b;
+        }
+    "#)
+  (top Top)
+  ; a = -1 (all ones) but MSB chunk is X
+  (let val_a (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (let mask_a (<< 0xffffffffffffffff 64))
+  (modify (set a (fourstate val_a mask_a)))
+  (let m_sar (xmask (get y_sar)))
+  (let expected_m_sar (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (assert (== m_sar expected_m_sar) "SAR sign extension should propagate X")
+  ; Signed comparison with X
+  (let val_b 0)
+  (let mask_b 0)
+  (modify (set b (fourstate val_b mask_b)))
+  (let m_lts (xmask (get y_lts)))
+  (assert (== m_lts 1) "Comparison with X should result in X (conservative)"))
+
+(case test_four_state_wide_concat_mixed
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<64>,
+            b: input bit<64>,
+            y_concat: output logic<128>
+        ) {
+            assign y_concat = {a, b}; // a (4-state) high, b (2-state) low
+        }
+    "#)
+  (top Top)
+  ; a has X, b is normal bit
+  (let val_a 0xAA)
+  (let mask_a 0xFF)
+  (let val_b 0x55)
+  (modify
+    (set a (fourstate val_a mask_a))
+    (set b val_b))
+  (let v_c (payload (get y_concat)))
+  (let m_c (xmask (get y_concat)))
+  (let expected_m (<< 0xFF 64))
+  ; Concat preserves input values at X positions
+  (let expected_v (| (<< 0xAA 64) 0x55))
+  (assert (== v_c expected_v))
+  (assert (== m_c expected_m)))
+
+(case test_four_state_mul_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_mul: output logic<8>
+        ) {
+            assign y_mul = a * b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: 3 * 7 = 21
+  (modify
+    (set a (fourstate 3 0))
+    (set b (fourstate 7 0)))
+  (let v (payload (get y_mul)))
+  (let m (xmask (get y_mul)))
+  (assert (== v 21) "3 * 7 = 21")
+  (assert (== m 0) "No X when both defined")
+  ; One operand has X: result should be all-X
+  (modify (set b (fourstate 0 1)))
+  (let v (payload (get y_mul)))
+  (let m (xmask (get y_mul)))
+  (assert (== m 0xFF) "MUL with X should yield all-X mask")
+  (assert (== v 0xFF) "Value normalized at X positions (v |= m)"))
+
+(case test_four_state_div_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_div: output logic<8>
+        ) {
+            assign y_div = a / b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: 20 / 4 = 5
+  (modify
+    (set a (fourstate 20 0))
+    (set b (fourstate 4 0)))
+  (let v (payload (get y_div)))
+  (let m (xmask (get y_div)))
+  (assert (== v 5) "20 / 4 = 5")
+  (assert (== m 0))
+  ; Dividend has X: result all-X
+  (modify (set a (fourstate 0 0x80)))
+  (let v (payload (get y_div)))
+  (let m (xmask (get y_div)))
+  (assert (== m 0xFF) "DIV with X dividend should yield all-X")
+  (assert (== v 0xFF) "Value normalized at X positions (v |= m)"))
+
+(case test_four_state_mod_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_mod: output logic<8>
+        ) {
+            assign y_mod = a % b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: 17 % 5 = 2
+  (modify
+    (set a (fourstate 17 0))
+    (set b (fourstate 5 0)))
+  (let v (payload (get y_mod)))
+  (let m (xmask (get y_mod)))
+  (assert (== v 2) "17 % 5 = 2")
+  (assert (== m 0))
+  ; Divisor has X: result all-X
+  (modify (set b (fourstate 0 1)))
+  (let v (payload (get y_mod)))
+  (let m (xmask (get y_mod)))
+  (assert (== m 0xFF) "MOD with X divisor should yield all-X")
+  (assert (== v 0xFF) "Value normalized at X positions (v |= m)"))
+
+(case test_four_state_equality_known_mismatch_with_unknown_bits
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>, b: input logic<8>,
+            eq: output logic, ne: output logic,
+        ) {
+            assign eq = a == b;
+            assign ne = a != b;
+        }
+    "#)
+  (top Top)
+  (for unknown_payload (list 0 1)
+    (modify
+      (set a (fourstate unknown_payload 1))
+      (set b 20))
+    (assert_eq eq (fourstate 0 0))
+    (assert_eq ne (fourstate 1 0))))
+
+(case test_four_state_ne_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_ne: output logic
+        ) {
+            assign y_ne = a != b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: 10 != 20 → 1
+  (modify
+    (set a (fourstate 10 0))
+    (set b (fourstate 20 0)))
+  (let v (payload (get y_ne)))
+  (let m (xmask (get y_ne)))
+  (assert (== v 1) "10 != 20 should be true")
+  (assert (== m 0))
+  ; The known bits agree: 0001010X != 00010100 is indeterminate.
+  (modify (set a (fourstate 21 1)))
+  (let m (xmask (get y_ne)))
+  (assert (== m 1) "NE with X should yield X result"))
+
+(case test_four_state_gt_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_gt: output logic
+        ) {
+            assign y_gt = a >: b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: 20 > 10 → 1
+  (modify
+    (set a (fourstate 20 0))
+    (set b (fourstate 10 0)))
+  (let v (payload (get y_gt)))
+  (let m (xmask (get y_gt)))
+  (assert (== v 1) "20 > 10 should be true")
+  (assert (== m 0))
+  ; One has X → result X
+  (modify (set b (fourstate 0 1)))
+  (let m (xmask (get y_gt)))
+  (assert (== m 1) "GT with X should yield X result"))
+
+(case test_four_state_ge_le_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y_ge: output logic,
+            y_le: output logic
+        ) {
+            assign y_ge = a >= b;
+            assign y_le = a <= b;
+        }
+    "#)
+  (top Top)
+  ; Both defined and equal: GE=1, LE=1
+  (modify
+    (set a (fourstate 10 0))
+    (set b (fourstate 10 0)))
+  (let v_ge (payload (get y_ge)))
+  (let m_ge (xmask (get y_ge)))
+  (let v_le (payload (get y_le)))
+  (let m_le (xmask (get y_le)))
+  (assert (== v_ge 1) "10 >= 10")
+  (assert (== m_ge 0))
+  (assert (== v_le 1) "10 <= 10")
+  (assert (== m_le 0))
+  ; One has X → both results X
+  (modify (set a (fourstate 0 1)))
+  (let m_ge (xmask (get y_ge)))
+  (let m_le (xmask (get y_le)))
+  (assert (== m_ge 1) "GE with X should yield X")
+  (assert (== m_le 1) "LE with X should yield X"))
+
+(case test_four_state_signed_comparison_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input signed logic<8>,
+            b: input signed logic<8>,
+            y_lt_s: output logic,
+            y_gt_s: output logic,
+            y_le_s: output logic,
+            y_ge_s: output logic
+        ) {
+            assign y_lt_s = a <: b;
+            assign y_gt_s = a >: b;
+            assign y_le_s = a <= b;
+            assign y_ge_s = a >= b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: a=-1 (0xFF), b=1 → signed: -1 < 1
+  (modify
+    (set a (fourstate 0xFF 0))
+    (set b (fourstate 1 0)))
+  (let v_lt (payload (get y_lt_s)))
+  (let m_lt (xmask (get y_lt_s)))
+  (let v_gt (payload (get y_gt_s)))
+  (let m_gt (xmask (get y_gt_s)))
+  (assert (== v_lt 1) "signed: -1 < 1 should be true")
+  (assert (== m_lt 0))
+  (assert (== v_gt 0) "signed: -1 > 1 should be false")
+  (assert (== m_gt 0))
+  ; One has X → all comparisons yield X
+  (modify (set a (fourstate 0 1)))
+  (let m_lt (xmask (get y_lt_s)))
+  (let m_gt (xmask (get y_gt_s)))
+  (let m_le (xmask (get y_le_s)))
+  (let m_ge (xmask (get y_ge_s)))
+  (assert (== m_lt 1) "Signed LT with X should yield X")
+  (assert (== m_gt 1) "Signed GT with X should yield X")
+  (assert (== m_le 1) "Signed LE with X should yield X")
+  (assert (== m_ge 1) "Signed GE with X should yield X"))
+
+(case test_four_state_reduction_xor_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y_rxor: output logic
+        ) {
+            assign y_rxor = ^a;
+        }
+    "#)
+  (top Top)
+  ; All defined: ^0xA5 = ^10100101 = 0 (even number of 1s)
+  (modify (set a (fourstate 0xA5 0)))
+  (let v (payload (get y_rxor)))
+  (let m (xmask (get y_rxor)))
+  (assert (== m 0) "No X when all bits defined")
+  (assert (== v 0) "^0xA5 = 0 (even parity)")
+  ; Any bit X → result X
+  (modify (set a (fourstate 0xA5 1)))
+  (let m (xmask (get y_rxor)))
+  (assert (== m 1) "Reduction XOR with any X bit should yield X"))
+
+(case test_four_state_65bit_boundary
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<65>,
+            b: input logic<65>,
+            y_and: output logic<65>,
+            y_add: output logic<65>
+        ) {
+            assign y_and = a & b;
+            assign y_add = a + b;
+        }
+    "#)
+  (top Top)
+  ; Set a = value with bit 64 set, b = all defined
+  (let val_a (| (<< 1 64) 0xFF))
+  (let mask_a (<< 1 64))
+  ; only bit 64 is X
+  (let val_b (| (<< 1 64) 0x0F))
+  (modify
+    (set a (fourstate val_a mask_a))
+    (set b (fourstate val_b 0)))
+  ; AND: bit 64 of a is X, bit 64 of b is 1 → result bit 64 is X
+  ; Lower bits: 0xFF & 0x0F = 0x0F (no X); bit 64: 1 & 1 = 1 (but masked as X)
+  (let v_and (payload (get y_and)))
+  (let m_and (xmask (get y_and)))
+  (assert (== m_and (<< 1 64)) "AND: X bit should propagate at bit 64")
+  ; bit 64 value = 1 & 1 = 1 (X position value preserved), lower = 0x0F
+  (assert (== v_and (| (<< 1 64) 0x0F)))
+  ; ADD: any X → all-X (conservative), value is actual computation result
+  (let v_add (payload (get y_add)))
+  (let m_add (xmask (get y_add)))
+  (let all_x_65 (- (<< 1 65) 1))
+  (assert (== m_add all_x_65) "ADD with X should yield all-X mask for 65 bits")
+  ; Without normalization, v contains Cranelift's actual addition result on the
+  ; X-encoded value bits (v=1 for X). The mask marks all bits as unknown, so the
+  ; Operations produce X (v=1,m=1): v |= m for 65-bit all-X
+  (assert (== v_add m_add)))
+
+(case test_four_state_negation_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y_neg: output logic<8>
+        ) {
+            assign y_neg = -a;
+        }
+    "#)
+  (top Top)
+  ; Defined: -5 = 0xFB (8-bit two's complement)
+  (modify (set a (fourstate 5 0)))
+  (let v (payload (get y_neg)))
+  (let m (xmask (get y_neg)))
+  (assert (== v 0xFB) "-5 = 0xFB in 8-bit")
+  (assert (== m 0))
+  ; Any X → all-X (conservative for arithmetic)
+  (modify (set a (fourstate 0 1)))
+  (let v (payload (get y_neg)))
+  (let m (xmask (get y_neg)))
+  (assert (== m 0xFF) "Negation with X should yield all-X")
+  ; Operations produce X (v=1,m=1), never Z
+  (assert (== v 0xFF)))
+
+(case test_four_state_logical_not_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y_lnot: output logic
+        ) {
+            assign y_lnot = !(|a);
+        }
+    "#)
+  (top Top)
+  ; Defined nonzero: !0x0A = 0
+  (modify (set a (fourstate 0x0A 0)))
+  (let v (payload (get y_lnot)))
+  (let m (xmask (get y_lnot)))
+  (assert (== v 0) "!nonzero = 0")
+  (assert (== m 0))
+  ; Defined zero: !0 = 1
+  (modify (set a (fourstate 0 0)))
+  (let v (payload (get y_lnot)))
+  (let m (xmask (get y_lnot)))
+  (assert (== v 1) "!0 = 1")
+  (assert (== m 0))
+  ; X input → result X
+  (modify (set a (fourstate 0 1)))
+  (let m (xmask (get y_lnot)))
+  (assert (== m 1) "Logical NOT with X should yield X"))
+
+(case test_four_state_sar_x_shift_amount
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input signed logic<8>,
+            sh: input logic<8>,
+            y_sar: output signed logic<8>
+        ) {
+            assign y_sar = a >>> sh;
+        }
+    "#)
+  (top Top)
+  ; Defined: 0x80 (signed = -128) >>> 2 = 0xE0 (sign-extended)
+  (modify
+    (set a (fourstate 0x80 0))
+    (set sh (fourstate 2 0)))
+  (let v (payload (get y_sar)))
+  (let m (xmask (get y_sar)))
+  (assert (== v 0xE0) "0x80 >>> 2 = 0xE0 (sign extend)")
+  (assert (== m 0))
+  ; Shift amount has X → all-X
+  (modify (set sh (fourstate 1 1)))
+  (let v (payload (get y_sar)))
+  (let m (xmask (get y_sar)))
+  (assert (== m 0xFF) "SAR by X amount should yield all-X")
+  ; Value is normalized at X positions: v |= m → 0xFF
+  (assert (== v 0xFF)))
+
+(case test_four_state_concat_three_elements
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<4>,
+            b: input logic<4>,
+            c: input logic<4>,
+            y: output logic<12>
+        ) {
+            assign y = {a, b, c};
+        }
+    "#)
+  (top Top)
+  ; a=0xA (X on all bits), b=0x5 (defined), c=0x3 (defined)
+  (modify
+    (set a (fourstate 0xA 0xF))
+    ; a: all X
+    (set b (fourstate 0x5 0))
+    ; b: defined
+    (set c (fourstate 0x3 0)))
+    ; c: defined
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  ; y = {a, b, c} = {XXXX, 0101, 0011} → mask = 0xF00
+  ; Concat preserves input value bits at X positions (a was set with v=0xA)
+  (assert (== m 0xF00) "Only high nibble should be X")
+  (assert (== v 0xA53) "Defined parts: b=5, c=3; X positions preserve input value"))
+
+(case test_four_state_wide_comparison_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_eq: output logic,
+            y_lt: output logic
+        ) {
+            assign y_eq = a == b;
+            assign y_lt = a <: b;
+        }
+    "#)
+  (top Top)
+  ; Both defined
+  (let val (| (<< 0xAA 64) 0x55))
+  (modify
+    (set a (fourstate val 0))
+    (set b (fourstate val 0)))
+  (let v_eq (payload (get y_eq)))
+  (let m_eq (xmask (get y_eq)))
+  (assert (== v_eq 1) "Equal values should be EQ=1")
+  (assert (== m_eq 0))
+  ; Upper word of a has X → both comparisons X
+  (let mask_a (<< 0xFF 64))
+  (modify (set a (fourstate val mask_a)))
+  (let m_eq (xmask (get y_eq)))
+  (let m_lt (xmask (get y_lt)))
+  (assert (== m_eq 1) "Wide EQ with X should yield X")
+  (assert (== m_lt 1) "Wide LT with X should yield X"))
+
+(case test_four_state_multibit_mux_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic<2>,
+            a: input logic<8>,
+            b: input logic<8>,
+            c: input logic<8>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                if sel == 2'd0 {
+                    y = a;
+                } else if sel == 2'd1 {
+                    y = b;
+                } else {
+                    y = c;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Setup branch values
+  (modify
+    (set a (fourstate 0xAA 0))
+    (set b (fourstate 0xBB 0))
+    (set c (fourstate 0xCC 0)))
+  ; A procedural condition takes its true branch only for a definite one.
+  ; Both equality tests are unknown here, so control reaches the final else.
+  (modify
+    (set sel (fourstate 0 1)))
+    ; bit 0 is X
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0))
+  (assert (== v 0xCC)))
+
+(case test_four_state_procedural_case_x_uses_default
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic<2>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                case sel {
+                    2'd0: y = 8'd10;
+                    2'd1: y = 8'd20;
+                    default: y = 8'd99;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify (set sel (fourstate 1 1)))
+  (let value (payload (get y)))
+  (let mask (xmask (get y)))
+  (assert (== mask 0))
+  (assert (== value 99)))
+
+(case test_four_state_procedural_if_known_nonzero_with_x_is_true
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            cond: input logic<2>,
+            y: output logic<8>
+        ) {
+            always_comb {
+                if cond {
+                    y = 8'hA5;
+                } else {
+                    y = 8'h5A;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (modify
+    ; 2'b1x has a known nonzero bit, so it is a true procedural condition.
+    (set cond (fourstate 2 1)))
+  (let value (payload (get y)))
+  (let mask (xmask (get y)))
+  (assert (== mask 0))
+  (assert (== value 0xA5)))
+
+(case test_four_state_width_narrowing_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<16>,
+            y: output logic<8>
+        ) {
+            assign y = a[7:0];
+        }
+    "#)
+  (top Top)
+  ; X in upper byte only → narrow to lower byte should have no X
+  (modify (set a (fourstate 0x12AB 0xFF00)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== v 0xAB) "Lower byte should be 0xAB")
+  (assert (== m 0) "Lower byte should have no X")
+  ; X in lower byte → narrow should propagate X
+  (modify (set a (fourstate 0x1200 0x000F)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0x0F) "Lower nibble X should propagate")
+  (assert (== v 0) "X bits normalized to 0"))
+
+(case test_four_state_width_widening_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y: output logic<16>
+        ) {
+            assign y = a;
+        }
+    "#)
+  (top Top)
+  ; a has partial X → upper byte of y should be 0 (zero-extended), no X
+  (modify (set a (fourstate 0xA5 0x0F)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  ; Upper byte: zero-extended → 0x00, mask 0x00
+  ; Lower byte: value 0xA5 (preserved, no normalization), mask 0x0F
+  (assert (== m 0x0F) "Only lower nibble X should propagate")
+  (assert (== v 0xA5) "Widening preserves input value at X positions"))
+
+(case test_four_state_ff_conditional_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            en: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff {
+                if_reset {
+                    q = 8'd0;
+                } else if en {
+                    q = d;
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; Reset first (AsyncLow: rst=0 means active)
+  (modify
+    (set rst (fourstate 0 0))
+    (set en (fourstate 0 0))
+    (set d (fourstate 0 0))
+    (set q (fourstate 0 0)))
+  (tick clk)
+  (let v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== v_q 0))
+  (assert (== m_q 0) "Reset should clear X")
+  ; en=1, d has X → q captures X (deactivate reset: rst=1)
+  (modify
+    (set rst (fourstate 1 0))
+    (set en (fourstate 1 0))
+    (set d (fourstate 0xAB 0x0F)))
+  (tick clk)
+  (let m_q (xmask (get q)))
+  (assert (== m_q 0x0F) "en=1: X from d should propagate to q")
+  ; en=0, d changes → q should hold previous value (with X)
+  (modify
+    (set en (fourstate 0 0))
+    (set d (fourstate 0xFF 0)))
+  (tick clk)
+  (let m_q (xmask (get q)))
+  (assert (== m_q 0x0F) "en=0: q should hold previous X mask"))
+
+(case test_four_state_concat_odd_width
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<3>,
+            b: input logic<5>,
+            y: output logic<8>
+        ) {
+            assign y = {a, b};
+        }
+    "#)
+  (top Top)
+  ; a = 3'b101 (0x5), mask=0b010 (bit 1 is X); b = 5'b10011 (0x13), mask=0
+  (modify
+    (set a (fourstate 0x5 0b010))
+    (set b (fourstate 0x13 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  ; y = {a, b} = {101, 10011} → 8'b101_10011
+  ; mask: a's bit 1 X → in y that's bit 6 → mask = 0b0100_0000 = 0x40
+  (assert (== m 0x40) "X in a[1] should appear at y[6]")
+  ; value: a = 0b101 (bit 1 is X), b = 0x13
+  ; y_val = (0b101 << 5) | 0b10011 = 0b10110011 = 0xB3
+  ; Normalization: v |= m → 0xB3 | 0x40 = 0xF3
+  (assert (== v 0xB3) "Concat preserves input value at X positions"))
+
+(case test_four_state_127bit
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<127>,
+            b: input logic<127>,
+            y_and: output logic<127>
+        ) {
+            assign y_and = a & b;
+        }
+    "#)
+  (top Top)
+  ; Set bit 126 (MSB of 127-bit) as X in a, b all ones
+  (let val_a (| (<< 1 126) 0xFF))
+  (let mask_a (<< 1 126))
+  (let val_b (| (<< 0xffffffffffffffff 63) 0xffffffffffffffff))
+  (modify
+    (set a (fourstate val_a mask_a))
+    (set b (fourstate val_b 0)))
+  (let m (xmask (get y_and)))
+  ; AND: a[126]=X, b[126]=1 → result[126]=X
+  (assert (== m mask_a) "127-bit AND: X at MSB should propagate"))
+
+(case test_four_state_wide_unary_not_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            y: output logic<128>
+        ) {
+            assign y = ~a;
+        }
+    "#)
+  (top Top)
+  ; Upper word has X, lower word is 0xFF..FF
+  (let val_a (| (<< 0xAA 64) 0xffffffffffffffff))
+  (let mask_a (<< 0xFF 64))
+  (modify (set a (fourstate val_a mask_a)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  ; NOT: mask preserved, defined bits inverted
+  (assert (== m mask_a) "Wide NOT should preserve mask")
+  ; Lower word: ~0xFF..FF = 0x00..00
+  (assert_eq (& v 0xffffffffffffffff) 0 "Lower word: ~0xFFFFFFFFFFFFFFFF = 0"))
+
+(case test_four_state_wide_negation_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            y: output logic<128>
+        ) {
+            assign y = -a;
+        }
+    "#)
+  (top Top)
+  ; Any X → all-X (conservative for arithmetic)
+  (let mask_a (<< 1 64))
+  (modify (set a (fourstate 5 mask_a)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (let all_x (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (assert (== m all_x) "Wide negation with X should yield all-X")
+  ; Without normalization, v contains the actual negation of the raw value bits.
+  ; Operations produce X (v=1,m=1): all-X means v = all ones
+  (assert (== v all_x)))
+
+(case test_four_state_wide_reduction_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            y_rand: output logic,
+            y_ror:  output logic,
+            y_rxor: output logic
+        ) {
+            assign y_rand = &a;
+            assign y_ror  = |a;
+            assign y_rxor = ^a;
+        }
+    "#)
+  (top Top)
+  ; a: upper word has X, lower word is all-1s
+  (let val_a (| (<< 0xAA 64) 0xffffffffffffffff))
+  (let mask_a (<< 0xFF 64))
+  (modify (set a (fourstate val_a mask_a)))
+  ; Reduction AND: upper word bits 72-127 are definite 0 → dominant-value = definite 0
+  (let m_rand (xmask (get y_rand)))
+  (assert (== m_rand 0) "Wide &a with definite 0 bits should be defined (dominant-value)")
+  ; Reduction OR: lower word has definite 1s → dominant-value = definite 1
+  ; IEEE 1800: |a = 1 if any bit is definite 1 (even if other bits are X)
+  (let m_ror (xmask (get y_ror)))
+  (assert (== m_ror 0) "Wide |a with definite 1 bits should be defined (dominant-value)")
+  ; Reduction XOR: any X bit → result X
+  (let m_rxor (xmask (get y_rxor)))
+  (assert (== m_rxor 1) "Wide ^a with any X should be X"))
+
+(case test_four_state_mux_both_branches_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic,
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = if sel ? a : b;
+        }
+    "#)
+  (top Top)
+  ; sel=1 (defined), a=all-X (v=1,m=1), b=all-X → selects a, result all-X
+  (modify
+    (set sel (fourstate 1 0))
+    (set a (fourstate 0xFF 0xFF))
+    (set b (fourstate 0xFF 0xFF)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "sel=1 selecting X branch → all-X")
+  (assert (== v 0xFF) "X encoding: v=1, m=1")
+  ; sel=0 (defined), still selects b which is X
+  (modify (set sel (fourstate 0 0)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "sel=0 selecting X branch → all-X")
+  ; sel=X, both branches X → definitely all-X
+  (modify (set sel (fourstate 0 1)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "sel=X, both branches X → all-X"))
+
+(case test_four_state_cascaded_mux_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel1: input logic,
+            sel2: input logic,
+            a: input logic<8>,
+            b: input logic<8>,
+            c: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = if sel1 ? (if sel2 ? a : b) : c;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set a (fourstate 0xAA 0))
+    (set b (fourstate 0xBB 0))
+    (set c (fourstate 0xCC 0)))
+  ; sel1=1, sel2=1 → a (defined)
+  (modify
+    (set sel1 (fourstate 1 0))
+    (set sel2 (fourstate 1 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== v 0xAA) "sel1=1,sel2=1 → a")
+  (assert (== m 0))
+  ; sel1=1, sel2=X → inner mux uncertain, result has X
+  (modify (set sel2 (fourstate 0 1)))
+  (let m (xmask (get y)))
+  (assert (!= m 0) "sel1=1,sel2=X → inner mux X propagates")
+  ; sel1=0 → c regardless of sel2
+  (modify (set sel1 (fourstate 0 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== v 0xCC) "sel1=0 → c regardless of sel2")
+  (assert (== m 0)))
+
+(case test_four_state_shift_both_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            sh: input logic<8>,
+            y: output logic<8>
+        ) {
+            assign y = a >> sh;
+        }
+    "#)
+  (top Top)
+  ; Both data and shift amount have X → all-X
+  (modify
+    (set a (fourstate 0xFF 0x0F))
+    (set sh (fourstate 3 1)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "Shift with X in both data and amount → all-X")
+  ; Value is normalized at X positions: v |= m → 0xFF
+  (assert (== v 0xFF)))
+
+(case test_four_state_case_defined_selector
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic<2>,
+            y: output logic<8>
+        ) {
+            assign y = case sel {
+                2'd0: 8'd10,
+                2'd1: 8'd20,
+                2'd2: 8'd30,
+                default: 8'd99,
+            };
+        }
+    "#)
+  (top Top)
+  ; sel = 1 (defined) → should match arm 1 and return 20
+  (modify (set sel (fourstate 1 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "Defined selector should produce defined result")
+  (assert (== v 20) "sel=1 should select value 20"))
+
+(case test_four_state_case_x_in_selector
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            sel: input logic<2>,
+            y: output logic<8>
+        ) {
+            assign y = case sel {
+                2'd0: 8'd10,
+                2'd1: 8'd20,
+                default: 8'd99,
+            };
+        }
+    "#)
+  (top Top)
+  ; sel has X → EqWildcard comparison yields X → should hit default
+  (modify
+    (set sel (fourstate 1 1)))
+    ; bit 0 is X
+  (let m (xmask (get y)))
+  ; With X selector, the comparison results are X, so the mux selects conservatively
+  (assert (!= m 0) "Case with X selector should produce X in output (conservative mux)"))
+
+(case test_four_state_reduction_or_dominant_one
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y: output logic
+        ) {
+            assign y = |a;
+        }
+    "#)
+  (top Top)
+  ; Value = 0x01, Mask = 0xF0 (upper nibble X, but bit 0 is definite 1)
+  ; IEEE 1800: |a should be definite 1 when any bit is definite 1
+  (modify (set a (fourstate 0x01 0xF0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "Reduction OR with definite 1 should yield defined result")
+  (assert (== v 1) "Reduction OR with definite 1 should yield 1")
+  ; Value = 0x00, Mask = 0x0F (lower nibble X, upper nibble all 0)
+  ; No definite 1 exists → result should be X
+  (modify (set a (fourstate 0x00 0x0F)))
+  (let m (xmask (get y)))
+  (assert (== m 1) "Reduction OR with no definite 1 but X bits should yield X"))
+
+(case test_four_state_reduction_and_dominant_zero
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            y: output logic
+        ) {
+            assign y = &a;
+        }
+    "#)
+  (top Top)
+  ; Value = 0xFE, Mask = 0xF0 (upper nibble X, but bit 0 is definite 0)
+  ; IEEE 1800: &a should be definite 0 when any bit is definite 0
+  (modify (set a (fourstate 0x0E 0xF0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "Reduction AND with definite 0 should yield defined result")
+  (assert (== v 0) "Reduction AND with definite 0 should yield 0")
+  ; Value = 0xF0, Mask = 0x0F (lower nibble X, upper nibble all 1)
+  ; All defined bits are 1, but X bits exist → result should be X
+  (modify (set a (fourstate 0xF0 0x0F)))
+  (let m (xmask (get y)))
+  (assert (== m 1) "Reduction AND with no definite 0 but X bits should yield X"))
+
+(case test_four_state_wide_reduction_or_dominant
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            y: output logic
+        ) {
+            assign y = |a;
+        }
+    "#)
+  (top Top)
+  ; Lower 64-bit chunk has definite 1 (bit 0), upper chunk is all X
+  ; |a should be definite 1 due to dominant-value
+  (let val 1)
+  ; bit 0 = 1
+  (let mask (| 0 (<< 0xffffffffffffffff 64)))
+  ; upper chunk all X
+  (modify (set a (fourstate val mask)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "Wide reduction OR: definite 1 in any chunk → defined result")
+  (assert (== v 1) "Wide reduction OR: definite 1 in any chunk → 1"))
+
+(case test_four_state_wide_reduction_and_dominant
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            y: output logic
+        ) {
+            assign y = &a;
+        }
+    "#)
+  (top Top)
+  ; Lower 64-bit chunk has definite 0 (bit 0), upper chunk is all X
+  ; &a should be definite 0 due to dominant-value
+  (let val 0xFFFFFFFFFFFFFFFE)
+  ; bit 0 = 0
+  (let mask (| 0 (<< 0xffffffffffffffff 64)))
+  ; upper chunk all X
+  (modify (set a (fourstate val mask)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "Wide reduction AND: definite 0 in any chunk → defined result")
+  (assert (== v 0) "Wide reduction AND: definite 0 in any chunk → 0"))
+
+(case test_four_state_logic_and_dominant_zero
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic
+        ) {
+            assign y = (|a) && (|b);
+        }
+    "#)
+  (top Top)
+  ; 0 && X = 0 (definite)
+  (modify
+    (set a (fourstate 0 0))
+    ; definite 0
+    (set b (fourstate 0 0xFF)))
+    ; all X
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "0 && X should be definite (mask=0)")
+  (assert (== v 0) "0 && X = 0")
+  ; X && 0 = 0 (definite)
+  (modify
+    (set a (fourstate 0 0xFF))
+    ; all X
+    (set b (fourstate 0 0)))
+    ; definite 0
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "X && 0 should be definite (mask=0)")
+  (assert (== v 0) "X && 0 = 0")
+  ; 1 && X = X
+  (modify
+    (set a (fourstate 1 0))
+    ; definite 1
+    (set b (fourstate 0 0xFF)))
+    ; all X
+  (let m (xmask (get y)))
+  (assert (!= m 0) "1 && X should be X (mask!=0)")
+  ; X && 1 = X
+  (modify
+    (set a (fourstate 0 0xFF))
+    ; all X
+    (set b (fourstate 1 0)))
+    ; definite 1
+  (let m (xmask (get y)))
+  (assert (!= m 0) "X && 1 should be X (mask!=0)")
+  ; 1 && 1 = 1 (definite)
+  (modify
+    (set a (fourstate 1 0))
+    (set b (fourstate 1 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "1 && 1 should be definite")
+  (assert (== v 1) "1 && 1 = 1"))
+
+(case test_four_state_logic_or_dominant_one
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<8>,
+            b: input logic<8>,
+            y: output logic
+        ) {
+            assign y = (|a) || (|b);
+        }
+    "#)
+  (top Top)
+  ; 1 || X = 1 (definite)
+  (modify
+    (set a (fourstate 1 0))
+    ; definite 1
+    (set b (fourstate 0 0xFF)))
+    ; all X
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "1 || X should be definite (mask=0)")
+  (assert (== v 1) "1 || X = 1")
+  ; X || 1 = 1 (definite)
+  (modify
+    (set a (fourstate 0 0xFF))
+    ; all X
+    (set b (fourstate 1 0)))
+    ; definite 1
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "X || 1 should be definite (mask=0)")
+  (assert (== v 1) "X || 1 = 1")
+  ; 0 || X = X
+  (modify
+    (set a (fourstate 0 0))
+    ; definite 0
+    (set b (fourstate 0 0xFF)))
+    ; all X
+  (let m (xmask (get y)))
+  (assert (!= m 0) "0 || X should be X (mask!=0)")
+  ; X || 0 = X
+  (modify
+    (set a (fourstate 0 0xFF))
+    ; all X
+    (set b (fourstate 0 0)))
+    ; definite 0
+  (let m (xmask (get y)))
+  (assert (!= m 0) "X || 0 should be X (mask!=0)")
+  ; 0 || 0 = 0 (definite)
+  (modify
+    (set a (fourstate 0 0))
+    (set b (fourstate 0 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "0 || 0 should be definite")
+  (assert (== v 0) "0 || 0 = 0"))
+
+(case test_four_state_eq_wildcard_value_at_wildcard_pos
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<4>,
+            b: input logic<4>,
+            y: output logic
+        ) {
+            assign y = a ==? b;
+        }
+    "#)
+  (top Top)
+  ; LHS = 4'b1110 (definite), RHS = 4'b1x1x (mask=0b0101)
+  ; Non-wildcard positions (bits 1,3): LHS[1]=1=RHS[1], LHS[3]=1=RHS[3] → match
+  ; IEEE 1800: ==? should return 1 (definite true)
+  (modify
+    (set a (fourstate 0b1110 0))
+    ; definite
+    (set b (fourstate 0b1010 0b0101)))
+    ; bits 0,2 are X
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "==? with matching non-wildcard bits should be definite")
+  (assert (== v 1) "==? with matching non-wildcard bits should be 1")
+  ; LHS = 4'b1100 (definite), RHS = 4'b1x1x (mask=0b0101)
+  ; Non-wildcard positions: bit 1: LHS[1]=0, RHS[1]=1 → mismatch
+  ; IEEE 1800: ==? should return 0 (definite false)
+  (modify
+    (set a (fourstate 0b1100 0))
+    (set b (fourstate 0b1010 0b0101)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "==? with definite mismatch should be definite")
+  (assert (== v 0) "==? with mismatch at non-wildcard should be 0")
+  ; LHS has X at non-wildcard position, no definite mismatch
+  ; LHS = 4'bxx10, RHS = 4'b1x1x → compare at bits 1,3
+  ; bit 1: LHS[1]=1 (definite), RHS[1]=1 → match
+  ; bit 3: LHS[3]=X → unknown
+  ; IEEE 1800: ==? should return X
+  (modify
+    (set a (fourstate 0b0010 0b1100))
+    ; bits 2,3 = X
+    (set b (fourstate 0b1010 0b0101)))
+    ; bits 0,2 = X
+  (let m (xmask (get y)))
+  (assert (!= m 0) "==? with LHS X at non-wildcard should be X")
+  ; Definite mismatch takes priority over LHS X elsewhere
+  ; LHS = 4'bxx00, RHS = 4'b1x1x → compare at bits 1,3
+  ; bit 1: LHS[1]=0, RHS[1]=1 → definite mismatch
+  ; bit 3: LHS[3]=X → unknown, but mismatch already found
+  ; IEEE 1800: ==? should return 0 (definite false)
+  (modify
+    (set a (fourstate 0b0000 0b1100))
+    ; bits 2,3 = X
+    (set b (fourstate 0b1010 0b0101)))
+    ; bits 0,2 = X
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "==? with definite mismatch should be definite even with X elsewhere")
+  (assert (== v 0) "==? with definite mismatch = 0"))
+
+(case test_four_state_ne_wildcard_value_at_wildcard_pos
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<4>,
+            b: input logic<4>,
+            y: output logic
+        ) {
+            assign y = a !=? b;
+        }
+    "#)
+  (top Top)
+  ; LHS = 4'b1110 (definite), RHS = 4'b1x1x (mask=0b0101)
+  ; All non-wildcard positions match → !=? should return 0 (definite false)
+  (modify
+    (set a (fourstate 0b1110 0))
+    (set b (fourstate 0b1010 0b0101)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "!=? with all matching should be definite")
+  (assert (== v 0) "!=? with all matching = 0")
+  ; LHS = 4'b1100, RHS = 4'b1x1x → mismatch at bit 1
+  ; !=? should return 1 (definite true)
+  (modify
+    (set a (fourstate 0b1100 0))
+    (set b (fourstate 0b1010 0b0101)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0) "!=? with definite mismatch should be definite")
+  (assert (== v 1) "!=? with mismatch = 1"))
+
+(case test_four_state_wide_wildcard_equality
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<130>,
+            b: input logic<130>,
+            y_eq: output logic,
+            y_ne: output logic
+        ) {
+            assign y_eq = a ==? b;
+            assign y_ne = a !=? b;
+        }
+    "#)
+  (top Top)
+  (let bit_64 (<< 1 64))
+  (let bit_65 (<< 1 65))
+  (let bit_129 (<< 1 129))
+  (let rhs_value (| bit_64 bit_129))
+  ; A difference at an RHS wildcard in the second chunk is ignored.
+  (modify
+    (set a (fourstate (| rhs_value bit_65) 0))
+    (set b (fourstate rhs_value bit_65)))
+  (assert_eq y_eq (fourstate 1 0))
+  (assert_eq y_ne (fourstate 0 0))
+  ; An unknown LHS bit at a non-wildcard position in the top chunk makes
+  ; both wildcard equality results unknown.
+  (modify
+    (set a (fourstate rhs_value bit_129))
+    (set b (fourstate rhs_value bit_65)))
+  (assert_eq y_eq (fourstate 1 1))
+  (assert_eq y_ne (fourstate 1 1))
+  ; A definite mismatch in another high chunk dominates that unknown.
+  (modify
+    (set a (fourstate bit_129 bit_129))
+    (set b (fourstate rhs_value bit_65)))
+  (assert_eq y_eq (fourstate 0 0))
+  (assert_eq y_ne (fourstate 1 0)))
+
+(case test_four_state_wide_mul_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_mul: output logic<128>
+        ) {
+            assign y_mul = a * b;
+        }
+    "#)
+  (top Top)
+  (let all_x_128 (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  ; Both defined: 3 * 7 = 21
+  (modify
+    (set a (fourstate 3 0))
+    (set b (fourstate 7 0)))
+  (let v (payload (get y_mul)))
+  (let m (xmask (get y_mul)))
+  (assert (== v 21) "Wide 3 * 7 = 21")
+  (assert (== m 0) "No X when both defined")
+  ; One operand has X in upper word → result should be all-X
+  (let mask_a (<< 1 64))
+  (modify (set a (fourstate 3 mask_a)))
+  (let v (payload (get y_mul)))
+  (let m (xmask (get y_mul)))
+  (assert (== m all_x_128) "Wide MUL with X should yield all-X mask")
+  ; Operations produce X (v=1,m=1): all-X means v = all ones
+  (assert (== v all_x_128)))
+
+(case test_four_state_wide_div_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_div: output logic<128>
+        ) {
+            assign y_div = a / b;
+        }
+    "#)
+  (top Top)
+  (let all_x_128 (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  ; Both defined: 20 / 4 = 5
+  (modify
+    (set a (fourstate 20 0))
+    (set b (fourstate 4 0)))
+  (let v (payload (get y_div)))
+  (let m (xmask (get y_div)))
+  (assert (== v 5) "Wide 20 / 4 = 5")
+  (assert (== m 0))
+  ; Dividend has X → result all-X
+  (modify (set a (fourstate 0 0x80)))
+  (let v (payload (get y_div)))
+  (let m (xmask (get y_div)))
+  (assert (== m all_x_128) "Wide DIV with X dividend should yield all-X")
+  (assert (== v all_x_128) "Operations produce X: v |= m"))
+
+(case test_four_state_wide_mod_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_mod: output logic<128>
+        ) {
+            assign y_mod = a % b;
+        }
+    "#)
+  (top Top)
+  (let all_x_128 (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  ; Both defined: 17 % 5 = 2
+  (modify
+    (set a (fourstate 17 0))
+    (set b (fourstate 5 0)))
+  (let v (payload (get y_mod)))
+  (let m (xmask (get y_mod)))
+  (assert (== v 2) "Wide 17 % 5 = 2")
+  (assert (== m 0))
+  ; Divisor has X → result all-X
+  (modify (set b (fourstate 1 1)))
+  (let v (payload (get y_mod)))
+  (let m (xmask (get y_mod)))
+  (assert (== m all_x_128) "Wide MOD with X divisor should yield all-X")
+  ; Operations produce X (v=1,m=1): all-X means v = all ones
+  (assert (== v all_x_128)))
+
+(case test_four_state_sar_both_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input signed logic<8>,
+            sh: input logic<8>,
+            y_sar: output signed logic<8>
+        ) {
+            assign y_sar = a >>> sh;
+        }
+    "#)
+  (top Top)
+  ; Both data and shift amount have X → all-X
+  (modify
+    (set a (fourstate 0x80 0x0F))
+    ; data has partial X
+    (set sh (fourstate 3 1)))
+    ; shift amount has X
+  (let v (payload (get y_sar)))
+  (let m (xmask (get y_sar)))
+  (assert (== m 0xFF) "SAR with X in both data and shift amount → all-X")
+  ; Value is normalized at X positions: v |= m → 0xFF
+  (assert (== v 0xFF)))
+
+(case test_four_state_wide_ne_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_ne: output logic
+        ) {
+            assign y_ne = a != b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: different values → NE=1
+  (let val_a (| (<< 0xAA 64) 0x55))
+  (let val_b (| (<< 0xBB 64) 0x55))
+  (modify
+    (set a (fourstate val_a 0))
+    (set b (fourstate val_b 0)))
+  (let v (payload (get y_ne)))
+  (let m (xmask (get y_ne)))
+  (assert (== v 1) "Different wide values → NE=1")
+  (assert (== m 0))
+  ; Same values → NE=0
+  (modify (set b (fourstate val_a 0)))
+  (let v (payload (get y_ne)))
+  (let m (xmask (get y_ne)))
+  (assert (== v 0) "Same wide values → NE=0")
+  (assert (== m 0))
+  ; One has X → result X
+  (let mask_a (<< 0xFF 64))
+  (modify (set a (fourstate val_a mask_a)))
+  (let m (xmask (get y_ne)))
+  (assert (== m 1) "Wide NE with X should yield X result"))
+
+(case test_four_state_wide_gt_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_gt: output logic
+        ) {
+            assign y_gt = a >: b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: a > b → 1
+  (let val_a (| (<< 0xFF 64) 0))
+  (let val_b 0xFF)
+  (modify
+    (set a (fourstate val_a 0))
+    (set b (fourstate val_b 0)))
+  (let v (payload (get y_gt)))
+  (let m (xmask (get y_gt)))
+  (assert (== v 1) "Wide a > b should be true")
+  (assert (== m 0))
+  ; One has X → result X
+  (let mask_a (<< 1 64))
+  (modify (set a (fourstate val_a mask_a)))
+  (let m (xmask (get y_gt)))
+  (assert (== m 1) "Wide GT with X should yield X result"))
+
+(case test_four_state_wide_ge_le_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            b: input logic<128>,
+            y_ge: output logic,
+            y_le: output logic
+        ) {
+            assign y_ge = a >= b;
+            assign y_le = a <= b;
+        }
+    "#)
+  (top Top)
+  ; Both defined and equal: GE=1, LE=1
+  (let val (| (<< 0xAA 64) 0x55))
+  (modify
+    (set a (fourstate val 0))
+    (set b (fourstate val 0)))
+  (let v_ge (payload (get y_ge)))
+  (let m_ge (xmask (get y_ge)))
+  (let v_le (payload (get y_le)))
+  (let m_le (xmask (get y_le)))
+  (assert (== v_ge 1) "Wide equal values → GE=1")
+  (assert (== m_ge 0))
+  (assert (== v_le 1) "Wide equal values → LE=1")
+  (assert (== m_le 0))
+  ; One has X → both results X
+  (let mask_a (<< 0xFF 64))
+  (modify (set a (fourstate val mask_a)))
+  (let m_ge (xmask (get y_ge)))
+  (let m_le (xmask (get y_le)))
+  (assert (== m_ge 1) "Wide GE with X should yield X")
+  (assert (== m_le 1) "Wide LE with X should yield X"))
+
+(case test_four_state_wide_signed_comparison_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input signed logic<128>,
+            b: input signed logic<128>,
+            y_lt_s: output logic,
+            y_gt_s: output logic,
+            y_le_s: output logic,
+            y_ge_s: output logic
+        ) {
+            assign y_lt_s = a <: b;
+            assign y_gt_s = a >: b;
+            assign y_le_s = a <= b;
+            assign y_ge_s = a >= b;
+        }
+    "#)
+  (top Top)
+  ; Both defined: a = -1 (all bits set in 128-bit), b = 1 → signed: -1 < 1
+  (let all_ones_128 (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
+  (modify
+    (set a (fourstate all_ones_128 0))
+    ; -1 in signed 128-bit
+    (set b (fourstate 1 0)))
+  (let v_lt (payload (get y_lt_s)))
+  (let m_lt (xmask (get y_lt_s)))
+  (let v_gt (payload (get y_gt_s)))
+  (let m_gt (xmask (get y_gt_s)))
+  (assert (== v_lt 1) "Wide signed: -1 < 1 should be true")
+  (assert (== m_lt 0))
+  (assert (== v_gt 0) "Wide signed: -1 > 1 should be false")
+  (assert (== m_gt 0))
+  ; One has X → all comparisons yield X
+  (let mask_a (<< 1 64))
+  (modify (set a (fourstate 0 mask_a)))
+  (let m_lt (xmask (get y_lt_s)))
+  (let m_gt (xmask (get y_gt_s)))
+  (let m_le (xmask (get y_le_s)))
+  (let m_ge (xmask (get y_ge_s)))
+  (assert (== m_lt 1) "Wide signed LT with X should yield X")
+  (assert (== m_gt 1) "Wide signed GT with X should yield X")
+  (assert (== m_le 1) "Wide signed LE with X should yield X")
+  (assert (== m_ge 1) "Wide signed GE with X should yield X"))
+
+(case test_four_state_wide_logical_not_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<128>,
+            y_lnot: output logic
+        ) {
+            assign y_lnot = !(|a);
+        }
+    "#)
+  (top Top)
+  ; Defined nonzero: !nonzero = 0
+  (let val (<< 1 64))
+  (modify (set a (fourstate val 0)))
+  (let v (payload (get y_lnot)))
+  (let m (xmask (get y_lnot)))
+  (assert (== v 0) "Wide !nonzero = 0")
+  (assert (== m 0))
+  ; Defined zero: !0 = 1
+  (modify (set a (fourstate 0 0)))
+  (let v (payload (get y_lnot)))
+  (let m (xmask (get y_lnot)))
+  (assert (== v 1) "Wide !0 = 1")
+  (assert (== m 0))
+  ; X input (upper word only) → result X
+  (let mask_a (<< 1 64))
+  (modify (set a (fourstate 0 mask_a)))
+  (let m (xmask (get y_lnot)))
+  (assert (== m 1) "Wide logical NOT with X should yield X"))
+
+(case test_four_state_concat_chunk_boundary_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input logic<48>,
+            b: input logic<32>,
+            c: input logic<48>,
+            y: output logic<128>
+        ) {
+            assign y = {a, b, c};
+        }
+    "#)
+  (top Top)
+  ; a = defined 48-bit value, b = all X (32-bit), c = defined 48-bit value
+  (modify
+    (set a (fourstate 0x123456789ABC 0))
+    (set b (fourstate 0 0xFFFFFFFF))
+    ; all X
+    (set c (fourstate 0xABCDEF012345 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  ; b occupies bits [79:48], crossing the 64-bit chunk boundary
+  ; Expected mask: bits [79:48] = 1, rest = 0
+  (let expected_mask (<< 0xFFFFFFFF 48))
+  (assert (== m expected_mask) "X in b should span bits [79:48] crossing chunk boundary")
+  ; c at bits [47:0] should be preserved
+  (let lower_48_mask (- (<< 1 48) 1))
+  (let v_c (& v lower_48_mask))
+  (assert (== v_c 0xABCDEF012345) "Lower 48 bits from c should be intact")
+  ; a at bits [127:80] should be preserved (after normalization, b's value bits are 0)
+  (let v_a (>> v 80))
+  (assert (== v_a 0x123456789ABC) "Upper 48 bits from a should be intact"))
+
+(case test_four_state_ff_sync_reset_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            clk: input clock,
+            rst: input reset,
+            sync_rst: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            always_ff {
+                if_reset {
+                    q = 8'd0;
+                } else {
+                    if sync_rst {
+                        q = 8'd0;
+                    } else {
+                        q = d;
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  ; 1. Async reset to clear state (AsyncLow: rst=0 means active)
+  (modify
+    (set rst (fourstate 0 0))
+    (set sync_rst (fourstate 0 0))
+    (set d (fourstate 0 0))
+    (set q (fourstate 0 0)))
+  (tick clk)
+  (let v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== v_q 0))
+  (assert (== m_q 0) "Async reset should clear X")
+  ; 2. Load data with X into q (deactivate reset: rst=1)
+  (modify
+    (set rst (fourstate 1 0))
+    (set sync_rst (fourstate 0 0))
+    (set d (fourstate 0xAB 0x0F)))
+    ; lower nibble X
+  (tick clk)
+  (let m_q (xmask (get q)))
+  (assert (== m_q 0x0F) "q should capture X from d")
+  ; 3. Sync reset should clear q (and X) to 0
+  (modify (set sync_rst (fourstate 1 0)))
+  (tick clk)
+  (let v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== v_q 0) "Sync reset should set q to 0")
+  (assert (== m_q 0) "Sync reset should clear X in q")
+  ; 4. Load X again, then verify sync reset clears it again
+  (modify
+    (set sync_rst (fourstate 0 0))
+    (set d (fourstate 0 0xFF)))
+    ; all X
+  (tick clk)
+  (let m_q (xmask (get q)))
+  (assert (== m_q 0xFF) "q should capture all-X from d")
+  (modify (set sync_rst (fourstate 1 0)))
+  (tick clk)
+  (let v_q (payload (get q)))
+  (let m_q (xmask (get q)))
+  (assert (== v_q 0) "Second sync reset should set q to 0")
+  (assert (== m_q 0) "Second sync reset should clear all X"))
+
+(case test_four_state_explicit_cast_with_x
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            a: input signed logic<8>,
+            y_to_unsigned: output logic<8>
+        ) {
+            assign y_to_unsigned = a;
+        }
+    "#)
+  (top Top)
+  ; a = 0x80 (-128 signed), no X: unsigned view should be 0x80
+  (modify (set a (fourstate 0x80 0)))
+  (let v (payload (get y_to_unsigned)))
+  (let m (xmask (get y_to_unsigned)))
+  (assert (== v 0x80) "Signed→unsigned: value preserved")
+  (assert (== m 0) "Signed→unsigned: no X")
+  ; a = 0x7F (+127 signed), no X
+  (modify (set a (fourstate 0x7F 0)))
+  (let v (payload (get y_to_unsigned)))
+  (let m (xmask (get y_to_unsigned)))
+  (assert (== v 0x7F) "Signed→unsigned: positive value preserved")
+  (assert (== m 0))
+  ; a has X in sign bit (bit 7): X should propagate to output
+  (modify
+    (set a (fourstate 0x40 0x80)))
+    ; bit 7 is X
+  (let m (xmask (get y_to_unsigned)))
+  (assert (== m 0x80) "Signed→unsigned: X in sign bit preserved")
+  ; a has X in lower bits: X should propagate
+  (modify
+    (set a (fourstate 0xA0 0x0F)))
+    ; lower nibble X
+  (let v (payload (get y_to_unsigned)))
+  (let m (xmask (get y_to_unsigned)))
+  (assert (== m 0x0F) "Signed→unsigned: X in lower bits preserved")
+  (assert (== v 0xA0) "Signed→unsigned: value normalized (v &= ~m)")
+  ; All bits Z (v=0, m=1 in new encoding)
+  (modify (set a (fourstate 0 0xFF)))
+  (let v (payload (get y_to_unsigned)))
+  (let m (xmask (get y_to_unsigned)))
+  (assert (== m 0xFF) "Signed→unsigned: all Z/X propagated")
+  (assert (== v 0) "Signed→unsigned: value preserved"))
+
+(case test_z_literal_passthrough
+  (four_state)
+  (source "test.veryl" #"
+        module Top (a: input logic<8>, y: output logic<8>) {
+            assign y = 8'hzz;
+        }
+    "#)
+  (top Top)
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "Z literal: all bits should have mask=1")
+  (assert (== v 0x00) "Z literal: Z encoding has v=0"))
+
+(case test_z_mux_tristate_pattern
+  (four_state)
+  (source "test.veryl" #"
+        module Top (en: input logic, d: input logic<8>, y: output logic<8>) {
+            assign y = if en ? d : 8'hzz;
+        }
+    "#)
+  (top Top)
+  ; en=1 → y=d (definite)
+  (modify
+    (set en (fourstate 1 0))
+    (set d (fourstate 0xA5 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== v 0xA5) "en=1: y should be d")
+  (assert (== m 0) "en=1: no X/Z bits")
+  ; en=0 → y=Z
+  (modify (set en (fourstate 0 0)))
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "en=0: y should be all Z (mask=0xFF)")
+  ; Z = (v=0, m=1)
+  (assert (== v 0) "en=0: Z encoding (v=0, m=1)"))
+
+(case test_x_literal_encoding
+  (four_state)
+  (source "test.veryl" #"
+        module Top (y: output logic<8>) {
+            assign y = 8'hxx;
+        }
+    "#)
+  (top Top)
+  (let v (payload (get y)))
+  (let m (xmask (get y)))
+  (assert (== m 0xFF) "X literal: all bits should have mask=1")
+  (assert (== v 0xFF) "X literal: X encoding has v=1"))
+
+(case test_four_state_shifts_preserve_xz
+  (four_state)
+  (source "test.veryl" #"module Top (sh: input logic<16>,
+a_8: input logic<8>,
+shr_8: output logic<8>,
+shl_8: output logic<8>,
+constant_8: output logic<8>,
+narrow_8: output logic<4>,
+a_64: input logic<64>,
+shr_64: output logic<64>,
+shl_64: output logic<64>,
+constant_64: output logic<64>,
+narrow_64: output logic<4>,
+a_65: input logic<65>,
+shr_65: output logic<65>,
+shl_65: output logic<65>,
+constant_65: output logic<65>,
+narrow_65: output logic<4>,
+a_128: input logic<128>,
+shr_128: output logic<128>,
+shl_128: output logic<128>,
+constant_128: output logic<128>,
+narrow_128: output logic<4>,
+a_256: input logic<256>,
+shr_256: output logic<256>,
+shl_256: output logic<256>,
+constant_256: output logic<256>,
+narrow_256: output logic<4>) {assign shr_8 = a_8 >> sh;
+assign shl_8 = a_8 << sh;
+assign constant_8 = a_8 >> 1;
+assign narrow_8 = a_8 >> sh;
+assign shr_64 = a_64 >> sh;
+assign shl_64 = a_64 << sh;
+assign constant_64 = a_64 >> 1;
+assign narrow_64 = a_64 >> sh;
+assign shr_65 = a_65 >> sh;
+assign shl_65 = a_65 << sh;
+assign constant_65 = a_65 >> 1;
+assign narrow_65 = a_65 >> sh;
+assign shr_128 = a_128 >> sh;
+assign shl_128 = a_128 << sh;
+assign constant_128 = a_128 >> 1;
+assign narrow_128 = a_128 >> sh;
+assign shr_256 = a_256 >> sh;
+assign shl_256 = a_256 << sh;
+assign constant_256 = a_256 >> 1;
+assign narrow_256 = a_256 >> sh;
+}"#)
+  (top Top)
+  (expand width (8 64 65 128 256)
+    (do
+      (let limit (- (<< 1 {width}) 1))
+      (let payload (| (<< 0xaa (- {width} 8)) (? (== {width} 8) 0 0x55)))
+      (let mask (<< 0xff (- {width} 8)))
+      (for amount (list 0 1 (/ {width} 2) (- {width} 1))
+        (modify
+          (set a_{width} (fourstate payload mask))
+          (set sh amount))
+        (assert_eq shr_{width} (fourstate (>> payload amount) (>> mask amount)) "shr width={width}")
+        (assert_eq shl_{width} (fourstate (& (<< payload amount) limit) (& (<< mask amount) limit)) "shl width={width}")
+        (assert_eq constant_{width} (fourstate (>> payload 1) (>> mask 1)) "constant width={width}")
+        (assert_eq narrow_{width} (fourstate (& (>> payload amount) 15) (& (>> mask amount) 15)) "narrow width={width}"))
+      ; Both 1z and 1x must produce all X, despite the definite one bit.
+      (for count (list 2 3)
+        (modify (set sh (fourstate count 1)))
+        (assert_eq shr_{width} (fourstate limit limit) "unknown count width={width}")
+        (assert_eq shl_{width} (fourstate limit limit) "unknown count width={width}")
+        (assert_eq narrow_{width} (fourstate 15 15))))))

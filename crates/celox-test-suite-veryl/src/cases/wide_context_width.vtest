@@ -1,0 +1,168 @@
+(group wide_context_width (category types))
+
+(case test_wide_context_addition_carry
+  (source "test.veryl" #"
+module Top (
+a: input  logic<64>,
+b: input  logic<64>,
+o: output logic<65>
+) {
+assign o = a + b;
+}
+"#)
+  (top Top)
+  (let val_a 0xffffffffffffffff)
+  (let val_b 1)
+  ; Expected: 2^64
+  (let expected (<< 1 64))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected "Carry bit should be preserved in 65-bit context"))
+
+(case test_wide_context_subtraction_underflow
+  (source "test.veryl" #"
+module Top (
+a: input  logic<64>,
+b: input  logic<64>,
+o: output logic<65>
+) {
+assign o = a - b;
+}
+"#)
+  (top Top)
+  (let val_a 0)
+  (let val_b 1)
+  ; (0 - 1) & ((1 << 65) - 1) = (1 << 65) - 1
+  (let expected (- (<< 1 65) 1))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected "Underflow in 65-bit context should result in 65-bit all-ones"))
+
+(case test_wide_context_shift_left
+  (source "test.veryl" #"
+module Top (
+i: input  logic<64>,
+s: input  logic<8>,
+o: output logic<130>
+) {
+// i as 130 ensures the shift happens in 130-bit context
+assign o = (i as 130) << s;
+}
+"#)
+  (top Top)
+  (let val_i 1)
+  (let val_s 65)
+  (let expected (<< 1 65))
+  (modify
+    (set i val_i)
+    (set s val_s))
+  (assert_eq o expected "Shift left with wide cast failed"))
+
+(case test_wide_context_constant_folding
+  (source "test.veryl" #"
+module Top (
+o: output logic<65>
+) {
+always_comb {
+o = 64'hffff_ffff_ffff_ffff + 64'h1;
+}
+}
+"#)
+  (top Top)
+  (let expected (<< 1 64))
+  (assert_eq o expected "Constant folding in 65-bit context failed"))
+
+(case test_wide_runtime_shift_width_behavior
+  (source "test.veryl" #"
+module Top (
+i: input  logic<64>,
+s: input  logic<8>,
+o1: output logic<130>,
+o2: output logic<130>
+) {
+always_comb {
+// The shift result width is determined by lhs.
+o1 = i << s;
+// To keep bits, 'i' must be cast to the target width before shifting.
+o2 = (i as 130) << s;
+}
+}
+"#)
+  (top Top)
+  ; Case 1: i=2^63 + 2^62, s=1
+  ; o1: (i << 1) in 64-bit context = 2^63 (the 2^64 bit is lost) -> zero-extended to 130-bit
+  ; o2: (i as 130 << 1) in 130-bit context = 2^64 + 2^63
+  (let val_i (| (<< 1 63) (<< 1 62)))
+  (let val_s 1)
+  (let expected_o1 (<< val_i val_s))
+  (let expected_o2 (<< val_i val_s))
+  (modify
+    (set i val_i)
+    (set s val_s))
+  (assert_eq o1 expected_o1 "Upper bit should be preserved")
+  (assert_eq o2 expected_o2 "Upper bit should be preserved after 130-bit cast")
+  (let val_i (<< 1 63))
+  (let val_s 2)
+  (let expected_o1 (<< val_i val_s))
+  (let expected_o2 (<< val_i val_s))
+  (modify
+    (set i val_i)
+    (set s val_s))
+  (assert_eq o1 expected_o1)
+  (assert_eq o2 expected_o2))
+
+(case test_wide_context_constant_folding_128bit
+  (source "test.veryl" #"
+module Top (
+o: output logic<128>
+) {
+always_comb {
+o = 32'hffff_ffff + 1;
+}
+}
+"#)
+  (top Top)
+  (let expected (<< 1 32))
+  (assert_eq o expected "Constant folding in 128-bit context failed: 32'hffff_ffff + 1 should be 32'h1_0000_0000"))
+
+(case test_wide_context_multiplication_boundary
+  (source "test.veryl" #"
+module Top (
+a: input  logic<64>,
+b: input  logic<64>,
+o: output logic<128>
+) {
+assign o = (a as 128) * (b as 128);
+}
+"#)
+  (top Top)
+  (let val_a 0xffffffffffffffff)
+  (let val_b 0xffffffffffffffff)
+  ; (2^64 - 1)^2 = 2^128 - 2*2^64 + 1
+  (let expected (+ (- (<< 1 128) (<< 2 64)) 1))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected "64-bit * 64-bit multiplication should not truncate in 128-bit context"))
+
+(case test_wide_context_addition_mixed_boundary
+  (source "test.veryl" #"
+module Top (
+a: input  logic<64>,
+b: input  logic<1>,
+o: output logic<65>
+) {
+assign o = a + b;
+}
+"#)
+  (top Top)
+  (let val_a 0xffffffffffffffff)
+  (let val_b 1)
+  ; Expected: 2^64
+  (let expected (<< 1 64))
+  (modify
+    (set a val_a)
+    (set b val_b))
+  (assert_eq o expected "Mixed 64-bit + 1-bit addition should not truncate in 65-bit context"))

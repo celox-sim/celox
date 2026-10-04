@@ -1,0 +1,121 @@
+(group enum_type (category types))
+
+(case test_enum_case_match
+  (source "test.veryl" #"
+module Top (
+sel: input logic<2>,
+o:   output logic<8>
+) {
+enum State: logic<2> {
+Idle = 2'd0,
+Run  = 2'd1,
+Done = 2'd2,
+}
+always_comb {
+case sel {
+State::Idle: o = 8'h00;
+State::Run:  o = 8'hAA;
+State::Done: o = 8'hFF;
+default:     o = 8'h01;
+}
+}
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq o 0x00)
+  (modify (set sel 1))
+  (assert_eq o 0xAA)
+  (modify (set sel 2))
+  (assert_eq o 0xFF)
+  (modify (set sel 3))
+  (assert_eq o 0x01))
+
+(case test_enum_ff_state_machine
+  (source "test.veryl" #"
+module Top (
+clk:   input clock,
+rst:   input reset,
+start: input logic,
+state_out: output logic<2>
+) {
+enum State: logic<2> {
+Idle = 2'd0,
+Run  = 2'd1,
+Done = 2'd2,
+}
+var state: State;
+always_ff (clk, rst) {
+if_reset {
+state = State::Idle;
+} else {
+case state {
+State::Idle: {
+if start {
+state = State::Run;
+}
+}
+State::Run: {
+state = State::Done;
+}
+State::Done: {
+state = State::Idle;
+}
+default: {
+state = State::Idle;
+}
+}
+}
+}
+assign state_out = state;
+}
+"#)
+  (top Top)
+  ; Reset (AsyncLow: rst=0 means active)
+  (modify
+    (set rst 0)
+    (set start 0))
+  (tick clk)
+  (assert_eq state_out 0)
+  ; Idle
+  ; Release reset, start = 0 -> stay Idle
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq state_out 0)
+  ; Idle
+  ; start = 1 -> go to Run
+  (modify (set start 1))
+  (tick clk)
+  (assert_eq state_out 1)
+  ; Run
+  ; Run -> Done
+  (modify (set start 0))
+  (tick clk)
+  (assert_eq state_out 2)
+  ; Done
+  ; Done -> Idle
+  (tick clk)
+  (assert_eq state_out 0))
+  ; Idle
+
+(case test_enum_assign_and_compare
+  (source "test.veryl" #"
+        module Top (
+            i: input logic<2>,
+            o_is_b: output logic
+        ) {
+            enum Color: logic<2> {
+                Red   = 2'd0,
+                Green = 2'd1,
+                Blue  = 2'd2,
+            }
+            var c: Color;
+            assign c = i;
+            assign o_is_b = c == Color::Blue;
+        }
+    "#)
+  (top Top)
+  (modify (set i 0))
+  (assert_eq o_is_b 0)
+  (modify (set i 2))
+  (assert_eq o_is_b 1))

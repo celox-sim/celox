@@ -1,0 +1,77 @@
+(group packed_scatter_store (category arrays))
+
+(case packed_scatter_last_lane_does_not_touch_adjacent_storage
+  (source "test.veryl" #"
+module Top (
+    enable  : input  logic,
+    selector: input  logic<5>,
+    value   : input  logic<6>,
+    base    : input  logic<192>,
+    lanes   : output logic<192>,
+    sentinel: output logic<64>,
+) {
+    always_comb {
+        lanes = base;
+        sentinel = 64'ha55a_c33c_f00f_9669;
+        if enable {
+            if selector == 5'd0 { lanes[0 +: 6] = value; }
+            if selector == 5'd1 { lanes[6 +: 6] = value; }
+            if selector == 5'd2 { lanes[12 +: 6] = value; }
+            if selector == 5'd3 { lanes[18 +: 6] = value; }
+            if selector == 5'd4 { lanes[24 +: 6] = value; }
+            if selector == 5'd5 { lanes[30 +: 6] = value; }
+            if selector == 5'd6 { lanes[36 +: 6] = value; }
+            if selector == 5'd7 { lanes[42 +: 6] = value; }
+            if selector == 5'd8 { lanes[48 +: 6] = value; }
+            if selector == 5'd9 { lanes[54 +: 6] = value; }
+            if selector == 5'd10 { lanes[60 +: 6] = value; }
+            if selector == 5'd11 { lanes[66 +: 6] = value; }
+            if selector == 5'd12 { lanes[72 +: 6] = value; }
+            if selector == 5'd13 { lanes[78 +: 6] = value; }
+            if selector == 5'd14 { lanes[84 +: 6] = value; }
+            if selector == 5'd15 { lanes[90 +: 6] = value; }
+            if selector == 5'd16 { lanes[96 +: 6] = value; }
+            if selector == 5'd17 { lanes[102 +: 6] = value; }
+            if selector == 5'd18 { lanes[108 +: 6] = value; }
+            if selector == 5'd19 { lanes[114 +: 6] = value; }
+            if selector == 5'd20 { lanes[120 +: 6] = value; }
+            if selector == 5'd21 { lanes[126 +: 6] = value; }
+            if selector == 5'd22 { lanes[132 +: 6] = value; }
+            if selector == 5'd23 { lanes[138 +: 6] = value; }
+            if selector == 5'd24 { lanes[144 +: 6] = value; }
+            if selector == 5'd25 { lanes[150 +: 6] = value; }
+            if selector == 5'd26 { lanes[156 +: 6] = value; }
+            if selector == 5'd27 { lanes[162 +: 6] = value; }
+            if selector == 5'd28 { lanes[168 +: 6] = value; }
+            if selector == 5'd29 { lanes[174 +: 6] = value; }
+            if selector == 5'd30 { lanes[180 +: 6] = value; }
+            if selector == 5'd31 { lanes[186 +: 6] = value; }
+        }
+    }
+}
+"#)
+  (top Top)
+  (let base_value 0)
+  (for byte (range 0 24)
+    (set! base_value (| base_value (<< (^ (trunc 8 (* byte 37)) 0xa5) (* byte 8)))))
+  (let full_mask (- (<< 1 192) 1))
+  (for enabled (range 0 2)
+    (for selected (range 0 32)
+      (let lane_value (& (trunc 8 (+ (* selected 11) 7)) 0x3f))
+      (modify
+        (set enable enabled)
+        (set selector selected)
+        (set value lane_value)
+        (set base base_value))
+      (eval)
+      (let offset (* selected 6))
+      (assert_eq lanes
+        (? enabled
+          (| (& base_value (^ full_mask (<< 0x3f offset))) (<< lane_value offset))
+          base_value)
+        "packed value")
+      (assert_eq sentinel 0xa55a_c33c_f00f_9669 "adjacent sentinel")
+      (assert_eq base base_value "base input was overwritten")
+      (assert_eq (trunc 8 (get enable)) enabled)
+      (assert_eq (trunc 8 (get selector)) selected)
+      (assert_eq (trunc 8 (get value)) lane_value))))

@@ -1,0 +1,230 @@
+(group recovered_unrolled_fold (category control_flow))
+
+(case recovered_mmio_read_write_dependencies_are_independent
+  (source "test.veryl" #"
+        module Top (
+            reads : input logic<2>,
+            writes: input logic<2>,
+            read_enable : output logic,
+            write_enable: output logic,
+        ) {
+            var grant: logic;
+            var fired: logic<2>;
+            assign grant = !read_enable;
+            assign fired = if grant ? writes : 2'd0;
+            always_comb {
+                read_enable = 1'b0;
+                write_enable = 1'b0;
+                for h in 0..2 {
+                    if reads[h] { read_enable = 1'b1; }
+                    if fired[h] { write_enable = 1'b1; }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (for r (list 0 1 2 3 0)
+    (for w (list 0 1 2 3 0)
+      (modify
+        (set reads r)
+        (set writes w))
+      (assert_eq read_enable (!= r 0))
+      (assert_eq write_enable (&& (== r 0) (!= w 0))))))
+
+(case recovered_unrolled_store_forward_selects_older_entry
+  (source "test.veryl" #"
+        module StoreShadow (
+            store_idx : input  logic<5>,
+            store_addr: input  logic<64>,
+            store_data: input  logic<64>,
+            addresses : output logic<64> [32],
+            values    : output logic<64> [32],
+            widths    : output logic<3>  [32],
+            valid     : output logic     [32],
+        ) {
+            always_comb {
+                for i in 0..32 {
+                    addresses[i] = 64'd0;
+                    values[i]    = 64'd0;
+                    widths[i]    = 3'd0;
+                    valid[i]     = 1'b0;
+                }
+                addresses[store_idx] = store_addr;
+                values[store_idx]    = store_data;
+                widths[store_idx]    = 3'b010;
+                valid[store_idx]     = 1'b1;
+            }
+        }
+
+        module Top (
+            en        : input  logic,
+            head      : input  logic<5>,
+            load_idx  : input  logic<5>,
+            store_idx : input  logic<5>,
+            load_addr : input  logic<64>,
+            store_addr: input  logic<64>,
+            store_data: input  logic<64>,
+            mask       : output logic,
+            byte0      : output logic<8>,
+        ) {
+            var rob_addr: logic<64> [32];
+            var rob_data: logic<64> [32];
+            var rob_f3  : logic<3>  [32];
+            var rob_fwd : logic     [32];
+            inst shadow: StoreShadow (
+                store_idx,
+                store_addr,
+                store_data,
+                addresses: rob_addr,
+                values   : rob_data,
+                widths   : rob_f3,
+                valid    : rob_fwd,
+            );
+
+            var ls_addr: logic<64> [32];
+            var ls_data: logic<64> [32];
+            var ls_f3  : logic<3>  [32];
+            var ls_fwd : logic     [32];
+            assign ls_addr = rob_addr;
+            assign ls_data = rob_data;
+            assign ls_f3   = rob_f3;
+            assign ls_fwd  = rob_fwd;
+
+            var found: logic;
+            var found_age: logic<5>;
+            var found_byte: logic<8>;
+            always_comb {
+                found      = 1'b0;
+                found_age  = 5'd0;
+                found_byte = 8'd0;
+                if en {
+                    for i in 0..32 {
+                        let age_i: logic<5> = (i as 5) - head;
+                        let load_age: logic<5> = load_idx - head;
+                        let sa: logic<64> = ls_addr[i];
+                        let la: logic<64> = load_addr;
+                        let covered: logic = ls_fwd[i] && (age_i <: load_age)
+                            && (la >= sa) && (la <: sa + ((5'd1 << ls_f3[i][1:0]) as 64));
+                        let offset: logic<64> = la - sa;
+                        let shifted: logic<64> = ls_data[i] >> {offset[2:0], 3'b000};
+                        if covered && (!found || age_i >: found_age) {
+                            found      = 1'b1;
+                            found_age  = age_i;
+                            found_byte = shifted[7:0];
+                        }
+                    }
+                }
+            }
+            assign mask  = found;
+            assign byte0 = found_byte;
+        }
+    "#)
+  (top Top)
+  (for (head_value store_value load_value) (list (0 3 4) (29 31 1) (17 18 21))
+    (modify
+      (set en 1)
+      (set head head_value)
+      (set store_idx store_value)
+      (set load_idx load_value)
+      (set store_addr 0x80002004)
+      (set load_addr 0x80002004)
+      (set store_data 0x12345678))
+    (assert_eq mask 1 "head={head_value} store={store_value} load={load_value}")
+    (assert_eq byte0 0x78 "head={head_value} store={store_value} load={load_value}")))
+
+(case recovered_unrolled_multi_state_priority
+  (source "test.veryl" #"
+    module Top (
+        en       : input  logic,
+        bits     : input  logic<4>,
+        out_data : output logic<3>,
+    ) {
+        var valid: logic;
+        var age  : logic<3>;
+        var data : logic<3>;
+
+        always_comb {
+            valid = 1'b0;
+            age   = 3'd0;
+            data  = 3'd0;
+            if en {
+                for i in 0..4 {
+                    let ai: logic<3> = (i as 3);
+                    if bits[i] && (!valid || ai >: age) {
+                        valid = 1'b1;
+                        age   = ai;
+                        data  = ai;
+                    }
+                }
+            }
+            out_data  = data;
+        }
+    }
+"#)
+  (top Top)
+  (for enabled (list 0 1)
+    (for input (range 0 16)
+      (set en enabled)
+      (set bits input)
+      (eval)
+      (let expected_priority (? (|| (== enabled 0) (== input 0)) 0 (trunc 8 (- 7 (- 8 (bitlen (trunc 8 input)))))))
+      (assert_eq out_data expected_priority "data for en={enabled} bits={input:04b}"))))
+
+(case recovered_unrolled_guard_uses_procedural_four_state_truth
+  (four_state)
+  (source "test.veryl" #"
+        module Top (
+            cond : input  logic<8>,
+            bits : input  logic<4>,
+            value: output logic<4>,
+        ) {
+            var state: logic<4>;
+            always_comb {
+                state = 4'd0;
+                if cond {
+                    for i in 0..4 {
+                        state[i] = bits[i];
+                    }
+                }
+                value = state;
+            }
+        }
+    "#)
+  (top Top)
+  (let unknown (<< 1 2))
+  (modify
+    (set bits 0b1010)
+    (set cond (fourstate unknown unknown)))
+  (eval)
+  (assert_eq value (fourstate 0 0) "an entirely unknown procedural guard must not enter the recovered loop")
+  (let known_one (<< 1 7))
+  (modify (set cond (fourstate (| known_one unknown) unknown)))
+  (eval)
+  (assert_eq value (fourstate 0b1010 0) "a known one bit must make the procedural guard true despite another unknown bit"))
+
+(case recovered_independent_reductions_share_input_correctly
+  (source "test.veryl" #"
+        module Top (
+            values: input logic<32>,
+            sum: output logic<8>,
+            parity: output logic<8>,
+        ) {
+            always_comb {
+                sum = 8'd0;
+                parity = 8'd0;
+                for h in 0..4 {
+                    sum = sum + values[h * 8+:8];
+                    parity = parity ^ values[h * 8+:8];
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (for value (list 0 0x04030201 0xffffffff 0x12345678 0x800100ff 0)
+    (modify (set values value))
+    (let b0 (slice value 7 0))
+    (let b1 (slice value 15 8))
+    (let b2 (slice value 23 16))
+    (let b3 (slice value 31 24))
+    (assert_eq sum (trunc 8 (+ b0 b1 b2 b3)))
+    (assert_eq parity (^ b0 b1 b2 b3))))

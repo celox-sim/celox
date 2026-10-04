@@ -1,193 +1,85 @@
-// The cases use ordinary Rust assertions and a small setup/build DSL so the
-// source and stimulus remain together. This macro is private to the corpus.
-macro_rules! cases {
-    (@expectation) => { crate::Expectation::Simulation };
-    (@expectation reject) => { crate::Expectation::CompilationError };
-    ($category:ident, $group:literal; $(
-        fn $name:ident($sim:ident) {
-            $(@tags [$($tag:ident),+ $(,)?];)?
-            $(@setup { $($setup:tt)* })?
-            $(@expect $expectation:ident;)?
-            @build $design:expr;
-            $($body:tt)*
+// Every group is a script file in the language of `crate::script`.
+
+pub(super) struct Group {
+    /// The file name, for diagnostics.
+    pub file: &'static str,
+    pub text: &'static str,
+}
+
+macro_rules! script {
+    ($name:literal) => {
+        Group {
+            file: concat!("src/cases/", $name, ".vtest"),
+            text: include_str!(concat!($name, ".vtest")),
         }
-    )*) => {
-        pub(super) const CASES: &[crate::TestCase] = &[$(
-            crate::TestCase {
-                name: concat!($group, "::", stringify!($name)),
-                category: crate::Category::$category,
-                expectation: cases!(@expectation $($expectation)?),
-                tags: &[$($(crate::TestTag::$tag),+)?],
-                run: |factory| {
-                    $($($setup)*)?
-                    let design = $design;
-                    let compiled = factory(&design);
-                    if cases!(@expectation $($expectation)?) == crate::Expectation::CompilationError {
-                        match compiled {
-                            Err(error) if error.is::<crate::CompilationRejected>() => {}
-                            Err(error) => panic!("compile {}::{}: expected language rejection, got adapter failure: {error}", $group, stringify!($name)),
-                            Ok(_) => panic!("invalid design was accepted: {}::{}", $group, stringify!($name)),
-                        }
-                        return;
-                    }
-                    let backend = compiled.unwrap_or_else(|error| {
-                        panic!("compile {}::{}: {error}", $group, stringify!($name))
-                    });
-                    #[allow(unused_mut, unused_variables)]
-                    let mut $sim = crate::Simulator::new(backend);
-                    $($body)*
-                },
-            },
-        )*];
     };
 }
 
-use std::path::{Path, PathBuf};
-
-fn std_source(parts: &[&str]) -> String {
-    veryl_std::expand().expect("failed to expand veryl-std sources");
-    let rel = parts.iter().collect::<PathBuf>();
-    let paths = veryl_std::paths(Path::new("")).expect("failed to resolve veryl-std sources");
-    let src = paths
-        .iter()
-        .find(|path| path.src.ends_with(&rel))
-        .unwrap_or_else(|| panic!("veryl-std source not found: {}", rel.display()));
-    std::fs::read_to_string(&src.src)
-        .unwrap_or_else(|err| panic!("failed to read {}: {}", src.src.display(), err))
-}
-
-mod advanced_interface;
-mod array_literal;
-mod basic;
-mod case_switch;
-mod comb_observer;
-mod compare_matrix;
-mod concat_operators;
-mod concatenation;
-mod concurrent_initial;
-mod context_width;
-mod counter;
-mod data_access;
-mod duplicate_varpath;
-mod enum_type;
-mod expression_semantics;
-mod false_loop;
-mod ff_event_snapshot;
-mod ff_narrow_arrays;
-mod fifo_issue5;
-mod flip_flop;
-mod for_loop_unroll;
-mod four_state;
-mod four_state_expression_semantics;
-mod function_arguments;
-mod generic_identity;
-mod hierarchical_assignment;
-mod hierarchy;
-mod interface;
-mod issue3_repro;
-mod linear_sorter_pull;
-mod loop_idiom;
-mod multi_clock;
-mod nba_cross_block;
-mod nba_cross_block_empty;
-mod nba_dynamic_array;
-mod operators;
-mod packed_scatter_store;
-mod param_override;
-mod proto_package;
-mod recovered_unrolled_fold;
-mod reset_edge_cases;
-mod self_determination;
-mod shift_bug_test;
-mod shift_signedness;
-mod signed_divrem;
-mod state_cast_semantics;
-mod std_binary_codec;
-mod std_delay;
-mod std_edge_detector;
-mod std_fifo;
-mod std_gray_codec;
-mod std_lfsr;
-mod std_mux;
-mod std_onehot;
-mod std_ram;
-mod struct_constructor;
-mod synth_dynamic_loop;
-mod system_function;
-mod test_unimplemented_paths;
-mod veryl_context_regressions;
-mod veryl_language;
-mod veryl_regressions;
-mod wide_context_width;
-mod wide_data;
-mod wide_operators;
-mod wide_shift_mem;
-
-pub(super) const GROUPS: &[&[crate::TestCase]] = &[
-    concurrent_initial::CASES,
-    hierarchical_assignment::CASES,
-    advanced_interface::CASES,
-    array_literal::CASES,
-    basic::CASES,
-    case_switch::CASES,
-    comb_observer::CASES,
-    compare_matrix::CASES,
-    concat_operators::CASES,
-    concatenation::CASES,
-    context_width::CASES,
-    counter::CASES,
-    data_access::CASES,
-    duplicate_varpath::CASES,
-    enum_type::CASES,
-    expression_semantics::CASES,
-    false_loop::CASES,
-    ff_event_snapshot::CASES,
-    ff_narrow_arrays::CASES,
-    fifo_issue5::CASES,
-    flip_flop::CASES,
-    for_loop_unroll::CASES,
-    four_state::CASES,
-    four_state_expression_semantics::CASES,
-    function_arguments::CASES,
-    generic_identity::CASES,
-    hierarchy::CASES,
-    interface::CASES,
-    issue3_repro::CASES,
-    linear_sorter_pull::CASES,
-    loop_idiom::CASES,
-    multi_clock::CASES,
-    nba_cross_block::CASES,
-    nba_cross_block_empty::CASES,
-    nba_dynamic_array::CASES,
-    operators::CASES,
-    packed_scatter_store::CASES,
-    param_override::CASES,
-    proto_package::CASES,
-    recovered_unrolled_fold::CASES,
-    reset_edge_cases::CASES,
-    self_determination::CASES,
-    shift_bug_test::CASES,
-    shift_signedness::CASES,
-    signed_divrem::CASES,
-    state_cast_semantics::CASES,
-    std_binary_codec::CASES,
-    std_delay::CASES,
-    std_edge_detector::CASES,
-    std_fifo::CASES,
-    std_gray_codec::CASES,
-    std_lfsr::CASES,
-    std_mux::CASES,
-    std_onehot::CASES,
-    std_ram::CASES,
-    struct_constructor::CASES,
-    synth_dynamic_loop::CASES,
-    system_function::CASES,
-    test_unimplemented_paths::CASES,
-    veryl_context_regressions::CASES,
-    veryl_language::CASES,
-    veryl_regressions::CASES,
-    wide_context_width::CASES,
-    wide_data::CASES,
-    wide_operators::CASES,
-    wide_shift_mem::CASES,
+pub(super) const GROUPS: &[Group] = &[
+    script!("concurrent_initial"),
+    script!("hierarchical_assignment"),
+    script!("advanced_interface"),
+    script!("array_literal"),
+    script!("basic"),
+    script!("case_switch"),
+    script!("comb_observer"),
+    script!("compare_matrix"),
+    script!("concat_operators"),
+    script!("concatenation"),
+    script!("context_width"),
+    script!("counter"),
+    script!("data_access"),
+    script!("duplicate_varpath"),
+    script!("enum_type"),
+    script!("expression_semantics"),
+    script!("false_loop"),
+    script!("ff_event_snapshot"),
+    script!("ff_narrow_arrays"),
+    script!("fifo_issue5"),
+    script!("flip_flop"),
+    script!("for_loop_unroll"),
+    script!("four_state"),
+    script!("four_state_expression_semantics"),
+    script!("function_arguments"),
+    script!("generic_identity"),
+    script!("hierarchy"),
+    script!("interface"),
+    script!("issue3_repro"),
+    script!("linear_sorter_pull"),
+    script!("loop_idiom"),
+    script!("multi_clock"),
+    script!("nba_cross_block"),
+    script!("nba_cross_block_empty"),
+    script!("nba_dynamic_array"),
+    script!("operators"),
+    script!("packed_scatter_store"),
+    script!("param_override"),
+    script!("proto_package"),
+    script!("recovered_unrolled_fold"),
+    script!("reset_edge_cases"),
+    script!("self_determination"),
+    script!("shift_bug_test"),
+    script!("shift_signedness"),
+    script!("signed_divrem"),
+    script!("state_cast_semantics"),
+    script!("std_binary_codec"),
+    script!("std_delay"),
+    script!("std_edge_detector"),
+    script!("std_fifo"),
+    script!("std_gray_codec"),
+    script!("std_lfsr"),
+    script!("std_mux"),
+    script!("std_onehot"),
+    script!("std_ram"),
+    script!("struct_constructor"),
+    script!("synth_dynamic_loop"),
+    script!("system_function"),
+    script!("test_unimplemented_paths"),
+    script!("veryl_context_regressions"),
+    script!("veryl_language"),
+    script!("veryl_regressions"),
+    script!("wide_context_width"),
+    script!("wide_data"),
+    script!("wide_operators"),
+    script!("wide_shift_mem"),
 ];

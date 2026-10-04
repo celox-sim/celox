@@ -1,0 +1,51 @@
+(group std_gray_codec (category standard_library))
+
+(case test_gray_roundtrip_8bit
+  (source "test.veryl"
+    (std "gray/gray_encoder.veryl")
+    (std "gray/gray_decoder.veryl")
+    #"
+module Top (
+i_bin  : input  logic<8>,
+o_gray : output logic<8>,
+o_bin  : output logic<8>,
+) {
+inst u_enc: gray_encoder #(WIDTH: 8) (
+i_bin,
+o_gray,
+);
+inst u_dec: gray_decoder #(WIDTH: 8) (
+i_gray: o_gray,
+o_bin,
+);
+}
+"#)
+  (top Top)
+  (for val (range 0 (+ 255 1))
+    (modify (set i_bin val))
+    (let gray_out (trunc 8 (get o_gray)))
+    (let bin_out (trunc 8 (get o_bin)))
+    (assert (== bin_out val) "roundtrip failed: input={val}, gray={gray_out:#04x}, output={bin_out}")))
+
+(case test_gray_single_bit_change
+  (source "test.veryl"
+    (std "gray/gray_encoder.veryl")
+    #"
+module Top (
+i_bin  : input  logic<8>,
+o_gray : output logic<8>,
+) {
+inst u_enc: gray_encoder #(WIDTH: 8) (
+i_bin,
+o_gray,
+);
+}
+"#)
+  (top Top)
+  (let prev 0)
+  (for val (range 0 256)
+    (modify (set i_bin val))
+    (let gray (trunc 8 (get o_gray)))
+    (if (> val 0)
+      (assert (== (popcount (^ prev gray)) 1) "adjacent gray codes should differ by 1 bit"))
+    (set! prev gray)))

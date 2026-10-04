@@ -1,0 +1,20 @@
+(group false_loop (category combinational))
+
+(case test_read_then_overwrite_convergence
+  ; This exercises Celox's fixed-point scheduling. The Veryl simulator
+  ; adapter evaluates these continuous assignments in source order.
+  (source "test.veryl" #"
+        module Top (
+            i: input logic,
+            o: output logic,
+        ) {
+            var a: logic<2>;
+            assign a[0] = a[1];
+            assign a[1] = i;
+            assign o = a[0];
+        }
+    "#)
+  (top Top)
+  (modify (set i 1))
+  (let result (get o))
+  (assert (== result 1) "The false loop failed to converge to the stable state (Fixed Point)"))

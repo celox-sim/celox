@@ -1,0 +1,126 @@
+(group counter (category sequential))
+
+(case test_counter_n4_basic
+  (source "test.veryl" #"
+module Top (
+clk: input clock,
+rst: input reset,
+cnt0: output logic<32>,
+cnt1: output logic<32>,
+cnt3: output logic<32>,
+) {
+var cnt: logic<32>[4];
+assign cnt0 = cnt[0];
+assign cnt1 = cnt[1];
+assign cnt3 = cnt[3];
+for i in 0..4: g {
+always_ff (clk, rst) {
+if_reset { cnt[i] = 0; }
+else { cnt[i] += 1; }
+}
+}
+}
+"#)
+  (top Top)
+  ; Assert reset (active low: rst=0)
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq cnt0 0)
+  (assert_eq cnt1 0)
+  ; Deassert reset (rst=1), start counting
+  (modify (set rst 1))
+  ; Tick 10 times
+  (tick clk 10)
+  (assert_eq cnt0 10)
+  (assert_eq cnt1 10)
+  (assert_eq cnt3 10)
+  ; 100 more ticks
+  (tick clk 100)
+  (assert_eq cnt0 110)
+  (assert_eq cnt3 110))
+
+(case test_counter_n100_wrap
+  (source "test.veryl" #"
+module Top #(param N: u32 = 100) (
+clk: input clock,
+rst: input reset,
+cnt0_out: output logic<8>,
+cnt99_out: output logic<8>,
+) {
+var cnt: logic<8>[N];
+assign cnt0_out = cnt[0];
+assign cnt99_out = cnt[99];
+for i in 0..N: g {
+always_ff (clk, rst) {
+if_reset { cnt[i] = 0; }
+else { cnt[i] += 1; }
+}
+}
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq cnt0_out 0)
+  ; Deassert reset
+  (modify (set rst 1))
+  ; 256 ticks: 8-bit counter wraps at 255
+  (tick clk 256)
+  ; 256 ticks = 256 mod 256 = 0
+  (assert_eq cnt0_out 0 "8-bit counter should wrap")
+  (assert_eq cnt99_out 0)
+  ; 1 more tick
+  (tick clk)
+  (assert_eq cnt0_out 1)
+  (assert_eq cnt99_out 1))
+
+(case test_phase_state_ssa_preserves_eval_before_apply_and_four_state
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    data: input logic<8>,
+    next_value: output logic<8>,
+    captured: output logic<8>,
+    previous: output logic<8>,
+) {
+    assign next_value = data ^ 8'ha5;
+
+    always_ff (clk, rst) {
+        if_reset {
+            captured = 0;
+        } else {
+            captured = next_value;
+        }
+    }
+
+    always_ff (clk, rst) {
+        if_reset {
+            previous = 0;
+        } else {
+            previous = captured;
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set rst 0))
+  (tick clk)
+  (assert_eq captured (fourstate 0 0))
+  (assert_eq previous (fourstate 0 0))
+  (let first_value 0x3c)
+  (let first_mask 0x10)
+  (modify
+    (set rst 1)
+    (set data (fourstate first_value first_mask)))
+  (tick clk)
+  (assert_eq captured (fourstate (^ first_value 0xa5) first_mask))
+  (assert_eq previous (fourstate 0 0))
+  (let second_value 0x52)
+  (let second_mask 0x03)
+  (modify (set data (fourstate second_value second_mask)))
+  (tick clk)
+  (assert_eq captured (fourstate (^ second_value 0xa5) second_mask))
+  (assert_eq previous (fourstate (^ first_value 0xa5) first_mask)))

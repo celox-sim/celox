@@ -1,0 +1,128 @@
+(group loop_idiom (category control_flow))
+
+(case test_guarded_packed_scan
+  (source "test.veryl" #"
+        module Top (
+            entries: input logic<32>,
+            gate: input logic,
+            seed: input logic<32>,
+            result: output logic<32>,
+            partial: output logic<32>,
+        ) {
+            always_comb {
+                result = 32'd0;
+                partial = seed;
+                for i in 0..32 {
+                    result[i] = gate && entries[i];
+                }
+                for i in 0..16 {
+                    partial[i] = gate && entries[i];
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (for mask (list 0 1 0x80000024 0xffffffff)
+    (for initial (list 0 0xabcdffff 0xffffffff)
+      (set entries mask)
+      (set seed initial)
+      (for active (list 0 1 0)
+        (set gate active)
+        (eval)
+        (let expected (? (!= active 0) mask 0))
+        (assert_eq result expected)
+        (assert_eq partial (| (& initial 0xffff0000) (& expected 0xffff)))))))
+
+(case test_recovered_bit_count_loop_semantics
+  (source "test.veryl" #"
+    module Top (
+        bits: input logic<64>,
+        gate: input logic,
+        fallback: input logic<7>,
+        pop: output logic<7>,
+        clz: output logic<7>,
+        ctz: output logic<7>,
+        gated_clz: output logic<7>,
+    ) {
+        always_comb {
+            pop = 7'd0;
+            for i in 0..64 {
+                pop = pop + {6'b0, bits[i]};
+            }
+
+            clz = 7'd64;
+            for i in 0..64 {
+                if bits[i] {
+                    clz = 7'd63 - (i as 7);
+                }
+            }
+
+            ctz = 7'd64;
+            for i in 0..64 {
+                if bits[63 - i] {
+                    ctz = 7'd63 - (i as 7);
+                }
+            }
+
+            gated_clz = if gate ? 7'd64 : fallback;
+            for i in 0..64 {
+                if bits[63 - i] && gated_clz == 7'd64 {
+                    gated_clz = if gate ? (i as 7) : gated_clz;
+                }
+            }
+        }
+    }
+"#)
+  (top Top)
+  (for (input expected_pop expected_clz expected_ctz) (list (0 0 64 64) (1 1 63 0) ((trunc 64 (<< 1 63)) 1 0 63) (0x00f0000000000008 5 8 3) (0xffffffffffffffff 64 0 0))
+    (set bits input)
+    (set gate 1)
+    (set fallback 37)
+    (eval)
+    (assert_eq pop expected_pop "popcount({input:#x})")
+    (assert_eq clz expected_clz "clz({input:#x})")
+    (assert_eq ctz expected_ctz "ctz({input:#x})")
+    (assert_eq gated_clz expected_clz "gated clz({input:#x})")
+    (set gate 0)
+    (eval)
+    (assert_eq gated_clz 37 "gated clz fallback({input:#x})")))
+
+(case test_guarded_scan_preserves_independent_outputs
+  (source "test.veryl" #"
+        module Top (
+            entries: input logic<32>,
+            gate0: input logic,
+            gate1: input logic,
+            seed: input logic<8>,
+            result0: output logic<8>,
+            result1: output logic<8>,
+        ) {
+            always_comb {
+                result0 = seed;
+                result1 = seed;
+                for i in 0..32 {
+                    if gate0 && entries[i] {
+                        result0 = seed + (i as 8);
+                    }
+                    if gate1 && entries[31 - i] {
+                        result1 = seed ^ (i as 8);
+                    }
+                }
+            }
+        }
+    "#)
+  (top Top)
+  (for mask (list 0 1 (<< 1 31) 0x8000_0024 0xffff_ffff)
+    (for initial (list 0 37 250)
+      (set entries mask)
+      (set seed initial)
+      ; Change guards while retaining the same data, then return idle.
+      (for (g0 g1) (list (0 0) (1 0) (0 1) (1 1) (0 0))
+        (set gate0 g0)
+        (set gate1 g1)
+        (eval)
+        ; The highest and lowest set bits of the mask.
+        (let high (- (bitlen mask) 1))
+        (let low (- (bitlen (& mask (- mask))) 1))
+        (assert_eq result0 (? (&& g0 (!= mask 0)) (trunc 8 (+ initial high)) initial) "result0")
+        (assert_eq result1 (? (&& g1 (!= mask 0)) (^ initial (- 31 low)) initial) "result1")))))

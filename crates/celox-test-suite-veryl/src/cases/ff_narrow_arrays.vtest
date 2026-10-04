@@ -1,0 +1,37 @@
+(group ff_narrow_arrays (category sequential))
+
+(case ff_captures_every_one_bit_array_element
+  (source "test.veryl" #"
+            module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+                var flags: logic [8];
+                always_ff (clk) {
+                    for i in 0..8 { flags[i] = d[i]; }
+                }
+                assign q = {flags[7], flags[6], flags[5], flags[4], flags[3], flags[2], flags[1], flags[0]};
+            }
+        "#)
+  (top Top)
+  (for value (list 0 0xff 0x55 0xaa 0x81 0x7e)
+    (modify (set d value))
+    (tick clk)
+    (assert_eq q value "input {value:#x}")))
+
+(case ff_captures_padded_elements_and_unknown_masks
+  (four_state)
+  (source "test.veryl" #"
+            module Top (clk: input clock, d: input logic<24>, q: output logic<24>) {
+                var lanes: logic<3> [8];
+                always_ff (clk) {
+                    for i in 0..8 { lanes[i] = d[i * 3 +: 3]; }
+                }
+                assign q = {lanes[7], lanes[6], lanes[5], lanes[4], lanes[3], lanes[2], lanes[1], lanes[0]};
+            }
+        "#)
+  (top Top)
+  (for (value mask) (list (0xffffff 0) (0x91a653 0x263ac9) (0x123456 0xe39a58) (0 0xffffff))
+    ; Set masked bits to X (value=1, mask=1), including an all-X pattern.
+    (let value (| value mask))
+    (let mask mask)
+    (modify (set d (fourstate value mask)))
+    (tick clk)
+    (assert_eq q (fourstate value mask))))
