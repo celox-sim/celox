@@ -438,6 +438,7 @@ pub struct SpecImplementation {
     pub operations: BTreeMap<String, Term>,
     pub states: BTreeMap<String, Env>,
     pub observations: Env,
+    pub responses: BTreeMap<String, BoundedResponse>,
 }
 fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementation> {
     let path = "/implementation";
@@ -454,7 +455,7 @@ fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementatio
                 "operations",
                 "binding",
             ],
-            &["wires"],
+            &["wires", "responses"],
         ),
     )?;
     let composition = at("/implementation/composition", text(&doc["composition"]))?;
@@ -514,6 +515,14 @@ fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementatio
             ))
         })
         .collect::<Result<_>>()?;
+    let responses = bounded_responses(
+        doc.get("responses"),
+        &state,
+        spec.inputs(),
+        &env,
+        &operations,
+        &mut lower,
+    )?;
     at(
         "/implementation/binding",
         keys(&doc["binding"], &["states", "observations"], &[]),
@@ -588,5 +597,116 @@ fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementatio
         operations,
         states,
         observations,
+        responses,
     })
+}
+
+/// Single-outstanding request witness. Completion is the named operation selector.
+#[derive(Clone, Debug)]
+pub struct BoundedResponse {
+    pub operation: String,
+    pub accept: Term,
+    pub pending: Term,
+    pub rank: Term,
+    pub bound: u64,
+    pub assumption: Term,
+    pub cover_depth: Option<u32>,
+}
+fn bounded_responses(
+    value: Option<&Value>,
+    state: &Env,
+    inputs: &Env,
+    env: &Env,
+    operations: &BTreeMap<String, Term>,
+    lower: &mut Lower,
+) -> Result<BTreeMap<String, BoundedResponse>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let rows = at("/implementation/responses", named(value))?;
+    if rows.len() != 1 {
+        return fail(
+            "/implementation/responses",
+            "initial bounded-response support requires exactly one contract per implementation",
+        );
+    }
+    let mut result = BTreeMap::new();
+    for (name, row) in rows {
+        let path = child("/implementation/responses", name);
+        at(
+            &path,
+            keys(
+                row,
+                &["operation", "accept", "pending", "rank", "bound", "assume"],
+                &["cover_depth"],
+            ),
+        )?;
+        let operation = at(&child(&path, "operation"), text(&row["operation"]))?;
+        if !operations.contains_key(operation) {
+            return fail(&child(&path, "operation"), "unknown completion operation");
+        }
+        let pending = boolean(
+            &row["pending"],
+            &scope(state, &Env::new()),
+            &child(&path, "pending"),
+            lower,
+        )?;
+        let rank = expression(
+            &row["rank"],
+            &scope(state, &Env::new()),
+            &child(&path, "rank"),
+            lower,
+        )?;
+        let Sort::Bv(width) = rank.0.sort else {
+            return fail(
+                &child(&path, "rank"),
+                "response rank must be an unsigned state-only word",
+            );
+        };
+        if width > 64 {
+            return fail(
+                &child(&path, "rank"),
+                "response rank widths above 64 are unsupported",
+            );
+        }
+        let bound = row["bound"]
+            .as_u64()
+            .filter(|n| *n > 0 && (*n as u128) < (1u128 << width))
+            .ok_or_else(|| ValidationError {
+                path: child(&path, "bound"),
+                message: "bound must be a positive integer representable in the rank width".into(),
+            })?;
+        let assumption = boolean(
+            &row["assume"],
+            &scope(&Env::new(), inputs),
+            &child(&path, "assume"),
+            lower,
+        )?;
+        let cover_depth = row
+            .get("cover_depth")
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| (1..=32).contains(n))
+                    .map(|n| n as u32)
+                    .ok_or_else(|| ValidationError {
+                        path: child(&path, "cover_depth"),
+                        message: "cover_depth must be an integer from 1 through 32".into(),
+                    })
+            })
+            .transpose()?;
+        let accept = boolean(&row["accept"], env, &child(&path, "accept"), lower)?;
+        result.insert(
+            name.clone(),
+            BoundedResponse {
+                operation: operation.into(),
+                accept,
+                pending,
+                rank,
+                bound,
+                assumption,
+                cover_depth,
+            },
+        );
+    }
+    Ok(result)
 }

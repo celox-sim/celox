@@ -58,7 +58,7 @@ async function activate(context) {
         output.clear();
         output.appendLine('Snapshot diagnostics only; no cached result is proof authority.');
         output.appendLine('Counterexamples may concern an auxiliary lemma or guard, not the target or reset reachability.');
-        output.appendLine(JSON.stringify({documentVersion: result.documentVersion, identity: result.identity, requestIdentity: result.requestIdentity, diagnostics: result.diagnostics, scope: result.proof?.scope, branch: result.proof?.branch, matchingBranches: result.proof?.matching_branches, error: result.proof?.error, query: result.proof?.query, queryDisplayTruncated: result.proof?.query_display_truncated, targets: result.proof?.reports.map(r => r.lemma_candidates), witnesses: result.witnesses}, null, 2));
+        output.appendLine(JSON.stringify({documentVersion: result.documentVersion, identity: result.identity, requestIdentity: result.requestIdentity, diagnostics: result.diagnostics, verification: result.verification, scope: result.proof?.scope, branch: result.proof?.branch, matchingBranches: result.proof?.matching_branches, error: result.proof?.error, query: result.proof?.query, queryDisplayTruncated: result.proof?.query_display_truncated, targets: result.proof?.reports.map(r => r.lemma_candidates), witnesses: result.witnesses}, null, 2));
         output.show(true);
         return result;
       } catch (error) {

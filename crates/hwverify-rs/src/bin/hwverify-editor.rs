@@ -64,8 +64,96 @@ fn run(request: &Value) -> Result<Value, Value> {
     };
     if doc["kind"] == "specification" {
         if request["operation"] == "prove" {
-            return Err(
-                json!({"uri":uri,"message":"explicit lemma execution currently requires a design"}),
+            if request["program"] != "responses"
+                || !request["step"].is_null()
+                || !request["branch"].is_null()
+            {
+                return Err(
+                    json!({"uri":uri,"message":"select Check implementation responses; steps and branches are unsupported for response contracts"}),
+                );
+            }
+            let out = Path::new(
+                request["out"]
+                    .as_str()
+                    .ok_or(json!({"message":"missing output"}))?,
+            );
+            fs::create_dir_all(out).map_err(|e| json!({"message":e.to_string()}))?;
+            let mut report = if doc["version"] == 4 {
+                let spec = hwverify_ir::ScopedSpecification::from_json(&doc)
+                    .map_err(|e| json!({"message":e.to_string()}))?;
+                hwverify_verify::check_scoped_specification(
+                    &spec,
+                    "EDITOR_EXTERNAL_SOLVER_FORBIDDEN".into(),
+                    out.into(),
+                )
+            } else {
+                let spec = hwverify_ir::Specification::from_json(&doc)
+                    .map_err(|e| json!({"message":e.to_string()}))?;
+                hwverify_verify::check_specification(
+                    &spec,
+                    "EDITOR_EXTERNAL_SOLVER_FORBIDDEN".into(),
+                    out.into(),
+                )
+            }
+            .map_err(|e| json!({"uri":uri,"message":e}))?;
+            let parsed = parse_document(source, uri).map_err(diagnostic)?;
+            if report["implementation_binding"].is_object() {
+                report["implementation_binding"]["source_path"] = json!("/implementation");
+            }
+            hwverify_syntax::locate_report(&mut report, uri, &parsed.spans);
+            let mut diagnostics=report["implementation_binding"]["obligations"].as_array().into_iter().flatten()
+                .filter(|r|r.get("source_path").is_some()).map(|r|json!({
+                    "uri":uri,"span":r["source_location"]["span"],"code":r["name"],
+                    "severity":if r["status"]=="passed" {3} else {1},
+                    "message":format!("Response {} / {}: {}",r["response"].as_str().unwrap_or(""),r["name"].as_str().unwrap_or(""),r["status"].as_str().unwrap_or("unknown"))
+                })).collect::<Vec<_>>();
+            for response in report["implementation_binding"]["responses"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let adequacy = &response["adequacy"];
+                let cover = &adequacy["reset_acceptance_cover"];
+                let depth = cover["depth"]
+                    .as_u64()
+                    .map(|n| format!("depth {n} nonreset edges"))
+                    .unwrap_or_else(|| "no depth requested".into());
+                diagnostics.push(json!({"uri":uri,"span":cover["source_location"]["span"],
+                    "code":"response_reset_acceptance_cover","severity":if cover["status"]=="reached" {3} else {2},
+                    "message":format!("Reset-acceptance cover: {}; {}; bounded existential adequacy only. {}", cover["status"].as_str().unwrap_or("unknown"), depth, cover["reason"].as_str().unwrap_or(""))}));
+
+                diagnostics.push(json!({"uri":uri,"span":adequacy["source_location"]["span"],
+                    "code":"response_external_service_not_specified","severity":2,
+                    "message":adequacy["message"]}));
+            }
+            if let Some(diagnostic) =
+                binding_failure_diagnostic(&report["implementation_binding"], uri)
+            {
+                diagnostics.push(diagnostic);
+            }
+            let mut witnesses = serde_json::Map::new();
+            for obligation in report["implementation_binding"]["obligations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if obligation["status"] == "counterexample"
+                    && obligation["finite"]["original_formula_validated"] == true
+                    && obligation["solver_result"] == "sat"
+                {
+                    if let Some(evidence) = obligation["evidence"].as_str() {
+                        if let Ok(bytes) =
+                            fs::read(out.join(evidence).with_extension("finite.json"))
+                        {
+                            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                                witnesses.insert(obligation["name"].as_str().unwrap_or(evidence).into(),json!({"context":value["context_values"],"source_location":obligation["source_location"],"original_formula_validated":true,"reset_reachability":"not_checked"}));
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(
+                json!({"diagnostics":diagnostics,"verification":report,"witnesses":witnesses,"proof_programs":null,"binding":null}),
             );
         }
         return Ok(json!({"diagnostics":[],"proof_programs":null,"binding":null}));
@@ -149,4 +237,49 @@ fn main() {
         _ => json!({"diagnostics":[{"message":"editor request exceeds 64 MiB or cannot be read"}]}),
     };
     println!("{response}");
+}
+
+fn binding_failure_diagnostic(binding: &Value, uri: &str) -> Option<Value> {
+    let status = binding["status"].as_str()?;
+    if status == "verified" {
+        return None;
+    }
+    let blockers = binding["obligations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["status"] != "passed")
+        .map(|r| {
+            format!(
+                "{}: {}",
+                r["name"].as_str().unwrap_or("obligation"),
+                r["status"].as_str().unwrap_or("unknown")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(json!({"uri":uri,"span":binding["source_location"]["span"],
+        "code":"implementation_binding_not_verified","severity":1,
+        "message":format!("Implementation binding {status}; conditional response guarantee is not established. {blockers}")}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failed_and_unknown_prerequisites_are_blocking_diagnostics() {
+        for status in ["failed", "unknown"] {
+            let binding = json!({"status":status,"source_location":{"span":{"line":12}},
+                "obligations":[{"name":"response_0_countdown_decreases","status":"passed"},
+                    {"name":"binding_step","status":status}]});
+            let diagnostic = binding_failure_diagnostic(&binding, "test.hwv").unwrap();
+            assert_eq!(diagnostic["severity"], 1);
+            assert_eq!(diagnostic["span"]["line"], 12);
+            assert!(diagnostic["message"]
+                .as_str()
+                .unwrap()
+                .contains("binding_step"));
+        }
+        assert!(binding_failure_diagnostic(&json!({"status":"verified"}), "test.hwv").is_none());
+    }
 }

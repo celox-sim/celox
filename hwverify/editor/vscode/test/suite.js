@@ -152,6 +152,31 @@ exports.run = async function run() {
     const unrelated = hoverMarkdown(unrelatedHovers);
     assert(!unrelated.includes(encodePlainHover('Checked target query')), JSON.stringify({unexpectedQuery: unrelated}));
     assert(!unrelated.includes(encodePlainHover('Witnesses for')), JSON.stringify({unexpectedWitness: unrelated}));
+    enter('native scoped response contract and infeasible environment');
+    const responseUri = vscode.Uri.file(path.join(process.env.HWVERIFY_EXTENSION_TEST_WORKSPACE, 'response.hwv'));
+    const responseDoc = await vscode.workspace.openTextDocument(responseUri);
+    await vscode.window.showTextDocument(responseDoc);
+    const responseOptions = {uri: responseUri.toString(), program: 'responses', branch: null};
+    const responseLenses = await until('response CodeLens', async () => {
+      const items = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', responseUri);
+      return items?.some(item => item.command?.arguments?.[0]?.program === 'responses') ? items : null;
+    });
+    assert(responseLenses.length > 0);
+    const responseResult = await vscode.commands.executeCommand('hwverify.prove', responseOptions);
+    assert.equal(responseResult.verification.implementation_binding.responses[0].status, 'verified');
+    assert.equal(responseResult.verification.implementation_binding.responses[0].adequacy.reset_acceptance_cover.status, 'reached');
+    assert.equal(responseResult.verification.implementation_binding.responses[0].adequacy.reset_acceptance_cover.witness.original_transitions_validated, true);
+    await until('reset-acceptance cover reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'response_reset_acceptance_cover' && d.severity === vscode.DiagnosticSeverity.Information));
+    await until('acceptance adequacy warning reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'response_external_service_not_specified' && d.severity === vscode.DiagnosticSeverity.Warning));
+    const responseSource = responseDoc.getText();
+    await replace(responseDoc, responseSource.replace('count = if w.complete { s.count + 1u4 } else { s.count };', 'count = 3u4;'));
+    const failedSafety = await api.checkProof(responseOptions);
+    assert.equal(failedSafety.verification.implementation_binding.responses[0].status, 'not_established_due_to_binding_failure');
+    await until('failed safety prerequisite reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'implementation_binding_not_verified' && d.severity === vscode.DiagnosticSeverity.Error));
+    await replace(responseDoc, responseSource.replace('assume !i.stall;', 'assume false;'));
+    const impossible = await api.checkProof(responseOptions);
+    assert.equal(impossible.verification.implementation_binding.status, 'failed');
+    assert(impossible.diagnostics.some(d => d.message.includes('environment_nonempty: failed_nonvacuity') && d.span.line > 30));
     console.log('PASS: real VS Code Extension Host activation, diagnostics, providers, checked command, Unknown, cancellation and stale-result invalidation');
   } catch (error) {
     failure = error;

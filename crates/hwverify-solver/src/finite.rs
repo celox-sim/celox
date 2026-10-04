@@ -1123,6 +1123,33 @@ impl Blast {
     }
 }
 
+/// Replay scalar IR terms directly, independently of CNF encoding and SAT search.
+/// Unsupported terms, missing values, and exhausted budgets are errors, never evidence.
+pub fn evaluate_scalar_terms(
+    terms: &Env,
+    assignments: &BTreeMap<String, Scalar>,
+    limits: Limits,
+) -> Res<BTreeMap<String, Scalar>> {
+    let mut budget = Budget {
+        limits,
+        start: Instant::now(),
+        work: 0,
+        time_check_in: 0,
+    };
+    let mut memo = HashMap::new();
+    let result = terms
+        .iter()
+        .map(|(name, term)| {
+            Ok((
+                name.clone(),
+                evaluate(term, assignments, &mut memo, &mut budget, 0)?,
+            ))
+        })
+        .collect();
+    budget.check_time()?;
+    result
+}
+
 /// Independent word-level interpretation: does not inspect CNF or gate values.
 fn evaluate(
     t: &Term,

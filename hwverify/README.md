@@ -22,6 +22,7 @@ HWVERIFY_SOLVER=finite target/release/hwverify-rs audit/lemma_candidates/counter
 | 実行方法、終了コード、開発・CIチェック | [使い方](docs/usage.md) |
 | `.hwv` の記法とJSONへの対応 | [言語](docs/language.md)、[JSON v2](docs/schema.md) |
 | 関係仕様と再利用可能なモジュール | [v3仕様](docs/specifications.md)、[v4 scoped仕様](docs/scoped-specifications.md)、[expectationとtrace](docs/expectations.md) |
+| 受理した要求の条件付き応答期限 | [v3/v4 bounded response](docs/specifications.md#conditional-bounded-response) |
 | プログラムの不変条件・停止性 | [program契約](docs/program-contracts.md) |
 | 補題を `.hwv` で書き、検査して使う | [補題](docs/lemmas.md) |
 | 自動証明探索、分割、予算 | [証明エンジン](docs/automatic-proofs.md) |

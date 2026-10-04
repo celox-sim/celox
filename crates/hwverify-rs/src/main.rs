@@ -108,6 +108,7 @@ fn run() -> Res<i32> {
         }
     }
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let mut source_spans = std::collections::BTreeMap::new();
     let outcome = (|| -> Res<Value> {
         let bytes = fs::read(&args[0]).map_err(|e| e.to_string())?;
         let mut design = if format == "hwv" {
@@ -115,6 +116,7 @@ fn run() -> Res<i32> {
                 .map_err(|e| format!("{}: invalid UTF-8 source: {e}", args[0]))?;
             let parsed =
                 hwverify_syntax::parse_document(source, &args[0]).map_err(|e| e.to_string())?;
+            source_spans = parsed.spans.clone();
             if parsed.canonical["version"] == 4 {
                 Input::ScopedSpecification(
                     parsed
@@ -187,10 +189,11 @@ fn run() -> Res<i32> {
             }
         }
     })();
-    let result = match outcome {
+    let mut result = match outcome {
         Ok(value) => value,
         Err(error) => json!({"status":"invalid_or_tool_error","error":error}),
     };
+    hwverify_syntax::locate_report(&mut result, &args[0], &source_spans);
     fs::write(
         out.join("report.json"),
         serde_json::to_string_pretty(&result).unwrap(),

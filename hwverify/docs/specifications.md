@@ -255,3 +255,136 @@ implementation の必須フィールドは `composition`、`reset_input`、`stat
 operations は操作名→Boolean selector式、binding は `states` と `observations` を持つ。
 states は component名→（private field名→状態のみの式）、observations は
 観測名→状態のみの式。全ての対応先と型を検査する。
+
+## Conditional bounded response
+
+Safety/stuttering alone permits an implementation to select no operation forever.
+An optional `implementation.responses` contract adds an inductive bounded-response
+check. The same contract is available in v3 and v4. Complete runnable examples are
+[response.hwv](../examples/response.hwv) and
+[scoped_response.hwv](../examples/scoped_response.hwv).
+
+```hwv
+responses {
+  request_done {
+    operation advance;
+    accept w.accept;
+    pending s.busy;
+    rank s.ticks;
+    bound 2;
+    cover_depth 2;
+    assume !i.stall;
+  }
+}
+```
+
+`accept` is the implementation's explicit acceptance handshake, not merely an
+external request signal. Completion is the selected operation's existing Boolean
+selector on the current implementation edge; its effects must still satisfy the
+ordinary relational safety binding. Acceptance may complete on the same edge.
+Otherwise `pending` must become true in the next state, and completion must occur
+within `bound` subsequent nonreset edges. The example accepts at edge 0, waits at
+edge 1 and completes at edge 2, incrementing its abstract counter exactly once.
+
+The initial interface supports exactly **one contract per implementation and one
+outstanding request**. Accepting while pending fails a checked obligation, even
+if the same edge completes the old request: same-edge queue replacement is not
+supported. Requests presented while busy may remain unaccepted; eventual
+acceptance is not promised. Unsolicited completion is rejected. `pending` cannot
+be silently dropped or cleared before completion. Reset has priority, cancels
+the obligation and requires the reset state to have `pending == false`; acceptance
+and completion on a reset edge do not create or discharge a nonreset obligation.
+
+`pending` and `rank` are state-only expressions over `s.*`. `rank` must be an
+unsigned word of at most 64 bits; `bound` must be a positive integer representable
+in that width. No wraparound, saturation, ghost state, implicit queue or temporal
+syntax is added. The author supplies the real implementation-state witness.
+Unsupported fields, input-dependent ranks/pending predicates, multiple contracts,
+unknown completion operations and invalid bounds are rejected during validation.
+
+`assume` is a Boolean expression over **inputs only**, using `i.*`; implementation
+state and wires are excluded so it cannot hide a stuck implementation state.
+It must hold at acceptance and every subsequent nonreset edge until completion.
+The example excludes stalls explicitly. Changing its assumption to `true` fails:
+an indefinitely stalled implementation does not meet a physical-step deadline.
+There is no implicit fairness or removal of stalled ticks from the count. After
+an assumption violation the old request has no response guarantee. Independently
+of response assumptions, the original safety obligations remain unconditional.
+
+For pending predicate P, acceptance A, completion C, rank R and bound B, generated
+checks establish reset cancellation, no overlapping A/P, and, on an assumed
+nonreset step, `P_next == (P || A) && !C`. They establish `P_next => R_next < B` and
+`P && !C => R_next < R`. The latter uses the same unsigned-rank comparison as v2
+progress. The invariant `P => R < B` is established at acceptance and preserved;
+strict decrease prohibits a non-completing step at rank zero. Thus the bound
+holds for each accepted request by induction, not by enumerating a finite trace
+and extrapolating it into unbounded liveness. Other operations receive no progress
+claim, and request/response payload correspondence is limited to the separate
+relational safety specification.
+
+**A verified conditional response does not establish that an external request is
+accepted, or that the implementation ever does useful work after reset.** `accept`
+is an implementation-defined event, not an automatically enforced request
+handshake. There is no separate external request predicate or request-to-acceptance
+obligation in this version. A model can add `ever_enabled`, reset it to false,
+preserve it forever, and require it in `accept`. Acceptance can then be feasible
+only in unreachable states, while every reset-reachable run remains idle and the
+conditional response checks pass. The regression suite preserves this example.
+
+Optional `cover_depth N` (1–32) requests a **separate bounded acceptance cover**.
+Edge 0 applies the original reset assignment with reset high. Edges 1 through N
+are candidate acceptance edges, each with reset low and the declared input
+assumption satisfied. The reset input vector is independent of subsequent input
+vectors, and the assumption is not imposed on reset. There are no constraints on
+inputs after the accepted edge. Depth counts nonreset implementation edges after
+reset, independently of the response latency `bound`.
+
+`adequacy.reset_acceptance_cover` reports the depth, limits, source location and:
+
+- `reached`: a SAT prefix independently replayed through the original reset and
+  next-state expressions. `witness.trace` contains concrete inputs and before/after
+  states, ending at `witness.acceptance_edge`; `original_transitions_validated`
+  is true. This proves existence of one accepting run, not service for all requests.
+- `not_reached_within_bound`: UNSAT for this bounded cover only. It does **not** mean
+  acceptance is unreachable at greater depth. The `ever_enabled` mutant receives
+  this result while its conditional response theorem still verifies.
+- `unknown`: budget exhaustion, unsupported scalar replay, or failed witness
+  validation; no replay-validated witness is returned.
+- `unchecked`: no `cover_depth` was supplied.
+
+The cover uses the existing finite solver and word-level interpreter, not an
+external solver or finite traces extrapolated into liveness. Initial replay
+support is Bool/BV state and inputs of width at most 64, with at most 4096 frame
+symbols; reported finite solver budgets also apply. It adds no mapped-invariant,
+pending or rank assumptions to the original transition system. Its status never
+changes the conditional proof status or CLI verification exit status.
+
+`adequacy.reset_reachable_acceptance` mirrors the cover status;
+`adequacy.external_request_to_acceptance` remains `"not_specified"`. The LSP shows
+cover outcomes at `cover_depth` and retains a warning at `accept` about the missing
+external request-to-acceptance obligation, including when the cover is reached.
+
+Separate SAT checks require a feasible nonreset input assumption and a feasible
+acceptance under the mapped invariant. Contradictory assumptions or `accept false`
+produce `failed_nonvacuity`, not success. These witnesses are **not claims of reset
+reachability**, general specification adequacy or deadlock freedom. Unknown in any
+required obligation remains Unknown. A verified response requires all generated
+obligations and the existing implementation binding to pass.
+
+```sh
+cargo build --release --locked
+HWVERIFY_SOLVER=finite target/release/hwverify-rs examples/scoped_response.hwv --out /tmp/fresh-response
+cargo test --release --locked -p hwverify-rs --test responses
+```
+
+Read `implementation_binding.responses` and the `response_*` obligations in the
+report. Native reports attach `source_location` to each response obligation;
+finite counterexample files retain current/next implementation and response
+aliases. In the editor, **Check implementation responses and safety** explicitly
+runs the same checker; edit-time analysis only validates syntax, names and types.
+The editor action also checks the document's ordinary examples and safety binding,
+so a passing response row alone does not override other failures in that result.
+
+Failed or Unknown implementation bindings also produce a blocking implementation-level
+editor diagnostic naming the outstanding obligations, even when every response
+obligation passes.

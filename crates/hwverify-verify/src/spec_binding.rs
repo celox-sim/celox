@@ -98,6 +98,14 @@ pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Val
         false,
         &context,
     )?;
+    let mut response_results = crate::progress::responses(
+        implementation,
+        reset.clone(),
+        invariant.clone(),
+        &context,
+        spec.inputs(),
+        q,
+    )?;
     let active = both(not(reset), invariant);
     let selectors = implementation
         .operations
@@ -133,6 +141,11 @@ pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Val
         false,
         &context,
     )?;
+    let progress_limitation = if implementation.responses.is_empty() {
+        "No liveness, fairness, progress, deadlock freedom, or implementation total-correctness claim"
+    } else {
+        "Only explicitly declared responses have conditional bounded progress; no general fairness, deadlock freedom or total-correctness claim"
+    };
     let reports = q.reports[before..].to_vec();
     let status = if reports
         .iter()
@@ -144,7 +157,17 @@ pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Val
     } else {
         "verified"
     };
+    for response in &mut response_results {
+        response["requires_verified_binding"] = json!(true);
+        if response["status"] == "verified" && status != "verified" {
+            response["status"] = json!(if status == "unknown" {
+                "unknown"
+            } else {
+                "not_established_due_to_binding_failure"
+            });
+        }
+    }
     Ok(Some(
-        json!({"status":status,"composition":implementation.composition,"members":product.members,"obligations":reports,"claim":"From reset, the supplied state-only abstraction maps each selected implementation step to a synchronized relational product step; no-operation steps stutter in all mapped state and observations","limitations":["This is a deterministic witness into the relational specification, not equality of behavior sets or abstraction surjectivity","No liveness, fairness, progress, deadlock freedom, or implementation total-correctness claim","Every mapped-invariant implementation state is checked, including unreachable states; reset has priority and restarts the abstract initial state","Operation selectors must be pairwise exclusive on nonreset mapped-invariant states; no selector means explicit abstract stutter"]}),
+        json!({"responses":response_results,"status":status,"composition":implementation.composition,"members":product.members,"obligations":reports,"claim":"From reset, the supplied state-only abstraction maps each selected implementation step to a synchronized relational product step; no-operation steps stutter in all mapped state and observations","limitations":["This is a deterministic witness into the relational specification, not equality of behavior sets or abstraction surjectivity",progress_limitation,"Every mapped-invariant implementation state is checked, including unreachable states; reset has priority and restarts the abstract initial state","Operation selectors must be pairwise exclusive on nonreset mapped-invariant states; no selector means explicit abstract stutter"]}),
     ))
 }

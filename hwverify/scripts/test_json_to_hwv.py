@@ -492,6 +492,17 @@ class PrinterTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('HWVERIFY_BIN'), 'set HWVERIFY_BIN to a freshly built CLI')
 class ParserRoundTripTests(unittest.TestCase):
+    def test_response_contracts_survive_printing_v3_and_v4(self):
+        for name in ('response', 'scoped_response'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                canonical = Path(temp) / 'canonical.json'
+                result = subprocess.run([os.environ['HWVERIFY_BIN'], str(ROOT / 'examples' / (name + '.hwv')), '--emit-json', str(canonical), '--out', str(Path(temp) / 'out')], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                doc = json.loads(canonical.read_text())
+                self.assertIn('responses {', print_document(doc))
+                self.assert_round_trip(doc)
+                self.assert_round_trip(doc, infix=True)
+
     def assert_round_trip(self, doc, infix=False):
         self.assert_source_document(print_document(doc, infix), doc)
 

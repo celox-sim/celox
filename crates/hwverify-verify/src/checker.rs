@@ -175,7 +175,7 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
         return Err("rank must be unsigned word".into());
     }
     let rankn = l.expr(&p["rank"], &relation_env(&next_s, &next_t, &Env::new()))?;
-    let dec = node(Sort::Bool, "bvult", vec![rankn.clone(), rank.clone()]);
+    let dec = crate::progress::decreases(rankn.clone(), rank.clone());
     let live = and(r.clone(), and(not(rst.clone()), enabled.clone()));
     ctx.insert("rank".into(), rank);
     ctx.insert("rank_next".into(), rankn);
