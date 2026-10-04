@@ -2096,63 +2096,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
-name = "lydite-ir"
-version = "0.10.1"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
-name = "lydite"
-version = "0.10.1"
-dependencies = [
- "lydite-ir",
- "lydite-solver",
- "lydite-syntax",
- "lydite-verify",
- "serde_json",
-]
-
-[[package]]
-name = "lydite-celox"
-version = "0.10.1"
-dependencies = [
- "lydite-ir",
- "lydite-solver",
- "serde_json",
-]
-
-[[package]]
-name = "lydite-solver"
-version = "0.10.1"
-dependencies = [
- "lydite-ir",
- "serde_json",
-]
-
-[[package]]
-name = "lydite-syntax"
-version = "0.10.1"
-dependencies = [
- "lydite-ir",
- "parol",
- "parol_runtime",
- "scnr2",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lydite-verify"
-version = "0.10.1"
-dependencies = [
- "lydite-ir",
- "lydite-solver",
- "lydite-syntax",
- "serde_json",
-]
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2608,6 +2551,63 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lydite"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "lydite-solver",
+ "lydite-syntax",
+ "lydite-verify",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-celox"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "lydite-solver",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-ir"
+version = "0.10.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-solver"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-syntax"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "parol",
+ "parol_runtime",
+ "scnr2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lydite-verify"
+version = "0.10.1"
+dependencies = [
+ "lydite-ir",
+ "lydite-solver",
+ "lydite-syntax",
+ "serde_json",
+]
 
 [[package]]
 name = "lz4_flex"
