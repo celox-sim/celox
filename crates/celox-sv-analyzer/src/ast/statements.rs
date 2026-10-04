@@ -27,6 +27,90 @@ pub(super) fn conditional_assignments_from_statement_or_null(
     Ok(())
 }
 
+/// The assignments a call statement `f(a, o);` performs on its `output` and
+/// `inout` arguments: each receives the value its parameter holds when the
+/// function body ends, computed from the arguments' values at the call.
+fn function_call_output_assignments(
+    call: &sv_parser::SubroutineCallStatement,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Result<Vec<(LValue, Expr)>, AnalyzerError> {
+    let unsupported = || AnalyzerError::Unsupported("function call statement".to_string());
+    let sv_parser::SubroutineCallStatement::SubroutineCall(call) = call else {
+        return Err(unsupported());
+    };
+    let sv_parser::SubroutineCall::TfCall(call) = &call.0 else {
+        return Err(unsupported());
+    };
+    let name = identifier_text(
+        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+        syntax_tree,
+    )
+    .ok_or_else(unsupported)?;
+    let function = packed_dimensions
+        .functions
+        .get(&name)
+        .filter(|function| !function.outputs.is_empty())
+        .ok_or_else(unsupported)?;
+    let Some(paren) = call.nodes.2.as_ref() else {
+        return Err(unsupported());
+    };
+    let sv_parser::ListOfArguments::Ordered(arguments) = &paren.nodes.1 else {
+        return Err(unsupported());
+    };
+    let arguments = arguments.nodes.0.contents();
+    if arguments.len() != function.params.len() {
+        return Err(unsupported());
+    }
+    let actuals = arguments
+        .into_iter()
+        .map(|argument| {
+            expr_from_expression_with_types(argument.as_ref()?, syntax_tree, packed_dimensions)
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(unsupported)?;
+    let env: HashMap<String, Expr> = function
+        .params
+        .iter()
+        .zip(&actuals)
+        .map(|(param, actual)| (param.name.clone(), actual.clone()))
+        .collect();
+    let mut assignments = Vec::new();
+    for (param, actual) in function.params.iter().zip(&actuals) {
+        if !param.direction.is_written() {
+            continue;
+        }
+        let (_, value) = function
+            .outputs
+            .iter()
+            .find(|(output, _)| *output == param.name)
+            .ok_or_else(unsupported)?;
+        let lhs = match actual {
+            Expr::Ident(name) => LValue::Ident(name.clone()),
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => match &**expr {
+                Expr::Ident(name) => LValue::Select {
+                    name: name.clone(),
+                    msb: msb.clone(),
+                    lsb: lsb.clone(),
+                    signed: *signed,
+                    array_slice_width: None,
+                    array_slice_reversed: false,
+                    is_2state: false,
+                },
+                _ => return Err(unsupported()),
+            },
+            _ => return Err(unsupported()),
+        };
+        assignments.push((lhs, substitute_expr_idents(value.clone(), &env)));
+    }
+    Ok(assignments)
+}
+
 fn push_procedural_assignment(
     assignments: &mut Vec<ConditionalAssignment>,
     condition: Option<Expr>,
@@ -126,6 +210,19 @@ pub(super) fn conditional_assignments_from_statement(
                 AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
             })?;
             push_procedural_assignment(assignments, condition, lhs, rhs, packed_dimensions);
+        }
+        sv_parser::StatementItem::SubroutineCallStatement(call) => {
+            for (lhs, rhs) in
+                function_call_output_assignments(call, syntax_tree, packed_dimensions)?
+            {
+                push_procedural_assignment(
+                    assignments,
+                    condition.clone(),
+                    lhs,
+                    rhs,
+                    packed_dimensions,
+                );
+            }
         }
         sv_parser::StatementItem::SeqBlock(block) => {
             for stmt in &block.nodes.3 {

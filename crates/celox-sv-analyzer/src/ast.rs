@@ -1330,14 +1330,45 @@ struct Function {
     name: String,
     params: Vec<FunctionParam>,
     body: Expr,
+    /// For each `output` / `inout` parameter, its value when the body ends,
+    /// in terms of the input parameters.
+    outputs: Vec<(String, Expr)>,
     return_width: Option<usize>,
     return_first_packed_dimension_width: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
 }
 
+/// How a function argument is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParamDirection {
+    Input,
+    Output,
+    Inout,
+}
+
+impl ParamDirection {
+    /// Whether the call writes the actual argument back.
+    fn is_written(self) -> bool {
+        !matches!(self, ParamDirection::Input)
+    }
+
+    fn from_tf_port(direction: &sv_parser::TfPortDirection) -> Option<Self> {
+        match direction {
+            sv_parser::TfPortDirection::PortDirection(direction) => match &**direction {
+                sv_parser::PortDirection::Input(_) => Some(ParamDirection::Input),
+                sv_parser::PortDirection::Output(_) => Some(ParamDirection::Output),
+                sv_parser::PortDirection::Inout(_) => Some(ParamDirection::Inout),
+                sv_parser::PortDirection::Ref(_) => None,
+            },
+            sv_parser::TfPortDirection::ConstRef(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FunctionParam {
+    direction: ParamDirection,
     name: String,
     width: Option<usize>,
     signed: bool,

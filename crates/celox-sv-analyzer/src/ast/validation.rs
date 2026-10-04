@@ -761,7 +761,7 @@ pub(super) fn reject_silently_ignored_constructs(
                     .any(non_input_function_port) =>
             {
                 return Err(AnalyzerError::Unsupported(
-                    "output or inout function argument".to_string(),
+                    "ref function argument".to_string(),
                 ));
             }
             RefNode::FunctionDeclaration(function)
@@ -916,10 +916,12 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
         RefNode::TfPortDeclaration(port) => Some(&port.nodes.1),
         _ => return false,
     };
+    // `output` and `inout` arguments are written back by the call statement;
+    // pass-by-reference is not lowered.
     match direction {
         None => false,
         Some(sv_parser::TfPortDirection::PortDirection(direction)) => {
-            !matches!(&**direction, sv_parser::PortDirection::Input(_))
+            matches!(&**direction, sv_parser::PortDirection::Ref(_))
         }
         Some(sv_parser::TfPortDirection::ConstRef(_)) => true,
     }

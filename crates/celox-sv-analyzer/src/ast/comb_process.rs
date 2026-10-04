@@ -734,6 +734,17 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
             }
             Ok(())
         }
+        // A call of a user function; its `output` arguments are lowered with
+        // the statement.
+        sv_parser::StatementItem::SubroutineCallStatement(call)
+            if matches!(
+                &**call,
+                sv_parser::SubroutineCallStatement::SubroutineCall(call)
+                    if matches!(call.0, sv_parser::SubroutineCall::TfCall(_))
+            ) =>
+        {
+            Ok(())
+        }
         sv_parser::StatementItem::LoopStatement(loop_statement) => {
             let sv_parser::LoopStatement::For(loop_statement) = &**loop_statement else {
                 return Err(AnalyzerError::Unsupported(

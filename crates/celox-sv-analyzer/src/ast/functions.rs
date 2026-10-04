@@ -480,13 +480,19 @@ pub(super) fn function_from_declaration(
             )?);
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
-            let expr = function_body_expr(
+            let output_names = params
+                .iter()
+                .filter(|param| param.direction.is_written())
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
+            let (expr, outputs) = function_body_expr(
                 &body.nodes.6,
                 syntax_tree,
                 &function_packed_dimensions,
                 &local_types,
                 &local_names,
                 Some(&name),
+                &output_names,
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
@@ -503,6 +509,7 @@ pub(super) fn function_from_declaration(
                 name,
                 params,
                 body: expr,
+                outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
@@ -550,13 +557,19 @@ pub(super) fn function_from_declaration(
             );
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
-            let expr = function_body_expr(
+            let output_names = params
+                .iter()
+                .filter(|param| param.direction.is_written())
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>();
+            let (expr, outputs) = function_body_expr(
                 &body.nodes.5,
                 syntax_tree,
                 &function_packed_dimensions,
                 &local_types,
                 &local_names,
                 Some(&name),
+                &output_names,
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
@@ -573,6 +586,7 @@ pub(super) fn function_from_declaration(
                 name,
                 params,
                 body: expr,
+                outputs,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_first_packed_dimension_width,
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
@@ -793,7 +807,12 @@ pub(super) fn tf_params(
     let mut previous_type = None;
     let mut previous_is_2state = false;
     let mut previous_packed_dimensions = Vec::new();
+    let mut direction = ParamDirection::Input;
     for port in list.nodes.0.contents() {
+        // An omitted direction repeats the previous argument's.
+        if let Some(declared) = port.nodes.1.as_ref().and_then(ParamDirection::from_tf_port) {
+            direction = declared;
+        }
         let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
         let inferred_type = value_type_from_data_type_or_implicit(
             &port.nodes.3,
@@ -866,6 +885,7 @@ pub(super) fn tf_params(
         previous_is_2state = is_2state;
         previous_packed_dimensions = packed_dimensions.clone();
         params.push(FunctionParam {
+            direction,
             name,
             width: r#type.map(|r#type| r#type.width),
             signed: r#type.is_some_and(|r#type| r#type.signed),
@@ -917,6 +937,8 @@ pub(super) fn tf_item_params(
                 continue;
             };
             params.push(FunctionParam {
+                direction: ParamDirection::from_tf_port(&declaration.nodes.1)
+                    .unwrap_or(ParamDirection::Input),
                 name,
                 width: r#type.map(|r#type| r#type.width),
                 signed: r#type.is_some_and(|r#type| r#type.signed),
@@ -1037,7 +1059,8 @@ fn function_body_expr(
     local_types: &HashMap<String, FunctionLocalType>,
     local_names: &HashSet<String>,
     return_variable: Option<&str>,
-) -> Option<Expr> {
+    output_names: &[String],
+) -> Option<(Expr, Vec<(String, Expr)>)> {
     let mut locals = local_types
         .iter()
         .map(|(name, r#type)| {
@@ -1069,8 +1092,21 @@ fn function_body_expr(
         packed_dimensions,
         local_types,
     );
-    // Falling off the end returns whatever was assigned to the function name.
-    returned.or_else(|| return_variable.and_then(|name| locals.get(name).cloned()))
+    // The values the `output` / `inout` arguments hold when the body ends.
+    let outputs = output_names
+        .iter()
+        .map(|name| Some((name.clone(), locals.get(name).cloned()?)))
+        .collect::<Option<Vec<_>>>()?;
+    if returned.is_some() && !outputs.is_empty() {
+        // An early `return` would need the arguments' values at that point.
+        return None;
+    }
+    // Falling off the end returns whatever was assigned to the function name;
+    // a function with only `output` arguments returns nothing.
+    let value = returned
+        .or_else(|| return_variable.and_then(|name| locals.get(name).cloned()))
+        .or_else(|| (!outputs.is_empty()).then(|| Expr::Literal("'x".to_string())))?;
+    Some((value, outputs))
 }
 
 /// Lower a returning branch with the remaining statements as its continuation.

@@ -5544,18 +5544,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "output or inout function argument",
-            r#"
-            module Top(input logic a, output logic y, side);
-                function automatic logic f(output logic out, input logic value);
-                    out = value;
-                    return value;
-                endfunction
-                assign y = f(side, a);
-            endmodule
-        "#,
-        ),
-        (
             "reduction operator in parameter expression",
             r#"
             module Top #(parameter logic [3:0] P = 4'hf, parameter FLAG = &P)

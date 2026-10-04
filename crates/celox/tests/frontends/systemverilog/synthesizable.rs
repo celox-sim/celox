@@ -300,6 +300,57 @@ sv_backends! {
         }
     }
 
+    fn function_output_and_inout_arguments_are_written_back(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic clk, input logic [7:0] a, b,
+                           output logic [7:0] sum, diff, lo, hi, twice, part, q);
+                    function automatic void sum_diff(input logic [7:0] x, y,
+                                                     output logic [7:0] s, d);
+                        s = x + y;
+                        d = x - y;
+                    endfunction
+                    function automatic void clamp(input logic [7:0] x, output logic [7:0] l, h);
+                        if (x > 8'd10) begin l = 8'd10; h = x; end
+                        else begin l = x; h = 8'd10; end
+                    endfunction
+                    function automatic void bump(inout logic [7:0] v);
+                        v = v + 1;
+                    endfunction
+                    function automatic void invert(input logic [3:0] x, output logic [3:0] z);
+                        z = ~x;
+                    endfunction
+                    function automatic void shift(input logic [7:0] x, output logic [7:0] z);
+                        z = x << 1;
+                    endfunction
+                    always_comb begin
+                        sum_diff(a, b, sum, diff);
+                        clamp(a, lo, hi);
+                        twice = a;
+                        bump(twice);
+                        bump(twice);
+                        part = 8'h00;
+                        invert(a[3:0], part[7:4]);
+                    end
+                    always_ff @(posedge clk) shift(a, q);
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("function_outputs.sv"))], "Top");
+        let (a, b) = (sim.signal("a"), sim.signal("b"));
+        for (x, y) in [(3u8, 4u8), (50, 7), (255, 255), (0, 1)] {
+            sim.modify(|io| { io.set(a, x); io.set(b, y); }).unwrap();
+            assert_eq!(sim.get(sim.signal("sum")), x.wrapping_add(y).into());
+            assert_eq!(sim.get(sim.signal("diff")), x.wrapping_sub(y).into());
+            assert_eq!(sim.get(sim.signal("lo")), x.min(10).into());
+            assert_eq!(sim.get(sim.signal("hi")), x.max(10).into());
+            assert_eq!(sim.get(sim.signal("twice")), x.wrapping_add(2).into());
+            assert_eq!(sim.get(sim.signal("part")), ((!x & 0xf) << 4).into());
+            sim.tick(sim.event("clk")).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), (x << 1).into());
+        }
+    }
+
     fn block_locals_and_dependent_assignments_accumulate(sim) {
         @setup {
             let source = r#"
