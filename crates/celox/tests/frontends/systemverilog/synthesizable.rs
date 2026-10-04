@@ -193,6 +193,26 @@ sv_backends! {
         }
     }
 
+    fn instance_arrays_broadcast_and_slice_connections(sim) {
+        @setup {
+            let source = r#"
+                module Inv(input logic [3:0] a, input logic en, output logic [3:0] y);
+                    assign y = en ? ~a : a;
+                endmodule
+                module Top(input logic [7:0] a, input logic en, output logic [7:0] y);
+                    Inv u[1:0](.a(a), .en(en), .y(y));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("array.sv"))], "Top");
+        let (a, en) = (sim.signal("a"), sim.signal("en"));
+        for (value, enable) in [(0x3cu8, 1u8), (0xa5, 0), (0xff, 1)] {
+            sim.modify(|io| { io.set(a, value); io.set(en, enable); }).unwrap();
+            let expected = if enable != 0 { !value } else { value };
+            assert_eq!(sim.get(sim.signal("y")), expected.into(), "a={value} en={enable}");
+        }
+    }
+
     fn exponentiation_works_in_constant_expressions(sim) {
         @setup {
             let source = r#"

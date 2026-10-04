@@ -115,6 +115,9 @@ pub(crate) struct LoweredSvInstance {
     pub instance_name: String,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
     pub port_connections: Vec<LoweredSvPortConnection>,
+    /// For an element of an instance array: its position in declaration order
+    /// and the number of elements.
+    pub array_element: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -294,7 +297,23 @@ fn child_output_driver_ranges(
         let Some(child) = modules.get(&child_id) else {
             continue;
         };
-        for connection in &instance.port_connections {
+        let element_connections = instance.array_element.and_then(|(position, count)| {
+            array_element_connections(
+                &instance.port_connections,
+                child,
+                position,
+                count,
+                &module.variables,
+                &module.signal_names,
+                &module.constants,
+                &module.parameter_types,
+            )
+            .ok()
+        });
+        let connections = element_connections
+            .as_deref()
+            .unwrap_or(&instance.port_connections);
+        for connection in connections {
             if !child.source.ports().iter().any(|port| {
                 port.name() == connection.formal
                     && matches!(
@@ -993,20 +1012,31 @@ fn lower_module_with_overrides(
                 continue;
             }
         }
-        instances.push(LoweredSvInstance {
-            module_name: instance.module_name().to_string(),
-            instance_name: instance.name().to_string(),
-            parameter_overrides: lower_parameter_overrides(instance, &constants, &parameter_types),
-            port_connections: instance
-                .port_connections()
-                .iter()
-                .map(|connection| LoweredSvPortConnection {
-                    formal: connection.formal().to_string(),
-                    actual: connection.actual().to_string(),
-                    actual_expr: connection.actual_expr().cloned(),
-                })
-                .collect(),
+        // An instance array is one instance per element, all under one name.
+        let elements = instance.array_len().map_or(vec![None], |len| {
+            (0..len).map(|position| Some((position, len))).collect()
         });
+        for array_element in elements {
+            instances.push(LoweredSvInstance {
+                module_name: instance.module_name().to_string(),
+                instance_name: instance.name().to_string(),
+                parameter_overrides: lower_parameter_overrides(
+                    instance,
+                    &constants,
+                    &parameter_types,
+                ),
+                port_connections: instance
+                    .port_connections()
+                    .iter()
+                    .map(|connection| LoweredSvPortConnection {
+                        formal: connection.formal().to_string(),
+                        actual: connection.actual().to_string(),
+                        actual_expr: connection.actual_expr().cloned(),
+                    })
+                    .collect(),
+                array_element,
+            });
+        }
     }
 
     Ok(LoweredSvModule {
@@ -1178,6 +1208,93 @@ fn parameter_value_bits(value: i128, width: usize) -> BigUint {
     }
 }
 
+/// The port connections of element `position` of an array of `count`
+/// instances. A connection as wide as the port is shared by every element; one
+/// `count` times as wide is divided between them, the first element taking the
+/// most significant slice.
+fn array_element_connections(
+    connections: &[LoweredSvPortConnection],
+    child: &LoweredSvModule,
+    position: usize,
+    count: usize,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+    parent_constants: &HashMap<String, i128>,
+    parent_parameter_types: &HashMap<String, (usize, bool)>,
+) -> Result<Vec<LoweredSvPortConnection>, ParserError> {
+    let unsupported = |detail: String| {
+        ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "systemverilog module instance array",
+            detail,
+            None,
+        )
+    };
+    connections
+        .iter()
+        .map(|connection| {
+            let Some(actual_expr) = connection.actual_expr.as_ref() else {
+                return Ok(connection.clone());
+            };
+            let Some(port_width) = child
+                .signal_names
+                .get(&connection.formal)
+                .and_then(|id| child.variables.get(id))
+                .map(|variable| variable.width)
+            else {
+                return Ok(connection.clone());
+            };
+            let Some(actual_width) = sv_expr_natural_width(
+                actual_expr,
+                parent_variables,
+                parent_signal_names,
+                parent_constants,
+                parent_parameter_types,
+            ) else {
+                return Ok(connection.clone());
+            };
+            if actual_width == port_width {
+                return Ok(connection.clone());
+            }
+            let sv::ir::Expr::Ident(name) = actual_expr else {
+                return Err(unsupported(format!(
+                    "`{}` is connected to a wider expression",
+                    connection.formal
+                )));
+            };
+            let zero_based = parent_signal_names
+                .get(name)
+                .and_then(|id| parent_variables.get(id))
+                .is_some_and(|variable| {
+                    variable.array_dims.is_empty()
+                        && matches!(
+                            variable.packed_ranges.as_slice(),
+                            [] | [(_, 0)]
+                        )
+                });
+            if actual_width != port_width * count || !zero_based {
+                return Err(unsupported(format!(
+                    "`{}` is {actual_width} bits wide, for a {port_width}-bit port of {count} elements",
+                    connection.formal
+                )));
+            }
+            let lsb = (count - 1 - position) * port_width;
+            let slice = sv::ir::Expr::Select {
+                expr: Box::new(actual_expr.clone()),
+                msb: sv::ir::ConstExpr::Literal((lsb + port_width - 1).to_string()),
+                lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
+                signed: false,
+            };
+            Ok(LoweredSvPortConnection {
+                formal: connection.formal.clone(),
+                actual: connection.actual.clone(),
+                actual_expr: Some(slice),
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn attach_instance_glue(
     module: &mut SimModule,
     lowered: &LoweredSvModule,
@@ -1207,6 +1324,24 @@ pub(crate) fn attach_instance_glue(
         let Some(child) = lowered_modules.get(&child_id) else {
             return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
+        let connections = match instance.array_element {
+            Some((position, count)) => {
+                module
+                    .indexed_instance_names
+                    .insert(instance.instance_name.clone());
+                array_element_connections(
+                    &instance.port_connections,
+                    child,
+                    position,
+                    count,
+                    &parent_variables,
+                    &signal_names,
+                    &lowered.constants,
+                    &lowered.parameter_types,
+                )?
+            }
+            None => instance.port_connections.clone(),
+        };
         ensure_parent_output_signals(
             module,
             &mut parent_variables,
@@ -1217,9 +1352,9 @@ pub(crate) fn attach_instance_glue(
             &lowered.constants,
             &lowered.parameter_types,
             child,
-            &instance.port_connections,
+            &connections,
         )?;
-        resolved_instances.push((instance, child_id, child));
+        resolved_instances.push((instance, child_id, child, connections));
     }
     let (comb_blocks, arena) = lower_comb_processes(
         &lowered.source,
@@ -1240,14 +1375,14 @@ pub(crate) fn attach_instance_glue(
     })?;
     module.comb_blocks = comb_blocks;
     module.arena = arena;
-    for (instance, child_id, child) in resolved_instances {
+    for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
             &signal_names,
             &lowered.constants,
             &lowered.parameter_types,
             child,
-            &instance.port_connections,
+            &connections,
             four_state,
         )?;
         module

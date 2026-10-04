@@ -11,33 +11,6 @@ pub(super) fn instances_from_module_node(
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
-    for child in active
-        .iter()
-        .flat_map(|item| RefNode::ModuleOrGenerateItem(item.node).into_iter())
-    {
-        let RefNode::ModuleInstantiation(instantiation) = child else {
-            continue;
-        };
-        let module_name = identifier_text(
-            RefNode::ModuleIdentifier(&instantiation.nodes.0),
-            syntax_tree,
-        )
-        .ok_or_else(|| {
-            AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
-        })?;
-        if !type_aliases.contains_key(&module_name)
-            && instantiation
-                .nodes
-                .2
-                .contents()
-                .iter()
-                .any(|instance| !instance.nodes.0.nodes.1.is_empty())
-        {
-            return Err(AnalyzerError::Unsupported(
-                "module instance array".to_string(),
-            ));
-        }
-    }
     let mut instances = Vec::new();
     for item in active {
         let start = instances.len();
@@ -168,6 +141,34 @@ fn instances_from_module_instantiation(
             .iter()
             .map(|connection| connection.formal().to_string())
             .collect();
+        // `Child c[3:0](...)` is an array of instances: one dimension with
+        // constant bounds.
+        let dimensions = &instance.nodes.0.nodes.1;
+        let array_len = if dimensions.is_empty() {
+            None
+        } else {
+            let ranges = unpacked_ranges_from_dimensions_with_env(
+                dimensions,
+                syntax_tree,
+                const_env,
+                &packed_dimensions.type_aliases,
+            )?;
+            let [range] = ranges.as_slice() else {
+                return Err(AnalyzerError::Unsupported(
+                    "multidimensional module instance array".to_string(),
+                ));
+            };
+            let left = eval_ast_const_expr(range.left(), const_env);
+            let right = eval_ast_const_expr(range.right(), const_env);
+            let len = left
+                .zip(right)
+                .and_then(|(left, right)| usize::try_from(left.abs_diff(right) + 1).ok())
+                .filter(|len| *len > 0 && *len <= 4096)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("module instance array bounds".to_string())
+                })?;
+            Some(len)
+        };
         instances.push(Instance::new(
             module_name.clone(),
             name,
@@ -176,6 +177,7 @@ fn instances_from_module_instantiation(
             condition.clone(),
             port_names,
             port_connections,
+            array_len,
         ));
     }
     Ok(())

@@ -226,6 +226,7 @@ pub struct Instance {
     condition: Option<ConstExpr>,
     port_names: Vec<String>,
     port_connections: Vec<PortConnection>,
+    array_len: Option<usize>,
 }
 
 impl Instance {
@@ -237,6 +238,7 @@ impl Instance {
         condition: Option<ConstExpr>,
         port_names: Vec<String>,
         port_connections: Vec<PortConnection>,
+        array_len: Option<usize>,
     ) -> Self {
         Self {
             module_name,
@@ -246,7 +248,13 @@ impl Instance {
             condition,
             port_names,
             port_connections,
+            array_len,
         }
+    }
+
+    /// The number of elements of an instance array, if this is one.
+    pub fn array_len(&self) -> Option<usize> {
+        self.array_len
     }
 
     pub fn module_name(&self) -> &str {

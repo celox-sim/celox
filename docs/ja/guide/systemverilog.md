@@ -37,15 +37,15 @@ let mut sim = Simulator::from_sv_sources(
 
 | 領域 | サポート内容 |
 | --- | --- |
-| モジュール | ANSI ポート、`parameter` / `localparam`、名前付き・位置指定のポート／パラメータ接続、階層 |
+| モジュール | ANSI ポート、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割） |
 | generate | `for`（`genvar`）、`if`、`case`。`**` を含む定数式 |
 | 型 | `logic`、`bit`、`reg`、packed ベクタ・配列・構造体、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入 |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など |
-| 文 | `if` / `else`、`case`、`casez`、`casex`、`unique` / `priority`、定数境界の `for` |
-| 関数 | `return`、または関数名への代入で値を返す `function`。呼び出しはインライン展開 |
+| 文 | `if` / `else`、`case`、`casez`、`casex`、`unique` / `priority`、定数境界の `for`、展開されたループ内の `break` / `continue` |
+| 関数 | `input` / `output` / `inout` 引数を持てる `function` と、タイミング制御のない `task`。`return`、または関数名への代入で値を返す。呼び出しはインライン展開 |
 | 式 | 算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`） |
@@ -59,13 +59,12 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 
 未対応の構文は、無視せずに、その構文名を示す `Unsupported` エラーを返します。
 
-- interface と modport、クラス、task、関数の `output` / `inout` 引数。
-- モジュールのインスタンス配列と型パラメータ（`parameter type`）。
+- interface と modport、クラス、タイミング制御を持つ task。
 - 振る舞い記述・検証向けの構文：`initial`、`final`、遅延、クロックエッジ以外のイベント制御、
   アサーション、`$display` などのシステムタスク、`force` / `release`。
 - `always_latch`、`@*` 以外のレベルセンシティブなセンシティビティリスト、ラッチを推論する
   不完全な組み合わせ代入。
-- 境界が定数でないループ（`while`、`repeat`、`forever`）、`break` と `continue`。
+- 境界が定数でないループ（`while`、`repeat`、`forever`）。
 - 実行時の値を使うべき乗。
 - union、unpacked 構造体、文字列、`real`、DPI、ゲートプリミティブ、トライステートバスと
   複数ドライバ、階層参照。

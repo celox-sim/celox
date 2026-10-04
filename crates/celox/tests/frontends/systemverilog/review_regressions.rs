@@ -5115,8 +5115,8 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "module instance array",
             r#"
-            module Child(); endmodule
-            module Top(); Child child[1:0](); endmodule
+            module Child(input logic [3:0] a); endmodule
+            module Top(input logic [6:0] a); Child child[1:0](.a(a)); endmodule
         "#,
         ),
         (

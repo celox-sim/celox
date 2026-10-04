@@ -41,15 +41,15 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Modules | ANSI ports, `parameter` / `localparam`, named and positional port and parameter connections, hierarchy |
+| Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Continuous logic | `assign`, `wire w = expr;` |
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like |
-| Statements | `if` / `else`, `case`, `casez`, `casex`, `unique` / `priority`, `for` with constant bounds |
-| Functions | `function` with `return` or assignment to the function name; calls are inlined |
+| Statements | `if` / `else`, `case`, `casez`, `casex`, `unique` / `priority`, `for` with constant bounds, `break` / `continue` in unrolled loops |
+| Functions | `function` and `task` (without timing) with `input`, `output` and `inout` arguments, `return` or assignment to the function name; calls are inlined |
 | Expressions | arithmetic, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs (`'{a, b}`, `'{x: a, default: 0}`) |
@@ -65,16 +65,13 @@ SystemVerilog emitted by Veryl.
 Celox reports an `Unsupported` error naming the construct instead of ignoring
 it.
 
-- Interfaces and modports, classes, tasks, and function `output` / `inout`
-  arguments.
-- Module instance arrays and type parameters (`parameter type`).
+- Interfaces and modports, classes, and tasks with timing controls.
 - Behavioral and verification constructs: `initial`, `final`, delays, event
   controls other than clock edges, assertions, `$display` and other system
   tasks, `force` / `release`.
 - `always_latch`, level-sensitive sensitivity lists other than `@*`, and
   incomplete combinational assignments that would infer a latch.
-- Loops whose bound is not constant (`while`, `repeat`, `forever`), `break` and
-  `continue`.
+- Loops whose bound is not constant (`while`, `repeat`, `forever`).
 - Exponentiation with a run-time operand.
 - Unions, unpacked structs, strings, `real`, DPI, gate primitives, tri-state
   buses and multiple drivers, hierarchical references.
