@@ -1,0 +1,110 @@
+{
+  "status": "pass",
+  "trials": 386,
+  "coverage": {
+    "cycles": 11934,
+    "retirements": 6858,
+    "full_pipeline": 9584,
+    "load_use": 402,
+    "double_match": 1013,
+    "stalls": 3442,
+    "resets": 418
+  },
+  "mutants": [
+    {
+      "case": "pipeline_bad_forward.json",
+      "counterexample": {
+        "rom": [
+          3,
+          0,
+          103,
+          159
+        ],
+        "data": [
+          0,
+          5,
+          10,
+          15
+        ],
+        "midreset": false,
+        "failure": "('architectural-result', {'cycle': 10, 'stall': False, 'commit': True, 'pc': 0, 'expected_regs': [8, 7], 'actual_regs': [15, 7]})"
+      }
+    },
+    {
+      "case": "pipeline_bad_interlock.json",
+      "counterexample": {
+        "rom": [
+          3,
+          192,
+          103,
+          159
+        ],
+        "data": [
+          0,
+          5,
+          10,
+          15
+        ],
+        "midreset": false,
+        "failure": "('architectural-result', {'cycle': 9, 'stall': False, 'commit': True, 'pc': 3, 'expected_regs': [0, 7], 'actual_regs': [0, 10]})"
+      }
+    },
+    {
+      "case": "pipeline_bad_priority.json",
+      "counterexample": {
+        "rom": [
+          3,
+          0,
+          103,
+          159
+        ],
+        "data": [
+          0,
+          5,
+          10,
+          15
+        ],
+        "midreset": false,
+        "failure": "('architectural-result', {'cycle': 9, 'stall': False, 'commit': True, 'pc': 3, 'expected_regs': [0, 7], 'actual_regs': [0, 10]})"
+      }
+    },
+    {
+      "case": "pipeline_bad_retire.json",
+      "counterexample": {
+        "rom": [
+          3,
+          0,
+          103,
+          159
+        ],
+        "data": [
+          0,
+          5,
+          10,
+          15
+        ],
+        "midreset": false,
+        "failure": "('architectural-result', {'cycle': 7, 'stall': False, 'commit': True, 'pc': 1, 'expected_regs': [3, 0], 'actual_regs': [0, 0]})"
+      }
+    },
+    {
+      "case": "pipeline_bad_stall.json",
+      "counterexample": {
+        "rom": [
+          3,
+          0,
+          103,
+          159
+        ],
+        "data": [
+          0,
+          5,
+          10,
+          15
+        ],
+        "midreset": false,
+        "failure": "('external-stall', {'cycle': 4, 'stall': True, 'commit': False, 'pc': 0, 'expected_regs': [0, 0], 'actual_regs': [0, 0]})"
+      }
+    }
+  ]
+}

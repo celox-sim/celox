@@ -1,0 +1,15 @@
+[package]
+name = "hwverify-sir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hwverify-ir.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hwverify-solver.workspace = true
+
+[[bin]]
+name = "hwverify-sir-lift"
+path = "src/main.rs"

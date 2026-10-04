@@ -1,0 +1,637 @@
+{
+  "status": "pass",
+  "models_replayed": 105,
+  "models": [
+    {
+      "target": "Choice",
+      "example": "earlier_result_remains_assertion_exists",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "earlier_result_remains_assertion_forall",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "earlier_result_remains_assertion_not_exists",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_allowed",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_exists_allowed",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_exists_differs",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_exists_equals",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_forall_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_forall_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_forall_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_b_not_exists_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_differs",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_exists_equals",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_forall_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_forall_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "exists_a_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_exists_equals",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_forall_differs",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_forall_equals",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_not_exists_allowed",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_not_exists_differs",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_b_not_exists_equals",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_differs",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_forall_equals",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_not_exists_allowed",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_not_exists_differs",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Choice",
+      "example": "forall_a_not_exists_equals",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "exists_a_exists_b_not_exists_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "exists_a_exists_b_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "exists_a_exists_b_not_exists_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "exists_a_not_exists_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "exists_a_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "exists_a_not_exists_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_exists_allowed",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_exists_equals",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_allowed",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_b_exists_allowed",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_b_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_b_exists_equals",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_b_forall_allowed",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_b_forall_differs",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_b_forall_equals",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_differs",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Dead",
+      "example": "forall_a_forall_equals",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_allowed",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_exists_allowed",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_exists_differs",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_exists_equals",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_forall_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_forall_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_forall_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_b_not_exists_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_exists_equals",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_forall_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_forall_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "exists_a_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_exists_equals",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_forall_differs",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_forall_equals",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_not_exists_allowed",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_not_exists_differs",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_b_not_exists_equals",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_forall_differs",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_not_exists_allowed",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Echo",
+      "example": "forall_a_not_exists_equals",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_allowed",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_exists_allowed",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_exists_differs",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_exists_equals",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_forall_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_forall_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_forall_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_not_exists_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_b_not_exists_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_exists_equals",
+      "purpose": "satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_forall_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_forall_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_not_exists_allowed",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_not_exists_differs",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "exists_a_not_exists_equals",
+      "purpose": "satisfying_input_choice",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_exists_allowed",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_exists_equals",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_allowed",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_exists_allowed",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_exists_differs",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_exists_equals",
+      "purpose": "input_without_satisfying_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_forall_allowed",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_forall_differs",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_forall_equals",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_not_exists_allowed",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_not_exists_differs",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_b_not_exists_equals",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_differs",
+      "purpose": "postcondition_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_forall_equals",
+      "purpose": "input_without_feasible_execution",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_not_exists_allowed",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    },
+    {
+      "target": "Restricted",
+      "example": "forall_a_not_exists_equals",
+      "purpose": "excluded_execution_counterexample",
+      "replayed": true
+    }
+  ],
+  "final_release_sha256": "ae5aed7cbb1cc0745f4748e9dc421b49d6169fe14bda61363947d64d5d0e6a97"
+}

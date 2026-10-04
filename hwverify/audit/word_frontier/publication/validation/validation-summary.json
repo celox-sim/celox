@@ -1,0 +1,52 @@
+{
+  "phase": 3,
+  "status": "bounded_increment_validated_with_explicit_unknown_limits",
+  "candidate_binary_sha256": "41ca94ac1a8c85726f660be11f3a467ed8621d46a9810796b3a4bd4880ae4b3b",
+  "baseline_binary_sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+  "input_sha256": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+  "rv_children": {
+    "before": 430,
+    "after": 431,
+    "total": 436,
+    "remaining_unknown": 5,
+    "whole_result": "unknown",
+    "manual_children_passed": 436,
+    "other_obligations_passed": 7
+  },
+  "rv_mutants": {
+    "rust_full_original_sat_success": 0,
+    "instances": 2,
+    "rust_microstep_unknown": 2,
+    "additional_concrete_original_counterexamples": 2,
+    "source_replay_changes_rust_verdict": false
+  },
+  "generic_controls": {
+    "phase1_positive": 11,
+    "phase1_original_sat_mutants": 18,
+    "phase2_required_positive": 9,
+    "phase2_original_sat_mutants": 19,
+    "phase2_unknown_diagnostics": 4,
+    "new_controls_positive": 6,
+    "new_controls_original_sat_mutants": 12,
+    "new_generic_coverage_gains": 0
+  },
+  "checks": {
+    "workspace_release_tests": "passed",
+    "focused_automatic_tests": 7,
+    "clippy": "passed",
+    "fmt": "passed",
+    "core_independent_audit": "approved; final 18-row gate and both concrete replay witnesses independently revalidated, no critical blockers",
+    "final_gate_artifacts_revalidated": 954,
+    "concrete_replay_script_sha256": "351fca2f23a28141229a0e6d716f716215c1b2537ff2276ed09b1fc66711b0b4",
+    "concrete_replay_summary_sha256": "9a92e542d384c08e362ad33560688832574c1a479d0899aa326aee0d709f90e6"
+  },
+  "finite_work": {
+    "before_including_failed_attempts": 3725129686,
+    "after_including_failed_attempts": 3076007506,
+    "address_bundle_work": 70242187,
+    "address_aggregate_clauses": 1174896,
+    "mode": "independent_lemmas",
+    "unknown_failed_work_cap_plus_two_retained": true
+  },
+  "heavy_runs_finished": true
+}

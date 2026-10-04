@@ -1,0 +1,79 @@
+specification "Scoped counter arithmetic with a spending budget"
+
+spec Counter(input amount: bv<4>, output count: bv<4>) {
+  state value: bv<4>;
+  init value == 0u4;
+  invariant count == value;
+  operation add { expect value' == value + amount; }
+
+  example add_two {
+    expect positive;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 2u4; } } }
+  }
+  example wrong_arithmetic {
+    expect negative;
+    initial { count = 0u4; }
+    trace { add { inputs { amount = 2u4; } observe { count = 3u4; } } }
+  }
+}
+
+spec Budget(input amount: bv<4>, output remaining: bv<4>) {
+  state credits: bv<4>;
+  init credits == 3u4;
+  invariant remaining == credits;
+  operation add { expect amount <= credits && credits' == credits - amount; }
+
+  example spend_two {
+    expect positive;
+    initial { remaining = 3u4; }
+    trace { add { inputs { amount = 2u4; } observe { remaining = 1u4; } } }
+  }
+  example cannot_overspend {
+    expect negative;
+    initial {}
+    trace { add { inputs { amount = 4u4; } observe {} } }
+  }
+}
+
+composition Budgeted(input amount: bv<4>, output count: bv<4>, output remaining: bv<4>) {
+  use Counter(amount: amount, count: count);
+  use Budget(amount: amount, remaining: remaining);
+
+  example spend_all {
+    expect positive;
+    initial { count = 0u4; remaining = 3u4; }
+    trace {
+      add { inputs { amount = 2u4; } observe { count = 2u4; remaining = 1u4; } }
+      add { inputs { amount = 1u4; } observe { count = 3u4; remaining = 0u4; } }
+    }
+  }
+  example exclude_overspend {
+    expect negative;
+    initial {}
+    trace { add { inputs { amount = 4u4; } observe { count = 4u4; } } }
+  }
+}
+
+implementation {
+  composition Budgeted;
+  input rst: bool;
+  input go: bool;
+  input amount: bv<4>;
+  reset_input rst;
+  state count: bv<4>;
+  state remaining: bv<4>;
+  reset { count = 0u4; remaining = 3u4; }
+  wires { accept = i.go && i.amount <= s.remaining; }
+  next {
+    count = if w.accept { s.count + i.amount } else { s.count };
+    remaining = if w.accept { s.remaining - i.amount } else { s.remaining };
+  }
+  operations { add = w.accept; }
+  binding {
+    bind Counter { value = s.count; }
+    bind Budget { credits = s.remaining; }
+    output count = s.count;
+    output remaining = s.remaining;
+  }
+}

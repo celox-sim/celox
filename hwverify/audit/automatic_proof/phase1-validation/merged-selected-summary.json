@@ -1,0 +1,70 @@
+[
+  {
+    "name": "without-hints",
+    "status": "unknown",
+    "children_passed": 430,
+    "children_total": 436,
+    "other_statuses": [
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+      "passed"
+    ],
+    "exit_code": 3,
+    "wall_seconds": 121.71907464900141,
+    "input_path": "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+    "input_sha256": "7a53eebbc19beef3fee8a46d2944334c888d3487968a8df7b1c4d459f3a64623",
+    "checker_sha256": "eec650b6c2ab56e0c1e8256fbe703c1def6a7748f9cdbd0098b64055494648e0",
+    "command": [
+      "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs",
+      "/workspace/scratch/07f10565586c/hwverify-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+      "--out",
+      "/workspace/scratch/07f10565586c/automatic-proof-publication-selected/without-hints",
+      "--z3",
+      "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+    ],
+    "environment": {
+      "HWVERIFY_SOLVER": "finite",
+      "HWVERIFY_CONJUNCTIVE_LEMMAS": "1",
+      "HWVERIFY_AUTOMATIC_PROOFS": "independent_lemmas"
+    },
+    "report_sha256": "1d6e47b148209a87bca4b4d56d6b9fe0800b2f4dbaa64e897b632b42a07fb902"
+  },
+  {
+    "name": "manual-compatible",
+    "status": "stuttering_refinement_verified",
+    "children_passed": 436,
+    "children_total": 436,
+    "other_statuses": [
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+      "passed"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 112.95845633399585,
+    "input_path": "/workspace/scratch/07f10565586c/selected-proof-program-contract-v2.json",
+    "input_sha256": "1f9cac480cb2040850180df568bd43b96ccd4090090e4702a3c258b8fc49212a",
+    "checker_sha256": "eec650b6c2ab56e0c1e8256fbe703c1def6a7748f9cdbd0098b64055494648e0",
+    "command": [
+      "/workspace/scratch/07f10565586c/hwverify-git-publish/target/release/hwverify-rs",
+      "/workspace/scratch/07f10565586c/selected-proof-program-contract-v2.json",
+      "--out",
+      "/workspace/scratch/07f10565586c/automatic-proof-publication-selected/manual-compatible",
+      "--z3",
+      "/workspace/scratch/07f10565586c/hwverify-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+    ],
+    "environment": {
+      "HWVERIFY_SOLVER": "finite",
+      "HWVERIFY_CONJUNCTIVE_LEMMAS": "1",
+      "HWVERIFY_AUTOMATIC_PROOFS": "independent_lemmas"
+    },
+    "report_sha256": "1eefe6ea40a4960224f4e77ae2d6d83ce867914fd96ee54030ce787bf02743b8"
+  }
+]

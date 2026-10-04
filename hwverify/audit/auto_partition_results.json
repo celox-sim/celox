@@ -1,0 +1,621 @@
+[
+  {
+    "name": "auto_array_sum",
+    "status": "program_and_refinement_verified",
+    "exit_code": 0,
+    "wall_seconds": 2.581738591998146,
+    "queries": 106,
+    "failures": [],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_renamed",
+    "status": "program_and_refinement_verified",
+    "exit_code": 0,
+    "wall_seconds": 2.5694528710009763,
+    "queries": 106,
+    "failures": [],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "location",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "cursor",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "aggregate",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_reordered",
+    "status": "program_and_refinement_verified",
+    "exit_code": 0,
+    "wall_seconds": 2.5480391569981293,
+    "queries": 106,
+    "failures": [],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_unsplit",
+    "status": "unknown",
+    "exit_code": 3,
+    "wall_seconds": 10.280077205999987,
+    "queries": 16,
+    "failures": [
+      {
+        "name": "program_invariant_preserved",
+        "status": "unknown"
+      }
+    ],
+    "plan": {
+      "partition_count": 1,
+      "strategy": "none"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_bad_program",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 3.7059629289979057,
+    "queries": 106,
+    "failures": [
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_240",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_241",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_242",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_243",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_244",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_245",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_246",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_247",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_248",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_249",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_250",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_251",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_252",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_253",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_invariant_preserved_auto_pc_1_auto_idx_254",
+        "status": "counterexample"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_false_invariant",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 0.23907955899994704,
+    "queries": 18,
+    "failures": [
+      {
+        "name": "program_initialization",
+        "status": "counterexample"
+      },
+      {
+        "name": "program_active_nonempty",
+        "status": "failed_nonvacuity"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 2,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 1,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_false_pre",
+    "status": "inadequate_contract",
+    "exit_code": 3,
+    "wall_seconds": 2.5675198809985886,
+    "queries": 106,
+    "failures": [
+      {
+        "name": "program_pre_nonempty",
+        "status": "failed_nonvacuity"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_bad_rank",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 2.5231100769997283,
+    "queries": 106,
+    "failures": [
+      {
+        "name": "program_rank_decreases",
+        "status": "counterexample"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "auto_array_sum_input_invariant",
+    "status": "invalid_or_tool_error",
+    "exit_code": 2,
+    "wall_seconds": 0.12351329800003441,
+    "queries": 0,
+    "failures": [],
+    "plan": null,
+    "error": "unknown reference i.stall"
+  },
+  {
+    "name": "auto_array_sum_wrong_indexed_load",
+    "status": "counterexample",
+    "exit_code": 1,
+    "wall_seconds": 2.8290357179976127,
+    "queries": 106,
+    "failures": [
+      {
+        "name": "microstep_refinement",
+        "status": "counterexample"
+      }
+    ],
+    "plan": {
+      "candidates": [
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "pc",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "decision": "selected",
+          "source": "invariant comparison (possibly also model)",
+          "state": "idx",
+          "values": [
+            0,
+            240,
+            241,
+            242,
+            243,
+            244,
+            245,
+            246,
+            247,
+            248,
+            249,
+            250,
+            251,
+            252,
+            253,
+            254,
+            255
+          ]
+        },
+        {
+          "decision": "product_budget",
+          "source": "model-only comparison",
+          "state": "acc",
+          "values": [
+            0
+          ]
+        }
+      ],
+      "max_axes": 3,
+      "max_partitions": 128,
+      "max_values_per_axis": 32,
+      "ordering": "invariant-mentioned first, then ascending distinct value count, then state name",
+      "partition_count": 90,
+      "partition_query_timeout_ms": 1000,
+      "partition_scheduling_budget_ms": 30000,
+      "selected_axes": 2,
+      "soundness": "each selected axis includes complement; all partitions and coverage must pass",
+      "strategy": "automatic_literal_comparisons_v2"
+    },
+    "error": null
+  },
+  {
+    "name": "array_sum",
+    "status": "program_and_refinement_verified",
+    "exit_code": 0,
+    "wall_seconds": 1.9570086269995954,
+    "queries": 84,
+    "failures": [],
+    "plan": {
+      "partition_count": 68,
+      "strategy": "manual_split"
+    },
+    "error": null
+  }
+]

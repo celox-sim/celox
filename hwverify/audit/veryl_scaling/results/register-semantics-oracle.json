@@ -1,0 +1,80 @@
+{
+  "kind": "independent finite oracle; not universal proof",
+  "results": [
+    {
+      "path": "/workspace/shared/cpu-registers-baseline/cpu_8gpr/refinement.json",
+      "sha256": "09ab957552f1251bd7a3289b4dc9c9ac8e12adabeaba5631e0e8ae088b4266a0",
+      "registers": 8,
+      "structural": {
+        "all_registers_bound": 8,
+        "all_registers_reset": 8,
+        "instruction_bits": 41,
+        "register_bits": 3
+      },
+      "isolated": {
+        "exhaustive_spec_instructions": 512,
+        "all_selector_read_checks": 8,
+        "all_destination_write_checks": 64,
+        "forwarding_pair_checks": 192,
+        "full_state_stall_checks": 1
+      },
+      "concrete": {
+        "trials": 108,
+        "cycles": 8640,
+        "commits": 4711,
+        "resets": 216,
+        "stalls": 1440
+      }
+    },
+    {
+      "path": "/workspace/shared/cpu-registers-baseline/cpu_16gpr/refinement.json",
+      "sha256": "0a3077230b22d33163757ce12015754d4dd98d36f263ba2f89b0ba4efed0e967",
+      "registers": 16,
+      "structural": {
+        "all_registers_bound": 16,
+        "all_registers_reset": 16,
+        "instruction_bits": 43,
+        "register_bits": 4
+      },
+      "isolated": {
+        "exhaustive_spec_instructions": 2048,
+        "all_selector_read_checks": 16,
+        "all_destination_write_checks": 128,
+        "forwarding_pair_checks": 768,
+        "full_state_stall_checks": 1
+      },
+      "concrete": {
+        "trials": 156,
+        "cycles": 11280,
+        "commits": 6195,
+        "resets": 312,
+        "stalls": 1728
+      }
+    },
+    {
+      "path": "/workspace/shared/cpu-registers-baseline/cpu_32gpr/refinement.json",
+      "sha256": "16e0ba63d77f322e008bf68cabfee920ca433be60c06a4d54780ccbd98123b8a",
+      "registers": 32,
+      "structural": {
+        "all_registers_bound": 32,
+        "all_registers_reset": 32,
+        "instruction_bits": 45,
+        "register_bits": 5
+      },
+      "isolated": {
+        "exhaustive_spec_instructions": 8192,
+        "all_selector_read_checks": 32,
+        "all_destination_write_checks": 256,
+        "forwarding_pair_checks": 3072,
+        "full_state_stall_checks": 1
+      },
+      "concrete": {
+        "trials": 252,
+        "cycles": 16560,
+        "commits": 9169,
+        "resets": 504,
+        "stalls": 2304
+      }
+    }
+  ]
+}

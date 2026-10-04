@@ -1,0 +1,182 @@
+[
+  {
+    "case": "array_sum_bad_post",
+    "witnesses": [
+      {
+        "obligation": "program_postcondition",
+        "replayed": true,
+        "pc": 3
+      }
+    ]
+  },
+  {
+    "case": "array_sum_bad_program",
+    "witnesses": [
+      {
+        "obligation": "program_invariant_preserved_index_240_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_241_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_242_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_243_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_244_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_245_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_246_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_247_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_248_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_249_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_250_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_251_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_252_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_253_pc_1",
+        "replayed": true,
+        "pc": 1
+      },
+      {
+        "obligation": "program_invariant_preserved_index_254_pc_1",
+        "replayed": true,
+        "pc": 1
+      }
+    ]
+  },
+  {
+    "case": "array_sum_bad_rank",
+    "witnesses": [
+      {
+        "obligation": "program_rank_decreases",
+        "replayed": true,
+        "pc": 1
+      }
+    ]
+  },
+  {
+    "case": "array_sum_bad_terminal",
+    "witnesses": [
+      {
+        "obligation": "program_postcondition",
+        "replayed": true,
+        "pc": 0
+      },
+      {
+        "obligation": "program_terminal_quiescent",
+        "replayed": true,
+        "pc": 1
+      }
+    ]
+  },
+  {
+    "case": "array_sum_false_invariant",
+    "witnesses": [
+      {
+        "obligation": "program_initialization",
+        "replayed": true,
+        "pc": 0
+      }
+    ]
+  },
+  {
+    "case": "array_sum_missing_case",
+    "witnesses": [
+      {
+        "obligation": "program_cases_cover",
+        "replayed": true,
+        "pc": 1
+      }
+    ]
+  },
+  {
+    "case": "array_sum_split_other_bad_post",
+    "witnesses": [
+      {
+        "obligation": "program_postcondition",
+        "replayed": true,
+        "pc": 3
+      }
+    ]
+  },
+  {
+    "case": "array_sum_split_other_bad_program",
+    "witnesses": [
+      {
+        "obligation": "program_invariant_preserved_index_other_pc_1",
+        "replayed": true,
+        "pc": 1
+      }
+    ]
+  },
+  {
+    "case": "array_sum_unavailable_step",
+    "witnesses": [
+      {
+        "obligation": "commit_eligible",
+        "replayed": true,
+        "pc": 0
+      },
+      {
+        "obligation": "program_step_available",
+        "replayed": true,
+        "pc": 1
+      }
+    ]
+  },
+  {
+    "case": "array_sum_wrong_indexed_load",
+    "witnesses": [
+      {
+        "obligation": "microstep_refinement",
+        "replayed": true,
+        "pc": 154
+      }
+    ]
+  }
+]

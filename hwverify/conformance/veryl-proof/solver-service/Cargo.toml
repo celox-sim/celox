@@ -1,0 +1,10 @@
+[package]
+name = "veryl-proof-finite-service"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+[workspace]
+[dependencies]
+hwverify-ir = { path = "../../../crates/ir" }
+hwverify-solver = { path = "../../../crates/solver" }
+serde_json = "1"

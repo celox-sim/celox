@@ -1,0 +1,45 @@
+--- a/src/ir/system_function.rs
++++ b/src/ir/system_function.rs
+@@ -1,4 +1,3 @@
+-use crate::analyzer_error::UnevaluableValueKind;
+ use crate::conv::Context;
+ use crate::ir::assign_table::{AssignContext, AssignTable};
+ use crate::ir::ff_table::FfTable;
+@@ -194,14 +193,10 @@
+                 };
+                 let arg0 = create_input(context, name, Some(arg0_type), args.remove(0));
+                 // Function bodies are templates; const-ness is resolved per call.
+-                if !arg0.0.comptime().is_const && !context.is_affiliated(Affiliation::Function) {
+-                    context.insert_error(AnalyzerError::unevaluable_value(
+-                        UnevaluableValueKind::SystemFunctionArg("$clog2"),
+-                        &arg0.0.token_range(),
+-                    ));
+-                    return Err(ir_error!(token));
+-                }
+-                comptime.is_const = true;
++                // Keep runtime calls in the typed IR. Only genuine constants
++                // may fold outside a function template.
++                comptime.is_const = arg0.0.comptime().is_const
++                    || context.is_affiliated(Affiliation::Function);
+                 Ok(SystemFunctionCall {
+                     kind: SystemFunctionKind::Clog2(arg0),
+                     comptime,
+@@ -223,14 +218,10 @@
+                     t
+                 };
+                 let arg0 = create_input(context, name, Some(arg0_type), args.remove(0));
+-                if !arg0.0.comptime().is_const && !context.is_affiliated(Affiliation::Function) {
+-                    context.insert_error(AnalyzerError::unevaluable_value(
+-                        UnevaluableValueKind::SystemFunctionArg("$onehot"),
+-                        &arg0.0.token_range(),
+-                    ));
+-                    return Err(ir_error!(token));
+-                }
+-                comptime.is_const = true;
++                // Keep runtime calls in the typed IR. Only genuine constants
++                // may fold outside a function template.
++                comptime.is_const = arg0.0.comptime().is_const
++                    || context.is_affiliated(Affiliation::Function);
+                 Ok(SystemFunctionCall {
+                     kind: SystemFunctionKind::Onehot(arg0),
+                     comptime,

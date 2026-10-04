@@ -1,0 +1,10 @@
+{
+  "status": "pass",
+  "expected_counts": {
+    "positive": 40,
+    "negative": 540
+  },
+  "case_count": 580,
+  "report_status": "spec_examples_passed",
+  "final_release_sha256": "ae83d45c84e99551e5eb37abe42fade8afdc89434512e077dd795f36a0058491"
+}

@@ -1,0 +1,19 @@
+[package]
+name = "veryl-proof-frontend"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+exclude = ["celox"]
+[dependencies]
+celox-frontend-veryl = { path = "../work/celox/crates/celox-frontend-veryl" }
+celox-frontend-core = { path = "../work/celox/crates/celox-frontend-core" }
+celox-sir = { path = "../work/celox/crates/celox-sir" }
+veryl-analyzer = "=0.21.0"
+veryl-parser = { version = "=0.21.0", default-features = false }
+veryl-metadata = { version = "=0.21.0", default-features = false, features = ["git-command"] }
+serde_json = "1"
+[patch.crates-io]
+veryl-analyzer = { path = "../work/analyzer" }
+veryl-metadata = { path = "../work/celox/vendor/veryl-metadata" }
+[profile.dev]
+debug = false

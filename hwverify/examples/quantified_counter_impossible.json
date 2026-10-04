@@ -1,0 +1,86 @@
+{
+  "compositions": {},
+  "kind": "specification",
+  "name": "Universal execution assertions must be feasible",
+  "specs": {
+    "Counter": {
+      "examples": {
+        "cannot_prove_an_impossible_execution": {
+          "expect": "forall",
+          "initial": {
+            "count": [
+              "bv",
+              2,
+              0
+            ]
+          },
+          "quantifiers": [
+            {
+              "kind": "forall",
+              "variables": {
+                "flag": "bool"
+              }
+            }
+          ],
+          "trace": [
+            {
+              "ensure": true,
+              "inputs": {
+                "enabled": "q.flag"
+              },
+              "observe": {},
+              "operation": "add"
+            }
+          ]
+        }
+      },
+      "init": [
+        "eq",
+        "s.value",
+        [
+          "bv",
+          2,
+          0
+        ]
+      ],
+      "inputs": {
+        "enabled": "bool"
+      },
+      "invariant": [
+        "eq",
+        "count",
+        "s.value"
+      ],
+      "operations": {
+        "add": [
+          "and",
+          "enabled",
+          [
+            "eq",
+            "n.value",
+            [
+              "add",
+              "s.value",
+              [
+                "bv",
+                2,
+                1
+              ]
+            ]
+          ]
+        ]
+      },
+      "outputs": {
+        "count": {
+          "bv": 2
+        }
+      },
+      "state": {
+        "value": {
+          "bv": 2
+        }
+      }
+    }
+  },
+  "version": 4
+}

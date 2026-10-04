@@ -1,0 +1,25 @@
+--- a/src/ir/system_function.rs
++++ b/src/ir/system_function.rs
+@@ -372,9 +372,20 @@
+             SystemFunctionKind::Size(x) => {
+                 let mut expr = x.0.clone();
+                 let comptime = expr.eval_comptime(context, None);
++                // $size defaults to the first unpacked dimension, or the
++                // first packed dimension when no unpacked dimension exists.
++                let first_dimension = |ty: &Type| {
++                    if let Some(size) = ty.array.first() {
++                        *size
++                    } else if let Some(size) = ty.width().first() {
++                        *size
++                    } else {
++                        ty.total_width()
++                    }
++                };
+                 let value = match &comptime.value {
+-                    ValueVariant::Numeric(_) => comptime.r#type.total_width(),
+-                    ValueVariant::Type(x) => x.total_width(),
++                    ValueVariant::Numeric(_) => first_dimension(&comptime.r#type),
++                    ValueVariant::Type(x) => first_dimension(x),
+                     _ => None,
+                 };
+                 value.map(|x| Value::new(x as u64, 32, false))

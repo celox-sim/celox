@@ -1,0 +1,125 @@
+{
+  "status": "pass",
+  "cases": [
+    {
+      "case": "budgeted_counter",
+      "status": "spec_examples_and_binding_verified",
+      "replayed": [
+        {
+          "target": "Budget",
+          "example": "spend_two",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Counter",
+          "example": "add_two",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Arithmetic",
+          "example": "arithmetic_allows_four",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Budgeted",
+          "example": "spend_all",
+          "steps": 2,
+          "replayed": true
+        }
+      ],
+      "failed_examples": []
+    },
+    {
+      "case": "contradictory_composition",
+      "status": "spec_examples_failed",
+      "replayed": [
+        {
+          "target": "One",
+          "example": "one_step",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Two",
+          "example": "one_step",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Contradiction",
+          "example": "common_initial_state",
+          "steps": 0,
+          "replayed": true
+        }
+      ],
+      "failed_examples": [
+        {
+          "target": "Contradiction",
+          "name": "intended_operation",
+          "admitted": false,
+          "expect": "positive"
+        }
+      ]
+    },
+    {
+      "case": "weakened_budget",
+      "status": "spec_examples_failed",
+      "replayed": [
+        {
+          "target": "Budget",
+          "example": "cannot_overspend",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Budget",
+          "example": "spend_two",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Counter",
+          "example": "add_two",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Arithmetic",
+          "example": "arithmetic_allows_four",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Budgeted",
+          "example": "exclude_overspend",
+          "steps": 1,
+          "replayed": true
+        },
+        {
+          "target": "Budgeted",
+          "example": "spend_all",
+          "steps": 2,
+          "replayed": true
+        }
+      ],
+      "failed_examples": [
+        {
+          "target": "Budget",
+          "name": "cannot_overspend",
+          "admitted": true,
+          "expect": "negative"
+        },
+        {
+          "target": "Budgeted",
+          "name": "exclude_overspend",
+          "admitted": true,
+          "expect": "negative"
+        }
+      ]
+    }
+  ],
+  "count": 13
+}

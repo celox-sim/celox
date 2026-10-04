@@ -1,0 +1,88 @@
+{
+  "baseline_commit": "8e700fa040d23334dc1fddd1c108c141375c2506",
+  "historical_probe_commit": "01400a4de7fe57b9d7f49a178d8c241c9c657338",
+  "candidate_version": "0.11.3",
+  "candidate_parent_commit": "01400a4de7fe57b9d7f49a178d8c241c9c657338",
+  "binaries": {
+    "baseline": {
+      "path": "/workspace/scratch/07f10565586c/counterexample_search_frozen/baseline-0.11.2",
+      "sha256": "fa8db7a2dbe7b52963594b35c84b13c02af8d963cd5b9f02fd87a980ce24936e"
+    },
+    "historical_probe": {
+      "path": "/workspace/scratch/07f10565586c/counterexample_search_frozen/candidate-0.11.3",
+      "sha256": "7e9b85db57aad57e4f737d1fdcc2a6ee0712e30baa02182f85ee2e41d17937f9"
+    },
+    "query": {
+      "path": "/workspace/scratch/07f10565586c/expected_result_search_frozen/candidate-0.11.3",
+      "sha256": "a7680b0bf418da92491f4729bfa2d1e673fb79ebbf09dcd8b4a8a7b45d8681ed"
+    },
+    "sat": {
+      "path": "/workspace/scratch/07f10565586c/expected_result_search_frozen/candidate-0.11.3",
+      "sha256": "a7680b0bf418da92491f4729bfa2d1e673fb79ebbf09dcd8b4a8a7b45d8681ed"
+    },
+    "unsat": {
+      "path": "/workspace/scratch/07f10565586c/expected_result_search_frozen/candidate-0.11.3",
+      "sha256": "a7680b0bf418da92491f4729bfa2d1e673fb79ebbf09dcd8b4a8a7b45d8681ed"
+    }
+  },
+  "candidate_sources": {
+    "Cargo.toml": "3cbb21eeb9af26d46410cdbb79d1845d80889e3df18d579e88f8646f0919ce32",
+    "Cargo.lock": "bdba5de57d787b8029a5f1d73f6b239c0826a9d8ff4316ca7c3d33299ccd55c0",
+    "crates/cli/src/kernel_tests.rs": "4c8a01e907e0486ad6b5cd8d2c9ae1669120ed443f18211bcf15788bae6bb2a0",
+    "crates/cli/src/main.rs": "93255df63e39f3f2bdae91321cf4b49e06b3aa9694df577abb1d1d8b5a2a08ac",
+    "crates/cli/src/tests.rs": "e5b7ccb3e5f057636a2ebce0173c78f80b1be100ef4faed7ea4cb7c663cfe735",
+    "crates/cli/tests/branch_pipeline.rs": "03778e7346f304cf86c1d376b495c70f1186e531408888770e9a8e5de48acb45",
+    "crates/cli/tests/expected_result_search.rs": "659ff8aa8d35e56220189e69363b32bb107a8f490b820d48ad8228bd60d19fd8",
+    "crates/cli/tests/language.rs": "6d9491259d1eb9c6625133d7c71913238837c7a5b62757d9d944ba09c1e55e24",
+    "crates/cli/tests/pipeline.rs": "d4181dacb9d4eda5cb6df43a1ceab5bda5fe74320f545528d675d288df9ecab1",
+    "crates/cli/tests/scoped.rs": "aa3742e957e0f6d19ffe968f08fd6e30e12e7b875bb9df1d4de0c4f4e707d957",
+    "crates/cli/tests/specifications.rs": "70cb330f5a5d8d0601ff8713c7ec8f5b7e3c30ca690a6b648e0fdb1816d4321e",
+    "crates/ir/src/design.rs": "42d7165d660c484a535444dd5863f5f212db99533194bb93225706709ef5f3a4",
+    "crates/ir/src/lib.rs": "db816cf8b0dde3d5f08e9be349d45593132ad82fd114f500cc65aaf5ac0e213f",
+    "crates/ir/src/lower.rs": "46968e906e75ea303b58435a4f72a3b914fef8e9009bffd6a0d958e2bff692a2",
+    "crates/ir/src/quantified_examples.rs": "73c3f189157690eda7f38862c0490ececb2c7344530f77fd804170e1561bab12",
+    "crates/ir/src/scoped_specification/tests.rs": "e4abdc45ec90164d2339988c65880bade44bfb320192855154fb47e4eb6ebb9c",
+    "crates/ir/src/scoped_specification.rs": "70d2f52872e89c1971d29e30e61c04785f799e380cbd9aa1eff508a0b90ab4ba",
+    "crates/ir/src/specification.rs": "79aa530d9aca11bae15bb958c9dda2cf452bfa00b3f04363598e61bc82e7b2f6",
+    "crates/ir/src/term.rs": "10a709ce657add3a875535b6a9b1ca076327a29a2250dcfbd6cbe2a49bb3e3b3",
+    "crates/ir/src/validation_tests.rs": "cc8aa63f36dd46b7cc059d2096398f4d21505519c720590f869fef2006725495",
+    "crates/solver/src/finite.rs": "9adb0aa01fc6ccd0eae687d3a50b47b960e70395e3dbd90bf24e0466ff0d15ae",
+    "crates/solver/src/kernel.rs": "8b999c3fe3ba7be33e95fa58ad581d9c8ded3f5aab9eca55c59af928995d49c0",
+    "crates/solver/src/lib.rs": "abc54849616f2d6f5b5f661c6f17c1c22e9bc0aa0c46c51371b7a6be3ddd766a",
+    "crates/solver/src/partition.rs": "e664fd87c11ea6afee469909c4e05fc2669cf472152fa493bd28625fe147d71c",
+    "crates/solver/src/quantified.rs": "fc6dabcc9c423eb6cd84825b1240337d6ec47188ad76b93bab3e3ec1e73e6829",
+    "crates/solver/src/z3.rs": "9bcd0a3db90e719bc5b804914efecfb8e3e5892f16e64438e26b66c6120f2eb6",
+    "crates/syntax/build.rs": "51d0a7a726d994e86acf1e3ef5e848714fc05cf32038abe4511efd1160b6d57d",
+    "crates/syntax/src/examples.rs": "75fe48a555990696a82de691bf38edaa341ce2ef2275f1790cc5860797f1b1cc",
+    "crates/syntax/src/expectations.rs": "d46ea474486e57bd3c90f3d3f1df56c8ae4a3965d4c750714836446dd7f33027",
+    "crates/syntax/src/json_input.rs": "08e6c3d6eb110904038837e483a2966f65668fdb42237c6ba31dcdd45b638aea",
+    "crates/syntax/src/lib.rs": "0db0e9df3b618d4e51cc72b69cdce81302f3fbd4d7aa1fc5b222018160a49df2",
+    "crates/syntax/src/scoped.rs": "24f21e2e87ac1e1120eedaadfc51eb6b4329adc493b3b1ec98f9427406eb181e",
+    "crates/syntax/tests/bare_quantified_names.rs": "fcca3fb1b4d60671a4db8d60d1e1877e7e3eccfd5151ae59a78a6d62c33b93b2",
+    "crates/syntax/tests/declarations.rs": "01dcbd37bfbf92a2e6356cbf352d331e7140b10c4c618c443e35d9adba06b5fc",
+    "crates/syntax/tests/expectations.rs": "03fed00afb83bd36c6cc718736b7e98abc9fa361c40ea6a87e9e1272a1275332",
+    "crates/syntax/tests/quantified_examples.rs": "8f588c31fac4b9f53a14145d0414c8df81a62d1690eef8adbcf9cb042be2c89d",
+    "crates/syntax/tests/scoped.rs": "ca9f260b0a221e01c30e4f44256490a0c51b241135a43cd60491711c9ed5aabe",
+    "crates/verify/src/checker.rs": "44f087d61da7aaa7a9976a04d681225a31a747d2157da823cdffe138af2a7e19",
+    "crates/verify/src/lib.rs": "ff34cb5437d79fdda1f4131065bc4c3ab454d03d0f0f9cd82f93e0f91ee88fe2",
+    "crates/verify/src/program.rs": "8b393284b1b52c7c01ae8ce6363101e71fbaa29e4b4797f47e0f0f78f6966cc7",
+    "crates/verify/src/quantified_examples.rs": "c422d42abcb3322e5ac97b92168ba72e76b846e9ccdad8edc15a1482650d5336",
+    "crates/verify/src/scoped_binding.rs": "55afa5b4a7e6e87101a17fed3903646c631901f7830f3796405d34891fd54b66",
+    "crates/verify/src/scoped_specification.rs": "fedea0449ccfd26f6a12c1ab2b6d85c2df9d099dc916232037584340dc4a8da6",
+    "crates/verify/src/spec_binding.rs": "2e9fa0de64eae4b26b2292594d99a1d580ddbf0b8bb9c399100e326eef53332b",
+    "crates/verify/src/specification.rs": "764a28816213ac7285be1729f99399fbefcfcd83fcb4cb7d357ec9c6718c3e76",
+    "crates/verify/tests/quantified_examples.rs": "b1137476e7377900779e7169926a19318ff68d23f07deca29f542154c94b11ad",
+    "crates/verify/tests/scoped_products.rs": "75621efefee2179e7147013f16b96f4e9c33565e28a7f663b5757da51ca59336",
+    "crates/verify/tests/scoped_specifications.rs": "9be31161a37f0cf701b4ddcf562515f9fcf2a1e81dd571371ff2d0d1faecf061",
+    "crates/cli/Cargo.toml": "0fe6869c2f93505fc69978a31b6ccee06787ba42f96ca1a5ea2bfa6c79c0a11d",
+    "crates/ir/Cargo.toml": "8f21d21ed7524adadf28139f989dc5cf071cc190de1a048691df81a27ae13323",
+    "crates/solver/Cargo.toml": "7fd21e9956b8c7692888ea46b86f53d83275deff5f9f78a0cacd20f2f0b9b274",
+    "crates/syntax/Cargo.toml": "50a6e5de72818cf16f57fd72792fb0d6dd86faaeb2093e530f525eb7cfca5d1a",
+    "crates/verify/Cargo.toml": "c5288a27a93296269d140ab8eb9b010bf38cff124f624725457e24d02fe8bd32"
+  },
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.41",
+  "method": "Same host/toolchain; immutable binaries; every model gets all five modes independently of actual result; 46 models x 5 modes x 5 repeats; mode order rotates and model order reverses; coordinated exclusive timing window; original SMT, results and exact search-counter equivalence checked; executable Z3 tripwire; whole-CLI wall time includes report and evidence I/O.",
+  "raw_summary_sha256": "d9b4da2a850dd0f4c33b6442b8ae246818904313941af4ad3103a6e624dabba3"
+}

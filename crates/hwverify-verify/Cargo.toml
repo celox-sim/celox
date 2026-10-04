@@ -1,0 +1,12 @@
+[package]
+name = "hwverify-verify"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+hwverify-ir.workspace = true
+hwverify-solver.workspace = true
+
+[dev-dependencies]
+hwverify-syntax.workspace = true

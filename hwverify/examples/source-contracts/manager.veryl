@@ -1,0 +1,32 @@
+// One outstanding transaction of each kind. VALID never waits for READY.
+module AxiLiteManager (
+    clk: input clock, rst_n: input bit, start_write: input bit, start_read: input bit,
+    awvalid: output bit, awready: input bit, awaddr: output bit<8>, awprot: output bit<3>,
+    wvalid: output bit, wready: input bit, wdata: output bit<32>, wstrb: output bit<4>,
+    bvalid: input bit, bready: output bit, bresp: input bit<2>,
+    arvalid: output bit, arready: input bit, araddr: output bit<8>, arprot: output bit<3>,
+    rvalid: input bit, rready: output bit, rdata: input bit<32>, rresp: input bit<2>,
+) {
+    var write_busy: bit;
+    var read_busy: bit;
+    assign awaddr = 8'd0;
+    assign awprot = 3'd0;
+    assign wdata = 32'd42;
+    assign wstrb = 4'd15;
+    assign araddr = 8'd0;
+    assign arprot = 3'd0;
+    assign bready = 1;
+    assign rready = 1;
+    always_ff (clk) {
+        if !rst_n { awvalid = 0; wvalid = 0; arvalid = 0; write_busy = 0; read_busy = 0; }
+        else {
+            if start_write && !write_busy { awvalid = 1; wvalid = 1; write_busy = 1; }
+            if awvalid && awready { awvalid = 0; }
+            if wvalid && wready { wvalid = 0; }
+            if bvalid && bready { write_busy = 0; }
+            if start_read && !read_busy { arvalid = 1; read_busy = 1; }
+            if arvalid && arready { arvalid = 0; }
+            if rvalid && rready { read_busy = 0; }
+        }
+    }
+}

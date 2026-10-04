@@ -1,0 +1,65 @@
+{
+  "status": "pass",
+  "old_binary_sha256": "cbbba4cf9dfdc51a84bf2cf8513df1c4995d88d0dd47e10d5f3678a28b3dffbd",
+  "new_binary_sha256": "ae83d45c84e99551e5eb37abe42fade8afdc89434512e077dd795f36a0058491",
+  "cases": [
+    {
+      "case": "array_sum.hwv",
+      "status": "program_and_refinement_verified",
+      "exit_code": 0,
+      "smt_files_identical": 163,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "auto_array_sum.hwv",
+      "status": "program_and_refinement_verified",
+      "exit_code": 0,
+      "smt_files_identical": 207,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "budgeted_counter.hwv",
+      "status": "spec_examples_and_binding_verified",
+      "exit_code": 0,
+      "smt_files_identical": 19,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "contradictory_composition.hwv",
+      "status": "spec_examples_failed",
+      "exit_code": 1,
+      "smt_files_identical": 6,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "memory_increment.hwv",
+      "status": "program_and_refinement_verified",
+      "exit_code": 0,
+      "smt_files_identical": 33,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "memory_increment_readable.hwv",
+      "status": "program_and_refinement_verified",
+      "exit_code": 0,
+      "smt_files_identical": 33,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    },
+    {
+      "case": "weakened_budget.hwv",
+      "status": "spec_examples_failed",
+      "exit_code": 1,
+      "smt_files_identical": 19,
+      "canonical_json_identical": true,
+      "non_timing_report_identical": true
+    }
+  ],
+  "total_smt_files_identical": 480,
+  "final_release_sha256": "ae83d45c84e99551e5eb37abe42fade8afdc89434512e077dd795f36a0058491"
+}

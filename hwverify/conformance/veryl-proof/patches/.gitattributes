@@ -1,0 +1,2 @@
+# A blank context line in a unified diff intentionally contains one space.
+*.patch whitespace=-blank-at-eol

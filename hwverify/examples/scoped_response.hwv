@@ -1,0 +1,47 @@
+specification "Accepted requests complete within two nonreset steps"
+
+spec Counter(output count: bv<4>) {
+  state value: bv<4>;
+  init value == 0u4;
+  invariant count == value;
+  operation advance { expect value' == value + 1u4; }
+}
+composition Completed(output count: bv<4>) {
+  use counter: Counter(count: count);
+}
+implementation {
+  composition Completed;
+  input rst: bool;
+  input request: bool;
+  input stall: bool;
+  reset_input rst;
+  state count: bv<4>;
+  state busy: bool;
+  state ticks: bv<2>;
+  reset { count = 0u4; busy = false; ticks = 0u2; }
+  wires {
+    accept = i.request && !s.busy;
+    complete = s.busy && s.ticks == 0u2 && !i.stall;
+  }
+  next {
+    count = if w.complete { s.count + 1u4 } else { s.count };
+    busy = if i.stall { s.busy } else { (s.busy || w.accept) && !w.complete };
+    ticks = if i.stall { s.ticks } else { if w.accept { 1u2 } else { if s.busy { s.ticks - 1u2 } else { s.ticks } } };
+  }
+  operations { advance = w.complete; }
+  binding {
+    bind counter { value = s.count; }
+    output count = s.count;
+  }
+  responses {
+    request_done {
+      operation advance;
+      accept w.accept;
+      pending s.busy;
+      rank s.ticks;
+      bound 2;
+      cover_depth 2;
+      assume !i.stall;
+    }
+  }
+}

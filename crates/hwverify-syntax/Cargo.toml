@@ -1,0 +1,13 @@
+[package]
+name = "hwverify-syntax"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+[dependencies]
+serde_json.workspace = true
+serde.workspace = true
+hwverify-ir.workspace = true
+parol_runtime = "=5.0.2"
+scnr2 = "=0.5.2"
+[build-dependencies]
+parol = "=5.0.2"

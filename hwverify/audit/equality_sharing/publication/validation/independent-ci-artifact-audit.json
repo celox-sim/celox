@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "directory": "equality-sharing-strict-ci-reviewed-20261003",
+      "row_artifact_references_checked": 1825,
+      "checker_sha256": "4d2d6f973f054117a1c9c0deacf85abdcb05c57d8b2fd03cc978d12cde86fd10",
+      "status": "passed_with_diagnostic_unknowns",
+      "covered": 9,
+      "negatives": 19,
+      "diagnostic_unknowns": 4
+    },
+    {
+      "directory": "automatic-proof-phase2-merged-ci",
+      "row_artifact_references_checked": 1825,
+      "checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
+      "status": "passed_with_diagnostic_unknowns",
+      "covered": 9,
+      "negatives": 19,
+      "diagnostic_unknowns": 4
+    }
+  ],
+  "total_row_artifact_references_checked": 3650
+}

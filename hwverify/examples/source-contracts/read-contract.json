@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "project": "read-project.json",
+  "contract": {
+    "kind": "fifo_read",
+    "name": "ReadQueue",
+    "capacity": 2,
+    "request_width": 8,
+    "response_width": 32,
+    "count": "count",
+    "slots": [
+      "slot0",
+      "slot1"
+    ],
+    "request_valid": "arvalid",
+    "request_payload": "araddr",
+    "request_ready": "bus_arready",
+    "response_valid": "bus_rvalid",
+    "response_data": "bus_rdata",
+    "response_ready": "rready",
+    "response_function": [
+      "ite",
+      [
+        "eq",
+        "request",
+        [
+          "bv",
+          8,
+          0
+        ]
+      ],
+      [
+        "bv",
+        32,
+        17
+      ],
+      [
+        "ite",
+        [
+          "eq",
+          "request",
+          [
+            "bv",
+            8,
+            4
+          ]
+        ],
+        [
+          "bv",
+          32,
+          34
+        ],
+        [
+          "bv",
+          32,
+          0
+        ]
+      ]
+    ]
+  }
+}

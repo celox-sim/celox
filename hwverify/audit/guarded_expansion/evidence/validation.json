@@ -1,0 +1,13 @@
+{
+  "status": "verified",
+  "archives_verified": 1,
+  "members_verified": 6655,
+  "uncompressed_bytes_verified": 221087036,
+  "archive_bytes_verified": 2282504,
+  "recorded_artifact_maps": [],
+  "recorded_artifact_references_verified": 0,
+  "original_files_verified": 6655,
+  "extracted_to": null,
+  "saved_reports_create_proof_handles": false,
+  "scope": "Byte integrity and recorded artifact hash maps; no proof rerun or composition authorization"
+}

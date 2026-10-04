@@ -1,0 +1,34 @@
+{
+  "status": "pass",
+  "trace_count": 2307,
+  "positive": 158,
+  "negative": 2149,
+  "bridge_variants": [
+    {
+      "variant": "good",
+      "exit_code": 0,
+      "status": "binding_verified_no_examples"
+    },
+    {
+      "variant": "inactive_state_changes",
+      "exit_code": 1,
+      "status": "implementation_binding_failed"
+    },
+    {
+      "variant": "swapped_private_binding",
+      "exit_code": 1,
+      "status": "implementation_binding_failed"
+    },
+    {
+      "variant": "missed_simultaneous_update",
+      "exit_code": 1,
+      "status": "implementation_binding_failed"
+    },
+    {
+      "variant": "conflicting_selectors",
+      "exit_code": 1,
+      "status": "implementation_binding_failed"
+    }
+  ],
+  "final_release_sha256": "ae83d45c84e99551e5eb37abe42fade8afdc89434512e077dd795f36a0058491"
+}

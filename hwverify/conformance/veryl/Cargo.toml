@@ -1,0 +1,12 @@
+[workspace]
+members = ["capture-macros", "generated-suite", "harness"]
+resolver = "2"
+
+[workspace.metadata]
+upstream = "https://github.com/celox-sim/celox"
+revision = "124a1315096d21b85d9d0d84fd7139363a181cad"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"

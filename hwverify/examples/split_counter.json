@@ -1,0 +1,214 @@
+{
+  "version": 2,
+  "name": "16-bit count vs split 8-bit registers",
+  "inputs": {
+    "clear": "bool",
+    "freeze": "bool"
+  },
+  "reset_input": "clear",
+  "spec": {
+    "state": {
+      "count": {
+        "bv": 16
+      }
+    },
+    "reset": {
+      "count": [
+        "bv",
+        16,
+        0
+      ]
+    },
+    "next": {
+      "count": [
+        "add",
+        "s.count",
+        [
+          "bv",
+          16,
+          1
+        ]
+      ]
+    },
+    "outputs": {
+      "allowed": true
+    }
+  },
+  "impl": {
+    "state": {
+      "hi": {
+        "bv": 8
+      },
+      "lo": {
+        "bv": 8
+      },
+      "phase": {
+        "bv": 1
+      }
+    },
+    "reset": {
+      "hi": [
+        "bv",
+        8,
+        0
+      ],
+      "lo": [
+        "bv",
+        8,
+        0
+      ],
+      "phase": [
+        "bv",
+        1,
+        0
+      ]
+    },
+    "next": {
+      "lo": [
+        "ite",
+        [
+          "and",
+          [
+            "not",
+            "i.freeze"
+          ],
+          [
+            "eq",
+            "s.phase",
+            [
+              "bv",
+              1,
+              1
+            ]
+          ]
+        ],
+        [
+          "add",
+          "s.lo",
+          [
+            "bv",
+            8,
+            1
+          ]
+        ],
+        "s.lo"
+      ],
+      "hi": [
+        "ite",
+        [
+          "and",
+          [
+            "and",
+            [
+              "not",
+              "i.freeze"
+            ],
+            [
+              "eq",
+              "s.phase",
+              [
+                "bv",
+                1,
+                1
+              ]
+            ]
+          ],
+          [
+            "eq",
+            "s.lo",
+            [
+              "bv",
+              8,
+              255
+            ]
+          ]
+        ],
+        [
+          "add",
+          "s.hi",
+          [
+            "bv",
+            8,
+            1
+          ]
+        ],
+        "s.hi"
+      ],
+      "phase": [
+        "ite",
+        [
+          "not",
+          "i.freeze"
+        ],
+        [
+          "bxor",
+          "s.phase",
+          [
+            "bv",
+            1,
+            1
+          ]
+        ],
+        "s.phase"
+      ]
+    },
+    "outputs": {
+      "retire": [
+        "and",
+        [
+          "not",
+          "i.freeze"
+        ],
+        [
+          "eq",
+          "s.phase",
+          [
+            "bv",
+            1,
+            1
+          ]
+        ]
+      ]
+    }
+  },
+  "binding": [
+    "eq",
+    "spec.count",
+    [
+      "concat",
+      "impl.hi",
+      "impl.lo"
+    ]
+  ],
+  "commit": "retire",
+  "can_step": "allowed",
+  "hold_when": "i.freeze",
+  "progress": {
+    "enabled": [
+      "not",
+      "i.freeze"
+    ],
+    "rank": [
+      "ite",
+      [
+        "eq",
+        "impl.phase",
+        [
+          "bv",
+          1,
+          0
+        ]
+      ],
+      [
+        "bv",
+        1,
+        1
+      ],
+      [
+        "bv",
+        1,
+        0
+      ]
+    ]
+  }
+}

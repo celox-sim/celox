@@ -1,0 +1,1998 @@
+{
+  "claim": "Reset-established inductive microstep/ISA-step correspondence; spec steps iff implementation commit, otherwise stutters; unsigned rank strictly decreases on enabled noncommit transitions",
+  "engine_summary": {
+    "custom_closed": 3,
+    "finite_queries": 5,
+    "finite_seconds": 0.052841353,
+    "kernel_compute_seconds": 0.042916125,
+    "not_run": 0,
+    "query_seconds": 0.09935838699999999,
+    "scoring_seconds": 0.0,
+    "timing_note": "query_seconds includes emission and evidence I/O; scoring is additional; whole-process wall time must be measured externally",
+    "z3_queries": 0,
+    "z3_seconds": 0.0
+  },
+  "limitations": [
+    "Rust structural-kernel UNSAT, the selected finite Bool/BV solver or Z3 fallback, Rust lowering, specification and binding are trusted; diagnostics are not independent proof certificates; existing Lean memory theorems do not certify these solvers",
+    "Progress is conditional on enabled at every noncommit step; external stalls may continue forever",
+    "Supplied binding adequacy is not inferred; no RTL import or synthesis claim",
+    "Nonvacuity checks are satisfiability in the relation, not reset reachability"
+  ],
+  "name": "veryl_branch_pipeline_w8_bad_wrong_add",
+  "normalization": {
+    "fixed_width_literal": 202
+  },
+  "obligations": [
+    {
+      "backend": "finite_bv",
+      "concrete_model": true,
+      "context_symbols": {},
+      "emission_seconds": 0.00010628,
+      "evidence": "binding_nonempty.smt2",
+      "finite": {
+        "assignments": {
+          "impl_d_ir": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_d_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_d_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_fetch_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_r0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_r1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_w_ir": {
+            "sort": "Bv",
+            "value": 3075,
+            "width": 13
+          },
+          "impl_w_next_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_w_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_w_result": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_w_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_x_ir": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_x_operand": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_x_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_x_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "spec_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "spec_r0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_r1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          }
+        },
+        "base_clauses": 1530,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 1535,
+        "conflicts": 5,
+        "context_values": {},
+        "decisions": 276,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 1535,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "sat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 165,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 585,
+        "work": 24397
+      },
+      "finite_diagnostics": "binding_nonempty.finite.json",
+      "finite_seconds": 0.000539514,
+      "kernel": {
+        "enabled": false
+      },
+      "logical_expectation": "sat",
+      "name": "binding_nonempty",
+      "search_hint_source": "logical_expectation",
+      "seconds": 0.000725754,
+      "solver_output": "binding_nonempty.out",
+      "solver_result": "sat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "structural_kernel",
+      "context_symbols": {
+        "binding_after": "t500",
+        "binding_before": "t611",
+        "commit": "t109",
+        "i.data0": "input_data0",
+        "i.data1": "input_data1",
+        "i.data2": "input_data2",
+        "i.data3": "input_data3",
+        "i.rom0": "input_rom0",
+        "i.rom1": "input_rom1",
+        "i.rom2": "input_rom2",
+        "i.rom3": "input_rom3",
+        "i.rst": "input_rst",
+        "i.stall": "input_stall",
+        "impl.d_ir": "impl_d_ir",
+        "impl.d_pc": "impl_d_pc",
+        "impl.d_valid": "impl_d_valid",
+        "impl.data0": "impl_data0",
+        "impl.data1": "impl_data1",
+        "impl.data2": "impl_data2",
+        "impl.data3": "impl_data3",
+        "impl.fetch_pc": "impl_fetch_pc",
+        "impl.pc": "impl_pc",
+        "impl.r0": "impl_r0",
+        "impl.r1": "impl_r1",
+        "impl.rom0": "impl_rom0",
+        "impl.rom1": "impl_rom1",
+        "impl.rom2": "impl_rom2",
+        "impl.rom3": "impl_rom3",
+        "impl.w_ir": "impl_w_ir",
+        "impl.w_next_pc": "impl_w_next_pc",
+        "impl.w_pc": "impl_w_pc",
+        "impl.w_result": "impl_w_result",
+        "impl.w_valid": "impl_w_valid",
+        "impl.x_ir": "impl_x_ir",
+        "impl.x_operand": "impl_x_operand",
+        "impl.x_pc": "impl_x_pc",
+        "impl.x_valid": "impl_x_valid",
+        "impl_next.d_ir": "t481",
+        "impl_next.d_pc": "t461",
+        "impl_next.d_valid": "t458",
+        "impl_next.data0": "t292",
+        "impl_next.data1": "t297",
+        "impl_next.data2": "t302",
+        "impl_next.data3": "t307",
+        "impl_next.fetch_pc": "t496",
+        "impl_next.pc": "t223",
+        "impl_next.r0": "t255",
+        "impl_next.r1": "t267",
+        "impl_next.rom0": "t272",
+        "impl_next.rom1": "t277",
+        "impl_next.rom2": "t282",
+        "impl_next.rom3": "t287",
+        "impl_next.w_ir": "t317",
+        "impl_next.w_next_pc": "t330",
+        "impl_next.w_pc": "t313",
+        "impl_next.w_result": "t372",
+        "impl_next.w_valid": "t311",
+        "impl_next.x_ir": "t403",
+        "impl_next.x_operand": "t437",
+        "impl_next.x_pc": "t398",
+        "impl_next.x_valid": "t396",
+        "spec.data0": "spec_data0",
+        "spec.data1": "spec_data1",
+        "spec.data2": "spec_data2",
+        "spec.data3": "spec_data3",
+        "spec.pc": "spec_pc",
+        "spec.r0": "spec_r0",
+        "spec.r1": "spec_r1",
+        "spec.rom0": "spec_rom0",
+        "spec.rom1": "spec_rom1",
+        "spec.rom2": "spec_rom2",
+        "spec.rom3": "spec_rom3",
+        "spec_next.data0": "t291",
+        "spec_next.data1": "t296",
+        "spec_next.data2": "t301",
+        "spec_next.data3": "t306",
+        "spec_next.pc": "t128",
+        "spec_next.r0": "t249",
+        "spec_next.r1": "t262",
+        "spec_next.rom0": "t271",
+        "spec_next.rom1": "t276",
+        "spec_next.rom2": "t281",
+        "spec_next.rom3": "t286"
+      },
+      "emission_seconds": 0.000354245,
+      "evidence": "reset_binding.smt2",
+      "finite_search_hint": "unsat",
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 0.000010094999999999997,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 180,
+        "residual": "reset_binding.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 1,
+        "rules": {
+          "(_ extract 1 0)": 1,
+          "(_ extract 12 10)": 1,
+          "(_ extract 12 12)": 1,
+          "(_ extract 7 0)": 1,
+          "(_ extract 8 8)": 1,
+          "(_ extract 9 9)": 1,
+          "=": 30,
+          "=>": 5,
+          "and": 29,
+          "bvadd": 4,
+          "bvxor": 1,
+          "ite": 16,
+          "not": 1,
+          "or": 2
+        },
+        "seconds": 0.000052719,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "logical_expectation": "unsat",
+      "name": "reset_binding",
+      "search_hint_source": "logical_expectation",
+      "search_strategy": "structural_kernel",
+      "seconds": 0.00045723,
+      "solver_output": "reset_binding.out",
+      "solver_result": "unsat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "finite_bv",
+      "concrete_model": true,
+      "context_symbols": {
+        "binding_after": "t516",
+        "binding_before": "t129",
+        "commit": "t131",
+        "i.data0": "input_data0",
+        "i.data1": "input_data1",
+        "i.data2": "input_data2",
+        "i.data3": "input_data3",
+        "i.rom0": "input_rom0",
+        "i.rom1": "input_rom1",
+        "i.rom2": "input_rom2",
+        "i.rom3": "input_rom3",
+        "i.rst": "input_rst",
+        "i.stall": "input_stall",
+        "impl.d_ir": "impl_d_ir",
+        "impl.d_pc": "impl_d_pc",
+        "impl.d_valid": "impl_d_valid",
+        "impl.data0": "impl_data0",
+        "impl.data1": "impl_data1",
+        "impl.data2": "impl_data2",
+        "impl.data3": "impl_data3",
+        "impl.fetch_pc": "impl_fetch_pc",
+        "impl.pc": "impl_pc",
+        "impl.r0": "impl_r0",
+        "impl.r1": "impl_r1",
+        "impl.rom0": "impl_rom0",
+        "impl.rom1": "impl_rom1",
+        "impl.rom2": "impl_rom2",
+        "impl.rom3": "impl_rom3",
+        "impl.w_ir": "impl_w_ir",
+        "impl.w_next_pc": "impl_w_next_pc",
+        "impl.w_pc": "impl_w_pc",
+        "impl.w_result": "impl_w_result",
+        "impl.w_valid": "impl_w_valid",
+        "impl.x_ir": "impl_x_ir",
+        "impl.x_operand": "impl_x_operand",
+        "impl.x_pc": "impl_x_pc",
+        "impl.x_valid": "impl_x_valid",
+        "impl_next.d_ir": "t497",
+        "impl_next.d_pc": "t477",
+        "impl_next.d_valid": "t474",
+        "impl_next.data0": "t309",
+        "impl_next.data1": "t314",
+        "impl_next.data2": "t319",
+        "impl_next.data3": "t324",
+        "impl_next.fetch_pc": "t512",
+        "impl_next.pc": "t240",
+        "impl_next.r0": "t272",
+        "impl_next.r1": "t284",
+        "impl_next.rom0": "t289",
+        "impl_next.rom1": "t294",
+        "impl_next.rom2": "t299",
+        "impl_next.rom3": "t304",
+        "impl_next.w_ir": "t335",
+        "impl_next.w_next_pc": "t348",
+        "impl_next.w_pc": "t330",
+        "impl_next.w_result": "t388",
+        "impl_next.w_valid": "t328",
+        "impl_next.x_ir": "t419",
+        "impl_next.x_operand": "t453",
+        "impl_next.x_pc": "t414",
+        "impl_next.x_valid": "t412",
+        "spec.data0": "spec_data0",
+        "spec.data1": "spec_data1",
+        "spec.data2": "spec_data2",
+        "spec.data3": "spec_data3",
+        "spec.pc": "spec_pc",
+        "spec.r0": "spec_r0",
+        "spec.r1": "spec_r1",
+        "spec.rom0": "spec_rom0",
+        "spec.rom1": "spec_rom1",
+        "spec.rom2": "spec_rom2",
+        "spec.rom3": "spec_rom3",
+        "spec_next.data0": "t308",
+        "spec_next.data1": "t313",
+        "spec_next.data2": "t318",
+        "spec_next.data3": "t323",
+        "spec_next.pc": "t150",
+        "spec_next.r0": "t266",
+        "spec_next.r1": "t279",
+        "spec_next.rom0": "t288",
+        "spec_next.rom1": "t293",
+        "spec_next.rom2": "t298",
+        "spec_next.rom3": "t303"
+      },
+      "emission_seconds": 0.000271299,
+      "evidence": "microstep_refinement.smt2",
+      "finite": {
+        "assignments": {
+          "impl_d_ir": {
+            "sort": "Bv",
+            "value": 1564,
+            "width": 13
+          },
+          "impl_d_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl_d_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_data0": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 8
+          },
+          "impl_data1": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 8
+          },
+          "impl_data2": {
+            "sort": "Bv",
+            "value": 253,
+            "width": 8
+          },
+          "impl_data3": {
+            "sort": "Bv",
+            "value": 255,
+            "width": 8
+          },
+          "impl_fetch_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_r0": {
+            "sort": "Bv",
+            "value": 4,
+            "width": 8
+          },
+          "impl_r1": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "impl_rom0": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "impl_rom1": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "impl_rom2": {
+            "sort": "Bv",
+            "value": 1025,
+            "width": 13
+          },
+          "impl_rom3": {
+            "sort": "Bv",
+            "value": 4092,
+            "width": 13
+          },
+          "impl_w_ir": {
+            "sort": "Bv",
+            "value": 3075,
+            "width": 13
+          },
+          "impl_w_next_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_w_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_w_result": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_w_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_x_ir": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "impl_x_operand": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "impl_x_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_x_valid": {
+            "sort": "Bool",
+            "value": true
+          },
+          "input_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "input_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "input_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "input_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "input_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "input_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "input_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "input_rom3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "input_rst": {
+            "sort": "Bool",
+            "value": false
+          },
+          "input_stall": {
+            "sort": "Bool",
+            "value": false
+          },
+          "spec_data0": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 8
+          },
+          "spec_data1": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 8
+          },
+          "spec_data2": {
+            "sort": "Bv",
+            "value": 253,
+            "width": 8
+          },
+          "spec_data3": {
+            "sort": "Bv",
+            "value": 255,
+            "width": 8
+          },
+          "spec_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "spec_r0": {
+            "sort": "Bv",
+            "value": 4,
+            "width": 8
+          },
+          "spec_r1": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "spec_rom0": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "spec_rom1": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "spec_rom2": {
+            "sort": "Bv",
+            "value": 1025,
+            "width": 13
+          },
+          "spec_rom3": {
+            "sort": "Bv",
+            "value": 4092,
+            "width": 13
+          }
+        },
+        "base_clauses": 5912,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 33521,
+        "conflicts": 3960,
+        "context_values": {
+          "binding_after": {
+            "sort": "Bool",
+            "value": false
+          },
+          "binding_before": {
+            "sort": "Bool",
+            "value": true
+          },
+          "commit": {
+            "sort": "Bool",
+            "value": false
+          },
+          "i.data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "i.data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "i.data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "i.data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "i.rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "i.rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "i.rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "i.rom3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "i.rst": {
+            "sort": "Bool",
+            "value": false
+          },
+          "i.stall": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl.d_ir": {
+            "sort": "Bv",
+            "value": 1564,
+            "width": 13
+          },
+          "impl.d_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl.d_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl.data0": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 8
+          },
+          "impl.data1": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 8
+          },
+          "impl.data2": {
+            "sort": "Bv",
+            "value": 253,
+            "width": 8
+          },
+          "impl.data3": {
+            "sort": "Bv",
+            "value": 255,
+            "width": 8
+          },
+          "impl.fetch_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl.pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl.r0": {
+            "sort": "Bv",
+            "value": 4,
+            "width": 8
+          },
+          "impl.r1": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "impl.rom0": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "impl.rom1": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "impl.rom2": {
+            "sort": "Bv",
+            "value": 1025,
+            "width": 13
+          },
+          "impl.rom3": {
+            "sort": "Bv",
+            "value": 4092,
+            "width": 13
+          },
+          "impl.w_ir": {
+            "sort": "Bv",
+            "value": 3075,
+            "width": 13
+          },
+          "impl.w_next_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl.w_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl.w_result": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl.w_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl.x_ir": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "impl.x_operand": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "impl.x_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl.x_valid": {
+            "sort": "Bool",
+            "value": true
+          },
+          "impl_next.d_ir": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "impl_next.d_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl_next.d_valid": {
+            "sort": "Bool",
+            "value": true
+          },
+          "impl_next.data0": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 8
+          },
+          "impl_next.data1": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 8
+          },
+          "impl_next.data2": {
+            "sort": "Bv",
+            "value": 253,
+            "width": 8
+          },
+          "impl_next.data3": {
+            "sort": "Bv",
+            "value": 255,
+            "width": 8
+          },
+          "impl_next.fetch_pc": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 2
+          },
+          "impl_next.pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_next.r0": {
+            "sort": "Bv",
+            "value": 4,
+            "width": 8
+          },
+          "impl_next.r1": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "impl_next.rom0": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "impl_next.rom1": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "impl_next.rom2": {
+            "sort": "Bv",
+            "value": 1025,
+            "width": 13
+          },
+          "impl_next.rom3": {
+            "sort": "Bv",
+            "value": 4092,
+            "width": 13
+          },
+          "impl_next.w_ir": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "impl_next.w_next_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl_next.w_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_next.w_result": {
+            "sort": "Bv",
+            "value": 250,
+            "width": 8
+          },
+          "impl_next.w_valid": {
+            "sort": "Bool",
+            "value": true
+          },
+          "impl_next.x_ir": {
+            "sort": "Bv",
+            "value": 1564,
+            "width": 13
+          },
+          "impl_next.x_operand": {
+            "sort": "Bv",
+            "value": 250,
+            "width": 8
+          },
+          "impl_next.x_pc": {
+            "sort": "Bv",
+            "value": 1,
+            "width": 2
+          },
+          "impl_next.x_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "spec.data0": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 8
+          },
+          "spec.data1": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 8
+          },
+          "spec.data2": {
+            "sort": "Bv",
+            "value": 253,
+            "width": 8
+          },
+          "spec.data3": {
+            "sort": "Bv",
+            "value": 255,
+            "width": 8
+          },
+          "spec.pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "spec.r0": {
+            "sort": "Bv",
+            "value": 4,
+            "width": 8
+          },
+          "spec.r1": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "spec.rom0": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "spec.rom1": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "spec.rom2": {
+            "sort": "Bv",
+            "value": 1025,
+            "width": 13
+          },
+          "spec.rom3": {
+            "sort": "Bv",
+            "value": 4092,
+            "width": 13
+          },
+          "spec_next.data0": {
+            "sort": "Bv",
+            "value": 2,
+            "width": 8
+          },
+          "spec_next.data1": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 8
+          },
+          "spec_next.data2": {
+            "sort": "Bv",
+            "value": 253,
+            "width": 8
+          },
+          "spec_next.data3": {
+            "sort": "Bv",
+            "value": 255,
+            "width": 8
+          },
+          "spec_next.pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "spec_next.r0": {
+            "sort": "Bv",
+            "value": 4,
+            "width": 8
+          },
+          "spec_next.r1": {
+            "sort": "Bv",
+            "value": 11,
+            "width": 8
+          },
+          "spec_next.rom0": {
+            "sort": "Bv",
+            "value": 1521,
+            "width": 13
+          },
+          "spec_next.rom1": {
+            "sort": "Bv",
+            "value": 2044,
+            "width": 13
+          },
+          "spec_next.rom2": {
+            "sort": "Bv",
+            "value": 1025,
+            "width": 13
+          },
+          "spec_next.rom3": {
+            "sort": "Bv",
+            "value": 4092,
+            "width": 13
+          }
+        },
+        "decisions": 16379,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 19640,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 4,
+        "search_strategy": "proof_decomposition",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 7,
+        "split_completed": 4,
+        "split_unsat": 3,
+        "terms": 564,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 1860,
+        "work": 4771429
+      },
+      "finite_diagnostics": "microstep_refinement.finite.json",
+      "finite_seconds": 0.04961716,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 0.0006300500000000001,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 1160,
+        "residual": "microstep_refinement.kernel-residual.smt2",
+        "residual_complexity": 1029,
+        "rounds": 3,
+        "rules": {
+          "=": 191,
+          "and": 116,
+          "assumed_equality_substitution": 12,
+          "bvadd": 14,
+          "ite": 8
+        },
+        "seconds": 0.037969306,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "logical_expectation": "unsat",
+      "name": "microstep_refinement",
+      "search_hint_source": "logical_expectation",
+      "seconds": 0.088987308,
+      "solver_output": "microstep_refinement.out",
+      "solver_result": "sat",
+      "status": "counterexample",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "structural_kernel",
+      "context_symbols": {
+        "binding_after": "t521",
+        "binding_before": "t129",
+        "commit": "t132",
+        "i.data0": "input_data0",
+        "i.data1": "input_data1",
+        "i.data2": "input_data2",
+        "i.data3": "input_data3",
+        "i.rom0": "input_rom0",
+        "i.rom1": "input_rom1",
+        "i.rom2": "input_rom2",
+        "i.rom3": "input_rom3",
+        "i.rst": "input_rst",
+        "i.stall": "input_stall",
+        "impl.d_ir": "impl_d_ir",
+        "impl.d_pc": "impl_d_pc",
+        "impl.d_valid": "impl_d_valid",
+        "impl.data0": "impl_data0",
+        "impl.data1": "impl_data1",
+        "impl.data2": "impl_data2",
+        "impl.data3": "impl_data3",
+        "impl.fetch_pc": "impl_fetch_pc",
+        "impl.pc": "impl_pc",
+        "impl.r0": "impl_r0",
+        "impl.r1": "impl_r1",
+        "impl.rom0": "impl_rom0",
+        "impl.rom1": "impl_rom1",
+        "impl.rom2": "impl_rom2",
+        "impl.rom3": "impl_rom3",
+        "impl.w_ir": "impl_w_ir",
+        "impl.w_next_pc": "impl_w_next_pc",
+        "impl.w_pc": "impl_w_pc",
+        "impl.w_result": "impl_w_result",
+        "impl.w_valid": "impl_w_valid",
+        "impl.x_ir": "impl_x_ir",
+        "impl.x_operand": "impl_x_operand",
+        "impl.x_pc": "impl_x_pc",
+        "impl.x_valid": "impl_x_valid",
+        "impl_next.d_ir": "t502",
+        "impl_next.d_pc": "t482",
+        "impl_next.d_valid": "t479",
+        "impl_next.data0": "t314",
+        "impl_next.data1": "t319",
+        "impl_next.data2": "t324",
+        "impl_next.data3": "t329",
+        "impl_next.fetch_pc": "t517",
+        "impl_next.pc": "t245",
+        "impl_next.r0": "t277",
+        "impl_next.r1": "t289",
+        "impl_next.rom0": "t294",
+        "impl_next.rom1": "t299",
+        "impl_next.rom2": "t304",
+        "impl_next.rom3": "t309",
+        "impl_next.w_ir": "t340",
+        "impl_next.w_next_pc": "t353",
+        "impl_next.w_pc": "t335",
+        "impl_next.w_result": "t393",
+        "impl_next.w_valid": "t333",
+        "impl_next.x_ir": "t424",
+        "impl_next.x_operand": "t458",
+        "impl_next.x_pc": "t419",
+        "impl_next.x_valid": "t417",
+        "spec.data0": "spec_data0",
+        "spec.data1": "spec_data1",
+        "spec.data2": "spec_data2",
+        "spec.data3": "spec_data3",
+        "spec.pc": "spec_pc",
+        "spec.r0": "spec_r0",
+        "spec.r1": "spec_r1",
+        "spec.rom0": "spec_rom0",
+        "spec.rom1": "spec_rom1",
+        "spec.rom2": "spec_rom2",
+        "spec.rom3": "spec_rom3",
+        "spec_next.data0": "t313",
+        "spec_next.data1": "t318",
+        "spec_next.data2": "t323",
+        "spec_next.data3": "t328",
+        "spec_next.pc": "t155",
+        "spec_next.r0": "t271",
+        "spec_next.r1": "t284",
+        "spec_next.rom0": "t293",
+        "spec_next.rom1": "t298",
+        "spec_next.rom2": "t303",
+        "spec_next.rom3": "t308"
+      },
+      "emission_seconds": 0.000292822,
+      "evidence": "commit_eligible.smt2",
+      "finite_search_hint": "unsat",
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 0.000013570999999999996,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 266,
+        "residual": "commit_eligible.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 1,
+        "rules": {
+          "=": 37,
+          "and": 20,
+          "bvadd": 3,
+          "not": 1
+        },
+        "seconds": 0.000093811,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "logical_expectation": "unsat",
+      "name": "commit_eligible",
+      "search_hint_source": "logical_expectation",
+      "search_strategy": "structural_kernel",
+      "seconds": 0.00045081,
+      "solver_output": "commit_eligible.out",
+      "solver_result": "unsat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "structural_kernel",
+      "context_symbols": {
+        "binding_after": "t569",
+        "binding_before": "t129",
+        "commit": "t136",
+        "i.data0": "input_data0",
+        "i.data1": "input_data1",
+        "i.data2": "input_data2",
+        "i.data3": "input_data3",
+        "i.rom0": "input_rom0",
+        "i.rom1": "input_rom1",
+        "i.rom2": "input_rom2",
+        "i.rom3": "input_rom3",
+        "i.rst": "input_rst",
+        "i.stall": "input_stall",
+        "impl.d_ir": "impl_d_ir",
+        "impl.d_pc": "impl_d_pc",
+        "impl.d_valid": "impl_d_valid",
+        "impl.data0": "impl_data0",
+        "impl.data1": "impl_data1",
+        "impl.data2": "impl_data2",
+        "impl.data3": "impl_data3",
+        "impl.fetch_pc": "impl_fetch_pc",
+        "impl.pc": "impl_pc",
+        "impl.r0": "impl_r0",
+        "impl.r1": "impl_r1",
+        "impl.rom0": "impl_rom0",
+        "impl.rom1": "impl_rom1",
+        "impl.rom2": "impl_rom2",
+        "impl.rom3": "impl_rom3",
+        "impl.w_ir": "impl_w_ir",
+        "impl.w_next_pc": "impl_w_next_pc",
+        "impl.w_pc": "impl_w_pc",
+        "impl.w_result": "impl_w_result",
+        "impl.w_valid": "impl_w_valid",
+        "impl.x_ir": "impl_x_ir",
+        "impl.x_operand": "impl_x_operand",
+        "impl.x_pc": "impl_x_pc",
+        "impl.x_valid": "impl_x_valid",
+        "impl_next.d_ir": "t258",
+        "impl_next.d_pc": "t263",
+        "impl_next.d_valid": "t269",
+        "impl_next.data0": "t272",
+        "impl_next.data1": "t275",
+        "impl_next.data2": "t278",
+        "impl_next.data3": "t281",
+        "impl_next.fetch_pc": "t288",
+        "impl_next.pc": "t294",
+        "impl_next.r0": "t302",
+        "impl_next.r1": "t309",
+        "impl_next.rom0": "t312",
+        "impl_next.rom1": "t315",
+        "impl_next.rom2": "t318",
+        "impl_next.rom3": "t321",
+        "impl_next.w_ir": "t325",
+        "impl_next.w_next_pc": "t331",
+        "impl_next.w_pc": "t335",
+        "impl_next.w_result": "t350",
+        "impl_next.w_valid": "t354",
+        "impl_next.x_ir": "t358",
+        "impl_next.x_operand": "t370",
+        "impl_next.x_pc": "t374",
+        "impl_next.x_valid": "t380",
+        "spec.data0": "spec_data0",
+        "spec.data1": "spec_data1",
+        "spec.data2": "spec_data2",
+        "spec.data3": "spec_data3",
+        "spec.pc": "spec_pc",
+        "spec.r0": "spec_r0",
+        "spec.r1": "spec_r1",
+        "spec.rom0": "spec_rom0",
+        "spec.rom1": "spec_rom1",
+        "spec.rom2": "spec_rom2",
+        "spec.rom3": "spec_rom3",
+        "spec_next.data0": "t458",
+        "spec_next.data1": "t462",
+        "spec_next.data2": "t466",
+        "spec_next.data3": "t470",
+        "spec_next.pc": "t405",
+        "spec_next.r0": "t431",
+        "spec_next.r1": "t438",
+        "spec_next.rom0": "t442",
+        "spec_next.rom1": "t446",
+        "spec_next.rom2": "t450",
+        "spec_next.rom3": "t454"
+      },
+      "emission_seconds": 0.000316347,
+      "evidence": "hold_contract.smt2",
+      "finite_search_hint": "unsat",
+      "kernel": {
+        "closed": true,
+        "diagnostics_seconds": 0.00001564300000000008,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 796,
+        "residual": "hold_contract.kernel-residual.smt2",
+        "residual_complexity": 1,
+        "rounds": 2,
+        "rules": {
+          "=": 126,
+          "and": 185,
+          "assumed_equality_substitution": 14,
+          "bvadd": 7,
+          "ite": 110,
+          "not": 56
+        },
+        "seconds": 0.002809607,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "logical_expectation": "unsat",
+      "name": "hold_contract",
+      "search_hint_source": "logical_expectation",
+      "search_strategy": "structural_kernel",
+      "seconds": 0.003242469,
+      "solver_output": "hold_contract.out",
+      "solver_result": "unsat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "finite_bv",
+      "concrete_model": true,
+      "context_symbols": {},
+      "emission_seconds": 0.000078198,
+      "evidence": "progress_nonvacuity.smt2",
+      "finite": {
+        "assignments": {
+          "impl_d_ir": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_d_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_d_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_fetch_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_r0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_r1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_w_ir": {
+            "sort": "Bv",
+            "value": 3075,
+            "width": 13
+          },
+          "impl_w_next_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_w_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_w_result": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_w_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_x_ir": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_x_operand": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_x_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_x_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "input_rst": {
+            "sort": "Bool",
+            "value": false
+          },
+          "input_stall": {
+            "sort": "Bool",
+            "value": false
+          },
+          "spec_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "spec_r0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_r1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          }
+        },
+        "base_clauses": 1536,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 1541,
+        "conflicts": 5,
+        "context_values": {},
+        "decisions": 276,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 1541,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "sat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 171,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 589,
+        "work": 24505
+      },
+      "finite_diagnostics": "progress_nonvacuity.finite.json",
+      "finite_seconds": 0.000393974,
+      "kernel": {
+        "enabled": false
+      },
+      "logical_expectation": "sat",
+      "name": "progress_nonvacuity",
+      "search_hint_source": "logical_expectation",
+      "seconds": 0.000565813,
+      "solver_output": "progress_nonvacuity.out",
+      "solver_result": "sat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "finite_bv",
+      "concrete_model": true,
+      "context_symbols": {},
+      "emission_seconds": 0.000081713,
+      "evidence": "commit_reachable_in_relation.smt2",
+      "finite": {
+        "assignments": {
+          "impl_d_ir": {
+            "sort": "Bv",
+            "value": 4611,
+            "width": 13
+          },
+          "impl_d_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_d_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "impl_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_fetch_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_r0": {
+            "sort": "Bv",
+            "value": 128,
+            "width": 8
+          },
+          "impl_r1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "impl_rom3": {
+            "sort": "Bv",
+            "value": 4611,
+            "width": 13
+          },
+          "impl_w_ir": {
+            "sort": "Bv",
+            "value": 4611,
+            "width": 13
+          },
+          "impl_w_next_pc": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 2
+          },
+          "impl_w_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_w_result": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "impl_w_valid": {
+            "sort": "Bool",
+            "value": true
+          },
+          "impl_x_ir": {
+            "sort": "Bv",
+            "value": 515,
+            "width": 13
+          },
+          "impl_x_operand": {
+            "sort": "Bv",
+            "value": 128,
+            "width": 8
+          },
+          "impl_x_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "impl_x_valid": {
+            "sort": "Bool",
+            "value": false
+          },
+          "input_rst": {
+            "sort": "Bool",
+            "value": false
+          },
+          "input_stall": {
+            "sort": "Bool",
+            "value": false
+          },
+          "spec_data0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_data3": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_pc": {
+            "sort": "Bv",
+            "value": 3,
+            "width": 2
+          },
+          "spec_r0": {
+            "sort": "Bv",
+            "value": 128,
+            "width": 8
+          },
+          "spec_r1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 8
+          },
+          "spec_rom0": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom1": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom2": {
+            "sort": "Bv",
+            "value": 0,
+            "width": 13
+          },
+          "spec_rom3": {
+            "sort": "Bv",
+            "value": 4611,
+            "width": 13
+          }
+        },
+        "base_clauses": 1542,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 1547,
+        "conflicts": 5,
+        "context_values": {},
+        "decisions": 232,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": true,
+        "peak_live_clauses": 1547,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "sat",
+        "search_slices": 1,
+        "search_strategy": "single_search",
+        "search_yields": 0,
+        "solver_result": "sat",
+        "split_alternatives": 0,
+        "split_completed": 0,
+        "split_unsat": 0,
+        "terms": 173,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 591,
+        "work": 24825
+      },
+      "finite_diagnostics": "commit_reachable_in_relation.finite.json",
+      "finite_seconds": 0.000403789,
+      "kernel": {
+        "enabled": false
+      },
+      "logical_expectation": "sat",
+      "name": "commit_reachable_in_relation",
+      "search_hint_source": "logical_expectation",
+      "seconds": 0.000580726,
+      "solver_output": "commit_reachable_in_relation.out",
+      "solver_result": "sat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    },
+    {
+      "backend": "finite_bv",
+      "concrete_model": false,
+      "context_symbols": {
+        "binding_after": "t531",
+        "binding_before": "t129",
+        "commit": "t134",
+        "i.data0": "input_data0",
+        "i.data1": "input_data1",
+        "i.data2": "input_data2",
+        "i.data3": "input_data3",
+        "i.rom0": "input_rom0",
+        "i.rom1": "input_rom1",
+        "i.rom2": "input_rom2",
+        "i.rom3": "input_rom3",
+        "i.rst": "input_rst",
+        "i.stall": "input_stall",
+        "impl.d_ir": "impl_d_ir",
+        "impl.d_pc": "impl_d_pc",
+        "impl.d_valid": "impl_d_valid",
+        "impl.data0": "impl_data0",
+        "impl.data1": "impl_data1",
+        "impl.data2": "impl_data2",
+        "impl.data3": "impl_data3",
+        "impl.fetch_pc": "impl_fetch_pc",
+        "impl.pc": "impl_pc",
+        "impl.r0": "impl_r0",
+        "impl.r1": "impl_r1",
+        "impl.rom0": "impl_rom0",
+        "impl.rom1": "impl_rom1",
+        "impl.rom2": "impl_rom2",
+        "impl.rom3": "impl_rom3",
+        "impl.w_ir": "impl_w_ir",
+        "impl.w_next_pc": "impl_w_next_pc",
+        "impl.w_pc": "impl_w_pc",
+        "impl.w_result": "impl_w_result",
+        "impl.w_valid": "impl_w_valid",
+        "impl.x_ir": "impl_x_ir",
+        "impl.x_operand": "impl_x_operand",
+        "impl.x_pc": "impl_x_pc",
+        "impl.x_valid": "impl_x_valid",
+        "impl_next.d_ir": "t512",
+        "impl_next.d_pc": "t492",
+        "impl_next.d_valid": "t231",
+        "impl_next.data0": "t334",
+        "impl_next.data1": "t339",
+        "impl_next.data2": "t344",
+        "impl_next.data3": "t349",
+        "impl_next.fetch_pc": "t527",
+        "impl_next.pc": "t265",
+        "impl_next.r0": "t297",
+        "impl_next.r1": "t309",
+        "impl_next.rom0": "t314",
+        "impl_next.rom1": "t319",
+        "impl_next.rom2": "t324",
+        "impl_next.rom3": "t329",
+        "impl_next.w_ir": "t358",
+        "impl_next.w_next_pc": "t371",
+        "impl_next.w_pc": "t353",
+        "impl_next.w_result": "t411",
+        "impl_next.w_valid": "t223",
+        "impl_next.x_ir": "t438",
+        "impl_next.x_operand": "t472",
+        "impl_next.x_pc": "t433",
+        "impl_next.x_valid": "t227",
+        "progress_enabled": "t131",
+        "rank": "t238",
+        "rank_next": "t235",
+        "spec.data0": "spec_data0",
+        "spec.data1": "spec_data1",
+        "spec.data2": "spec_data2",
+        "spec.data3": "spec_data3",
+        "spec.pc": "spec_pc",
+        "spec.r0": "spec_r0",
+        "spec.r1": "spec_r1",
+        "spec.rom0": "spec_rom0",
+        "spec.rom1": "spec_rom1",
+        "spec.rom2": "spec_rom2",
+        "spec.rom3": "spec_rom3",
+        "spec_next.data0": "t333",
+        "spec_next.data1": "t338",
+        "spec_next.data2": "t343",
+        "spec_next.data3": "t348",
+        "spec_next.pc": "t261",
+        "spec_next.r0": "t291",
+        "spec_next.r1": "t304",
+        "spec_next.rom0": "t313",
+        "spec_next.rom1": "t318",
+        "spec_next.rom2": "t323",
+        "spec_next.rom3": "t328"
+      },
+      "emission_seconds": 0.000287233,
+      "evidence": "noncommit_rank_decreases.smt2",
+      "finite": {
+        "assignments": {},
+        "base_clauses": 5959,
+        "clause_accounting": "aggregate materialized CNF/branch/learned clauses within the whole-query limit",
+        "clauses": 17892,
+        "conflicts": 15,
+        "context_values": {},
+        "decisions": 181,
+        "kind": "bounded bit-blast/CDCL diagnostics; not an independently checkable proof certificate",
+        "original_formula_validated": false,
+        "peak_live_clauses": 17879,
+        "probe_result": null,
+        "probe_work": 0,
+        "reason": null,
+        "search_hint": "unsat",
+        "search_slices": 2,
+        "search_strategy": "proof_decomposition",
+        "search_yields": 0,
+        "solver_result": "unsat",
+        "split_alternatives": 2,
+        "split_completed": 2,
+        "split_unsat": 2,
+        "terms": 577,
+        "trusted": "Rust scalar encoding, SAT search, and original-formula evaluation; not a Lean certificate",
+        "variables": 1875,
+        "work": 89024
+      },
+      "finite_diagnostics": "noncommit_rank_decreases.finite.json",
+      "finite_seconds": 0.001886916,
+      "kernel": {
+        "closed": false,
+        "diagnostics_seconds": 0.00009783699999999992,
+        "enabled": true,
+        "kind": "diagnostic rule counts, not independently checkable proof certificate",
+        "original_complexity": 436,
+        "residual": "noncommit_rank_decreases.kernel-residual.smt2",
+        "residual_complexity": 207,
+        "rounds": 4,
+        "rules": {
+          "=": 109,
+          "=>": 4,
+          "and": 153,
+          "assumed_equality_substitution": 15,
+          "bvadd": 7,
+          "ite": 39,
+          "not": 65
+        },
+        "seconds": 0.001990682,
+        "trusted": "Rust rewrite/contradiction implementation; not a Lean certificate"
+      },
+      "logical_expectation": "unsat",
+      "name": "noncommit_rank_decreases",
+      "search_hint_source": "logical_expectation",
+      "seconds": 0.004348277,
+      "solver_output": "noncommit_rank_decreases.out",
+      "solver_result": "unsat",
+      "status": "passed",
+      "z3_seconds": 0.0
+    }
+  ],
+  "partition_plan": null,
+  "program_contract": null,
+  "reset": "active-high synchronous priority; reset expressions may use shared inputs",
+  "status": "counterexample"
+}

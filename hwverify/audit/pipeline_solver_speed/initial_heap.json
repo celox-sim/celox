@@ -1,0 +1,32 @@
+[
+  {
+    "wall": 0.5058977720000257,
+    "stats": {
+      "variables": 2323,
+      "clauses": 12039,
+      "decisions": 20478,
+      "conflicts": 5458,
+      "work": 12530638
+    }
+  },
+  {
+    "wall": 0.49216572799923597,
+    "stats": {
+      "variables": 2323,
+      "clauses": 12039,
+      "decisions": 20478,
+      "conflicts": 5458,
+      "work": 12530638
+    }
+  },
+  {
+    "wall": 0.5105880589999288,
+    "stats": {
+      "variables": 2323,
+      "clauses": 12039,
+      "decisions": 20478,
+      "conflicts": 5458,
+      "work": 12530638
+    }
+  }
+]
