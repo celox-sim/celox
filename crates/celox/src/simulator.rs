@@ -1,4 +1,6 @@
 mod builder;
+#[cfg(feature = "host-runtime")]
+mod checkpoint;
 mod error;
 
 #[cfg(all(
@@ -15,6 +17,8 @@ pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions, TierPromo
 pub use builder::{compile_frontend_to_sir, compile_to_sir};
 #[cfg(feature = "systemverilog")]
 pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
+#[cfg(feature = "host-runtime")]
+pub use checkpoint::{Checkpoint, CheckpointError};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 
@@ -92,8 +96,10 @@ mod host {
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
-        comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
-        comb_observer_initial_eval: bool,
+        pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+        pub(super) comb_observer_initial_eval: bool,
+        /// Identity of the state layout, computed on first checkpoint use.
+        pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
         pub(crate) diagnostics: crate::RuntimeDiagnostics,
         tick_timing_ticks: u64,
         tick_timing_eval_apply_ns: u64,
@@ -586,6 +592,7 @@ mod host {
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_initial_eval: true,
+                checkpoint_fingerprint: std::sync::OnceLock::new(),
                 diagnostics: crate::RuntimeDiagnostics::default(),
                 tick_timing_ticks: 0,
                 tick_timing_eval_apply_ns: 0,
@@ -942,7 +949,7 @@ mod host {
             Ok(())
         }
 
-        fn settle_dirty_for_runtime_event_drain(&mut self) {
+        pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {
             if self.runtime_event_drain_active.load(Ordering::Acquire) {
                 self.eval_comb_checked().unwrap();
                 self.dirty = false;

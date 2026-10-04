@@ -71,7 +71,7 @@ mod host_api {
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
-    pub use crate::simulation::Simulation;
+    pub use crate::simulation::{Simulation, SimulationCheckpoint};
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -79,9 +79,9 @@ mod host_api {
     ))]
     pub use crate::simulator::NativeCompilation;
     pub use crate::simulator::{
-        DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal, RuntimeEvent,
-        RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder, SimulatorOptions,
-        TierPromotion,
+        Checkpoint, CheckpointError, DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal,
+        RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder,
+        SimulatorOptions, TierPromotion,
     };
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};
     pub use celox_macros::veryl_test;

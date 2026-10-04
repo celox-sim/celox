@@ -2,9 +2,46 @@ use crate::{
     RuntimeErrorCode, Simulator,
     backend::{EventHandle, MemoryLayout, SimBackend},
     ir::SignalRef,
-    simulator::{InstanceHierarchy, NamedEvent, NamedSignal},
+    simulator::{Checkpoint, CheckpointError, InstanceHierarchy, NamedEvent, NamedSignal},
 };
-use celox_runtime::{EventInfo, SimulationExecutor, SimulationState};
+use celox_runtime::{EventInfo, SimulationExecutor, SimulationSnapshot, SimulationState};
+
+/// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
+/// the design state together with simulation time, clocks and pending events.
+pub struct SimulationCheckpoint<B: SimBackend = crate::DefaultBackend> {
+    simulator: Checkpoint,
+    schedule: SimulationSnapshot<B>,
+}
+
+impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
+    fn clone(&self) -> Self {
+        Self {
+            simulator: self.simulator.clone(),
+            schedule: self.schedule.clone(),
+        }
+    }
+}
+
+impl<B: SimBackend> SimulationCheckpoint<B> {
+    /// Simulation time at which the checkpoint was taken.
+    pub fn time(&self) -> u64 {
+        self.schedule.time()
+    }
+
+    /// Size of the saved design state in bytes.
+    pub fn state_size(&self) -> usize {
+        self.simulator.state_size()
+    }
+}
+
+impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimulationCheckpoint")
+            .field("time", &self.time())
+            .field("state_size", &self.state_size())
+            .finish_non_exhaustive()
+    }
+}
 
 /// A timed simulation wrapper around the core logic engine.
 ///
@@ -195,6 +232,30 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns warnings emitted during compilation.
     pub fn warnings(&self) -> &[crate::CompilationWarning] {
         self.simulator.warnings()
+    }
+
+    /// Save the design state, simulation time, clocks and pending events.
+    pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
+        Ok(SimulationCheckpoint {
+            simulator: self.simulator.checkpoint()?,
+            schedule: self.state.snapshot(),
+        })
+    }
+
+    /// Return to the state saved in `checkpoint`, including its simulation
+    /// time. See [`Simulator::restore`] for what is not rolled back.
+    pub fn restore(&mut self, checkpoint: &SimulationCheckpoint<B>) -> Result<(), CheckpointError> {
+        self.simulator.validate_restore(&checkpoint.simulator)?;
+        let events = self.simulator.backend.id_to_event_slice();
+        self.state
+            .restore(&checkpoint.schedule, |event| {
+                events
+                    .get(event.id())
+                    .copied()
+                    .filter(|local| local.addr() == event.addr())
+            })
+            .map_err(|_| CheckpointError::DesignMismatch)?;
+        self.simulator.restore(&checkpoint.simulator)
     }
 
     /// Captures the current state of all signals and writes them to the VCD file.

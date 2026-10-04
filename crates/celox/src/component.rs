@@ -694,6 +694,10 @@ impl ComponentRuntime {
             .collect()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.components.is_empty()
+    }
+
     pub(crate) fn has_scheduled_components(&self) -> bool {
         self.components
             .iter()

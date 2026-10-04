@@ -9,12 +9,24 @@ pub struct ClockDef {
     pub period: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SimEvent<B: SimBackend> {
     pub time: u64,
     pub event_ref: B::Event,
     pub signal: SignalRef,
     pub next_val: u8,
+}
+
+// Manual impl: a derive would require `B: Clone`, which no backend is.
+impl<B: SimBackend> Clone for SimEvent<B> {
+    fn clone(&self) -> Self {
+        Self {
+            time: self.time,
+            event_ref: self.event_ref,
+            signal: self.signal,
+            next_val: self.next_val,
+        }
+    }
 }
 
 impl<B: SimBackend> PartialEq for SimEvent<B> {

@@ -15,7 +15,7 @@ pub use reflection::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,
 };
-pub use simulation::{EventInfo, SimulationExecutor, SimulationState};
+pub use simulation::{EventInfo, SimulationExecutor, SimulationSnapshot, SimulationState};
 pub use testbench::bind_testbench_program;
 pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdStatistics, VcdWriter};
 

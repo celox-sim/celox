@@ -470,4 +470,75 @@ impl<B: SimBackend> SimulationState<B> {
     pub fn next_event_time(&self) -> Option<u64> {
         self.scheduler.next_event_time()
     }
+
+    /// Capture the mutable scheduling state: time, pending events, clocks and
+    /// the clock values edge detection compares against.
+    pub fn snapshot(&self) -> SimulationSnapshot<B> {
+        SimulationSnapshot {
+            time: self.scheduler.time,
+            clocks: self.scheduler.clocks.clone(),
+            event_queue: self.scheduler.event_queue.clone(),
+            periodic_events: self.periodic_events.clone(),
+            last_clock_values: self.last_clock_values.clone(),
+        }
+    }
+
+    /// Return to a state captured by [`Self::snapshot`] on a state built for
+    /// the same design.
+    ///
+    /// Event handles may point into the compiled code of the instance that took
+    /// the snapshot, so `remap` translates each pending event into a handle of
+    /// this instance. If an event cannot be translated, nothing is changed and
+    /// that event is returned.
+    pub fn restore(
+        &mut self,
+        snapshot: &SimulationSnapshot<B>,
+        mut remap: impl FnMut(B::Event) -> Option<B::Event>,
+    ) -> Result<(), B::Event> {
+        let event_queue = snapshot
+            .event_queue
+            .iter()
+            .map(|event| {
+                Ok(SimEvent {
+                    event_ref: remap(event.event_ref).ok_or(event.event_ref)?,
+                    ..event.clone()
+                })
+            })
+            .collect::<Result<_, B::Event>>()?;
+        self.scheduler.time = snapshot.time;
+        self.scheduler.clocks.clone_from(&snapshot.clocks);
+        self.scheduler.event_queue = event_queue;
+        self.periodic_events.clone_from(&snapshot.periodic_events);
+        self.last_clock_values
+            .clone_from(&snapshot.last_clock_values);
+        Ok(())
+    }
+}
+
+/// Scheduling state captured by [`SimulationState::snapshot`].
+pub struct SimulationSnapshot<B: SimBackend> {
+    time: u64,
+    clocks: Vec<Option<ClockDef>>,
+    event_queue: std::collections::BinaryHeap<SimEvent<B>>,
+    periodic_events: FxHashMap<PeriodicEventKey, usize>,
+    last_clock_values: BitSet,
+}
+
+impl<B: SimBackend> Clone for SimulationSnapshot<B> {
+    fn clone(&self) -> Self {
+        Self {
+            time: self.time,
+            clocks: self.clocks.clone(),
+            event_queue: self.event_queue.clone(),
+            periodic_events: self.periodic_events.clone(),
+            last_clock_values: self.last_clock_values.clone(),
+        }
+    }
+}
+
+impl<B: SimBackend> SimulationSnapshot<B> {
+    /// Simulation time at which the snapshot was taken.
+    pub fn time(&self) -> u64 {
+        self.time
+    }
 }
