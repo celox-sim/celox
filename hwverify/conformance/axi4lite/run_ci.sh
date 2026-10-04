@@ -19,5 +19,6 @@ PY
 trap finish EXIT
 cd "$REPO"
 ./conformance/celox-replay/run_ci.sh "$OUT/base-replay"
+python3 -m unittest discover -s conformance/structural -p 'test_*.py' -v 2>&1 | tee "$OUT/structural-unit.log"
 python3 -m unittest discover -s conformance/axi4lite -p 'test_*.py' -v 2>&1 | tee "$OUT/axi-unit.log"
 python3 conformance/axi4lite/run.py --out "$OUT/axi-projects" 2>&1 | tee "$OUT/axi-projects.log"

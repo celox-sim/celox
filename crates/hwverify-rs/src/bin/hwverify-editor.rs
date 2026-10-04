@@ -107,6 +107,14 @@ fn run(request: &Value) -> Result<Value, Value> {
                     "severity":if r["status"]=="passed" {3} else {1},
                     "message":format!("Response {} / {}: {}",r["response"].as_str().unwrap_or(""),r["name"].as_str().unwrap_or(""),r["status"].as_str().unwrap_or("unknown"))
                 })).collect::<Vec<_>>();
+            for obligation in report["structural"]["obligations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                diagnostics.push(json!({"uri":uri,"span":obligation["source_location"]["span"],"code":"structural_unbound","severity":1,
+                    "message":"no_comb_path is unbound: run the source structural checker with a complete source graph; behavioral proof does not discharge this obligation"}));
+            }
             for response in report["implementation_binding"]["responses"]
                 .as_array()
                 .into_iter()

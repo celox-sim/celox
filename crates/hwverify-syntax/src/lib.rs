@@ -220,6 +220,9 @@ impl Lower<'_> {
             )
         };
         let (collection, subcontext) = match (&*entry.named_body, context, keyword.text()) {
+            (g::NamedBody::LBraceNamedBodyListRBrace(_), "structure", "no_comb_path") => {
+                ("no_comb_path", "no_comb_path")
+            }
             (g::NamedBody::LBraceNamedBodyListRBrace(_), "specroot", "operation") => {
                 ("operations", "operation")
             }
@@ -743,6 +746,8 @@ impl Lower<'_> {
                         ("component_group", _) => "component",
                         ("composition_group", _) => "composition",
                         ("component", "state") => "declarations",
+                        ("component", "structure") => "structure",
+                        ("rel_impl", "endpoints") => "assignments",
                         ("component", "steps") => "assignments",
                         ("component" | "composition", "examples") => "example_group",
                         ("example_group", _) => "example",
@@ -819,6 +824,7 @@ impl Lower<'_> {
                         "rel_impl" | "scoped_impl" => ["composition", "reset_input"].as_slice(),
                         "component" | "scoped_spec" => ["init", "invariant"].as_slice(),
                         "composition" => ["members"].as_slice(),
+                        "no_comb_path" => ["from", "to"].as_slice(),
                         "example" | "scoped_example" => ["expect", "execution"].as_slice(),
                         "trace_frame" => ["ensure"].as_slice(),
                         "progress" => ["enabled", "rank"].as_slice(),

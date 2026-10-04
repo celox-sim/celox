@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'conformance/celox-replay'))
 import project as replay
+import structure_project
 from protocols.axi4lite import bind, parameters, signal_types, rules, UNCHECKED, SOURCE
 from protocols.axi4lite_reference import check_trace
 
@@ -56,6 +57,33 @@ def prepare(path, out):
     reset_lift = replay.invoke([replay.LIFTER, out / 'compiled.json', out / 'reset-bindings.json', '--inline'])
     reset_impl = {'wires': reset_lift['wires'], 'reset': impl['reset']}
     reset_signals = {n: expand(reset_lift['outputs'][alias], reset_impl, reset=True) for n, alias in binding['signals'].items()}
+    # Generic native structural obligations; no AXI-specific graph checker.
+    structural = json.loads(json.dumps(project['document']))
+    structural['components']['AxiStructure'] = {'state': {}, 'init': True, 'invariant': True, 'steps': {'tick': True}, 'examples': {}, 'structure': {'no_comb_path': {}}}
+    structural['compositions']['AxiSourceStructure'] = {'members': [impl['composition'], 'AxiStructure'], 'examples': {}}
+    structural['implementation']['composition'] = 'AxiSourceStructure'
+    structural['implementation']['binding']['states']['AxiStructure'] = {}
+    endpoints = structural['implementation'].setdefault('endpoints', {})
+    inputs = {}; outputs = {}
+    inverse_inputs = {physical: name for name, physical in project['manifest']['inputs'].items()}
+    for protocol, alias in binding['signals'].items():
+        physical = project['manifest']['signals'][alias]['signal']
+        if top[physical]['kind'] == 'Input':
+            logical = 'i.' + inverse_inputs[physical]; inputs[protocol] = logical
+        else:
+            name = 'axi_port_' + protocol
+            if name in structural['observations']: raise ValueError('reserved structural observation collision')
+            structural['observations'][name] = types[protocol]
+            structural['implementation']['binding']['observations'][name] = False if types[protocol] == 'bool' else ['bv', types[protocol]['bv'], 0]
+            logical = 'o.' + name; outputs[protocol] = logical
+        if logical in endpoints and endpoints[logical] != physical: raise ValueError('conflicting structural endpoint binding')
+        endpoints[logical] = physical
+    for source, fr in inputs.items():
+        for target, to in outputs.items():
+            structural['components']['AxiStructure']['structure']['no_comb_path'][source + '_to_' + target] = {'from': fr, 'to': to}
+    replay.write(out / 'structure-model.json', structural)
+    project['structural'] = structure_project.check(structural, project['design'], compiled, out)
+    project['identity']['structural_extractor_sha256'] = project['structural']['trusted_extractor_sha256']
     base = project['document']
     project['document'] = bind(base, config, signals, reset_signals)
     project['scope_document'] = bind(base, config, signals, reset_signals, 'scope')
@@ -141,6 +169,13 @@ def main():
             status, independent = simulate(project, inputs, args.out)
             if args.mode == 'replay' and status != 'reset_reachable_failure': raise ValueError('saved failure did not reproduce')
             summary = {'status': (independent['status'] if status == 'trace_no_failure' and independent['status'] != 'sampled_prefix_passed' else status), 'independent': independent, 'identity': project['identity'], 'unchecked': UNCHECKED}
+        summary['structural'] = project['structural']
+        if project['structural']['status'] == 'verified':
+            summary['unchecked'] = ['synthesized-netlist/physical combinational paths'] + [item for item in UNCHECKED if item != 'input-to-output combinational paths']
+        if project['structural']['status'] == 'violated':
+            summary['status'] = 'structural_violation'
+        elif project['structural']['status'] != 'verified' and summary['status'] in ('bounded_no_failure', 'trace_no_failure'):
+            summary['status'] = 'unknown'
         summary['environment_nonvacuity'] = ('Not established by search; provide a legal positive stimulus or separate cover' if args.mode == 'search' else 'Concrete prefix only; inspect independent environment violations and accepted transfer counts')
         summary['claim'] = 'Bounded sampled safety conditional on a legal counterpart prefix and declared capacity; not complete AXI compliance'
         replay.write(args.out / 'result.json', summary)

@@ -34,10 +34,10 @@ impl Input {
 fn run() -> Res<i32> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--finite-search-hint query|sat|unsat]".into());
+        return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--structural-artifact FILE.json] [--finite-search-hint query|sat|unsat]".into());
     }
     if args[0] == "--help" || args[0] == "-h" {
-        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence.");
+        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--structural-artifact FILE.json] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence.");
         return Ok(0);
     }
     let mut out = PathBuf::from("results");
@@ -54,6 +54,7 @@ fn run() -> Res<i32> {
     let mut emit_json = None;
     let mut lemma_source: Option<PathBuf> = None;
     let mut finite_search_hint = None;
+    let mut structural_artifact_path: Option<PathBuf> = None;
     let mut n = 1;
     while n < args.len() {
         if args[n] == "--check" {
@@ -70,6 +71,12 @@ fn run() -> Res<i32> {
                     return Err("--lemmas may only be specified once".into());
                 }
                 lemma_source = Some(PathBuf::from(&args[n + 1]));
+            }
+            "--structural-artifact" => {
+                if structural_artifact_path.is_some() {
+                    return Err("--structural-artifact may only be specified once".into());
+                }
+                structural_artifact_path = Some(PathBuf::from(&args[n + 1]));
             }
             "--out" => out = PathBuf::from(&args[n + 1]),
             "--z3" => z3 = args[n + 1].clone(),
@@ -175,6 +182,15 @@ fn run() -> Res<i32> {
             )
             .map_err(|e| e.to_string())?;
         }
+        let structural_artifact = if let Some(path) = &structural_artifact_path {
+            if !matches!(&design, Input::Specification(_)) {
+                return Err("structural artifacts require a v3 specification".into());
+            }
+            let bytes = fs::read(path).map_err(|e| e.to_string())?;
+            Some(hwverify_syntax::parse_json(&bytes).map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
         if check_only {
             Ok(
                 json!({"status":"validated", "name":design.document().get("name"), "input_format":format, "claim":"Syntax, names and types validated; no proof obligations executed"}),
@@ -182,7 +198,12 @@ fn run() -> Res<i32> {
         } else {
             match &design {
                 Input::Design(d) => checker::check_design(d, z3, out.clone()),
-                Input::Specification(s) => checker::check_specification(s, z3, out.clone()),
+                Input::Specification(s) => checker::check_specification_structural(
+                    s,
+                    z3,
+                    out.clone(),
+                    structural_artifact.as_ref(),
+                ),
                 Input::ScopedSpecification(s) => {
                     checker::check_scoped_specification(s, z3, out.clone())
                 }
@@ -212,6 +233,7 @@ fn run() -> Res<i32> {
         } else if result["status"] == "counterexample"
             || result["status"] == "spec_examples_failed"
             || result["status"] == "implementation_binding_failed"
+            || result["status"] == "structural_contract_failed"
         {
             1
         } else if result["status"] == "invalid_or_tool_error" {

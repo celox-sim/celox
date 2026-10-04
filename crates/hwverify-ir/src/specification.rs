@@ -123,7 +123,17 @@ impl Specification {
             let path = child("/components", name);
             at(
                 &path,
-                keys(c, &["state", "init", "invariant", "steps", "examples"], &[]),
+                keys(
+                    c,
+                    &["state", "init", "invariant", "steps", "examples"],
+                    &["structure"],
+                ),
+            )?;
+            validate_structure(
+                c.get("structure"),
+                &inputs,
+                &observations,
+                &child(&path, "structure"),
             )?;
             let state = declarations(
                 &c["state"],
@@ -456,9 +466,37 @@ fn implementation(doc: &Value, spec: &Specification) -> Result<SpecImplementatio
                 "operations",
                 "binding",
             ],
-            &["wires", "responses"],
+            &["wires", "responses", "endpoints"],
         ),
     )?;
+    if let Some(endpoints) = doc.get("endpoints") {
+        let endpoints = endpoints.as_object().ok_or_else(|| ValidationError {
+            path: "/implementation/endpoints".into(),
+            message: "endpoints must be an object".into(),
+        })?;
+        for (name, value) in endpoints {
+            structural_port(
+                name,
+                spec.inputs(),
+                spec.observations(),
+                "/implementation/endpoints",
+            )?;
+            let target = at("/implementation/endpoints", text(value))?;
+            if target.is_empty()
+                || !target.split('.').all(|part| {
+                    !part.is_empty()
+                        && part.chars().enumerate().all(|(i, c)| {
+                            c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                        })
+                })
+            {
+                return fail(
+                    "/implementation/endpoints",
+                    "endpoint requires a plain source signal path, not an expression",
+                );
+            }
+        }
+    }
     let composition = at("/implementation/composition", text(&doc["composition"]))?;
     let target = spec
         .compositions()
@@ -718,4 +756,39 @@ fn bounded_responses(
         );
     }
     Ok(result)
+}
+
+fn structural_port(name: &str, inputs: &Env, outputs: &Env, path: &str) -> Result<()> {
+    let found = name
+        .strip_prefix("i.")
+        .and_then(|n| inputs.get(n))
+        .or_else(|| name.strip_prefix("o.").and_then(|n| outputs.get(n)));
+    if found.is_none() {
+        return fail(
+            path,
+            "structural endpoint must reference a declared i.input or o.observation",
+        );
+    }
+    Ok(())
+}
+fn validate_structure(
+    value: Option<&Value>,
+    inputs: &Env,
+    outputs: &Env,
+    path: &str,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    at(path, keys(value, &["no_comb_path"], &[]))?;
+    for (name, rule) in at(path, named(&value["no_comb_path"]))? {
+        let p = child(&child(path, "no_comb_path"), name);
+        at(&p, keys(rule, &["from", "to"], &[]))?;
+        for field in ["from", "to"] {
+            let f = child(&p, field);
+            let port = at(&f, text(&rule[field]))?;
+            structural_port(port, inputs, outputs, &f)?;
+        }
+    }
+    Ok(())
 }

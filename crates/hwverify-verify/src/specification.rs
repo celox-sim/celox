@@ -135,6 +135,14 @@ fn trace_constraints(
 }
 
 pub fn check_specification(spec: &Specification, z3: String, out: PathBuf) -> Res<Value> {
+    check_specification_structural(spec, z3, out, None)
+}
+pub fn check_specification_structural(
+    spec: &Specification,
+    z3: String,
+    out: PathBuf,
+    artifact: Option<&Value>,
+) -> Res<Value> {
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let mut query = Check {
         z3,
@@ -205,12 +213,19 @@ pub fn check_specification(spec: &Specification, z3: String, out: PathBuf) -> Re
         }
     }
     let binding = crate::spec_binding::obligations(spec, &mut query)?;
+    let structural = crate::structure::check(spec, artifact)?;
     let binding_status = binding.as_ref().and_then(|b| b["status"].as_str());
     let status = if examples.iter().any(|x| x["status"] == "failed") {
         "spec_examples_failed"
     } else if binding_status == Some("failed") {
         "implementation_binding_failed"
-    } else if examples.iter().any(|x| x["status"] == "unknown") || binding_status == Some("unknown")
+    } else if structural["status"] == "violated" {
+        "structural_contract_failed"
+    } else if !matches!(
+        structural["status"].as_str(),
+        Some("verified" | "not_requested")
+    ) || examples.iter().any(|x| x["status"] == "unknown")
+        || binding_status == Some("unknown")
     {
         "unknown"
     } else if binding_status == Some("verified") {
@@ -233,6 +248,6 @@ pub fn check_specification(spec: &Specification, z3: String, out: PathBuf) -> Re
         "all hidden private state and omitted inputs/observations are existential; negative examples require UNSAT for every hidden completion"
     };
     Ok(
-        json!({"status":status,"name":spec.document().get("name"),"examples":examples,"coverage":coverage,"implementation_binding":binding,"claim":"Example results concern only the supplied finite observational traces; any separate universal safety/stuttering binding result is reported under implementation_binding", "semantics":{"composition":"conjunction with private component state and shared observations/inputs; all members synchronize on every named operation","initial":"component init and invariant at frame 0; no implicit reset operation","timing":"step k consumes inputs k and relates observations/state at frames k and k+1; observe constrains frame k+1","projection":projection},"limitations":["Passing examples alone is not universal verification, specification adequacy, deadlock freedom, liveness, or implementation refinement; any separate binding proof is reported under implementation_binding","Initial predicates define example starting states; no reset reachability or arbitrary future extension is inferred","Rust lowering, the structural kernel and Z3 are trusted; emitted SMT obligations are replayable"]}),
+        json!({"status":status,"name":spec.document().get("name"),"examples":examples,"coverage":coverage,"implementation_binding":binding,"structural":structural,"claim":"Example results concern only the supplied finite observational traces; any separate universal safety/stuttering binding result is reported under implementation_binding", "semantics":{"composition":"conjunction with private component state and shared observations/inputs; all members synchronize on every named operation","initial":"component init and invariant at frame 0; no implicit reset operation","timing":"step k consumes inputs k and relates observations/state at frames k and k+1; observe constrains frame k+1","projection":projection},"limitations":["Passing examples alone is not universal verification, specification adequacy, deadlock freedom, liveness, or implementation refinement; any separate binding proof is reported under implementation_binding","Initial predicates define example starting states; no reset reachability or arbitrary future extension is inferred","Rust lowering, the structural kernel and Z3 are trusted; emitted SMT obligations are replayable"]}),
     )
 }

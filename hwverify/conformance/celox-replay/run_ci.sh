@@ -28,7 +28,7 @@ cargo test --release --locked -p hwverify-verify reachable::tests
 python3 "$HERE/test_replay.py"
 python3 - "$OUT" <<'PY'
 import hashlib,json,pathlib,subprocess,sys
-out=pathlib.Path(sys.argv[1]); paths=[pathlib.Path(p) for p in ['conformance/veryl-proof/dependencies.json','conformance/celox-replay/adapter/Cargo.lock','conformance/veryl-proof/target/debug/veryl-proof-frontend','conformance/veryl-proof/target/debug/hwverify-celox-replay','target/release/hwverify-replay','target/release/hwverify-sir-lift']]
+out=pathlib.Path(sys.argv[1]); paths=[pathlib.Path(p) for p in ['conformance/veryl-proof/dependencies.json','conformance/celox-replay/adapter/Cargo.lock','conformance/veryl-proof/target/debug/veryl-proof-frontend','conformance/veryl-proof/target/debug/hwverify-celox-replay','target/release/hwverify-replay','target/release/hwverify-sir-lift','target/release/hwverify-structure']]
 (out/'executables-and-pins.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},indent=2)+'\n')
 (out/'head.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
 PY
