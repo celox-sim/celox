@@ -205,8 +205,10 @@ fn value_width(case: &ScriptCase, design: &DesignInfo) -> Result<usize, Unsuppor
         _ => None,
     };
     let mut widest = design.max_width.max(64);
+    let mut multiplies = false;
     for stmt in &case.body {
         walk_stmt(stmt, &mut |e| match e {
+            Expr::Op(Op::Mul | Op::Pow, _) => multiplies = true,
             Expr::Literal(value) => {
                 widest = widest.max(value.payload.bits() as usize + 1);
                 widest = widest.max(value.mask.bits() as usize + 1);
@@ -240,8 +242,10 @@ fn value_width(case: &ScriptCase, design: &DesignInfo) -> Result<usize, Unsuppor
             _ => {}
         });
     }
-    // Twice the widest value, so that a product of two still fits.
-    let width = (2 * widest + 64).div_ceil(64) * 64;
+    // Twice the widest value when the case multiplies, so that a product
+    // of two still fits.
+    let factor = if multiplies { 2 } else { 1 };
+    let width = (factor * widest + 64).div_ceil(64) * 64;
     if width > MAX_VALUE_WIDTH {
         return Err(Unsupported(format!(
             "{} needs {width}-bit testbench values; the limit is {MAX_VALUE_WIDTH}",
@@ -860,8 +864,8 @@ mod tests {
         .unwrap();
         assert!(text.contains("Top dut (.clk(i_clk), .a(i_a), .o());"));
         assert!(text.contains("i_a = t1;"));
-        assert!(text.contains("repeat (192'sh2) begin"));
-        assert!(text.contains("actual = $signed(192'({dut.o}));"));
+        assert!(text.contains("repeat (128'sh2) begin"));
+        assert!(text.contains("actual = $signed(128'({dut.o}));"));
         assert!(text.contains("@suite assert g::t at"));
         assert!(text.contains("$finish;"));
     }
