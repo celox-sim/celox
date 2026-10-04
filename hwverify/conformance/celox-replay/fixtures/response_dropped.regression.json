@@ -1,12 +1,14 @@
 {
-  "version": 1,
-  "case": "response_dropped",
+  "version": 2,
+  "project": "response_dropped",
   "goal": "response_deadline",
+  "depth": 5,
   "identity": {
     "celox_revision": "124a1315096d21b85d9d0d84fd7139363a181cad",
-    "source_sha256": "00d164299b2ffe34da9395f00eed9e30bd7e808c309066a7d101cfd708596e4e",
+    "manifest_sha256": "48209480ce98583714bd20d17c6dd7632f19ccda0f0783e54d3f1a9617f75e80",
+    "sources_sha256": "7d4565fcfbe0ef52058f3483444e84584aea83dacefac40adceafd67f9921b67",
     "specification_sha256": "00f525a84db174fc937a233c3751c00fb6292a3b406f07dd11b27cc0c41a9848",
-    "bindings_sha256": "7796761b8d360a37f40d4e9f29e3f15ec799ec7e576f0ed806dc2f9d2732ccea",
+    "bindings_sha256": "08ff406511e1bd9e75aef95ce8914bc7b2f238129f5e9f23ba0e63197f836e22",
     "document_sha256": "aa8a968e335dfb271ad480e485947aee0214f28cf411a5b22f0f2b98b05352e5",
     "dependency_patches_sha256": "4ba8abd9b14edc12c8ceca52b9fccfbe6bcdccf9bc996410e118150cbc843491"
   },

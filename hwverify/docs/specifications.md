@@ -460,3 +460,99 @@ malformed/stale witnesses, bad sampling/reset indices, and simulation divergence
 The mandatory `celox-replay` CI job uploads fresh evidence; `--record` is an
 explicit developer action for changing reviewed regressions and is never used
 by CI.
+
+### User project entry point
+
+The fixture gate and external projects use the same public CLI,
+[project.py](../conformance/celox-replay/project.py). No fixture name, source layout,
+or physical port naming convention is required. First build the pinned tools
+from the hwverify repository (Rust 1.98.1):
+
+```sh
+python3 conformance/veryl-proof/prepare.py
+cargo build --locked --manifest-path conformance/veryl-proof/frontend/Cargo.toml --target-dir conformance/veryl-proof/target
+cargo build --locked --manifest-path conformance/celox-replay/adapter/Cargo.toml --target-dir conformance/veryl-proof/target
+cargo build --release --locked -p hwverify-rs -p hwverify-sir
+```
+
+Place a manifest in your project directory. This example maps the canonical
+names in a native counter specification to differently named RTL pins:
+
+```json
+{
+  "version": 1,
+  "name": "my_counter",
+  "sources": ["rtl/counter.veryl"],
+  "top": "MyCounter",
+  "specification": "contracts/counter.hwv",
+  "clock": "clock_pin",
+  "reset": {"input": "rst", "active": 0},
+  "inputs": {"rst": "reset_pin", "en": "enable_pin"},
+  "state": {"count": "count_pin", "fault": "fault_pin"},
+  "signals": {},
+  "property": "safety",
+  "depth": 8
+}
+```
+
+All fields are required. `sources` may list multiple Veryl files; file paths are
+relative to the manifest directory and must remain inside it. `top` selects the
+module. `inputs` maps every specification input to exactly one external nonclock
+RTL input; the boolean `reset.input` must equal the specification's `reset_input`.
+`reset.active` is integer 0 or 1. `state` maps every implementation state variable
+to a distinct top-level sequential signal. Names on each side may differ.
+Types come from the native implementation declarations and must match the RTL
+widths exactly. The counter example needs a native declaration for both `count`
+and `fault`; adjust the mappings and declarations together for your design.
+
+The native v3 file contains the relational components, implementation state
+schema, abstraction binding, operation selectors, and optional response contract.
+Its implementation `reset`, `next`, and wire expressions are typechecked template
+fields, then **replaced by the expressions lifted from your source RTL**. They
+are not taken as an independently implemented DUT or used to supply expected
+outputs. The relational requirements and state/observation bindings remain the
+user-authored property.
+
+`signals` maps each declared implementation wire alias to a typed pre-edge DUT
+signal. For example, aliases used by a response contract can be mapped as
+`"accept": {"signal": "accepted_pin", "type": "bool"}` and
+`"complete": {"signal": "done_pin", "type": "bool"}`. Use `"property":
+"response_deadline"` to check the single declared response. Signal types are
+`"bool"` or `{"bv": N}` for N=1–64; they must match the RTL. All declared wire
+aliases must be mapped, with no extra aliases. These signals are also sampled
+before the simulator clock edge and compared against the deterministic lifted
+DUT expressions. No unique output is inferred from a relational-specification
+witness: a relation allowing several next values continues to allow all of them.
+
+Search and save a reproduced failure, then replay it without solver-generated
+stimulus selection:
+
+```sh
+python3 conformance/celox-replay/project.py search /path/to/project/replay.json --out /tmp/my-search --save-regression /path/to/project/failure.json
+python3 conformance/celox-replay/project.py replay /path/to/project/replay.json /path/to/project/failure.json --out /tmp/my-replay
+```
+
+Output directories must be fresh. `--save-regression` is optional and never
+replaces an existing file. It writes only after an actual failure passes both
+original-property replay and Celox simulation. A bounded no-failure or Unknown
+result does not create a regression. Saved version-2 regressions contain concrete
+inputs and hashes of the manifest, ordered sources, native specification,
+resolved bindings, compiled transition model and dependency identity. Moving an
+unchanged project directory is allowed; changing its relative layout, content,
+mappings, property or depth requires a new search instead of silently accepting
+an old regression.
+
+The CLI prints a JSON result and retains details in the output directory.
+Exit 0 means the request completed: inspect `status`, which can still be
+`reset_reachable_failure`, `bounded_no_failure`, or `unknown`. Malformed projects,
+stale regressions and tool failures return `project_error` with exit 2;
+`simulator_divergence` remains a separate result with exit 2. No simulator match
+is reported for a search with no executable failure witness.
+
+Unsupported mappings fail explicitly: missing or duplicate input/state mappings,
+hierarchical names, array lanes, width mismatches, state mapped to combinational
+outputs, clock-as-data, inouts, typed/asynchronous reset, arbitrary mapping
+expressions, unknown fields, duplicate JSON fields, and project paths escaping
+the manifest directory. The existing lifter additionally rejects unsupported
+SIR and reset equations depending on arbitrary prestate. This interface retains
+the scalar two-state, one-clock, synchronous-reset scope described above.

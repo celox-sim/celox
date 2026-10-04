@@ -22,11 +22,26 @@ fn run(v: &Value) -> Result<Value, String> {
                 .filter(|n| *n <= 32)
                 .ok_or("invalid depth")? as u32,
         ),
-        Some("check_stimulus") => hwverify_verify::reachable::check_stimulus(
-            &spec,
-            v["goal"].as_str().ok_or("missing goal")?,
-            v["inputs"].as_array().ok_or("missing inputs")?,
-        ),
+        Some("check_stimulus") => {
+            let signals = match v.get("signals") {
+                None => vec![],
+                Some(Value::Array(xs)) => xs
+                    .iter()
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_owned)
+                            .ok_or("sampled signal must be a string")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Err("signals must be an array".into()),
+            };
+            hwverify_verify::reachable::observe_stimulus(
+                &spec,
+                v["goal"].as_str().ok_or("missing goal")?,
+                v["inputs"].as_array().ok_or("missing inputs")?,
+                &signals,
+            )
+        }
         Some("replay") => hwverify_verify::reachable::validate_reachable(&spec, &v["witness"]),
         _ => Err("mode must be search or replay".into()),
     }

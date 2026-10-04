@@ -377,6 +377,50 @@ pub fn check_stimulus(spec: &Specification, selected: &str, inputs: &[Value]) ->
     )
 }
 
+/// Observe explicitly named deterministic DUT wires during an original-property
+/// replay. These are simulation comparison values, never a relational-spec oracle.
+pub fn observe_stimulus(
+    spec: &Specification,
+    selected: &str,
+    inputs: &[Value],
+    signals: &[String],
+) -> Res<Value> {
+    let mut result = check_stimulus(spec, selected, inputs)?;
+    let imp = spec.implementation().unwrap();
+    let terms = signals
+        .iter()
+        .map(|name| {
+            Ok((
+                name.clone(),
+                imp.wires
+                    .get(name)
+                    .ok_or(format!("unknown DUT wire {name}"))?
+                    .clone(),
+            ))
+        })
+        .collect::<Res<Env>>()?;
+    if terms.len() != signals.len() {
+        return Err("duplicate sampled wire".into());
+    }
+    for frame in result["trace"].as_array_mut().unwrap() {
+        if frame["edge"] == 0 {
+            continue;
+        }
+        let iv = input_values(&frame["inputs"], spec.inputs())?;
+        let raw = frame["state_before"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v["value"].clone()))
+            .collect::<serde_json::Map<_, _>>();
+        let sv = input_values(&Value::Object(raw), &imp.machine.state)?;
+        let mut a = assignments(spec.inputs(), &iv)?;
+        a.extend(assignments(&imp.machine.state, &sv)?);
+        frame["signal_samples"] = values(&eval(&terms, &a)?);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +439,35 @@ mod tests {
                     .map(|(request, stall)| json!({"rst":false,"request":request,"stall":stall})),
             )
             .collect()
+    }
+    #[test]
+    fn sampled_dut_signals_use_preedge_state_and_reject_bad_names() {
+        let s = spec(&document());
+        let rows = inputs(&[(true, false), (false, false), (false, false)]);
+        let sampled = observe_stimulus(
+            &s,
+            "response_deadline",
+            &rows,
+            &["accept".into(), "complete".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            sampled["trace"][1]["signal_samples"]["accept"]["value"],
+            true
+        );
+        assert_eq!(sampled["trace"][1]["state_after"]["busy"]["value"], true);
+        assert_eq!(
+            sampled["trace"][3]["signal_samples"]["complete"]["value"],
+            true
+        );
+        assert!(observe_stimulus(&s, "response_deadline", &rows, &["missing".into()]).is_err());
+        assert!(observe_stimulus(
+            &s,
+            "response_deadline",
+            &rows,
+            &["accept".into(), "accept".into()]
+        )
+        .is_err());
     }
     #[test]
     fn deadline_counts_subsequent_edges_and_ignores_dut_pending_and_rank() {
