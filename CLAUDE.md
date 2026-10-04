@@ -4,7 +4,7 @@ The repository-wide agent workflow requirements in `AGENTS.md` also apply.
 
 ## Project Overview
 
-Celox is a JIT simulator for Veryl HDL. It compiles Veryl designs with Cranelift for high-speed simulation. Future plans include SystemVerilog/Verilog support.
+Celox is a JIT simulator for Veryl HDL and a synthesizable subset of SystemVerilog. It compiles designs with Cranelift for high-speed simulation. The SystemVerilog frontend (`celox-sv-analyzer`, `celox-frontend-sv`) is behind the `systemverilog` feature of `celox`; see `docs/guide/systemverilog.md` for the supported subset.
 
 ## Build Commands
 
