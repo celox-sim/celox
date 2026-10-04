@@ -16,4 +16,5 @@ mod quantified_examples;
 pub mod lemma_candidate;
 pub mod proof_program;
 
+mod acceptance_cover;
 mod progress;

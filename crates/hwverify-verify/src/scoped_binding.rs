@@ -117,6 +117,7 @@ pub(crate) fn obligations(target: &ScopedTarget, q: &mut Check) -> Res<Option<Va
         reset.clone(),
         invariant.clone(),
         &context,
+        &target.implementation_inputs,
         q,
     )?;
     let active = and(not(reset), invariant);

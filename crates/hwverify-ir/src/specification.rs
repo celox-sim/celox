@@ -610,6 +610,7 @@ pub struct BoundedResponse {
     pub rank: Term,
     pub bound: u64,
     pub assumption: Term,
+    pub cover_depth: Option<u32>,
 }
 fn bounded_responses(
     value: Option<&Value>,
@@ -637,7 +638,7 @@ fn bounded_responses(
             keys(
                 row,
                 &["operation", "accept", "pending", "rank", "bound", "assume"],
-                &[],
+                &["cover_depth"],
             ),
         )?;
         let operation = at(&child(&path, "operation"), text(&row["operation"]))?;
@@ -681,6 +682,18 @@ fn bounded_responses(
             &child(&path, "assume"),
             lower,
         )?;
+        let cover_depth = row
+            .get("cover_depth")
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| (1..=32).contains(n))
+                    .map(|n| n as u32)
+                    .ok_or_else(|| ValidationError {
+                        path: child(&path, "cover_depth"),
+                        message: "cover_depth must be an integer from 1 through 32".into(),
+                    })
+            })
+            .transpose()?;
         let accept = boolean(&row["accept"], env, &child(&path, "accept"), lower)?;
         result.insert(
             name.clone(),
@@ -691,6 +704,7 @@ fn bounded_responses(
                 rank,
                 bound,
                 assumption,
+                cover_depth,
             },
         );
     }

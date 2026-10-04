@@ -272,6 +272,7 @@ responses {
     pending s.busy;
     rank s.ticks;
     bound 2;
+    cover_depth 2;
     assume !i.stall;
   }
 }
@@ -330,10 +331,38 @@ preserve it forever, and require it in `accept`. Acceptance can then be feasible
 only in unreachable states, while every reset-reachable run remains idle and the
 conditional response checks pass. The regression suite preserves this example.
 
-Every response report exposes `adequacy.reset_reachable_acceptance: "unchecked"`
-and `adequacy.external_request_to_acceptance: "not_specified"` separately from its
-conditional proof status. The LSP emits a warning at `accept` with the same
-limitation, including for verified responses.
+Optional `cover_depth N` (1–32) requests a **separate bounded acceptance cover**.
+Edge 0 applies the original reset assignment with reset high. Edges 1 through N
+are candidate acceptance edges, each with reset low and the declared input
+assumption satisfied. The reset input vector is independent of subsequent input
+vectors, and the assumption is not imposed on reset. There are no constraints on
+inputs after the accepted edge. Depth counts nonreset implementation edges after
+reset, independently of the response latency `bound`.
+
+`adequacy.reset_acceptance_cover` reports the depth, limits, source location and:
+
+- `reached`: a SAT prefix independently replayed through the original reset and
+  next-state expressions. `witness.trace` contains concrete inputs and before/after
+  states, ending at `witness.acceptance_edge`; `original_transitions_validated`
+  is true. This proves existence of one accepting run, not service for all requests.
+- `not_reached_within_bound`: UNSAT for this bounded cover only. It does **not** mean
+  acceptance is unreachable at greater depth. The `ever_enabled` mutant receives
+  this result while its conditional response theorem still verifies.
+- `unknown`: budget exhaustion, unsupported scalar replay, or failed witness
+  validation; no replay-validated witness is returned.
+- `unchecked`: no `cover_depth` was supplied.
+
+The cover uses the existing finite solver and word-level interpreter, not an
+external solver or finite traces extrapolated into liveness. Initial replay
+support is Bool/BV state and inputs of width at most 64, with at most 4096 frame
+symbols; reported finite solver budgets also apply. It adds no mapped-invariant,
+pending or rank assumptions to the original transition system. Its status never
+changes the conditional proof status or CLI verification exit status.
+
+`adequacy.reset_reachable_acceptance` mirrors the cover status;
+`adequacy.external_request_to_acceptance` remains `"not_specified"`. The LSP shows
+cover outcomes at `cover_depth` and retains a warning at `accept` about the missing
+external request-to-acceptance obligation, including when the cover is reached.
 
 Separate SAT checks require a feasible nonreset input assumption and a feasible
 acceptance under the mapped invariant. Contradictory assumptions or `accept false`

@@ -255,8 +255,8 @@ class Protocol(unittest.TestCase):
         command = next(l['command'] for l in lenses if l['command']['arguments'][0]['program'] == 'responses')
         result = c.request('workspace/executeCommand', command)
         self.assertEqual(result['verification']['implementation_binding']['responses'][0]['status'], 'verified')
-        self.assertEqual(result['verification']['implementation_binding']['responses'][0]['adequacy']['reset_reachable_acceptance'], 'unchecked')
-        self.assertTrue(any(d['code'] == 'response_acceptance_adequacy_unchecked' and d['severity'] == 2 for d in result['diagnostics']))
+        self.assertEqual(result['verification']['implementation_binding']['responses'][0]['adequacy']['reset_reachable_acceptance'], 'reached')
+        self.assertTrue(any(d['code'] == 'response_external_service_not_specified' and d['severity'] == 2 for d in result['diagnostics']))
         self.assertTrue(all(d['span']['line'] > 30 for d in result['diagnostics']))
         c.edit(source.replace('assume !i.stall;', 'assume false;'))
         result = c.request('workspace/executeCommand', command)
@@ -270,6 +270,36 @@ class Protocol(unittest.TestCase):
         result = c.request('workspace/executeCommand', command)
         self.assertTrue(result['diagnostics'])
         self.assertNotIn('verification', result)
+
+    def test_response_cover_reached_bounded_miss_and_unknown(self):
+        c = self.client
+        source = (ROOT / 'examples/scoped_response.hwv').read_text()
+        c.open(source)
+        options = {'command': 'hwverify.prove', 'arguments': [{'uri': URI, 'program': 'responses', 'branch': None}]}
+        result = c.request('workspace/executeCommand', options)
+        cover = result['verification']['implementation_binding']['responses'][0]['adequacy']['reset_acceptance_cover']
+        self.assertEqual(cover['status'], 'reached')
+        self.assertTrue(cover['witness']['original_transitions_validated'])
+        diagnostic = next(d for d in result['diagnostics'] if d['code'] == 'response_reset_acceptance_cover')
+        self.assertEqual(diagnostic['severity'], 3)
+        self.assertEqual(diagnostic['span'], cover['source_location']['span'])
+        idle = source.replace('state busy: bool;', 'state enabled: bool; state busy: bool;').replace('reset {', 'reset { enabled = false;').replace('next {', 'next { enabled = s.enabled;').replace('accept = i.request && !s.busy;', 'accept = i.request && !s.busy && s.enabled;')
+        c.edit(idle)
+        result = c.request('workspace/executeCommand', options)
+        self.assertEqual(result['verification']['implementation_binding']['status'], 'verified')
+        self.assertTrue(any(d['code'] == 'response_reset_acceptance_cover' and 'not_reached_within_bound' in d['message'] and d['severity'] == 2 for d in result['diagnostics']))
+        crowded = source.replace('cover_depth 2;', 'cover_depth 32;')
+        for n in range(130):
+            crowded = crowded.replace('state busy: bool;', f'state extra{n}: bool; state busy: bool;').replace('reset {', f'reset {{ extra{n} = false;').replace('next {', f'next {{ extra{n} = s.extra{n};')
+        c.edit(crowded, 3)
+        result = c.request('workspace/executeCommand', options)
+        cover = result['verification']['implementation_binding']['responses'][0]['adequacy']['reset_acceptance_cover']
+        self.assertEqual(cover['status'], 'unknown')
+        self.assertIsNone(cover['witness'])
+        self.assertTrue(any(d['code'] == 'response_reset_acceptance_cover' and 'unknown' in d['message'] and d['severity'] == 2 for d in result['diagnostics']))
+        c.edit(source.replace('cover_depth 2;', ''), 4)
+        result = c.request('workspace/executeCommand', options)
+        self.assertTrue(any(d['code'] == 'response_reset_acceptance_cover' and 'unchecked' in d['message'] and 'not specified' in d['message'] for d in result['diagnostics']))
 
     def test_response_check_reports_failed_safety_prerequisite(self):
         c = self.client

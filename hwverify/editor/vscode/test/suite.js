@@ -164,7 +164,10 @@ exports.run = async function run() {
     assert(responseLenses.length > 0);
     const responseResult = await vscode.commands.executeCommand('hwverify.prove', responseOptions);
     assert.equal(responseResult.verification.implementation_binding.responses[0].status, 'verified');
-    await until('acceptance adequacy warning reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'response_acceptance_adequacy_unchecked' && d.severity === vscode.DiagnosticSeverity.Warning));
+    assert.equal(responseResult.verification.implementation_binding.responses[0].adequacy.reset_acceptance_cover.status, 'reached');
+    assert.equal(responseResult.verification.implementation_binding.responses[0].adequacy.reset_acceptance_cover.witness.original_transitions_validated, true);
+    await until('reset-acceptance cover reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'response_reset_acceptance_cover' && d.severity === vscode.DiagnosticSeverity.Information));
+    await until('acceptance adequacy warning reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'response_external_service_not_specified' && d.severity === vscode.DiagnosticSeverity.Warning));
     const responseSource = responseDoc.getText();
     await replace(responseDoc, responseSource.replace('count = if w.complete { s.count + 1u4 } else { s.count };', 'count = 3u4;'));
     const failedSafety = await api.checkProof(responseOptions);

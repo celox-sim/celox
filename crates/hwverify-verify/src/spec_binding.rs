@@ -103,6 +103,7 @@ pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Val
         reset.clone(),
         invariant.clone(),
         &context,
+        spec.inputs(),
         q,
     )?;
     let active = both(not(reset), invariant);

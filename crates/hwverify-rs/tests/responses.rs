@@ -270,6 +270,13 @@ fn cli_progress_obligations_have_native_locations() {
         .unwrap()
         .ends_with("scoped_response.hwv"));
     assert!(location["span"]["line"].as_u64().unwrap() > 30);
+    assert!(
+        cover(&report)["source_location"]["span"]["line"]
+            .as_u64()
+            .unwrap()
+            > 30
+    );
+    assert_eq!(cover(&report)["status"], "reached");
 }
 
 #[test]
@@ -298,11 +305,131 @@ fn unreachable_acceptance_does_not_establish_service_after_reset() {
         assert_eq!(response["status"], "verified");
         assert_eq!(
             response["adequacy"]["reset_reachable_acceptance"],
-            "unchecked"
+            "not_reached_within_bound"
         );
         assert_eq!(
             response["adequacy"]["external_request_to_acceptance"],
             "not_specified"
         );
+    }
+}
+
+fn cover(r: &Value) -> &Value {
+    &r["implementation_binding"]["responses"][0]["adequacy"]["reset_acceptance_cover"]
+}
+#[test]
+fn reset_cover_depth_and_assumptions_have_exact_edge_indexing() {
+    for scoped in [false, true] {
+        let text = source(scoped)
+            .replace(
+                "state busy: bool;",
+                "state busy: bool; state enabled: bool;",
+            )
+            .replace("reset {", "reset { enabled = false;")
+            .replace("next {", "next { enabled = true;")
+            .replace(
+                "accept = i.request && !s.busy;",
+                "accept = i.request && !s.busy && s.enabled;",
+            );
+        let mut delayed = hwverify_syntax::parse_document(&text, "delayed.hwv")
+            .unwrap()
+            .canonical;
+        delayed["implementation"]["responses"]["request_done"]["cover_depth"] = json!(1);
+        let short = check(&delayed, &format!("cover-short-{scoped}"));
+        assert_eq!(cover(&short)["status"], "not_reached_within_bound");
+        assert!(cover(&short)["witness"].is_null());
+        assert_eq!(short["implementation_binding"]["status"], "verified");
+        delayed["implementation"]["responses"]["request_done"]["cover_depth"] = json!(2);
+        let reached = check(&delayed, &format!("cover-depth-two-{scoped}"));
+        assert_eq!(cover(&reached)["status"], "reached");
+        assert_eq!(cover(&reached)["witness"]["acceptance_edge"], 2);
+        assert_eq!(
+            cover(&reached)["witness"]["original_transitions_validated"],
+            true
+        );
+        let trace = cover(&reached)["witness"]["trace"].as_array().unwrap();
+        assert_eq!(trace.len(), 3);
+        assert_eq!(trace[0]["inputs"]["rst"]["value"], true);
+        assert!(trace[0]["assumption"].is_null());
+        assert_eq!(trace[1]["accept"], false);
+        assert_eq!(trace[2]["accept"], true);
+        assert_eq!(trace[1]["state_after"], trace[2]["state_before"]);
+        // Reaching enabled would require violating the assumption BEFORE acceptance.
+        delayed["implementation"]["next"]["enabled"] = json!(["or", "i.stall", "s.enabled"]);
+        let blocked = check(&delayed, &format!("cover-prefix-assume-{scoped}"));
+        assert_eq!(cover(&blocked)["status"], "not_reached_within_bound");
+        // Reset inputs are independent: rst and stall may both be true on edge 0.
+        delayed["implementation"]["reset"]["enabled"] = json!("i.stall");
+        delayed["implementation"]["responses"]["request_done"]["assume"] =
+            json!(["and", ["not", "i.rst"], ["not", "i.stall"]]);
+        let seeded = check(&delayed, &format!("cover-reset-input-{scoped}"));
+        assert_eq!(cover(&seeded)["status"], "reached");
+        assert_eq!(
+            cover(&seeded)["witness"]["trace"][0]["inputs"]["stall"]["value"],
+            true
+        );
+        // Neither reset nor an assumption-violating acceptance can count as a hit.
+        for (name, accept) in [("reset", "i.rst"), ("stall", "i.stall")] {
+            delayed["implementation"]["responses"]["request_done"]["accept"] = json!(accept);
+            assert_eq!(
+                cover(&check(&delayed, &format!("cover-no-{name}-{scoped}")))["status"],
+                "not_reached_within_bound"
+            );
+        }
+    }
+}
+#[test]
+fn cover_is_optional_and_exhausted_budget_is_unknown() {
+    for scoped in [false, true] {
+        let mut doc = document(scoped);
+        let reached = check(&doc, &format!("cover-real-{scoped}"));
+        assert_eq!(cover(&reached)["status"], "reached");
+        assert_eq!(cover(&reached)["depth"], 2);
+        assert_eq!(
+            cover(&reached)["witness"]["original_transitions_validated"],
+            true
+        );
+        doc["implementation"]["responses"]["request_done"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cover_depth");
+        assert_eq!(
+            cover(&check(&doc, &format!("cover-absent-{scoped}")))["status"],
+            "unchecked"
+        );
+        let mut crowded = source(scoped).replace("cover_depth 2;", "cover_depth 32;");
+        for n in 0..130 {
+            crowded = crowded
+                .replace(
+                    "state busy: bool;",
+                    &format!("state extra{n}: bool; state busy: bool;"),
+                )
+                .replace("reset {", &format!("reset {{ extra{n} = false;"))
+                .replace("next {", &format!("next {{ extra{n} = s.extra{n};"));
+        }
+        let doc = hwverify_syntax::parse_document(&crowded, "crowded.hwv")
+            .unwrap()
+            .canonical;
+        let unknown = check(&doc, &format!("cover-unknown-{scoped}"));
+        assert_eq!(cover(&unknown)["status"], "unknown");
+        assert!(cover(&unknown)["witness"].is_null());
+        assert!(cover(&unknown)["reason"]
+            .as_str()
+            .unwrap()
+            .contains("budget"));
+        for bad in [json!(0), json!(33), json!(1.5)] {
+            let mut invalid = document(scoped);
+            invalid["implementation"]["responses"]["request_done"]["cover_depth"] = bad;
+            let message = if scoped {
+                hwverify_ir::ScopedSpecification::from_json(&invalid)
+                    .unwrap_err()
+                    .to_string()
+            } else {
+                hwverify_ir::Specification::from_json(&invalid)
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(message.contains("cover_depth"), "{message}");
+        }
     }
 }

@@ -113,8 +113,17 @@ fn run(request: &Value) -> Result<Value, Value> {
                 .flatten()
             {
                 let adequacy = &response["adequacy"];
+                let cover = &adequacy["reset_acceptance_cover"];
+                let depth = cover["depth"]
+                    .as_u64()
+                    .map(|n| format!("depth {n} nonreset edges"))
+                    .unwrap_or_else(|| "no depth requested".into());
+                diagnostics.push(json!({"uri":uri,"span":cover["source_location"]["span"],
+                    "code":"response_reset_acceptance_cover","severity":if cover["status"]=="reached" {3} else {2},
+                    "message":format!("Reset-acceptance cover: {}; {}; bounded existential adequacy only. {}", cover["status"].as_str().unwrap_or("unknown"), depth, cover["reason"].as_str().unwrap_or(""))}));
+
                 diagnostics.push(json!({"uri":uri,"span":adequacy["source_location"]["span"],
-                    "code":"response_acceptance_adequacy_unchecked","severity":2,
+                    "code":"response_external_service_not_specified","severity":2,
                     "message":adequacy["message"]}));
             }
             if let Some(diagnostic) =

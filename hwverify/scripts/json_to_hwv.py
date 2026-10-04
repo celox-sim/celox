@@ -223,10 +223,10 @@ def print_document(doc, infix=False):
         lines.append('  responses {')
         for name, contract in implementation['responses'].items():
             fields = ('operation', 'accept', 'pending', 'rank', 'bound', 'assume')
-            if set(contract) != set(fields):
+            if not set(fields) <= set(contract) or set(contract) - set(fields) - {'cover_depth'}:
                 raise ValueError('unsupported or incomplete bounded response contract')
             lines.append(f'    {name} {{')
-            for key in fields:
+            for key in fields + (('cover_depth',) if 'cover_depth' in contract else ()):
                 field(key, contract[key], 6)
             lines.append('    }')
         lines.append('  }')

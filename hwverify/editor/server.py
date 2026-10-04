@@ -14,7 +14,7 @@ import threading
 from urllib.parse import unquote, urlparse
 
 TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z_0-9]*|[^\s]', re.S)
-KEYWORDS = 'design input reset_input spec impl state reset next outputs binding commit can_step progress enabled rank proof forall target rhs lemma context guard claim depends use result let responses accept pending rank bound assume true false bool bv mem'.split()
+KEYWORDS = 'design input reset_input spec impl state reset next outputs binding commit can_step progress enabled rank proof forall target rhs lemma context guard claim depends use result let responses accept pending rank bound cover_depth assume true false bool bv mem'.split()
 
 
 def offset(text, pos):

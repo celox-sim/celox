@@ -822,9 +822,16 @@ impl Lower<'_> {
                         "example" | "scoped_example" => ["expect", "execution"].as_slice(),
                         "trace_frame" => ["ensure"].as_slice(),
                         "progress" => ["enabled", "rank"].as_slice(),
-                        "response" => {
-                            ["operation", "accept", "pending", "rank", "bound", "assume"].as_slice()
-                        }
+                        "response" => [
+                            "operation",
+                            "accept",
+                            "pending",
+                            "rank",
+                            "bound",
+                            "assume",
+                            "cover_depth",
+                        ]
+                        .as_slice(),
                         "contract" => [
                             "pre",
                             "precondition",

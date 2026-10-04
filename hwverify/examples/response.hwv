@@ -40,6 +40,7 @@ implementation {
       pending s.busy;
       rank s.ticks;
       bound 2;
+      cover_depth 2;
       assume !i.stall;
     }
   }
