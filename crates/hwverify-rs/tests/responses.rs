@@ -271,3 +271,38 @@ fn cli_progress_obligations_have_native_locations() {
         .ends_with("scoped_response.hwv"));
     assert!(location["span"]["line"].as_u64().unwrap() > 30);
 }
+
+#[test]
+fn unreachable_acceptance_does_not_establish_service_after_reset() {
+    for scoped in [false, true] {
+        // Reset and every transition preserve !ever_enabled. Acceptance is therefore
+        // unreachable for every input sequence, although safe arbitrary states can accept.
+        let text = source(scoped)
+            .replace(
+                "state busy: bool;",
+                "state busy: bool; state ever_enabled: bool;",
+            )
+            .replace("reset {", "reset { ever_enabled = false;")
+            .replace("next {", "next { ever_enabled = s.ever_enabled;")
+            .replace(
+                "accept = i.request && !s.busy;",
+                "accept = i.request && !s.busy && s.ever_enabled;",
+            );
+        let doc = hwverify_syntax::parse_document(&text, "unreachable.hwv")
+            .unwrap()
+            .canonical;
+        let r = check(&doc, &format!("unreachable-accept-{scoped}"));
+        assert_eq!(r["implementation_binding"]["status"], "verified", "{r}");
+        assert_eq!(obligation(&r, "accept_nonempty")["status"], "passed");
+        let response = &r["implementation_binding"]["responses"][0];
+        assert_eq!(response["status"], "verified");
+        assert_eq!(
+            response["adequacy"]["reset_reachable_acceptance"],
+            "unchecked"
+        );
+        assert_eq!(
+            response["adequacy"]["external_request_to_acceptance"],
+            "not_specified"
+        );
+    }
+}

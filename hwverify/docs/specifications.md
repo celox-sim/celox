@@ -321,6 +321,20 @@ and extrapolating it into unbounded liveness. Other operations receive no progre
 claim, and request/response payload correspondence is limited to the separate
 relational safety specification.
 
+**A verified conditional response does not establish that an external request is
+accepted, or that the implementation ever does useful work after reset.** `accept`
+is an implementation-defined event, not an automatically enforced request
+handshake. There is no separate external request predicate or request-to-acceptance
+obligation in this version. A model can add `ever_enabled`, reset it to false,
+preserve it forever, and require it in `accept`. Acceptance can then be feasible
+only in unreachable states, while every reset-reachable run remains idle and the
+conditional response checks pass. The regression suite preserves this example.
+
+Every response report exposes `adequacy.reset_reachable_acceptance: "unchecked"`
+and `adequacy.external_request_to_acceptance: "not_specified"` separately from its
+conditional proof status. The LSP emits a warning at `accept` with the same
+limitation, including for verified responses.
+
 Separate SAT checks require a feasible nonreset input assumption and a feasible
 acceptance under the mapped invariant. Contradictory assumptions or `accept false`
 produce `failed_nonvacuity`, not success. These witnesses are **not claims of reset
@@ -341,3 +355,7 @@ aliases. In the editor, **Check implementation responses and safety** explicitly
 runs the same checker; edit-time analysis only validates syntax, names and types.
 The editor action also checks the document's ordinary examples and safety binding,
 so a passing response row alone does not override other failures in that result.
+
+Failed or Unknown implementation bindings also produce a blocking implementation-level
+editor diagnostic naming the outstanding obligations, even when every response
+obligation passes.

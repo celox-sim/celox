@@ -164,7 +164,13 @@ exports.run = async function run() {
     assert(responseLenses.length > 0);
     const responseResult = await vscode.commands.executeCommand('hwverify.prove', responseOptions);
     assert.equal(responseResult.verification.implementation_binding.responses[0].status, 'verified');
-    await replace(responseDoc, responseDoc.getText().replace('assume !i.stall;', 'assume false;'));
+    await until('acceptance adequacy warning reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'response_acceptance_adequacy_unchecked' && d.severity === vscode.DiagnosticSeverity.Warning));
+    const responseSource = responseDoc.getText();
+    await replace(responseDoc, responseSource.replace('count = if w.complete { s.count + 1u4 } else { s.count };', 'count = 3u4;'));
+    const failedSafety = await api.checkProof(responseOptions);
+    assert.equal(failedSafety.verification.implementation_binding.responses[0].status, 'not_established_due_to_binding_failure');
+    await until('failed safety prerequisite reaches Problems', () => vscode.languages.getDiagnostics(responseUri).some(d => d.code === 'implementation_binding_not_verified' && d.severity === vscode.DiagnosticSeverity.Error));
+    await replace(responseDoc, responseSource.replace('assume !i.stall;', 'assume false;'));
     const impossible = await api.checkProof(responseOptions);
     assert.equal(impossible.verification.implementation_binding.status, 'failed');
     assert(impossible.diagnostics.some(d => d.message.includes('environment_nonempty: failed_nonvacuity') && d.span.line > 30));

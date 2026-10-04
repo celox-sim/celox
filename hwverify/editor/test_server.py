@@ -255,7 +255,8 @@ class Protocol(unittest.TestCase):
         command = next(l['command'] for l in lenses if l['command']['arguments'][0]['program'] == 'responses')
         result = c.request('workspace/executeCommand', command)
         self.assertEqual(result['verification']['implementation_binding']['responses'][0]['status'], 'verified')
-        self.assertTrue(result['diagnostics'])
+        self.assertEqual(result['verification']['implementation_binding']['responses'][0]['adequacy']['reset_reachable_acceptance'], 'unchecked')
+        self.assertTrue(any(d['code'] == 'response_acceptance_adequacy_unchecked' and d['severity'] == 2 for d in result['diagnostics']))
         self.assertTrue(all(d['span']['line'] > 30 for d in result['diagnostics']))
         c.edit(source.replace('assume !i.stall;', 'assume false;'))
         result = c.request('workspace/executeCommand', command)
@@ -269,6 +270,23 @@ class Protocol(unittest.TestCase):
         result = c.request('workspace/executeCommand', command)
         self.assertTrue(result['diagnostics'])
         self.assertNotIn('verification', result)
+
+    def test_response_check_reports_failed_safety_prerequisite(self):
+        c = self.client
+        source = (ROOT / 'examples/scoped_response.hwv').read_text()
+        source = source.replace('count = if w.complete { s.count + 1u4 } else { s.count };', 'count = 3u4;')
+        c.open(source)
+        lenses = c.request('textDocument/codeLens', {'textDocument': {'uri': URI}})
+        command = next(l['command'] for l in lenses if l['command']['arguments'][0]['program'] == 'responses')
+        result = c.request('workspace/executeCommand', command)
+        binding = result['verification']['implementation_binding']
+        self.assertEqual(binding['status'], 'failed')
+        self.assertTrue(all(r['status'] == 'passed' for r in binding['obligations'] if 'response' in r))
+        self.assertEqual(binding['responses'][0]['status'], 'not_established_due_to_binding_failure')
+        diagnostic = next(d for d in result['diagnostics'] if d['code'] == 'implementation_binding_not_verified')
+        self.assertEqual(diagnostic['severity'], 1)
+        self.assertEqual(diagnostic['span']['line'], 12)
+        self.assertIn('binding_', diagnostic['message'])
 
     def test_real_worker_start_signal_and_interruptions(self):
         c = self.client

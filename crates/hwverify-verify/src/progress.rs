@@ -153,6 +153,7 @@ pub(crate) fn responses(
             "verified"
         };
         results.push(json!({"name":name,"operation":c.operation,"status":status,"bound":c.bound,
+            "adequacy":{"reset_reachable_acceptance":"unchecked","external_request_to_acceptance":"not_specified","source_path":format!("/implementation/responses/{name}/accept"),"message":"Conditional completion only: reset-reachable acceptance is unchecked; no external request-to-acceptance obligation is specified. An implementation that never accepts after reset can pass."},
             "claim":"Every accepted request completes on its acceptance edge or within bound subsequent nonreset steps, provided the input-only assumption holds on every step; reset cancels outstanding work",
             "semantics":{"outstanding":"single per contract; overlapping acceptance and unsolicited completion are checked errors","completion":"the named operation selector on the current edge","latency":"nonreset implementation edges, not abstract operations or enabled-only ticks","proof":"inductive pending/countdown invariant plus strict unsigned rank decrease; not finite trace enumeration","feasibility":"environment and acceptance SAT witnesses are not reset-reachability proofs"},
             "limitations":["No eventual acceptance, unbounded fairness, or guarantee after an assumption violation","No payload correspondence beyond the separate relational safety binding","Contracts do not imply progress for undeclared operations"]}));
