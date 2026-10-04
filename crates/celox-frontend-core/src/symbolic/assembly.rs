@@ -1985,7 +1985,7 @@ fn build_comb_observer_capture_paths(
         };
         let emit_on_true = matches!(
             sites[observer.site_id as usize].kind,
-            RuntimeEventKind::Display | RuntimeEventKind::Write
+            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
         );
         let fatal_error_code = matches!(
             sites[observer.site_id as usize].kind,
@@ -2038,7 +2038,7 @@ fn build_comb_observer_capture_paths(
                 let member = &observers[member_idx];
                 let member_emit_on_true = matches!(
                     sites[member.site_id as usize].kind,
-                    RuntimeEventKind::Display | RuntimeEventKind::Write
+                    RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
                 );
                 let member_fatal_error_code = matches!(
                     sites[member.site_id as usize].kind,

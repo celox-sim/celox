@@ -627,7 +627,7 @@ pub fn parse_sv(
 fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
     match error {
         celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
-            64,
+            error.tracking_issue(),
             celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",
             error.to_string(),

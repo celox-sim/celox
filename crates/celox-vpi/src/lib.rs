@@ -1310,6 +1310,7 @@ fn process_runtime_events() {
                 );
                 callbacks::fail(message);
             }
+            RuntimeEvent::Finish => callbacks::request_finish(),
             RuntimeEvent::Missed { count } => {
                 let _ = writeln!(
                     std::io::stderr().lock(),

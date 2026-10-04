@@ -799,17 +799,18 @@ pub fn build_partial_assign_expr(
     ))
 }
 
-/// Build a read-modify-write expression for a partial assignment whose
-/// destination contains a dynamic index or select.
-pub fn build_dynamic_partial_assign_expr(
+/// Bit offset of a variable select as an expression over its index
+/// expressions, together with the select's geometry. Static selects yield a
+/// literal offset.
+pub fn select_offset_expr(
     module: &Module,
-    dst: &AssignDestination,
-    rhs: Expression,
-    old_value: Expression,
-) -> Result<Expression, ParserError> {
-    let geometry = select_geometry(module, dst.id, &dst.index, &dst.select)?;
-    let mut indices = dst.index.0.clone();
-    indices.extend(dst.select.0.iter().cloned());
+    var_id: VarId,
+    index: &VarIndex,
+    select: &VarSelect,
+) -> Result<(Expression, SelectGeometry), ParserError> {
+    let geometry = select_geometry(module, var_id, index, select)?;
+    let mut indices = index.0.clone();
+    indices.extend(select.0.iter().cloned());
     let token = TokenRange::default();
     let ct = || Box::new(Comptime::create_unknown(token));
     let offset_literal =
@@ -840,7 +841,7 @@ pub fn build_dynamic_partial_assign_expr(
             None => term,
         });
     }
-    if let Some((op, range)) = &dst.select.1 {
+    if let Some((op, range)) = &select.1 {
         let anchor = indices
             .get(geometry.dimension_count)
             .expect("validated part-select anchor is present");
@@ -851,7 +852,20 @@ pub fn build_dynamic_partial_assign_expr(
             None => term,
         });
     }
-    let offset = offset.unwrap_or_else(|| offset_literal(0));
+    Ok((offset.unwrap_or_else(|| offset_literal(0)), geometry))
+}
+
+/// Build a read-modify-write expression for a partial assignment whose
+/// destination contains a dynamic index or select.
+pub fn build_dynamic_partial_assign_expr(
+    module: &Module,
+    dst: &AssignDestination,
+    rhs: Expression,
+    old_value: Expression,
+) -> Result<Expression, ParserError> {
+    let (offset, geometry) = select_offset_expr(module, dst.id, &dst.index, &dst.select)?;
+    let token = TokenRange::default();
+    let ct = || Box::new(Comptime::create_unknown(token));
 
     let mask_big = (BigUint::from(1u8) << geometry.selected_width) - BigUint::from(1u8);
     let mask = Expression::create_value(

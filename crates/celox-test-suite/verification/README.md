@@ -8,18 +8,18 @@ See [investigation notes](../VERIFICATION_REPORT.md) for limitations and unresol
 
 | Result | Verilator | Icarus |
 | --- | ---: | ---: |
-| `passed` | 490 | 484 |
+| `passed` | 498 | 492 |
 | `rejected` | 1 | 8 |
 | `unexpected_accept` | 0 | 0 |
 | `mismatch` | 0 | 0 |
 | `emission_error` | 0 | 0 |
 | `compile_error` | 1 | 8 |
 | `runtime_error` | 0 | 0 |
-| `unsupported` | 112 | 0 |
-| `ignored` | 91 | 195 |
-| Total | 695 | 695 |
+| `unsupported` | 113 | 0 |
+| `ignored` | 91 | 196 |
+| Total | 704 | 704 |
 
-377 cases pass both simulators; 597 pass at least one. A pass in one tool does not resolve a disagreement with the other.
+384 cases pass both simulators; 606 pass at least one. A pass in one tool does not resolve a disagreement with the other.
 
 ## Assertion disagreements and execution errors
 
@@ -56,7 +56,7 @@ See [the review](../LIMITATIONS.md) and [pre-exclusion Verilator](limitations/ve
 | [icarus_assignment_patterns](../LIMITATIONS.md#icarus-assignment-patterns) | compile | 0 | 27 |
 | [icarus_case_break_crash](../LIMITATIONS.md#icarus-case-break-crash) | execute | 0 | 1 |
 | [icarus_function_inout](../LIMITATIONS.md#icarus-function-inout) | compile | 0 | 2 |
-| [icarus_function_outputs](../LIMITATIONS.md#icarus-function-outputs) | compile | 0 | 47 |
+| [icarus_function_outputs](../LIMITATIONS.md#icarus-function-outputs) | compile | 0 | 48 |
 | [icarus_instance_array_unpacked_port](../LIMITATIONS.md#icarus-instance-array-unpacked-port) | compile | 0 | 1 |
 | [icarus_interfaces](../LIMITATIONS.md#icarus-interfaces) | compile | 0 | 5 |
 | [icarus_package_types](../LIMITATIONS.md#icarus-package-types) | compile | 0 | 6 |

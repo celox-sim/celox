@@ -108,6 +108,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("function_arguments.vtest"),
     },
     Group {
+        file: "src/veryl/cases/function_bodies.vtest",
+        text: include_str!("function_bodies.vtest"),
+    },
+    Group {
         file: "src/veryl/cases/generic_identity.vtest",
         text: include_str!("generic_identity.vtest"),
     },

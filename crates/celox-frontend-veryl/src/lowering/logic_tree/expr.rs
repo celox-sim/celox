@@ -302,9 +302,7 @@ fn eval_array_literal_expression_with_item_context(
                 let width = get_width(part_expr, arena);
                 let rep_count = if let Some(rep_expr) = repeat {
                     let Some(rep_count) = eval_constexpr(rep_expr).and_then(|x| x.to_u64()) else {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::CombLowering,
+                        return Err(ParserError::illegal_context(
                             "array literal non-constant repeat",
                             format!("{:?}", rep_expr),
                             Some(&rep_expr.token_range()),
@@ -323,9 +321,7 @@ fn eval_array_literal_expression_with_item_context(
             ArrayLiteralItem::Defaul(default_expr) => {
                 if default_part.is_some() {
                     let token = default_expr.token_range();
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::CombLowering,
+                    return Err(ParserError::illegal_context(
                         "array literal multiple default",
                         format!("{:?}", items),
                         Some(&token),
@@ -350,9 +346,7 @@ fn eval_array_literal_expression_with_item_context(
     if let Some((default_expr, default_width)) = default_part {
         let Some(target_width) = expected_width else {
             let token = items.first().map(|i| i.token_range());
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::CombLowering,
+            return Err(ParserError::illegal_context(
                 "array literal default without context width",
                 format!("{:?}", items),
                 token.as_ref(),
@@ -361,9 +355,7 @@ fn eval_array_literal_expression_with_item_context(
 
         if explicit_width > target_width {
             let token = items.first().map(|i| i.token_range());
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::CombLowering,
+            return Err(ParserError::illegal_context(
                 "array literal width overflow",
                 format!("explicit_width={explicit_width}, target_width={target_width}"),
                 token.as_ref(),
@@ -372,9 +364,7 @@ fn eval_array_literal_expression_with_item_context(
 
         let remaining = target_width - explicit_width;
         if default_width == 0 || !remaining.is_multiple_of(default_width) {
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::CombLowering,
+            return Err(ParserError::illegal_context(
                 "array literal default width mismatch",
                 format!(
                     "remaining={remaining}, default_width={default_width}, target_width={target_width}"
@@ -551,13 +541,10 @@ pub(super) fn eval_function_body_return(
                 }
                 Ok(())
             }
-            _ => Err(ParserError::unsupported(
-                59,
-                LoweringPhase::CombLowering,
-                "system function call in comb function body",
-                format!("module `{}`: {call}", module.name),
-                Some(&call.comptime.token),
-            )),
+            SystemFunctionKind::Readmemh(input, _) => {
+                validate_function_body_expression(module, &input.0)
+            }
+            SystemFunctionKind::Finish => Ok(()),
         }
     }
 
@@ -683,7 +670,7 @@ pub(super) fn eval_function_body_return(
         }
         let ret_access = BitAccess::new(0, ret_width - 1);
         let range_store = store.get(&ret_id).ok_or_else(|| {
-            ParserError::illegal_context(
+            ParserError::internal(
                 "function return value",
                 "return variable is absent from the symbolic store",
                 None,
@@ -2158,7 +2145,6 @@ pub(super) fn eval_function_body_return(
                     state.boundaries,
                     call,
                     arena,
-                    LoweringPhase::CombLowering,
                 )?;
                 apply_function_guard(
                     module,
@@ -2219,9 +2205,7 @@ pub(super) fn eval_function_body_return(
 
     for var_id in written.keys() {
         let Some(var) = module.variables.get(var_id) else {
-            return Err(ParserError::unsupported(
-                67,
-                LoweringPhase::CombLowering,
+            return Err(ParserError::internal(
                 "function local variable",
                 format!("unknown variable id: {:?}", var_id),
                 None,
@@ -2249,15 +2233,8 @@ pub(super) fn eval_function_body_return(
         ret_id,
         arena,
     )?;
-    if !matches!(constant_bool(arena, final_state.live_expr), Some(false)) {
-        return Err(ParserError::unsupported(
-            67,
-            LoweringPhase::CombLowering,
-            "function return expression",
-            format!("function return var id: {:?}", ret_id),
-            None,
-        ));
-    }
+    // Paths that fall off the end return the return variable's current
+    // value, which the final store already holds for every live path.
     let (ret_expr, ret_sources) = function_return_value(module, &final_state.store, ret_id, arena)?;
     Ok((
         (ret_expr, ret_sources),
@@ -2273,9 +2250,7 @@ fn eval_function_call_expression(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     let Some(function) = module.functions.get(&call.id) else {
-        return Err(ParserError::unsupported(
-            62,
-            LoweringPhase::CombLowering,
+        return Err(ParserError::internal(
             "function call",
             format!("unknown function id: {:?}", call.id),
             Some(&call.comptime.token),
@@ -2287,9 +2262,7 @@ fn eval_function_call_expression(
     } else {
         function.get_function(&[])
     }) else {
-        return Err(ParserError::unsupported(
-            62,
-            LoweringPhase::CombLowering,
+        return Err(ParserError::internal(
             "function call specialization",
             format!("{call}"),
             Some(&call.comptime.token),
@@ -2308,9 +2281,7 @@ fn eval_function_call_expression(
     let mut evaluated_inputs = Vec::with_capacity(call.inputs.len());
     for (arg_id, arg_expr) in super::ordered_function_inputs(function, &function_body, call)? {
         let Some(arg_var) = module.variables.get(&arg_id) else {
-            return Err(ParserError::unsupported(
-                67,
-                LoweringPhase::CombLowering,
+            return Err(ParserError::internal(
                 "function argument variable",
                 format!("unknown arg id: {:?}", arg_id),
                 Some(&call.comptime.token),
@@ -2760,9 +2731,7 @@ pub(super) fn eval_expression_in_context(
         Expression::Binary(lhs, op, rhs, _) => {
             if matches!(op, Op::As) {
                 let Some(cast) = cast_semantics(lhs, rhs) else {
-                    return Err(ParserError::unsupported(
-                        67,
-                        LoweringPhase::CombLowering,
+                    return Err(ParserError::internal(
                         "as cast target",
                         format!("{:?}", rhs),
                         Some(&rhs.token_range()),
@@ -2965,9 +2934,7 @@ pub(super) fn eval_expression_in_context(
                 let rep_count = if let Some(rep_expr) = repeat {
                     let v = eval_constexpr(rep_expr);
                     v.ok_or_else(|| {
-                        ParserError::unsupported(
-                            67,
-                            LoweringPhase::CombLowering,
+                        ParserError::illegal_context(
                             "concatenation non-constant repeat",
                             format!("{:?}", rep_expr),
                             Some(&rep_expr.token_range()),
@@ -3139,18 +3106,14 @@ pub(super) fn eval_expression_in_context(
 
             for (name, field_expr) in fields {
                 let Some(member_type) = ty.get_member_type(*name) else {
-                    return Err(ParserError::unsupported(
-                        67,
-                        LoweringPhase::CombLowering,
+                    return Err(ParserError::internal(
                         "struct constructor member",
                         format!("unknown member: {:?} in {:?}", name, ty),
                         Some(&field_expr.token_range()),
                     ));
                 };
                 let Some(member_width) = member_type.total_width() else {
-                    return Err(ParserError::unsupported(
-                        67,
-                        LoweringPhase::CombLowering,
+                    return Err(ParserError::internal(
                         "struct constructor member width",
                         format!("member: {:?}, type: {:?}", name, member_type),
                         Some(&field_expr.token_range()),
@@ -3500,9 +3463,7 @@ fn eval_factor(
             let node = coerce_node_width(arena, node, context_width, context_signed)?;
             Ok(((node, sources), bounds))
         }
-        Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::unsupported(
-            67,
-            LoweringPhase::CombLowering,
+        Factor::Anonymous(_) | Factor::Unknown(_) => Err(ParserError::internal(
             "unresolved factor in comb expression",
             format!("{:?}", factor),
             Some(&factor.token_range()),
@@ -3820,9 +3781,7 @@ fn eval_system_function_call(
                 bounds,
             ))
         }
-        _ => Err(ParserError::unsupported(
-            59,
-            LoweringPhase::CombLowering,
+        _ => Err(ParserError::illegal_context(
             "system function call in comb expression",
             format!("module `{}`: {call}", module.name),
             Some(&call.comptime.token),

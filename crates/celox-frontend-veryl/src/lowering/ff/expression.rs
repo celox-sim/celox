@@ -4,7 +4,7 @@ use crate::context_width::{
     system_function_dimension, system_function_type_size,
 };
 use crate::{
-    HashMap, HashSet, LoweringPhase, ParserError,
+    HashMap, HashSet, ParserError,
     bitaccess::{
         celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
         get_access_width, is_static_access,
@@ -356,6 +356,40 @@ impl<'a> FfParser<'a> {
             mask,
         ));
         selected
+    }
+
+    /// Read a runtime-indexed select of a formal bound to an expression:
+    /// evaluate the whole actual, then select from that value.
+    #[allow(clippy::too_many_arguments)]
+    fn load_dynamic_bound_function_access<A>(
+        &mut self,
+        var_id: VarId,
+        bound_expr: &Expression,
+        index: &VarIndex,
+        select: &VarSelect,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let formal_width = resolve_total_width(self.module, &self.module.variables[&var_id])?;
+        self.materialize_bound_function_access(
+            var_id,
+            bound_expr,
+            BitAccess::new(0, formal_width - 1),
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let whole = self.stack.pop_back().expect("bound formal value");
+        let selected = self.emit_register_select(
+            whole, var_id, index, select, domain, convert, sources, ir_builder,
+        )?;
+        self.stack.push_back(selected);
+        Ok(())
     }
 
     fn materialize_bound_function_access<A>(
@@ -2556,6 +2590,61 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    /// Select `index`/`select` of `var_id` from a register holding the
+    /// variable's whole value.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_register_select<A>(
+        &mut self,
+        value: RegisterId,
+        var_id: VarId,
+        index: &VarIndex,
+        select: &VarSelect,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<RegisterId, ParserError> {
+        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+            return Ok(value);
+        }
+        let width = get_access_width(self.module, var_id, index, select)?;
+        Ok(
+            match self
+                .emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?
+            {
+                SIROffset::Static(lsb)
+                | SIROffset::PackedElements {
+                    bit_offset: lsb, ..
+                } => self.emit_register_slice(
+                    value,
+                    BitAccess::new(lsb, lsb + width - 1),
+                    ir_builder,
+                ),
+                SIROffset::Dynamic(offset) => {
+                    self.emit_register_dynamic_slice(value, offset, width, ir_builder)
+                }
+                SIROffset::Element {
+                    index,
+                    element_width,
+                    bit_offset,
+                    dynamic_bit_offset,
+                } => {
+                    let mut logical = Some(scale_offset(index, element_width, ir_builder));
+                    add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
+                    if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                        add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
+                    }
+                    self.emit_register_dynamic_slice(
+                        value,
+                        logical.expect("scaled element index is present"),
+                        width,
+                        ir_builder,
+                    )
+                }
+            },
+        )
+    }
+
     pub(super) fn op_load<A>(
         &mut self,
         var_id: VarId,
@@ -2571,44 +2660,9 @@ impl<'a> FfParser<'a> {
             variable.affiliation == Affiliation::AlwaysFf && variable.kind == VarKind::Let
         };
         if is_local_let && let Some(&value) = self.local_let_values.get(&var_id) {
-            let width = get_access_width(self.module, var_id, index, select)?;
-            let selected = if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
-                value
-            } else {
-                match self
-                    .emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?
-                {
-                    SIROffset::Static(lsb)
-                    | SIROffset::PackedElements {
-                        bit_offset: lsb, ..
-                    } => self.emit_register_slice(
-                        value,
-                        BitAccess::new(lsb, lsb + width - 1),
-                        ir_builder,
-                    ),
-                    SIROffset::Dynamic(offset) => {
-                        self.emit_register_dynamic_slice(value, offset, width, ir_builder)
-                    }
-                    SIROffset::Element {
-                        index,
-                        element_width,
-                        bit_offset,
-                        dynamic_bit_offset,
-                    } => {
-                        let mut logical = Some(scale_offset(index, element_width, ir_builder));
-                        add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
-                        if let Some(dynamic_bit_offset) = dynamic_bit_offset {
-                            add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
-                        }
-                        self.emit_register_dynamic_slice(
-                            value,
-                            logical.expect("scaled element index is present"),
-                            width,
-                            ir_builder,
-                        )
-                    }
-                }
-            };
+            let selected = self.emit_register_select(
+                value, var_id, index, select, domain, convert, sources, ir_builder,
+            )?;
             self.stack.push_back(selected);
             return Ok(());
         }
@@ -2624,9 +2678,32 @@ impl<'a> FfParser<'a> {
             ir_builder.alloc_logic(width)
         };
 
-        let offset =
+        let mut offset =
             self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
-        let load_region = if self.local_working_vars.contains(&var_id) {
+        if !source_type.array.is_empty()
+            && index.0.is_empty()
+            && select.0.is_empty()
+            && select.1.is_none()
+        {
+            // A whole unpacked array is a multi-element transfer, like the
+            // corresponding whole-array store in `op_store`.
+            let element_count = source_type.total_array().ok_or_else(|| {
+                ParserError::unresolved_width(
+                    self.module,
+                    &self.module.variables[&var_id],
+                    source_type.to_string(),
+                )
+            })?;
+            if element_count > 0 && width.is_multiple_of(element_count) {
+                offset = SIROffset::PackedElements {
+                    bit_offset: 0,
+                    element_width: width / element_count,
+                };
+            }
+        }
+        let is_internal = self.local_working_vars.contains(&var_id)
+            || self.inline_function_locals.contains(&var_id);
+        let load_region = if is_internal {
             WORKING_REGION
         } else {
             STABLE_REGION
@@ -2647,7 +2724,6 @@ impl<'a> FfParser<'a> {
         // value, even when an earlier statement in the same block assigned
         // that variable.  `defined_ranges` only describes pending writes; it
         // must not hide the old-state read from the shared-clock scheduler.
-        let is_internal = self.local_working_vars.contains(&var_id);
         if !is_internal {
             sources.push(VarAtomBase::new(
                 convert(var_id, STABLE_REGION),
@@ -2733,6 +2809,19 @@ impl<'a> FfParser<'a> {
             };
         }
         let is_static = is_static_access(&dst.index, &dst.select);
+        if self.inline_function_locals.contains(&dst.id) {
+            // Inline function storage is blocking and call-private, so it
+            // bypasses the FF target, seed, and commit bookkeeping.
+            ir_builder.emit(SIRInstruction::Store(
+                convert(dst.id, WORKING_REGION),
+                offset,
+                target_width,
+                src_reg,
+                Vec::new(),
+                Vec::new(),
+            ));
+            return Ok(());
+        }
         let store_region = if matches!(domain, Domain::Ff)
             && (!is_static || self.sparse_write_vars.contains(&dst.id))
         {
@@ -3526,16 +3615,17 @@ impl<'a> FfParser<'a> {
                         let Some(access) =
                             self.eval_formal_type_select(*var_id, var_index, var_select)
                         else {
-                            return Err(ParserError::unsupported(
-                                43,
-                                LoweringPhase::FfLowering,
-                                "function argument indexed access",
-                                format!(
-                                    "non-variable argument expression with dynamic indexed access: var_id={:?}",
-                                    var_id
-                                ),
-                                Some(&factor.token_range()),
-                            ));
+                            return self.load_dynamic_bound_function_access(
+                                *var_id,
+                                &bound_expr,
+                                var_index,
+                                var_select,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            );
                         };
                         self.materialize_bound_function_access(
                             *var_id,
@@ -3560,16 +3650,17 @@ impl<'a> FfParser<'a> {
                         let Some(access) =
                             self.eval_formal_type_select(*var_id, var_index, var_select)
                         else {
-                            return Err(ParserError::unsupported(
-                                43,
-                                LoweringPhase::FfLowering,
-                                "function argument indexed access",
-                                format!(
-                                    "non-variable argument expression with dynamic indexed access: var_id={:?}",
-                                    var_id
-                                ),
-                                Some(&factor.token_range()),
-                            ));
+                            return self.load_dynamic_bound_function_access(
+                                *var_id,
+                                &bound_expr,
+                                var_index,
+                                var_select,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            );
                         };
                         self.materialize_bound_function_access(
                             *var_id,
@@ -3588,16 +3679,17 @@ impl<'a> FfParser<'a> {
                         let Some(access) =
                             self.eval_formal_type_select(*var_id, var_index, var_select)
                         else {
-                            return Err(ParserError::unsupported(
-                                43,
-                                LoweringPhase::FfLowering,
-                                "function argument indexed access",
-                                format!(
-                                    "chained range access with dynamic indices: var_id={:?}",
-                                    var_id
-                                ),
-                                Some(&factor.token_range()),
-                            ));
+                            return self.load_dynamic_bound_function_access(
+                                *var_id,
+                                &bound_expr,
+                                var_index,
+                                var_select,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            );
                         };
                         self.materialize_bound_function_access(
                             *var_id,
@@ -3708,9 +3800,7 @@ impl<'a> FfParser<'a> {
                 self.parse_function_call_expr(call, targets, domain, convert, sources, ir_builder)?;
             }
             Factor::Anonymous(comptime) | Factor::Unknown(comptime) => {
-                return Err(ParserError::unsupported(
-                    67,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::internal(
                     "unresolved factor in FF expression",
                     format!("{factor:?}"),
                     Some(&comptime.token),
@@ -3763,9 +3853,7 @@ impl<'a> FfParser<'a> {
 
         if matches!(op, Op::As) {
             let Some(cast) = cast_semantics(left, right) else {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::internal(
                     "as cast target",
                     format!("{:?}", right),
                     Some(&right.token_range()),
@@ -4384,18 +4472,14 @@ impl<'a> FfParser<'a> {
 
         for (name, expr) in fields {
             let Some(member_type) = ty.get_member_type(*name) else {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::internal(
                     "struct constructor member",
                     format!("unknown member: {:?} in {:?}", name, ty),
                     Some(&expr.token_range()),
                 ));
             };
             let Some(member_width) = member_type.total_width() else {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::internal(
                     "struct constructor member width",
                     format!("member: {:?}, type: {:?}", name, member_type),
                     Some(&expr.token_range()),
@@ -4498,9 +4582,7 @@ impl<'a> FfParser<'a> {
 
         if let Some((default_reg, default_width)) = default_part {
             let Some(target_width) = expected_width else {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "array literal default without context width",
                     format!("{:?}", items),
                     items.first().map(|it| it.token_range()).as_ref(),
