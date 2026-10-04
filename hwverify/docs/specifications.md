@@ -798,10 +798,124 @@ reset epochs remain rejected by the source replay route.
 read/write offer searches, two outstanding requests, stalls, repeated addresses,
 simultaneous events, full-queue backpressure, reset polarity, mutations, incorrect
 bindings, reset-phase mismatches on VALID/data/READY under both polarities, physical
-endpoint aliases, and stale witnesses. Its separate complete AXI depth-10 search currently
-returns `Unknown` from the finite solver term-depth budget; this is retained in
-`results.json`, not counted as a protocol proof. Actual scenario traces independently
-pass the ordinary AXI checks. Other example/test results do not discharge this limit.
+endpoint aliases, and stale witnesses. The complete AXI guarantee and capacity
+queries at depth 10 are now mandatory bounded no-failure regressions, alongside
+independent actual scenario traces. A future `Unknown` fails this regression.
+
+The bounded-search encoder balances each frame's conjunction of reset/transition
+equations instead of extending one linear chain. For this 54-state example at depth
+10, the reset-prefix conjunction spine drops from 604 levels to 16; the unchanged
+finite-solver depth limit is 512. It also factors the complete machine trajectory
+outside the disjunction of failures. This preserves existence of a bounded failure:
+every earlier failing prefix extends to the bound because each scalar machine
+state has a total next expression and future nonreset inputs are unconstrained.
+Specification invariants, relational guarantees and response assumptions are **not**
+added as trajectory constraints. Every reset/next equation and failure predicate is
+retained, and SAT witnesses still undergo original transition/property replay.
+
+This factoring exposes mandatory equations to existing exact equality sharing. It
+also resolves the 64-bit memory-effect query's clause exhaustion without changing
+any limits or branch accounting. Three identical-request native-process runs gave:
+
+| Depth-10 query | Earlier encoding | Current encoding | Current terms / final clauses / work |
+|---|---|---|---|
+| Full read-example AXI guarantees | depth-budget Unknown, median 0.073 s | bounded no-failure, 0.112 s | 6,055 / 28,126 / 1,633,794 |
+| Full read-example AXI capacity | depth-budget Unknown, median 0.056 s | bounded no-failure, 0.091 s | 5,597 / 27,422 / 1,497,944 |
+| 64-bit memory byte effects | balanced-prefix clause-budget Unknown, median 0.259 s | bounded no-failure, 1.067 s | 3,063 / 716,918 / 71,319,783 |
+
+The first two baselines stopped before encoding terms. The 64-bit baseline had
+allocated 934,659 clauses when another split copy would exceed the unchanged
+1,000,000-clause budget. Timing depends on the environment; these are completed
+queries replacing failures, not a claim that failed queries were slower.
+`conformance/source-contracts/measure_search.py --out DIR --baseline-binary PATH`
+records request/binary hashes, raw runs and counters; `--request-file FILE` accepts
+an exact additional native safety-search request. Without that option it prepares
+the full read-example AXI guarantee and capacity queries. Omitting the baseline
+argument measures only the current binary.
+
+Native regressions exhaust all seven-input conjunction valuations; check wide
+frames and first/middle/last equation mutations; preserve reset and final-edge
+failures; compare bounded searches against exhaustive concrete prefixes, including
+already-failed invariants; replay original transitions; and retain `Unknown` for
+a deliberately insufficient depth budget. No bounded result becomes an unbounded
+safety theorem.
+
+### Source-bound memory writes and byte effects
+
+`memory_write(document, name, address_width, data_width, locations, initial,
+bindings, inputs)` extends the same native source-contract library. The source
+adapter's `memory_write` descriptor in
+[the example binding](../examples/source-contracts/memory-contract.json) supplies
+explicit memory-register locations/reset contents, input aliases, request-storage
+state, and actual effect/response signals. It supports 32/64-bit words and 1–16
+explicit aligned cells, one pending read response, and one outstanding AW/W pair.
+The example has two cells;
+it is a memory model, not inferred semantics for an arbitrary peripheral.
+
+The six independently checked documents are:
+
+- `requests`: accepted AW and W payloads enter their actual source holding slots
+  independently and remain there while pending. Inactive payload bits are free.
+- `capacity`: neither write holding slot nor the pending read slot is overwritten
+  by a new acceptance before retirement (same-edge retirement/replacement is
+  representable, including read retire/refill). This is the
+  declared adapter capacity, not an AXI-wide outstanding-transaction limit.
+- `effects`: actual memory-register transitions equal byte-enabled updates from
+  the captured request, only on the bound application event. Disabled lanes,
+  other cells and all cells outside an event remain unchanged. Reset contents
+  are checked against the separately declared values.
+- `completion`: an application event needs both accepted payloads and cannot be
+  repeated for an already applied pair; the real applied flag tracks application
+  through response retirement. No application deadline is introduced.
+- `response`: an offered B response needs the applied pair, has the declared
+  region's status, and remains stable while stalled. This explicitly binds the
+  response to the write-effect lifecycle rather than assigning response-time tags.
+- `readback`: an accepted read returns the pre-edge addressed memory word and
+  status on the next state, retaining it under backpressure. Payload is unconstrained
+  while the next response is invalid; clearing idle RDATA/RRESP is supported. This is the example's
+  explicit one-slot, one-edge **read-before-write** contract, not a normative AXI latency or
+  universal simultaneous-access ordering rule.
+
+Buffered read implementations need a separately declared FIFO correspondence
+contract; this memory template does not impose its one-slot capacity on arbitrary
+AXI designs. The independent byte-array oracle counts a pending accepted read
+until response handshake and rejects replacement, even for identical addresses
+and data. Actual 32/64-bit always-ready mutants exercise different data, equal
+data and different response status under a stall; both original witness replay
+and explicit legal retire/refill traces are checked. Stall retention is an
+independent `readback` clause and never assumes the sibling capacity obligation.
+
+All six must succeed for the same source/semantic binding before combining their
+claims. The function/region model is independently supplied: byte lanes are
+little-endian, address low bits select offsets within the aligned bus-width word,
+and WSTRB selects modified bytes. Unmapped writes change no cell and complete with
+DECERR; unmapped reads return zero/DECERR. The `apply` alias may bind an actual
+internal source signal (never an external input); other signal aliases require
+actual output ports. The declared event meaning is not inferred from a name.
+Actual request retention, memory transitions and response conditions are checked
+against it; no monitor-created transaction origin or assumed DUT guarantee is used.
+As with the other templates, separate reset lowering and actual reset-output
+comparison protect state-only bindings.
+
+The source suite exercises both widths, all address offsets, full/sparse/zero
+strobes, independent AW/W arrival, full-slot backpressure, successive writes,
+response stalls, reset polarities, unmapped accesses, and reads simultaneous with
+or stalled across a write. A separately implemented byte-array oracle tracks actual
+handshakes and compares every actual memory cell after each Celox edge. Mutants
+ignore strobes, select the wrong lane/word, lose accepted payload, clobber disabled
+bytes, acknowledge without an effect, repeat an application, corrupt readback or
+write without a request. They must fail both the native obligation and an explicit
+legal source scenario; the ordinary AXI checks still pass those concrete traces.
+An additional slot-overrun mutant is classified separately as a declared-capacity
+failure. Source/semantic identity protects saved witnesses.
+
+The generic application search does not assume AXI counterpart legality. Tests
+therefore keep searched witnesses and explicit legal bus stimuli separate, instead
+of depending on a solver's choice of input values. Positive application/response
+covers establish the exercised progress only. These contracts establish bounded
+memory semantics for declared bindings; they do not promise eventual service,
+multi-outstanding write reordering, external memory visibility, cache coherence,
+physical timing, or unbound peripheral side effects.
 
 ### Explicit optional response-output profile
 
@@ -954,8 +1068,9 @@ initial reset; the independent oracle additionally tests repeated reset epochs.
 This does not prove subordinate byte-write effects, memory contents, or response
 transaction origin. The separate source-bound FIFO template above supplies bounded
 read correspondence evidence only with an independent response function and actual
-RTL storage/output bindings. Write/effect origins and further optional profiles
-remain explicit gaps in the conformance inventory.
+RTL storage/output bindings. The explicit memory template additionally binds a single outstanding write pair
+to its actual byte effects and response lifecycle. Other write/peripheral origin
+models and further optional profiles remain distinct conformance scopes.
 
 ### AXI limits and validation
 

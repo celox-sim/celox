@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "project": "memory-project.json",
+  "contract": {
+    "kind": "memory_write",
+    "name": "ByteMemory",
+    "address_width": 8,
+    "data_width": 32,
+    "locations": [
+      {
+        "address": 0,
+        "state": "mem0",
+        "initial": 287454020
+      },
+      {
+        "address": 4,
+        "state": "mem1",
+        "initial": 1432778632
+      }
+    ],
+    "state": {
+      "aw_pending": "a_full",
+      "w_pending": "d_full",
+      "address": "held_addr",
+      "data": "held_data",
+      "strobes": "held_strb",
+      "applied": "write_done"
+    },
+    "signals": {
+      "apply": "event_apply",
+      "aw_ready": "bus_awready",
+      "w_ready": "bus_wready",
+      "b_valid": "bus_bvalid",
+      "b_response": "bus_bresp",
+      "read_ready": "bus_arready",
+      "read_valid": "bus_rvalid",
+      "read_data": "bus_rdata",
+      "read_response": "bus_rresp"
+    },
+    "inputs": {
+      "aw_valid": "awvalid",
+      "aw_address": "awaddr",
+      "w_valid": "wvalid",
+      "w_data": "wdata",
+      "w_strobes": "wstrb",
+      "b_ready": "bready",
+      "ar_valid": "arvalid",
+      "ar_address": "araddr",
+      "r_ready": "rready"
+    }
+  }
+}

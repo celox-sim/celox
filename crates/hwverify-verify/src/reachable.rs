@@ -7,6 +7,15 @@ use std::collections::BTreeMap;
 fn or(a: Term, b: Term) -> Term {
     node(Sort::Bool, "or", vec![a, b])
 }
+// Preserve every conjunct while avoiding a linear-depth chain of frame equations.
+// Association changes only; no transition or property is simplified or assumed.
+fn conjunction(terms: &[Term]) -> Term {
+    match terms.len() {
+        0 => boolv(true),
+        1 => terms[0].clone(),
+        n => and(conjunction(&terms[..n / 2]), conjunction(&terms[n / 2..])),
+    }
+}
 fn values(v: &BTreeMap<String, Scalar>) -> Value {
     json!(v
         .iter()
@@ -145,13 +154,14 @@ fn search_with_limits(
         }
         sub
     };
-    let mut prefix = ins[0][&imp.reset_input].clone();
+    let mut reset_constraints = vec![ins[0][&imp.reset_input].clone()];
     let sub = sub_for(0);
     for (n, t) in &m.reset {
-        prefix = and(prefix, eq(states[0][n].clone(), substitute(t, &sub)));
+        reset_constraints.push(eq(states[0][n].clone(), substitute(t, &sub)));
     }
+    let mut prefix = conjunction(&reset_constraints);
     let mut formula = if selected == "safety" {
-        and(prefix.clone(), not(substitute(&safety.reset_good, &sub)))
+        not(substitute(&safety.reset_good, &sub))
     } else {
         boolv(false)
     };
@@ -160,10 +170,11 @@ fn search_with_limits(
     let mut age = bv(64, 0);
     for e in 1..=depth as usize {
         let sub = sub_for(e);
-        prefix = and(prefix, not(ins[e][&imp.reset_input].clone()));
+        let mut edge_constraints = vec![not(ins[e][&imp.reset_input].clone())];
         for (n, t) in &m.next {
-            prefix = and(prefix, eq(states[e][n].clone(), substitute(t, &sub)));
+            edge_constraints.push(eq(states[e][n].clone(), substitute(t, &sub)));
         }
+        prefix = and(prefix, conjunction(&edge_constraints));
         let bad = if selected == "safety" {
             safety.checks.iter().fold(boolv(false), |acc, (_, bad, _)| {
                 or(acc, substitute(bad, &sub))
@@ -196,8 +207,14 @@ fn search_with_limits(
             age = next_age;
             bad
         };
-        formula = or(formula, and(prefix.clone(), bad));
+        formula = or(formula, bad);
     }
+    // Every machine state has a total next expression over finite scalar sorts.
+    // Thus an earlier failing prefix extends to this bound for arbitrary future
+    // nonreset inputs. Conjoin the full trajectory once, outside the failure OR:
+    // this preserves existence of a failure and exposes mandatory frame equations
+    // to the solver, without assuming any specification invariant or guarantee.
+    let formula = and(prefix, formula);
     let solved = finite::solve_with_hint(&formula, &context, limits, SearchHint::Sat);
     report["solver"] = solved.diagnostics();
     match solved.verdict {
@@ -225,7 +242,7 @@ fn search_with_limits(
                     .collect::<Res<BTreeMap<_, _>>>()?;
                 inputs.push(raw_inputs(&row));
             }
-            // A selected satisfying prefix need not constrain future frames.
+            // The solver models the full trajectory, including later frames.
             // Replay stops at its first actual failure and ignores later inputs.
             match execute(spec, selected, &inputs, true) {
                 Ok(trace) => {
@@ -442,6 +459,194 @@ mod tests {
                     .map(|(request, stall)| json!({"rst":false,"request":request,"stall":stall})),
             )
             .collect()
+    }
+    #[test]
+    fn balanced_conjunction_preserves_all_leaves_and_empty_identity() {
+        let terms = (0..7)
+            .map(|n| var(format!("b{n}"), Sort::Bool))
+            .collect::<Vec<_>>();
+        let balanced = conjunction(&terms);
+        let linear = terms.iter().cloned().fold(boolv(true), and);
+        let env = [("balanced".into(), balanced), ("linear".into(), linear)]
+            .into_iter()
+            .collect();
+        for bits in 0..128 {
+            let inputs = (0..7)
+                .map(|n| (format!("b{n}"), Scalar::Bool(bits & (1 << n) != 0)))
+                .collect();
+            let values = eval(&env, &inputs).unwrap();
+            assert_eq!(values["balanced"], Scalar::Bool(bits == 127));
+            assert_eq!(values["balanced"], values["linear"]);
+        }
+        assert_eq!(conjunction(&[]), boolv(true));
+    }
+    #[test]
+    fn wide_frames_keep_reset_transitions_and_last_edge_failures() {
+        let mut fields = serde_json::Map::new();
+        let mut reset = serde_json::Map::new();
+        let mut next = serde_json::Map::new();
+        let mut bindings = serde_json::Map::new();
+        let mut initial = json!(true);
+        let mut step = json!(true);
+        for n in 0..64 {
+            let name = format!("v{n}");
+            fields.insert(name.clone(), json!({"bv":4}));
+            reset.insert(name.clone(), json!(["bv", 4, 0]));
+            next.insert(name.clone(), json!(format!("s.{name}")));
+            bindings.insert(name.clone(), json!(format!("s.{name}")));
+            initial = json!(["and", initial, ["eq", format!("s.{name}"), ["bv", 4, 0]]]);
+            step = json!([
+                "and",
+                step,
+                ["eq", format!("n.{name}"), format!("s.{name}")]
+            ]);
+        }
+        let mut machine_fields = fields.clone();
+        machine_fields.insert("timer".into(), json!({"bv":4}));
+        reset.insert("timer".into(), json!(["bv", 4, 0]));
+        next.insert("timer".into(), json!(["add", "s.timer", ["bv", 4, 1]]));
+        let mut d = json!({"version":3,"kind":"specification","name":"wide frame regression",
+            "inputs":{"rst":"bool"},"observations":{},"operations":{"tick":{}},
+            "components":{"Hold":{"state":fields,"init":initial,"invariant":true,"steps":{"tick":step},"examples":{}}},
+            "compositions":{"System":{"members":["Hold"],"examples":{}}},
+            "implementation":{"composition":"System","reset_input":"rst","state":machine_fields,"reset":reset,"next":next,"wires":{},"operations":{"tick":true},"binding":{"states":{"Hold":bindings},"observations":{}}}});
+        assert_eq!(
+            search_reachable(&spec(&d), "safety", 10).unwrap()["status"],
+            "bounded_no_failure"
+        );
+        // First/middle/last equation mutations must not be dropped when balancing.
+        for field in ["v0", "v31", "v63"] {
+            d["implementation"]["next"][field] = json!([
+                "ite",
+                ["eq", "s.timer", ["bv", 4, 9]],
+                ["bv", 4, 1],
+                format!("s.{field}")
+            ]);
+            assert_eq!(
+                search_reachable(&spec(&d), "safety", 9).unwrap()["status"],
+                "bounded_no_failure"
+            );
+            let s = spec(&d);
+            let failure = search_reachable(&s, "safety", 10).unwrap();
+            assert_eq!(failure["status"], "reset_reachable_failure");
+            validate_reachable(&s, &failure["witness"]).unwrap();
+            assert_eq!(
+                failure["witness"]["trace"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["edge"],
+                10
+            );
+            d["implementation"]["next"][field] = json!(format!("s.{field}"));
+            d["implementation"]["reset"][field] = json!(["bv", 4, 1]);
+            assert_eq!(
+                search_reachable(&spec(&d), "safety", 10).unwrap()["witness"]["trace"][0]["edge"],
+                0
+            );
+            d["implementation"]["reset"][field] = json!(["bv", 4, 0]);
+        }
+        let limited = search_with_limits(
+            &spec(&d),
+            "safety",
+            10,
+            Limits {
+                max_depth: 4,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(limited["status"], "unknown");
+    }
+    #[test]
+    fn complete_trajectory_query_matches_exhaustive_prefix_failures() {
+        // The specification may already fail at reset or an early edge. Future
+        // equations must not silently assume its invariant or require progress.
+        for target in 0..4u64 {
+            let d = json!({"version":3,"kind":"specification","name":"total scalar trajectory",
+                "inputs":{"rst":"bool","choose":"bool"},"observations":{},"operations":{"tick":{}},
+                "components":{"Check":{"state":{"value":{"bv":2}},"init":["eq","s.value",["bv",2,0]],
+                    "invariant":["not",["eq","s.value",["bv",2,target]]],"steps":{"tick":true},"examples":{}}},
+                "compositions":{"System":{"members":["Check"],"examples":{}}},
+                "implementation":{"composition":"System","reset_input":"rst","state":{"value":{"bv":2}},
+                    "reset":{"value":["bv",2,0]},"next":{"value":["ite","i.choose",["add","s.value",["bv",2,1]],"s.value"]},
+                    "wires":{},"operations":{"tick":true},"binding":{"states":{"Check":{"value":"s.value"}},"observations":{}}}});
+            let s = spec(&d);
+            for depth in 1..=4 {
+                let mut any_failure = false;
+                for choices in 0..(1 << depth) {
+                    let mut trace = vec![json!({"rst":true,"choose":false})];
+                    let mut count = 0;
+                    let mut failed = target == 0;
+                    for edge in 0..depth {
+                        let choose = choices & (1 << edge) != 0;
+                        if choose {
+                            count = (count + 1) % 4;
+                        }
+                        failed |= count == target;
+                        trace.push(json!({"rst":false,"choose":choose}));
+                    }
+                    let actual = check_stimulus(&s, "safety", &trace).unwrap();
+                    assert_eq!(actual["status"] == "reset_reachable_failure", failed);
+                    any_failure |= failed;
+                }
+                let result = search_reachable(&s, "safety", depth).unwrap();
+                assert_eq!(
+                    result["status"],
+                    if any_failure {
+                        "reset_reachable_failure"
+                    } else {
+                        "bounded_no_failure"
+                    }
+                );
+                if any_failure {
+                    validate_reachable(&s, &result["witness"]).unwrap();
+                }
+            }
+        }
+    }
+    #[test]
+    fn early_deadline_failure_survives_later_cancellation_or_completion() {
+        for cancellation in [false, true] {
+            let mut d = document();
+            d["implementation"]["next"]["count"] = json!(["add", "s.count", ["bv", 4, 1]]);
+            d["implementation"]["responses"]["request_done"]["accept"] =
+                json!(["eq", "s.count", ["bv", 4, 0]]);
+            d["implementation"]["responses"]["request_done"]["assume"] = if cancellation {
+                json!(["not", "i.stall"])
+            } else {
+                json!(true)
+            };
+            d["implementation"]["operations"]["advance"] = if cancellation {
+                json!(false)
+            } else {
+                json!(["eq", "s.count", ["bv", 4, 3]])
+            };
+            let s = spec(&d);
+            // Acceptance at edge 1 expires at edge 3. At edge 4 the interval
+            // cancels/completes, but extending to edge 6 must retain the failure.
+            let mut extension = [(false, false); 6];
+            if cancellation {
+                extension[3].1 = true;
+            }
+            let concrete = check_stimulus(&s, "response_deadline", &inputs(&extension)).unwrap();
+            assert_eq!(concrete["status"], "reset_reachable_failure");
+            assert_eq!(
+                concrete["trace"].as_array().unwrap().last().unwrap()["edge"],
+                3
+            );
+            let result = search_reachable(&s, "response_deadline", 6).unwrap();
+            assert_eq!(result["status"], "reset_reachable_failure");
+            assert_eq!(
+                result["witness"]["trace"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["edge"],
+                3
+            );
+            validate_reachable(&s, &result["witness"]).unwrap();
+        }
     }
     #[test]
     fn sampled_dut_signals_use_preedge_state_and_reject_bad_names() {

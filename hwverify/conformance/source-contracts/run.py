@@ -34,12 +34,9 @@ def main():
             expect(cli('read-search-' + obligation, 'search', fifo, obligation), 'bounded_no_failure')
         passed('read_all_independent_obligations', depth=10)
         bus_search = axi('read-axi-search', 'search', good / 'axi-binding.json')
-        if bus_search['status'] == 'unknown':
-            reason = replay.load_json(args.out / 'read-axi-search' / 'search.json').get('reason')
-            if reason != 'finite solver term depth budget exhausted': raise RuntimeError(bus_search)
-            results.append({'case': 'full_axi_search', 'status': 'unknown', 'depth': 10, 'reason': reason})
-        else:
-            expect(bus_search, 'bounded_no_failure'); passed('full_axi_search', depth=10)
+        expect(bus_search, 'bounded_no_failure')
+        if bus_search['capacity_search'] != 'bounded_no_failure': raise RuntimeError(bus_search)
+        passed('full_axi_search', depth=10, capacity='bounded_no_failure')
         if bus_search['structural']['status'] != 'verified': raise RuntimeError(bus_search['structural'])
         for channel in ('write', 'read'):
             for obligation in ('resource', 'launch'):
@@ -142,9 +139,12 @@ def main():
             expect(cli(channel + '-wait-search', 'search', mutant / (channel + '-offer.json'), 'launch', '--regression', saved), 'reset_reachable_failure')
             expect(cli(channel + '-wait-resource', 'search', mutant / (channel + '-offer.json'), 'resource'), 'reset_reachable_failure')
             expect(cli(channel + '-wait-replay', 'replay', mutant / (channel + '-offer.json'), 'launch', '--regression', saved), 'reset_reachable_failure')
-            inputs = replay.load_json(saved)['inputs']; replay.write(file, inputs)
-            expect(cli(channel + '-wait-good', 'stimulus', good / (channel + '-offer.json'), 'launch', '--inputs', file), 'trace_no_failure')
-            # Concrete READY-low witness remains legal and passes structural checking.
+            inputs = replay.load_json(saved)['inputs']; searched = root / (channel + '-searched-inputs.json'); replay.write(searched, inputs)
+            expect(cli(channel + '-wait-good', 'stimulus', good / (channel + '-offer.json'), 'launch', '--inputs', searched), 'trace_no_failure')
+            # The generic application search has no AXI counterpart assumptions.
+            # Separately reproduce on the explicit legal READY-low fixture, rather
+            # than depending on which unconstrained witness the solver selects.
+            expect(cli(channel + '-wait-concrete', 'stimulus', mutant / (channel + '-offer.json'), 'launch', '--inputs', file), 'reset_reachable_failure')
             bus = axi(channel + '-wait-axi', 'stimulus', mutant / 'manager-binding.json', '--inputs', file)
             expect(bus, 'trace_no_failure')
             if bus['structural']['status'] != 'verified' or bus['independent']['status'] != 'sampled_prefix_passed': raise RuntimeError('registered wait witness not independently legal')
@@ -153,6 +153,8 @@ def main():
         results.extend(reset_output_controls(root, good, cli, axi, args.out))
         from endpoint_bindings import run as endpoint_controls
         results.extend(endpoint_controls(root, good, cli, args.out))
+        from memory import run as memory_controls
+        results.extend(memory_controls(root, good, cli, axi, args.out))
     replay.write(args.out / 'results.json', results); print(json.dumps({'status': 'passed', 'cases': len(results), 'known_unknowns': [r for r in results if r['status'] == 'unknown']}))
 
 if __name__ == '__main__': main()
