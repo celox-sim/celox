@@ -1,5 +1,120 @@
 # Changelog
 
+## 0.10.0 (2026-10-03)
+
+## What's Changed
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/739
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/740
+* fix(veryl): roll HEAD to 36172f6ac944 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/741
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/744
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/745
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/749
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/752
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/754
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/756
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/757
+* fix(veryl): roll HEAD to 082f3f56475f by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/746
+* fix(veryl): roll HEAD to 10c4d89a548d by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/758
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/761
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/763
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/765
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/768
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/769
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/773
+* fix(veryl): roll HEAD to 6df50ce79ec3 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/774
+* fix(veryl): roll HEAD to 4d821887fcd1 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/775
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/778
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/781
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/782
+* feat(veryl)!: support hierarchical readmemh on Veryl HEAD by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/776
+* fix(veryl): roll HEAD to 06eaa3c9f53c by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/784
+* fix(veryl): roll HEAD to d6d47fe0b286 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/785
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/786
+* fix(veryl): roll HEAD to a6ef6af4621b by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/788
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/789
+* fix(veryl): roll HEAD to 5e5a136b2201 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/791
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/792
+* fix(veryl): roll HEAD to 59e6c50d9ec4 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/793
+* fix(veryl): roll HEAD to afe81dc8d168 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/794
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/796
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/801
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/805
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/807
+* fix(veryl): roll HEAD to 3945e9db61a8 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/803
+* fix(veryl): roll HEAD to fea54da98ac2 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/809
+* fix(veryl): roll HEAD to 63db6f87fa30 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/814
+* fix(veryl): roll HEAD to 86e4bdaa355e by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/821
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/810
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/828
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/829
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/832
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/836
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/837
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/839
+* fix(veryl): roll HEAD to e115c907ccc9 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/830
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/841
+* fix(veryl): roll HEAD to ee754466ffad by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/843
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/844
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/846
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/849
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/852
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/853
+* test: restore passing regressions with develop Veryl by @tignear in https://github.com/celox-sim/celox/pull/855
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/858
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/860
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/861
+* fix(veryl): roll HEAD to 2bd44cba2eae by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/863
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/864
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/867
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/872
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/875
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/878
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/882
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/883
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/885
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/887
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/888
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/893
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/895
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/898
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/900
+* fix(veryl): roll HEAD to 7b269d0fc6b1 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/891
+* fix(veryl): roll HEAD to d1f7025898b9 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/905
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/906
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/913
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/923
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/925
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/926
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/927
+* test(veryl): refresh inout cases and backend exclusions by @tignear in https://github.com/celox-sim/celox/pull/929
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/933
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/934
+* fix(veryl): roll HEAD to 3799a119518a by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/928
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/937
+* fix(veryl): roll HEAD to 46ffa40d940b by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/938
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/944
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/947
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/951
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/956
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/957
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/961
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/968
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/972
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/980
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/983
+* chore(develop): sync master by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/984
+* fix(veryl)!: upgrade to Veryl 0.22.0 by @tignear in https://github.com/celox-sim/celox/pull/985
+* fix(veryl): support hierarchical testbench assignments by @tignear in https://github.com/celox-sim/celox/pull/989
+* chore(deps): update rust toolchain to 7470661 by @renovate[bot] in https://github.com/celox-sim/celox/pull/990
+* test(veryl): restore 0.22 coverage and audit exclusions by @tignear in https://github.com/celox-sim/celox/pull/992
+* perf(x86): lower wide runtime shifts with a barrel network by @tignear in https://github.com/celox-sim/celox/pull/995
+* feat(testbench)!: support concurrent Veryl initial processes by @tignear in https://github.com/celox-sim/celox/pull/993
+* perf(compiler): reduce retained IR and analysis memory by @tignear in https://github.com/celox-sim/celox/pull/996
+* fix(deps): update rust crate wasm-encoder to 0.260 by @renovate[bot] in https://github.com/celox-sim/celox/pull/999
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.9.1...v0.10.0
+
 ## 0.9.1 (2026-10-02)
 
 ## What's Changed
