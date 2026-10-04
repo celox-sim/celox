@@ -321,8 +321,6 @@ describe("FourStateDemo", () => {
     it("starts every unpacked array element as X", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
-        sim.evalComb();
-
         expect(sim.fourState("array_snapshot").mask).toBe(0xffn);
 
         sim.dispose();
@@ -1525,7 +1523,6 @@ async function run() {
 			return {
 				dut,
 				warnings: [] as readonly string[],
-				evalComb,
 				tick(
 					eventOrCount?: { name: string; id: number } | number,
 					count?: number,
