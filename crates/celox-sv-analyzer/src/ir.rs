@@ -226,7 +226,8 @@ pub struct Instance {
     condition: Option<ConstExpr>,
     port_names: Vec<String>,
     port_connections: Vec<PortConnection>,
-    array_len: Option<usize>,
+    /// The declared `[left:right]` bounds of an instance array.
+    array_range: Option<(i128, i128)>,
 }
 
 impl Instance {
@@ -238,7 +239,7 @@ impl Instance {
         condition: Option<ConstExpr>,
         port_names: Vec<String>,
         port_connections: Vec<PortConnection>,
-        array_len: Option<usize>,
+        array_range: Option<(i128, i128)>,
     ) -> Self {
         Self {
             module_name,
@@ -248,13 +249,19 @@ impl Instance {
             condition,
             port_names,
             port_connections,
-            array_len,
+            array_range,
         }
     }
 
     /// The number of elements of an instance array, if this is one.
     pub fn array_len(&self) -> Option<usize> {
-        self.array_len
+        self.array_range
+            .and_then(|(left, right)| usize::try_from(left.abs_diff(right)).ok()?.checked_add(1))
+    }
+
+    /// The declared `[left:right]` bounds of an instance array, if this is one.
+    pub fn array_range(&self) -> Option<(i128, i128)> {
+        self.array_range
     }
 
     pub fn module_name(&self) -> &str {

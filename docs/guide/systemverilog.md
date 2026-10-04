@@ -79,6 +79,9 @@ it.
 
 ## Semantics worth knowing
 
+- **Instance array elements.** In the hierarchy (`child_signal`,
+  `named_hierarchy`), the elements of `Child u[3:2](...)` are numbered from the
+  lower bound: `u[2]` is index 0 and `u[3]` is index 1.
 - **Out-of-range selects.** A run-time select that reaches past either end of a
   vector reads zero for the missing bits and writes only the bits that exist.
   Four-state simulation does not yet turn a fully out-of-range read into `X`.

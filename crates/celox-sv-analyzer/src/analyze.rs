@@ -92,7 +92,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                             )
                         })
                         .collect(),
-                    instance.array_len(),
+                    instance.array_range(),
                 )
             })
             .collect();

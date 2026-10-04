@@ -144,7 +144,7 @@ fn instances_from_module_instantiation(
         // `Child c[3:0](...)` is an array of instances: one dimension with
         // constant bounds.
         let dimensions = &instance.nodes.0.nodes.1;
-        let array_len = if dimensions.is_empty() {
+        let array_range = if dimensions.is_empty() {
             None
         } else {
             let ranges = unpacked_ranges_from_dimensions_with_env(
@@ -160,14 +160,13 @@ fn instances_from_module_instantiation(
             };
             let left = eval_ast_const_expr(range.left(), const_env);
             let right = eval_ast_const_expr(range.right(), const_env);
-            let len = left
+            let bounds = left
                 .zip(right)
-                .and_then(|(left, right)| usize::try_from(left.abs_diff(right) + 1).ok())
-                .filter(|len| *len > 0 && *len <= 4096)
+                .filter(|(left, right)| left.abs_diff(*right) < 4096)
                 .ok_or_else(|| {
                     AnalyzerError::Unsupported("module instance array bounds".to_string())
                 })?;
-            Some(len)
+            Some(bounds)
         };
         instances.push(Instance::new(
             module_name.clone(),
@@ -177,7 +176,7 @@ fn instances_from_module_instantiation(
             condition.clone(),
             port_names,
             port_connections,
-            array_len,
+            array_range,
         ));
     }
     Ok(())

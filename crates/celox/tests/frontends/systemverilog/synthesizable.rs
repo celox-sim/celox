@@ -210,6 +210,9 @@ sv_backends! {
             sim.modify(|io| { io.set(a, value); io.set(en, enable); }).unwrap();
             let expected = if enable != 0 { !value } else { value };
             assert_eq!(sim.get(sim.signal("y")), expected.into(), "a={value} en={enable}");
+            // `u[1]`, the leftmost element, takes the most significant slice.
+            let high = sim.child_signal(&[("u", 1)], "a");
+            assert_eq!(sim.get(high), (value >> 4).into(), "a={value}");
         }
     }
 
@@ -229,6 +232,12 @@ sv_backends! {
         for value in [0x3cu8, 0xa5, 0xff, 0x01] {
             sim.modify(|io| io.set(a, value)).unwrap();
             assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value}");
+            // The leftmost element takes the most significant slice; elements
+            // are addressed by their index minus the lower bound.
+            let high = sim.child_signal(&[("u", 0)], "a");
+            let low = sim.child_signal(&[("u", 1)], "a");
+            assert_eq!(sim.get(high), (value >> 4).into(), "a={value}");
+            assert_eq!(sim.get(low), (value & 0xf).into(), "a={value}");
         }
     }
 
@@ -248,6 +257,12 @@ sv_backends! {
         for value in [0x3cu8, 0xa5, 0xff, 0x01] {
             sim.modify(|io| io.set(a, value)).unwrap();
             assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value}");
+            // The leftmost element takes the most significant slice; elements
+            // are addressed by their index minus the lower bound.
+            let high = sim.child_signal(&[("u", 1)], "a");
+            let low = sim.child_signal(&[("u", 0)], "a");
+            assert_eq!(sim.get(high), (value >> 4).into(), "a={value}");
+            assert_eq!(sim.get(low), (value & 0xf).into(), "a={value}");
         }
     }
 

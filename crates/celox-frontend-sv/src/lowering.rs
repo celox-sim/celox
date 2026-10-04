@@ -1013,8 +1013,19 @@ fn lower_module_with_overrides(
             }
         }
         // An instance array is one instance per element, all under one name.
+        // Elements are listed from the lowest index up, so an element's place
+        // in the hierarchy is its index minus the lower bound; each keeps its
+        // position in declaration order, which decides its connections.
         let elements = instance.array_len().map_or(vec![None], |len| {
-            (0..len).map(|position| Some((position, len))).collect()
+            let descending = instance
+                .array_range()
+                .is_some_and(|(left, right)| left >= right);
+            (0..len)
+                .map(|offset| {
+                    let position = if descending { len - 1 - offset } else { offset };
+                    Some((position, len))
+                })
+                .collect()
         });
         for array_element in elements {
             instances.push(LoweredSvInstance {
