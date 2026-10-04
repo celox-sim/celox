@@ -97,7 +97,7 @@ use expressions::{
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{
-    case_item_condition, function_from_declaration,
+    case_item_condition, case_keyword_is_wildcard, function_from_declaration,
     function_local_packed_dimensions_from_block_item_iter,
     function_local_packed_dimensions_from_block_items,
     function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
@@ -138,8 +138,9 @@ use types::{
     validate_unpacked_dimension_sizes,
 };
 use validation::{
-    reject_silently_ignored_constructs, reject_unsupported_multidimensional_packed_bounds,
-    static_for_loop_initial_value, static_for_loop_iterations,
+    AlwaysKind, always_comb_body, always_kind, reject_silently_ignored_constructs,
+    reject_unsupported_multidimensional_packed_bounds, static_for_loop_initial_value,
+    static_for_loop_iterations,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

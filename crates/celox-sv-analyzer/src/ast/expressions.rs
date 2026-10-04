@@ -59,8 +59,57 @@ fn expr_from_expression_with_types_raw(
         sv_parser::Expression::ConditionalExpression(expr) => {
             expr_from_conditional_expression(expr, syntax_tree, packed_dimensions)
         }
+        sv_parser::Expression::InsideExpression(inside) => {
+            expr_from_inside_expression(inside, syntax_tree, packed_dimensions)
+        }
         _ => None,
     }
+}
+
+/// `x inside {a, [lo:hi], ...}` is true when `x` matches any item: a value by
+/// wildcard equality, a range by an inclusive bounds check.
+fn expr_from_inside_expression(
+    inside: &sv_parser::InsideExpression,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let operand =
+        expr_from_expression_with_types_raw(&inside.nodes.0, syntax_tree, packed_dimensions)?;
+    let compare = |left: Expr, op: BinaryOp, right: Expr| Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    inside
+        .nodes
+        .2
+        .nodes
+        .1
+        .nodes
+        .0
+        .contents()
+        .into_iter()
+        .map(|item| match &item.nodes.0 {
+            sv_parser::ValueRange::Expression(value) => {
+                let value =
+                    expr_from_expression_with_types_raw(value, syntax_tree, packed_dimensions)?;
+                Some(case_item_condition(operand.clone(), value, true))
+            }
+            sv_parser::ValueRange::Binary(range) => {
+                let (low, _, high) = &range.nodes.0.nodes.1;
+                let low = expr_from_expression_with_types_raw(low, syntax_tree, packed_dimensions)?;
+                let high =
+                    expr_from_expression_with_types_raw(high, syntax_tree, packed_dimensions)?;
+                Some(compare(
+                    compare(operand.clone(), BinaryOp::Ge, low),
+                    BinaryOp::LogicAnd,
+                    compare(operand.clone(), BinaryOp::Le, high),
+                ))
+            }
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .reduce(|left, right| compare(left, BinaryOp::LogicOr, right))
 }
 
 pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {

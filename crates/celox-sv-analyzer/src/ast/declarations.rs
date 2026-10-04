@@ -334,6 +334,27 @@ fn signals_from_module_common_item(
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
 ) -> Result<(), AnalyzerError> {
+    if let sv_parser::ModuleCommonItem::AlwaysConstruct(always) = item
+        && always_kind(always) == AlwaysKind::Comb
+    {
+        // A variable declared inside an `always_comb` block is hoisted to a
+        // module signal. A clash with another signal of the same name is
+        // reported as a duplicate internal signal.
+        for node in RefNode::Statement(&always.nodes.1) {
+            if let RefNode::DataDeclaration(data) = node {
+                let mut declared = signals_from_data_declaration(
+                    data,
+                    syntax_tree,
+                    type_aliases,
+                    const_env,
+                    selected_name,
+                )?;
+                substitute_signal_local_constants(&mut declared, const_env);
+                signals.extend(declared);
+            }
+        }
+        return Ok(());
+    }
     if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = item {
         let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
             declaration,

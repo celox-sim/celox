@@ -96,8 +96,9 @@ fn rejects_block_local_declarations_inside_always_comb() {
         endmodule
         "#,
     );
+    // The local `t` would be hoisted onto the output port `t`.
     assert!(
-        error.contains("block-local declaration inside always_comb"),
+        error.contains("duplicate port or signal name `t`"),
         "unexpected error: {error}"
     );
 }
@@ -5167,12 +5168,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "net declaration assignment",
-            r#"
-            module Top(input logic a, output logic y); wire n = a; assign y = n; endmodule
-        "#,
-        ),
-        (
             "blocking assignment inside always_ff",
             r#"
             module Top(input logic clk, d, output logic q);
@@ -5306,20 +5301,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "dependent repeated assignment inside always_comb",
-            r#"
-            module Top(input logic a, output logic y);
-                always_comb begin y = a; y = y + 1'b1; end
-            endmodule
-        "#,
-        ),
-        (
-            "always and always_latch processes",
-            r#"
-            module Top(input logic a, output logic y); always @* y = a; endmodule
-        "#,
-        ),
-        (
             "always and always_latch processes",
             r#"
             module Top(input logic a, output logic y); always_latch y = a; endmodule
@@ -5348,27 +5329,10 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "indexed part-select",
-            r#"
-            module Top(input logic [15:0] a, input logic [3:0] index,
-                       output logic [7:0] y);
-                assign y = a[index +: 8];
-            endmodule
-        "#,
-        ),
-        (
             "non-zero-based multidimensional packed range",
             r#"
             module Top(input logic [2:1][7:0] a, output logic [7:0] y);
                 assign y = a[1];
-            endmodule
-        "#,
-        ),
-        (
-            "casez, casex, or pattern case inside always_ff",
-            r#"
-            module Top(input logic clk, input logic [1:0] a, output logic y);
-                always_ff @(posedge clk) casez (a) 2'b1?: y <= 1'b1; default: y <= 0; endcase
             endmodule
         "#,
         ),
@@ -5443,34 +5407,10 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "block-local declaration inside always_comb",
-            r#"
-            module Top(input logic a, output logic y);
-                always_comb begin logic tmp; tmp = a; y = tmp; end
-            endmodule
-        "#,
-        ),
-        (
             "continuous assignment expression",
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
                 assign y = {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
-            "cast expression",
-            r#"
-            module Top(output logic [7:0] y);
-                assign y = 8'(16'h1234);
-            endmodule
-        "#,
-        ),
-        (
-            "cast expression",
-            r#"
-            module Top(input logic [7:0] value, output logic [7:0] y);
-                assign y = signed'(value);
             endmodule
         "#,
         ),
@@ -5506,17 +5446,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return value;
                 endfunction
                 assign y = value;
-            endmodule
-        "#,
-        ),
-        (
-            "combinational expression",
-            r#"
-            module Top(input logic a, output logic y);
-                function automatic logic choose(input logic x);
-                    if (x) return 1'b1;
-                endfunction
-                assign y = choose(a);
             endmodule
         "#,
         ),
@@ -5679,17 +5608,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top #(parameter logic [3:0] P = 4'hf, parameter FLAG = &P)
                        (output logic y);
                 assign y = FLAG;
-            endmodule
-        "#,
-        ),
-        (
-            "casez or casex inside function",
-            r#"
-            module Top(input logic [1:0] a, output logic y);
-                function automatic logic f(input logic [1:0] x);
-                    casez (x) 2'b1?: return 1'b1; default: return 1'b0; endcase
-                endfunction
-                assign y = f(a);
             endmodule
         "#,
         ),

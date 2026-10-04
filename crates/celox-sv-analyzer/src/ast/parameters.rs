@@ -450,6 +450,7 @@ pub(super) fn enum_member_constants_from_module_node(
             }),
         }
         .ok_or_else(|| AnalyzerError::Unsupported("enum base type".to_string()))?;
+        let mut next_enum_value = 0i128;
         for member in r#enum.nodes.2.nodes.1.contents() {
             let name = identifier_text(RefNode::Identifier(&member.nodes.0.nodes.0), syntax_tree)
                 .ok_or_else(|| {
@@ -460,18 +461,21 @@ pub(super) fn enum_member_constants_from_module_node(
                     "ranged enum member `{name}`"
                 )));
             }
-            let Some((_, value)) = &member.nodes.2 else {
-                return Err(AnalyzerError::Unsupported(format!(
-                    "enum member `{name}` without an explicit value"
-                )));
+            let value = match &member.nodes.2 {
+                Some((_, value)) => const_expr_from_ref_node_with_env(
+                    RefNode::ConstantExpression(value),
+                    syntax_tree,
+                    &eval_env,
+                    &resolved_type_aliases,
+                )
+                .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?,
+                // An unvalued member follows its predecessor (the first is 0).
+                None => ConstExpr::Literal(format_typed_parameter_literal(
+                    next_enum_value,
+                    member_type.width,
+                    member_type.signed,
+                )),
             };
-            let value = const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(value),
-                syntax_tree,
-                &eval_env,
-                &resolved_type_aliases,
-            )
-            .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?;
             let value = match value {
                 ConstExpr::Literal(literal) => ConstExpr::Literal(
                     resize_unbased_fill_literal_for_cast(
@@ -498,6 +502,7 @@ pub(super) fn enum_member_constants_from_module_node(
             }
             let number =
                 coerce_const_parameter_value(number, member_type.width, member_type.signed);
+            next_enum_value = number.wrapping_add(1);
             constants.numbers.insert(name.clone(), number);
             eval_env.insert(name.clone(), number);
             insert_parameter_type_markers(&mut eval_env, &name, member_type);

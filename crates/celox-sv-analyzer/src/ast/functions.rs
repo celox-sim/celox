@@ -231,6 +231,11 @@ fn validate_function_declaration_statements(
     type_aliases: &HashMap<String, Type>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
+    let function_name = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.2,
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => &body.nodes.2,
+    };
+    let function_name = identifier_text(RefNode::FunctionIdentifier(function_name), syntax_tree);
     let (statements, params, local_types) = match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => {
             let params = body
@@ -272,6 +277,8 @@ fn validate_function_declaration_statements(
     };
     let mut assignment_targets = local_types.into_keys().collect::<HashSet<_>>();
     assignment_targets.extend(params.into_iter().map(|param| param.name));
+    // Assigning the function's own name sets its return value.
+    assignment_targets.extend(function_name);
     for node in RefNode::FunctionDeclaration(declaration) {
         let RefNode::BlockingAssignment(assignment) = node else {
             continue;
@@ -479,6 +486,7 @@ pub(super) fn function_from_declaration(
                 &function_packed_dimensions,
                 &local_types,
                 &local_names,
+                Some(&name),
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
@@ -548,6 +556,7 @@ pub(super) fn function_from_declaration(
                 &function_packed_dimensions,
                 &local_types,
                 &local_names,
+                Some(&name),
             )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
@@ -1027,6 +1036,7 @@ fn function_body_expr(
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
     local_names: &HashSet<String>,
+    return_variable: Option<&str>,
 ) -> Option<Expr> {
     let mut locals = local_types
         .iter()
@@ -1048,13 +1058,19 @@ fn function_body_expr(
             Some(&statement.nodes.0)
         })
         .collect::<Vec<_>>();
-    function_expr_from_sequence(
+    if let Some(name) = return_variable {
+        // The value of an unassigned return variable is unknown.
+        locals.insert(name.to_string(), Expr::Literal("'x".to_string()));
+    }
+    let returned = function_expr_from_sequence(
         &statements,
         &mut locals,
         syntax_tree,
         packed_dimensions,
         local_types,
-    )
+    );
+    // Falling off the end returns whatever was assigned to the function name.
+    returned.or_else(|| return_variable.and_then(|name| locals.get(name).cloned()))
 }
 
 /// Lower a returning branch with the remaining statements as its continuation.
@@ -1176,6 +1192,7 @@ fn function_expr_from_sequence(
                                 Some(case_item_condition(
                                     selector.clone(),
                                     substitute_expr_idents(label, locals),
+                                    case_keyword_is_wildcard(&case.nodes.1),
                                 ))
                             })
                             .collect::<Option<Vec<_>>>()?
@@ -1518,7 +1535,13 @@ fn function_expr_from_case_statement(
                         )
                     })
                     .map(|expr| substitute_expr_idents(expr, locals))
-                    .map(|expr| case_item_condition(case_expr.clone(), expr))
+                    .map(|expr| {
+                        case_item_condition(
+                            case_expr.clone(),
+                            expr,
+                            case_keyword_is_wildcard(&statement.nodes.1),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let condition = conditions.into_iter().reduce(|left, right| Expr::Binary {
                     left: Box::new(left),
@@ -1596,10 +1619,40 @@ fn function_expr_from_case_statement(
     })
 }
 
-pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
+/// Whether a `case` keyword treats `z`/`?` (and `x` for `casex`) in a case
+/// item as a wildcard.
+pub(super) fn case_keyword_is_wildcard(keyword: &sv_parser::CaseKeyword) -> bool {
+    !matches!(keyword, sv_parser::CaseKeyword::Case(_))
+}
+
+pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bool) -> Expr {
+    if wildcard
+        && let Expr::Literal(literal) = &item_expr
+        && let Some(pattern) = typecheck::parse_integral_literal(literal)
+        && pattern.mask != num_bigint::BigUint::default()
+    {
+        // The wildcard bits of a constant pattern are known up front. Force
+        // them to one on both sides instead of relying on unknown-bit
+        // comparison, which a two-state simulation does not carry.
+        let wildcard_bits = format!("{}'h{:x}", pattern.width, pattern.mask);
+        let pattern_bits = format!("{}'h{:x}", pattern.width, &pattern.value | &pattern.mask);
+        return Expr::Binary {
+            left: Box::new(Expr::Binary {
+                left: Box::new(case_expr),
+                op: BinaryOp::BitOr,
+                right: Box::new(Expr::Literal(wildcard_bits)),
+            }),
+            op: BinaryOp::EqCase,
+            right: Box::new(Expr::Literal(pattern_bits)),
+        };
+    }
     Expr::Binary {
         left: Box::new(case_expr),
-        op: BinaryOp::EqCase,
+        op: if wildcard {
+            BinaryOp::EqWildcard
+        } else {
+            BinaryOp::EqCase
+        },
         right: Box::new(item_expr),
     }
 }

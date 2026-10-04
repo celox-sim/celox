@@ -922,8 +922,8 @@ fn preserves_enum_base_types_during_constant_substitution() {
 }
 
 #[test]
-fn rejects_casez_nested_under_comb_conditionals() {
-    let error = analyze_source(
+fn accepts_casez_nested_under_comb_conditionals() {
+    analyze_source(
         r#"
             module Top(input logic en, sel, output logic y);
                 always_comb begin
@@ -936,12 +936,7 @@ fn rejects_casez_nested_under_comb_conditionals() {
         "#,
         Path::new("nested_casez.sv"),
     )
-    .expect_err("nested casez must be rejected")
-    .to_string();
-    assert!(
-        error.contains("casez or casex inside always_comb"),
-        "unexpected error: {error}"
-    );
+    .expect("casez nested under a conditional must analyze");
 }
 
 fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
@@ -2777,10 +2772,13 @@ fn preserves_signedness_for_compound_unpacked_array_lvalues() {
             _ => None,
         })
         .expect("compound assignment should lower to an arithmetic shift");
-    assert!(matches!(
+    // The earlier write is substituted into the compound assignment, so the
+    // shifted operand is the signed input itself.
+    assert_eq!(
         compound.as_ref(),
-        ir::Expr::Select { signed: true, .. }
-    ));
+        &ir::Expr::Ident("input_value".to_string())
+    );
+    assert!(ir.modules()[0].ports()[0].r#type().is_signed());
 }
 
 #[test]

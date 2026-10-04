@@ -92,7 +92,7 @@ fn ff_process_from_always_construct(
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
-    if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
+    if always_kind(always) != AlwaysKind::Ff {
         return Ok(None);
     }
     let Some((events, body)) = ff_event_control_and_body(&always.nodes.1, syntax_tree) else {
