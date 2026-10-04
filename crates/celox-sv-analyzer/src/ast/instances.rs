@@ -142,32 +142,34 @@ fn instances_from_module_instantiation(
             .map(|connection| connection.formal().to_string())
             .collect();
         // `Child c[3:0](...)` is an array of instances: one dimension with
-        // constant bounds.
+        // constant bounds. `my_t mem [N];` parses the same way but declares a
+        // variable of a typedef'd type, and is dropped below.
         let dimensions = &instance.nodes.0.nodes.1;
-        let array_range = if dimensions.is_empty() {
-            None
-        } else {
-            let ranges = unpacked_ranges_from_dimensions_with_env(
-                dimensions,
-                syntax_tree,
-                const_env,
-                &packed_dimensions.type_aliases,
-            )?;
-            let [range] = ranges.as_slice() else {
-                return Err(AnalyzerError::Unsupported(
-                    "multidimensional module instance array".to_string(),
-                ));
+        let array_range =
+            if dimensions.is_empty() || packed_dimensions.type_aliases.contains_key(&module_name) {
+                None
+            } else {
+                let ranges = unpacked_ranges_from_dimensions_with_env(
+                    dimensions,
+                    syntax_tree,
+                    const_env,
+                    &packed_dimensions.type_aliases,
+                )?;
+                let [range] = ranges.as_slice() else {
+                    return Err(AnalyzerError::Unsupported(
+                        "multidimensional module instance array".to_string(),
+                    ));
+                };
+                let left = eval_ast_const_expr(range.left(), const_env);
+                let right = eval_ast_const_expr(range.right(), const_env);
+                let bounds = left
+                    .zip(right)
+                    .filter(|(left, right)| left.abs_diff(*right) < 4096)
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported("module instance array bounds".to_string())
+                    })?;
+                Some(bounds)
             };
-            let left = eval_ast_const_expr(range.left(), const_env);
-            let right = eval_ast_const_expr(range.right(), const_env);
-            let bounds = left
-                .zip(right)
-                .filter(|(left, right)| left.abs_diff(*right) < 4096)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("module instance array bounds".to_string())
-                })?;
-            Some(bounds)
-        };
         instances.push(Instance::new(
             module_name.clone(),
             name,

@@ -273,6 +273,122 @@ sv_backends! {
         assert_eq!(indices, [2, 3]);
     }
 
+    fn instance_array_unpacked_connection_descending_to_descending(sim) {
+        @setup {
+            // `a` is split from the leftmost instance down; the unpacked array
+            // connects its leftmost element to the leftmost instance.
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [3:0];
+                    Inv u[3:0](.a(a), .y(lanes));
+                    assign y = {lanes[3], lanes[2], lanes[1], lanes[0]};
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("unpacked.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0x1234u16, 0xa5c3, 0xffff] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value:#x}");
+        }
+    }
+
+    fn instance_array_unpacked_connection_descending_to_ascending(sim) {
+        @setup {
+            // `a` is split from the leftmost instance down; the unpacked array
+            // connects its leftmost element to the leftmost instance.
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [0:3];
+                    Inv u[3:0](.a(a), .y(lanes));
+                    assign y = {lanes[0], lanes[1], lanes[2], lanes[3]};
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("unpacked.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0x1234u16, 0xa5c3, 0xffff] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value:#x}");
+        }
+    }
+
+    fn instance_array_unpacked_connection_ascending_to_descending(sim) {
+        @setup {
+            // `a` is split from the leftmost instance down; the unpacked array
+            // connects its leftmost element to the leftmost instance.
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [3:0];
+                    Inv u[0:3](.a(a), .y(lanes));
+                    assign y = {lanes[3], lanes[2], lanes[1], lanes[0]};
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("unpacked.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0x1234u16, 0xa5c3, 0xffff] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value:#x}");
+        }
+    }
+
+    fn instance_array_unpacked_connection_offset_ranges(sim) {
+        @setup {
+            // `a` is split from the leftmost instance down; the unpacked array
+            // connects its leftmost element to the leftmost instance.
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [1:4];
+                    Inv u[4:7](.a(a), .y(lanes));
+                    assign y = {lanes[1], lanes[2], lanes[3], lanes[4]};
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("unpacked.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0x1234u16, 0xa5c3, 0xffff] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), (!value).into(), "a={value:#x}");
+        }
+    }
+
+    fn typedef_unpacked_arrays_are_not_instance_arrays(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic clk, input logic [12:0] addr, input logic [7:0] d,
+                           input logic we, output logic [7:0] q, output logic [7:0] m);
+                    typedef logic [7:0] byte_t;
+                    byte_t mem [0:8191];
+                    byte_t grid [2][3];
+                    always_ff @(posedge clk) if (we) mem[addr] <= d;
+                    assign q = mem[addr];
+                    assign grid[1][2] = d;
+                    assign m = grid[1][2];
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("typedef_array.sv"))], "Top");
+        let (addr, d, we) = (sim.signal("addr"), sim.signal("d"), sim.signal("we"));
+        sim.modify(|io| { io.set(addr, 5000u16); io.set(d, 0x5au8); io.set(we, 1u8); }).unwrap();
+        let clk = sim.event("clk");
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0x5au8.into());
+        assert_eq!(sim.get(sim.signal("m")), 0x5au8.into());
+    }
+
     fn exponentiation_works_in_constant_expressions(sim) {
         @setup {
             let source = r#"
