@@ -92,7 +92,7 @@ const val = sim.dut.result; // bigint — X ビットは 0 として読まれる
 
 ### value/mask ペアの読み出し
 
-`Simulator` または `Simulation` の `fourState()` メソッドで value と X マスクをまとめて読み出せます：
+`Simulator` または `Simulation` の `fourState()` メソッドで value と X マスクをまとめて読み出せます。`dut` 経由の出力読み出しと同様に、入力が変更されていれば先に組み合わせ回路を評価します：
 
 ```typescript
 const fs = sim.fourState("result");
