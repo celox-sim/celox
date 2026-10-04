@@ -64,8 +64,69 @@ fn run(request: &Value) -> Result<Value, Value> {
     };
     if doc["kind"] == "specification" {
         if request["operation"] == "prove" {
-            return Err(
-                json!({"uri":uri,"message":"explicit lemma execution currently requires a design"}),
+            if request["program"] != "responses"
+                || !request["step"].is_null()
+                || !request["branch"].is_null()
+            {
+                return Err(
+                    json!({"uri":uri,"message":"select Check implementation responses; steps and branches are unsupported for response contracts"}),
+                );
+            }
+            let out = Path::new(
+                request["out"]
+                    .as_str()
+                    .ok_or(json!({"message":"missing output"}))?,
+            );
+            fs::create_dir_all(out).map_err(|e| json!({"message":e.to_string()}))?;
+            let mut report = if doc["version"] == 4 {
+                let spec = hwverify_ir::ScopedSpecification::from_json(&doc)
+                    .map_err(|e| json!({"message":e.to_string()}))?;
+                hwverify_verify::check_scoped_specification(
+                    &spec,
+                    "EDITOR_EXTERNAL_SOLVER_FORBIDDEN".into(),
+                    out.into(),
+                )
+            } else {
+                let spec = hwverify_ir::Specification::from_json(&doc)
+                    .map_err(|e| json!({"message":e.to_string()}))?;
+                hwverify_verify::check_specification(
+                    &spec,
+                    "EDITOR_EXTERNAL_SOLVER_FORBIDDEN".into(),
+                    out.into(),
+                )
+            }
+            .map_err(|e| json!({"uri":uri,"message":e}))?;
+            let parsed = parse_document(source, uri).map_err(diagnostic)?;
+            hwverify_syntax::locate_report(&mut report, uri, &parsed.spans);
+            let diagnostics=report["implementation_binding"]["obligations"].as_array().into_iter().flatten()
+                .filter(|r|r.get("source_path").is_some()).map(|r|json!({
+                    "uri":uri,"span":r["source_location"]["span"],"code":r["name"],
+                    "severity":if r["status"]=="passed" {3} else {1},
+                    "message":format!("Response {} / {}: {}",r["response"].as_str().unwrap_or(""),r["name"].as_str().unwrap_or(""),r["status"].as_str().unwrap_or("unknown"))
+                })).collect::<Vec<_>>();
+            let mut witnesses = serde_json::Map::new();
+            for obligation in report["implementation_binding"]["obligations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if obligation["status"] == "counterexample"
+                    && obligation["finite"]["original_formula_validated"] == true
+                    && obligation["solver_result"] == "sat"
+                {
+                    if let Some(evidence) = obligation["evidence"].as_str() {
+                        if let Ok(bytes) =
+                            fs::read(out.join(evidence).with_extension("finite.json"))
+                        {
+                            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                                witnesses.insert(obligation["name"].as_str().unwrap_or(evidence).into(),json!({"context":value["context_values"],"source_location":obligation["source_location"],"original_formula_validated":true,"reset_reachability":"not_checked"}));
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(
+                json!({"diagnostics":diagnostics,"verification":report,"witnesses":witnesses,"proof_programs":null,"binding":null}),
             );
         }
         return Ok(json!({"diagnostics":[],"proof_programs":null,"binding":null}));

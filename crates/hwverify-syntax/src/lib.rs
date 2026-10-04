@@ -727,6 +727,8 @@ impl Lower<'_> {
                         }
                         ("scoped_impl", "reset" | "next" | "wires" | "operations") => "assignments",
                         ("scoped_impl", "binding") => "scoped_binding",
+                        ("rel_impl" | "scoped_impl", "responses") => "responses",
+                        ("responses", _) => "response",
                         ("scoped_binding", "states") => "state_maps",
                         ("scoped_binding", "outputs") => "assignments",
                         ("rel_impl", "state") => "declarations",
@@ -820,6 +822,9 @@ impl Lower<'_> {
                         "example" | "scoped_example" => ["expect", "execution"].as_slice(),
                         "trace_frame" => ["ensure"].as_slice(),
                         "progress" => ["enabled", "rank"].as_slice(),
+                        "response" => {
+                            ["operation", "accept", "pending", "rank", "bound", "assume"].as_slice()
+                        }
                         "contract" => [
                             "pre",
                             "precondition",
@@ -1233,5 +1238,30 @@ mod specification_surface_tests {
           "specification \"x\" { components { C { examples { p {expect positive;trace {x=1u8;}}}}}}",
           "specification \"x\" { components { C {state {} state {}}}}",
         ] { assert!(parse_document(source,"bad.hwv").is_err()); }
+    }
+}
+
+/// Attach native source locations to checker obligations that carry schema paths.
+/// Locations are diagnostic metadata; never consumed as proof evidence.
+pub fn locate_report(value: &mut Value, filename: &str, spans: &BTreeMap<String, Span>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                locate_report(value, filename, spans);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                locate_report(value, filename, spans);
+            }
+            if let Some(span) = object
+                .get("source_path")
+                .and_then(Value::as_str)
+                .and_then(|p| spans.get(p))
+            {
+                object.insert("source_location".into(),json!({"uri":filename,"span":{"start":span.start,"end":span.end,"line":span.line,"column":span.column}}));
+            }
+        }
+        _ => {}
     }
 }

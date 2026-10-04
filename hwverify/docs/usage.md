@@ -132,8 +132,9 @@ obligations. A target with multiple matching decomposition branches requires an
 explicit zero-based index; successful checking of one branch does not prove the
 other branches. Targets must match an exact current query RHS (which can differ
 from the unsplit next-state expression after guarded decomposition).
-Specifications receive editing diagnostics; explicit native-lemma execution
-currently requires a design. Worker concurrency is limited to two; edit analysis has a 20-second wall limit
+Specifications receive editing diagnostics. A native `responses` block offers
+**Check implementation responses and safety**, using the full specification checker
+with source-linked obligations. Native lemma execution still requires a design. Worker concurrency is limited to two; edit analysis has a 20-second wall limit
 and explicit proof execution a 120-second wall limit. Exceeding either limit
 retains no verdict. LSP messages and individual worker requests are limited to
 64 MiB; larger disk models use streamed, hash-checked private snapshots.

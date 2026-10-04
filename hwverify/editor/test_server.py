@@ -247,6 +247,29 @@ class Protocol(unittest.TestCase):
             self.assertNotIn('Checked target query', text)
             self.assertNotIn('Witnesses for', text)
 
+    def test_native_scoped_response_check_and_source_diagnostics(self):
+        c = self.client
+        source = (ROOT / 'examples/scoped_response.hwv').read_text()
+        c.open(source)
+        lenses = c.request('textDocument/codeLens', {'textDocument': {'uri': URI}})
+        command = next(l['command'] for l in lenses if l['command']['arguments'][0]['program'] == 'responses')
+        result = c.request('workspace/executeCommand', command)
+        self.assertEqual(result['verification']['implementation_binding']['responses'][0]['status'], 'verified')
+        self.assertTrue(result['diagnostics'])
+        self.assertTrue(all(d['span']['line'] > 30 for d in result['diagnostics']))
+        c.edit(source.replace('assume !i.stall;', 'assume false;'))
+        result = c.request('workspace/executeCommand', command)
+        self.assertEqual(result['verification']['implementation_binding']['status'], 'failed')
+        self.assertTrue(any('failed_nonvacuity' in d['message'] and d['severity'] == 1 for d in result['diagnostics']))
+        c.edit(source.replace('assume !i.stall;', 'assume true;'), 3)
+        stalled = c.request('workspace/executeCommand', command)
+        self.assertTrue(stalled['witnesses'])
+        self.assertTrue(all(w['reset_reachability'] == 'not_checked' and w['original_formula_validated'] for w in stalled['witnesses'].values()))
+        c.edit(source.replace('rank s.ticks;', 'rank i.request;'), 4)
+        result = c.request('workspace/executeCommand', command)
+        self.assertTrue(result['diagnostics'])
+        self.assertNotIn('verification', result)
+
     def test_real_worker_start_signal_and_interruptions(self):
         c = self.client
         c.open()

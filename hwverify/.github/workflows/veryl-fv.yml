@@ -31,6 +31,8 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal
           rustup override set 1.98.1
           cargo build --release --locked --bin hwverify-editor
+      - name: Check bounded responses and reject deadlock and dropped-request mutants
+        run: cargo test --release --locked -p hwverify-rs --test responses
       - name: Check LSP lifecycle and fresh proof outcomes over stdio
         run: python3 -m unittest editor.test_server -v
       - name: Install and check the pinned VS Code client

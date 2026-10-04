@@ -1017,7 +1017,7 @@ fn implementation_target<'a>(
                 "operations",
                 "binding",
             ],
-            &["wires"],
+            &["wires", "responses"],
         ),
     )?;
     let name = at(

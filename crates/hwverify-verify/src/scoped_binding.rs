@@ -112,6 +112,13 @@ pub(crate) fn obligations(target: &ScopedTarget, q: &mut Check) -> Res<Option<Va
         false,
         &context,
     )?;
+    let mut response_results = crate::progress::responses(
+        implementation,
+        reset.clone(),
+        invariant.clone(),
+        &context,
+        q,
+    )?;
     let active = and(not(reset), invariant);
 
     // A local operation is activated once, even when several exported groups
@@ -157,6 +164,11 @@ pub(crate) fn obligations(target: &ScopedTarget, q: &mut Check) -> Res<Option<Va
         and(relation, next_invariant),
         &context,
     )?;
+    let progress_limitation = if implementation.responses.is_empty() {
+        "No liveness, fairness, progress, deadlock freedom, or implementation total-correctness claim"
+    } else {
+        "Only explicitly declared responses have conditional bounded progress; no general fairness, deadlock freedom or total-correctness claim"
+    };
     let reports = q.reports[before..].to_vec();
     let status = if reports
         .iter()
@@ -168,7 +180,18 @@ pub(crate) fn obligations(target: &ScopedTarget, q: &mut Check) -> Res<Option<Va
     } else {
         "verified"
     };
+    for response in &mut response_results {
+        response["requires_verified_binding"] = json!(true);
+        if response["status"] == "verified" && status != "verified" {
+            response["status"] = json!(if status == "unknown" {
+                "unknown"
+            } else {
+                "not_established_due_to_binding_failure"
+            });
+        }
+    }
     Ok(Some(json!({
+        "responses":response_results,
         "status": status,
         "composition": implementation.composition,
         "members": product.members,
@@ -177,7 +200,7 @@ pub(crate) fn obligations(target: &ScopedTarget, q: &mut Check) -> Res<Option<Va
         "claim": "From reset, the supplied state-only abstraction preserves the relational product and all invariants for every nonreset implementation step, with private-state stuttering for each inactive leaf",
         "limitations": [
             "This is a deterministic safety witness into the relational specification, not equality of behavior sets, abstraction surjectivity, or realization of positive examples",
-            "No liveness, fairness, progress, deadlock freedom, or implementation total-correctness claim",
+            progress_limitation,
             "Every mapped-invariant implementation state is checked, including unreachable states; reset has priority and restarts the abstract initial state",
             "Distinct local operations of the same leaf must be exclusive; independent leaf actions and exported groups reaching the same local operation may overlap",
             "Inactive leaves preserve private state; shared outputs remain constrained by invariants and active relations, with no general observable-stutter claim"

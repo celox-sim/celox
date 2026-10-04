@@ -14,7 +14,7 @@ import threading
 from urllib.parse import unquote, urlparse
 
 TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z_0-9]*|[^\s]', re.S)
-KEYWORDS = 'design input reset_input spec impl state reset next outputs binding commit can_step progress enabled rank proof forall target rhs lemma context guard claim depends use result let true false bool bv mem'.split()
+KEYWORDS = 'design input reset_input spec impl state reset next outputs binding commit can_step progress enabled rank proof forall target rhs lemma context guard claim depends use result let responses accept pending rank bound assume true false bool bv mem'.split()
 
 
 def offset(text, pos):
@@ -633,6 +633,9 @@ class Server:
                         self.reply(rid, self.hover(uri, at))
                     else:
                         lenses = []
+                        response = next((t for i, t in enumerate(index.tokens[:-1]) if t['word'] == 'responses' and index.tokens[i+1]['word'] == '{'), None)
+                        if response:
+                            lenses.append({'range': region(doc['text'], response['start'], response['end']), 'command': {'title': 'Check implementation responses and safety', 'command': 'hwverify.prove', 'arguments': [{'uri': uri, 'program': 'responses', 'branch': None}]}})
                         for symbol in index.symbols:
                             if symbol['kind'] not in ('target', 'lemma', 'use'):
                                 continue

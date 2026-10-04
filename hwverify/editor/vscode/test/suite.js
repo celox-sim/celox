@@ -152,6 +152,22 @@ exports.run = async function run() {
     const unrelated = hoverMarkdown(unrelatedHovers);
     assert(!unrelated.includes(encodePlainHover('Checked target query')), JSON.stringify({unexpectedQuery: unrelated}));
     assert(!unrelated.includes(encodePlainHover('Witnesses for')), JSON.stringify({unexpectedWitness: unrelated}));
+    enter('native scoped response contract and infeasible environment');
+    const responseUri = vscode.Uri.file(path.join(process.env.HWVERIFY_EXTENSION_TEST_WORKSPACE, 'response.hwv'));
+    const responseDoc = await vscode.workspace.openTextDocument(responseUri);
+    await vscode.window.showTextDocument(responseDoc);
+    const responseOptions = {uri: responseUri.toString(), program: 'responses', branch: null};
+    const responseLenses = await until('response CodeLens', async () => {
+      const items = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', responseUri);
+      return items?.some(item => item.command?.arguments?.[0]?.program === 'responses') ? items : null;
+    });
+    assert(responseLenses.length > 0);
+    const responseResult = await vscode.commands.executeCommand('hwverify.prove', responseOptions);
+    assert.equal(responseResult.verification.implementation_binding.responses[0].status, 'verified');
+    await replace(responseDoc, responseDoc.getText().replace('assume !i.stall;', 'assume false;'));
+    const impossible = await api.checkProof(responseOptions);
+    assert.equal(impossible.verification.implementation_binding.status, 'failed');
+    assert(impossible.diagnostics.some(d => d.message.includes('environment_nonempty: failed_nonvacuity') && d.span.line > 30));
     console.log('PASS: real VS Code Extension Host activation, diagnostics, providers, checked command, Unknown, cancellation and stale-result invalidation');
   } catch (error) {
     failure = error;

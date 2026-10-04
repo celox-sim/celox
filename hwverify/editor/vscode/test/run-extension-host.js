@@ -34,6 +34,7 @@ async function main() {
   fs.mkdirSync(workspace);
   fs.mkdirSync(path.join(profile, 'User'), {recursive: true});
   fs.copyFileSync(path.join(root, 'audit/lemma_candidates/counter.hwv'), path.join(workspace, 'counter.hwv'));
+  fs.copyFileSync(path.join(root, 'examples/scoped_response.hwv'), path.join(workspace, 'response.hwv'));
   const worker = path.join(root, 'target/release/hwverify-editor');
   fs.accessSync(worker, fs.constants.X_OK);
   fs.writeFileSync(path.join(profile, 'User/settings.json'), JSON.stringify({

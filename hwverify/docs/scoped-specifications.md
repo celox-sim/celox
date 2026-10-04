@@ -278,3 +278,12 @@ cargo run --locked -- /tmp/scoped-dual.hwv --emit-json /tmp/scoped-dual.json --o
 処理系の版は0.8、JSON schema versionは2 / 3 / 4であり別の番号。
 parser、lowering、インスタンス展開、型検査、義務生成とZ3は引き続き信頼対象で、
 この追加によって処理系全体の健全性が形式的に証明されたわけではない。
+
+## 実装の応答期限
+
+`implementation` 内の `responses` で、受理した要求の完了期限を明示できる。
+[v3/v4共通の意味と制約](specifications.md#conditional-bounded-response)と
+[実行例](../examples/scoped_response.hwv)を参照。既存のselectorは完了イベントに
+対応し、受理とは区別する。初期版は一つのcontract・一つの未完了要求を扱い、
+入力仮定の充足可能性、要求の保持、reset取消、unsigned countdownを別々に検査する。
+契約のない操作の進捗や、無制限のstallを公平性で救済する保証は追加しない。

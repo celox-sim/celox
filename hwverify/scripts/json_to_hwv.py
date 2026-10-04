@@ -217,6 +217,20 @@ def print_document(doc, infix=False):
                 lines.append(f'{pad}    }}')
             lines.extend([f'{pad}  }}', f'{pad}}}'])
 
+    def responses(implementation):
+        if 'responses' not in implementation:
+            return
+        lines.append('  responses {')
+        for name, contract in implementation['responses'].items():
+            fields = ('operation', 'accept', 'pending', 'rank', 'bound', 'assume')
+            if set(contract) != set(fields):
+                raise ValueError('unsupported or incomplete bounded response contract')
+            lines.append(f'    {name} {{')
+            for key in fields:
+                field(key, contract[key], 6)
+            lines.append('    }')
+        lines.append('  }')
+
     if version == 4:
         def signature(kind, name, target):
             ports = [f'{direction} {port}: {type_name(sort)}'
@@ -264,7 +278,9 @@ def print_document(doc, infix=False):
                 assignments(f'bind {name}', mapping, 4)
             for name, value in implementation['binding']['outputs'].items():
                 lines.append(f'    output {name} = {expression(value, 4, infix)};')
-            lines.extend(['  }', '}'])
+            lines.append('  }')
+            responses(implementation)
+            lines.append('}')
         return '\n'.join(lines).rstrip() + '\n'
 
     declarations('input', doc['inputs'], 0)
@@ -301,7 +317,9 @@ def print_document(doc, infix=False):
                 assignments(f'bind {name}', mapping, 4)
             for name, value in implementation['binding']['observations'].items():
                 lines.append(f'    observation {name} = {expression(value, 4, infix)};')
-            lines.extend(['  }', '}'])
+            lines.append('  }')
+            responses(implementation)
+            lines.append('}')
         return '\n'.join(lines).rstrip() + '\n'
 
     field('reset_input', doc['reset_input'])
