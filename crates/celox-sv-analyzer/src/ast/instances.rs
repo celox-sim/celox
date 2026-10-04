@@ -7,6 +7,7 @@ pub(super) fn instances_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    interfaces: &ModuleInterfaces,
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
     let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
@@ -47,6 +48,7 @@ pub(super) fn instances_from_module_node(
             syntax_tree,
             &item.env,
             &dimensions,
+            interfaces,
             &mut instances,
         )?;
         for instance in &mut instances[start..] {
@@ -73,6 +75,7 @@ fn instances_from_module_or_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    interfaces: &ModuleInterfaces,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::Module(module) = item {
@@ -82,6 +85,7 @@ fn instances_from_module_or_generate_item(
             syntax_tree,
             const_env,
             packed_dimensions,
+            interfaces,
             instances,
         )?;
     }
@@ -94,6 +98,7 @@ fn instances_from_module_instantiation(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
+    interfaces: &ModuleInterfaces,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let module_name = identifier_text(
@@ -103,8 +108,12 @@ fn instances_from_module_instantiation(
     .ok_or_else(|| {
         AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
     })?;
-    let mut parameter_overrides =
-        parameter_overrides_from_value_assignment(instantiation.nodes.1.as_ref(), syntax_tree)?;
+    let interface = interfaces.get(&module_name);
+    let mut parameter_overrides = parameter_overrides_from_value_assignment(
+        instantiation.nodes.1.as_ref(),
+        syntax_tree,
+        interface,
+    )?;
     for override_ in &mut parameter_overrides {
         if let Some(value) = override_.value.take() {
             let value = substitute_typed_parameter_literals(
@@ -139,8 +148,12 @@ fn instances_from_module_instantiation(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported instance identifier".to_string()))?;
-        let mut port_connections =
-            port_connections_from_hierarchical_instance(instance, syntax_tree, packed_dimensions)?;
+        let mut port_connections = port_connections_from_hierarchical_instance(
+            instance,
+            syntax_tree,
+            packed_dimensions,
+            interface,
+        )?;
         for connection in &mut port_connections {
             connection.actual_expr = connection.actual_expr.take().map(|expr| {
                 substitute_expr_constants_with_parameter_literals(
@@ -170,6 +183,7 @@ fn instances_from_module_instantiation(
 fn parameter_overrides_from_value_assignment(
     assignment: Option<&sv_parser::ParameterValueAssignment>,
     syntax_tree: &SyntaxTree,
+    interface: Option<&ModuleInterface>,
 ) -> Result<Vec<ParameterOverride>, AnalyzerError> {
     let Some(assignment) = assignment else {
         return Ok(Vec::new());
@@ -177,10 +191,29 @@ fn parameter_overrides_from_value_assignment(
     let Some(assignments) = assignment.nodes.1.nodes.1.as_ref() else {
         return Ok(Vec::new());
     };
-    let sv_parser::ListOfParameterAssignments::Named(assignments) = assignments else {
-        return Err(AnalyzerError::Unsupported(
-            "ordered parameter assignment".to_string(),
-        ));
+    let assignments = match assignments {
+        sv_parser::ListOfParameterAssignments::Named(assignments) => assignments,
+        sv_parser::ListOfParameterAssignments::Ordered(assignments) => {
+            // Positional values bind to the parameters of the instantiated
+            // module's `#(...)` list, in order.
+            let parameters = interface
+                .map(|interface| interface.parameters.as_slice())
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("ordered parameter assignment".to_string())
+                })?;
+            let mut overrides = Vec::new();
+            for (position, assignment) in assignments.nodes.0.contents().into_iter().enumerate() {
+                let name = parameters.get(position).ok_or_else(|| {
+                    AnalyzerError::Unsupported("ordered parameter assignment".to_string())
+                })?;
+                let value = const_expr_from_param_expression(&assignment.nodes.0, syntax_tree)
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported("parameter override expression".to_string())
+                    })?;
+                overrides.push(ParameterOverride::new(name.clone(), Some(value)));
+            }
+            return Ok(overrides);
+        }
     };
     let mut overrides = Vec::new();
     let mut names = HashSet::default();
@@ -216,24 +249,49 @@ fn port_connections_from_hierarchical_instance(
     instance: &sv_parser::HierarchicalInstance,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
+    interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
     let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
         return Ok(Vec::new());
     };
     let sv_parser::ListOfPortConnections::Named(connections) = connections else {
-        if let sv_parser::ListOfPortConnections::Ordered(connections) = connections
-            && connections
-                .nodes
-                .0
-                .contents()
-                .iter()
-                .all(|connection| connection.nodes.1.is_none())
+        let sv_parser::ListOfPortConnections::Ordered(connections) = connections else {
+            return Err(AnalyzerError::Unsupported(
+                "ordered port connection".to_string(),
+            ));
+        };
+        let connections = connections.nodes.0.contents();
+        if connections
+            .iter()
+            .all(|connection| connection.nodes.1.is_none())
         {
             return Ok(Vec::new());
         }
-        return Err(AnalyzerError::Unsupported(
-            "ordered port connection".to_string(),
-        ));
+        // Positional connections bind to the ports of the instantiated module,
+        // in declaration order.
+        let ports = interface
+            .map(|interface| interface.ports.as_slice())
+            .ok_or_else(|| AnalyzerError::Unsupported("ordered port connection".to_string()))?;
+        let mut lowered = Vec::new();
+        for (position, connection) in connections.into_iter().enumerate() {
+            let formal = ports
+                .get(position)
+                .ok_or_else(|| AnalyzerError::Unsupported("ordered port connection".to_string()))?;
+            let Some(expr) = connection.nodes.1.as_ref() else {
+                continue;
+            };
+            let actual_expr = expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("ordered port connection expression".to_string())
+                })?;
+            let actual = expr_ident_name(&actual_expr).unwrap_or_else(|| formal.clone());
+            lowered.push(PortConnection::new(
+                formal.clone(),
+                actual,
+                Some(actual_expr),
+            ));
+        }
+        return Ok(lowered);
     };
     let mut lowered = Vec::new();
     for connection in connections.nodes.0.contents() {

@@ -166,6 +166,64 @@ sv_backends! {
         }
     }
 
+    fn positional_ports_and_parameters_bind_in_declaration_order(sim) {
+        @setup {
+            let source = r#"
+                module Shift #(parameter W = 4, parameter S = 1)(
+                    input logic [W-1:0] a, input logic en, output logic [W-1:0] y, output logic z);
+                    assign y = en ? a << S : a;
+                    assign z = ^a;
+                endmodule
+                module Top(input logic [7:0] a, input logic en, output logic [7:0] y,
+                           output logic z);
+                    Shift #(8, 2) u(a, en, y, z);
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("positional.sv"))], "Top");
+        let (a, en) = (sim.signal("a"), sim.signal("en"));
+        for (value, enable) in [(3u8, 1u8), (64, 1), (0xa5, 0), (0xff, 1)] {
+            sim.modify(|io| { io.set(a, value); io.set(en, enable); }).unwrap();
+            let expected = if enable != 0 { value << 2 } else { value };
+            assert_eq!(sim.get(sim.signal("y")), expected.into(), "a={value} en={enable}");
+            assert_eq!(
+                sim.get(sim.signal("z")),
+                u8::try_from(value.count_ones() & 1).unwrap().into()
+            );
+        }
+    }
+
+    fn exponentiation_works_in_constant_expressions(sim) {
+        @setup {
+            let source = r#"
+                module Pass #(parameter W = 1)(input logic [W-1:0] a, output logic [W-1:0] y);
+                    assign y = a;
+                endmodule
+                module Top #(parameter N = 3)(input logic [2**N-1:0] a, output logic [7:0] y,
+                           output logic [3:0] lanes, output logic eq);
+                    localparam int D = 2**4 + 3**2;
+                    Pass #(.W(2**3)) u(.a(a), .y(y));
+                    for (genvar i = 0; i < 2**2; i++) begin : g
+                        assign lanes[i] = ~a[i];
+                    end
+                    if (2**2 == 4) begin : g4
+                        assign eq = (a == D);
+                    end else begin : other
+                        assign eq = 1'b0;
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("pow.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u8, 5, 25, 200] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+            assert_eq!(sim.get(sim.signal("lanes")), (!value & 0xf).into());
+            assert_eq!(sim.get(sim.signal("eq")), u8::from(value == 25).into());
+        }
+    }
+
     fn block_locals_and_dependent_assignments_accumulate(sim) {
         @setup {
             let source = r#"

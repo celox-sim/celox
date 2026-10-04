@@ -126,6 +126,79 @@ pub(super) fn ports_from_module_node(
     Ok(ports)
 }
 
+/// The positional interface of a module: its ports in declaration order and
+/// the overridable (non-local, non-type) parameters of its `#(...)` list.
+pub(super) fn module_interface_from_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<ModuleInterface, AnalyzerError> {
+    let mut ports = Vec::new();
+    for child in node.clone() {
+        match child {
+            RefNode::AnsiPortDeclarationNet(port) => {
+                ports.push(port_name(
+                    RefNode::PortIdentifier(&port.nodes.1),
+                    syntax_tree,
+                )?);
+            }
+            RefNode::AnsiPortDeclarationVariable(port) => {
+                ports.push(port_name(
+                    RefNode::PortIdentifier(&port.nodes.1),
+                    syntax_tree,
+                )?);
+            }
+            _ => {}
+        }
+    }
+    let mut parameters = Vec::new();
+    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node) {
+        let push_declaration = |declaration: &sv_parser::ParameterPortDeclaration,
+                                parameters: &mut Vec<String>| {
+            if matches!(
+                declaration,
+                sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_)
+                    | sv_parser::ParameterPortDeclaration::TypeList(_)
+            ) {
+                return;
+            }
+            for child in RefNode::ParameterPortDeclaration(declaration) {
+                if let RefNode::ParamAssignment(assignment) = child
+                    && let Some(name) = identifier_text(
+                        RefNode::ParameterIdentifier(&assignment.nodes.0),
+                        syntax_tree,
+                    )
+                {
+                    parameters.push(name);
+                }
+            }
+        };
+        match list {
+            sv_parser::ParameterPortList::Assignment(list) => {
+                for child in RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0) {
+                    if let RefNode::ParamAssignment(assignment) = child
+                        && let Some(name) = identifier_text(
+                            RefNode::ParameterIdentifier(&assignment.nodes.0),
+                            syntax_tree,
+                        )
+                    {
+                        parameters.push(name);
+                    }
+                }
+                for (_, declaration) in &list.nodes.1.nodes.1.1 {
+                    push_declaration(declaration, &mut parameters);
+                }
+            }
+            sv_parser::ParameterPortList::Declaration(list) => {
+                for declaration in list.nodes.1.nodes.1.contents() {
+                    push_declaration(declaration, &mut parameters);
+                }
+            }
+            sv_parser::ParameterPortList::Empty(_) => {}
+        }
+    }
+    Ok(ModuleInterface { ports, parameters })
+}
+
 pub(super) fn parameters_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,

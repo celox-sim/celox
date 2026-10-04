@@ -77,8 +77,9 @@ use constants::{
     substitute_process_constants_with_parameter_literals, unary_expr_from_symbol,
 };
 use declarations::{
-    identifier_locate, module_name_from_node, module_non_port_items, module_parameter_port_list,
-    module_scope_items, package_or_generate_declaration_from_module_item,
+    identifier_locate, module_interface_from_node, module_name_from_node, module_non_port_items,
+    module_parameter_port_list, module_scope_items,
+    package_or_generate_declaration_from_module_item,
     package_or_generate_declaration_from_non_port_item, parameter_name,
     parameters_from_module_node, ports_from_module_node, signals_from_data_declaration,
     signals_from_module_node, signals_from_module_or_generate_item, type_alias_from_ref_node,
@@ -143,6 +144,17 @@ use validation::{
     static_for_loop_iterations,
 };
 
+/// The positional interface of a module: its ports in declaration order and
+/// the parameters of its `#(...)` list that an instantiation may override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleInterface {
+    pub ports: Vec<String>,
+    pub parameters: Vec<String>,
+}
+
+/// The interface of each module, by module name.
+pub type ModuleInterfaces = HashMap<String, ModuleInterface>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     modules: Vec<Module>,
@@ -162,6 +174,7 @@ impl Source {
             .iter()
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
+        let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -171,6 +184,7 @@ impl Source {
                         syntax_tree,
                         module_name,
                         &parameter_overrides,
+                        &interfaces,
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(_) => {
@@ -198,14 +212,20 @@ impl Source {
             syntax_tree,
             module_name,
             &parameter_overrides,
+            &ModuleInterfaces::default(),
         )
     }
 
+    /// `extra_interfaces` describes modules declared in other sources; the
+    /// modules of `syntax_tree` are always known.
     pub fn from_syntax_module_with_parameter_expr_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
+        extra_interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
+        let mut interfaces = extra_interfaces.clone();
+        interfaces.extend(Self::module_interfaces_from_syntax(syntax_tree)?);
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -219,6 +239,7 @@ impl Source {
                         syntax_tree,
                         module_name,
                         parameter_overrides,
+                        &interfaces,
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(module) => {
@@ -255,6 +276,21 @@ impl Source {
         Ok(names)
     }
 
+    /// The positional interface of every ANSI module declared in `syntax_tree`.
+    pub fn module_interfaces_from_syntax(
+        syntax_tree: &SyntaxTree,
+    ) -> Result<ModuleInterfaces, AnalyzerError> {
+        let mut interfaces = ModuleInterfaces::default();
+        for node in syntax_tree {
+            if let RefNode::ModuleDeclarationAnsi(module) = node {
+                let node = RefNode::ModuleDeclarationAnsi(module);
+                let name = module_name_from_node(node.clone(), syntax_tree)?;
+                interfaces.insert(name, module_interface_from_node(node, syntax_tree)?);
+            }
+        }
+        Ok(interfaces)
+    }
+
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
@@ -278,6 +314,7 @@ impl Module {
         syntax_tree: &SyntaxTree,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
+        interfaces: &ModuleInterfaces,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
@@ -465,8 +502,13 @@ impl Module {
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
         packed_dimensions.extend(parameter_packed_dimensions(&parameters));
-        let mut instances =
-            instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
+        let mut instances = instances_from_module_node(
+            node.clone(),
+            syntax_tree,
+            &const_env,
+            &packed_dimensions,
+            interfaces,
+        )?;
         let mut instance_names = HashSet::default();
         if let Some(instance) = instances
             .iter()
@@ -1094,6 +1136,7 @@ pub enum BinaryOp {
     Mul,
     Div,
     Mod,
+    Pow,
     Shl,
     Shr,
     Sar,

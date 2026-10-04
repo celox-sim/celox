@@ -5113,27 +5113,6 @@ fn reads_bit_selects_of_scalar_array_elements() {
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
-            "ordered port connection",
-            r#"
-            module Child(input logic a); endmodule
-            module Top(input logic a); Child child(a); endmodule
-        "#,
-        ),
-        (
-            "ordered parameter assignment",
-            r#"
-            module Child #(parameter W = 1) (); endmodule
-            module Top(); Child #(8) child(); endmodule
-        "#,
-        ),
-        (
-            "parameter override expression",
-            r#"
-            module Child #(parameter W = 1) (output logic [W-1:0] y); assign y = '0; endmodule
-            module Top(output logic [7:0] y); Child #(.W(2 ** 3)) child(.y(y)); endmodule
-        "#,
-        ),
-        (
             "module instance array",
             r#"
             module Child(); endmodule
@@ -5197,23 +5176,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(input logic a); endmodule
             module Top(input logic [3:0] x);
-                Child child(.a(x ** 2));
-            endmodule
-        "#,
-        ),
-        (
-            "loop-generate initializer",
-            r#"
-            module Top(output wire y);
-                for (genvar i = 2 ** 0; i < 2; i++) assign y = 1'b1;
-            endmodule
-        "#,
-        ),
-        (
-            "loop-generate condition",
-            r#"
-            module Top(output wire y);
-                for (genvar i = 0; i < 2 ** 1; i++) assign y = 1'b1;
+                Child child(.a({<<{x}}));
             endmodule
         "#,
         ),
@@ -5239,7 +5202,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, e, output logic [3:0] q);
                 always_ff @(posedge clk) begin
-                    if (a ** b) q <= d;
+                    if ({<<{a}}) q <= d;
                     else q <= e;
                 end
             endmodule
@@ -5250,7 +5213,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, output logic [3:0] q);
                 always_ff @(posedge clk) begin
-                    case (a ** b)
+                    case ({<<{a}})
                         0: q <= d;
                         default: q <= '0;
                     endcase
@@ -5262,7 +5225,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "always_ff assignment lowering",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
-                always_ff @(posedge clk) q <= a ** b;
+                always_ff @(posedge clk) q <= {<<{a}};
             endmodule
         "#,
         ),
@@ -5454,7 +5417,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
-                    if (value ** 2) return 1'b1;
+                    if ({<<{value}}) return 1'b1;
                     else return 1'b0;
                 endfunction
                 assign y = choose(a);
@@ -5467,7 +5430,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic [3:0] a, output logic [3:0] y);
                 function automatic logic [3:0] square(input logic [3:0] value);
                     logic [3:0] tmp;
-                    tmp = value ** 2;
+                    tmp = {<<{value}};
                     return tmp;
                 endfunction
                 assign y = square(a);
@@ -5479,7 +5442,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
-                    case (value ** 2)
+                    case ({<<{value}})
                         1: return 1'b1;
                         default: return 1'b0;
                     endcase
@@ -5497,21 +5460,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     input logic [3:0] item
                 );
                     case (value)
-                        item ** 2: return 1'b1;
+                        {<<{item}}: return 1'b1;
                         default: return 1'b0;
                     endcase
                 endfunction
                 assign y = choose(a, b);
-            endmodule
-        "#,
-        ),
-        (
-            "conditional-generate condition",
-            r#"
-            module Top #(
-                parameter logic [3:0] P = 4'hf
-            ) (input logic clk, d, output logic q);
-                if (P ** 2) always_ff @(posedge clk) q <= d;
             endmodule
         "#,
         ),
@@ -5672,7 +5625,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic clk, a, b, output logic q);
                 always_ff @(posedge clk)
                     case (a)
-                        (b ** 2): q <= 1'b1;
+                        ({<<{b}}): q <= 1'b1;
                         default: q <= 1'b0;
                     endcase
             endmodule
@@ -5689,24 +5642,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return x;
                 endfunction
                 assign y = f();
-            endmodule
-        "#,
-        ),
-        (
-            "unknown conditional-generate condition",
-            r#"
-            module Top(output logic y);
-                if (2 ** 3) assign y = 1'b1;
-                else assign y = 1'b0;
-            endmodule
-        "#,
-        ),
-        (
-            "unresolved explicit packed width",
-            r#"
-            module Top #(parameter W = 2 ** 3)
-                      (input logic [W-1:0] a, output logic [W-1:0] y);
-                assign y = a;
             endmodule
         "#,
         ),
@@ -5761,7 +5696,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "always_comb assignment expression",
             r#"
             module Top(input logic [3:0] a, b, output logic [7:0] y);
-                always_comb y = a ** b;
+                always_comb y = {<<{a}};
             endmodule
         "#,
         ),
@@ -5848,14 +5783,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
             module Top(output logic y);
                 Child #(.NO_SUCH()) child(.y(y));
-            endmodule
-        "#,
-        ),
-        (
-            "unsupported packed range",
-            r#"
-            module Top(output logic [2 ** 3 - 1:0] y);
-                assign y = '1;
             endmodule
         "#,
         ),

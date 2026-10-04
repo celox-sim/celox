@@ -102,6 +102,9 @@ struct AnalyzedSvModule {
     source_code: String,
     source_path: PathBuf,
     implicit_nets_allowed: bool,
+    /// The positional interface of every module in all sources, used to bind
+    /// positional port and parameter connections.
+    interfaces: std::sync::Arc<sv::ModuleInterfaces>,
 }
 
 #[derive(Clone)]
@@ -153,6 +156,11 @@ fn analyze_sources(
     sources: &[(&str, &Path)],
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     let mut modules = HashMap::default();
+    let mut interfaces = sv::ModuleInterfaces::default();
+    for (code, path) in sources {
+        interfaces.extend(sv::source_module_interfaces(code, path)?);
+    }
+    let interfaces = std::sync::Arc::new(interfaces);
     for (code, path) in sources {
         let implicit_net_permissions = sv::source_module_implicit_net_permissions(code, path)?;
         for module_name in sv::source_module_names(code, path)? {
@@ -170,6 +178,7 @@ fn analyze_sources(
                     name: module_name,
                     source_code: (*code).to_string(),
                     source_path: (*path).to_path_buf(),
+                    interfaces: interfaces.clone(),
                 },
             );
         }
@@ -790,6 +799,7 @@ fn specialize_module(
         &module.source_path,
         &module.name,
         &overrides,
+        &module.interfaces,
     )?;
     let specialized = ir
         .modules()
@@ -2346,7 +2356,7 @@ fn lower_glue_parent_expr(
                 arena
                     .alloc(SLTNode::Binary(
                         left,
-                        binary_op_from_sv(*op, operator_signed),
+                        binary_op_from_sv(*op, operator_signed)?,
                         right,
                     ))
                     .ok()?,
@@ -4071,7 +4081,7 @@ fn lower_expr_with_context(
                 arena
                     .alloc(SLTNode::Binary(
                         left,
-                        binary_op_from_sv(*op, operator_signed),
+                        binary_op_from_sv(*op, operator_signed)?,
                         right,
                     ))
                     .ok()?,
@@ -6856,7 +6866,7 @@ fn lower_expr_to_sir_with_context(
             builder.emit(SIRInstruction::Binary(
                 reg,
                 left,
-                binary_op_from_sv(*op, operator_signed),
+                binary_op_from_sv(*op, operator_signed)?,
                 right,
             ));
             Some(reg)
@@ -7086,8 +7096,11 @@ fn unary_op_from_sv(op: sv::ir::UnaryOp) -> Option<UnaryOp> {
     }
 }
 
-fn binary_op_from_sv(op: sv::ir::BinaryOp, operands_signed: bool) -> BinaryOp {
-    match op {
+fn binary_op_from_sv(op: sv::ir::BinaryOp, operands_signed: bool) -> Option<BinaryOp> {
+    Some(match op {
+        // Exponentiation exists only in constant expressions; hardware for a
+        // run-time exponent is not lowered.
+        sv::ir::BinaryOp::Pow => return None,
         sv::ir::BinaryOp::Add => BinaryOp::Add,
         sv::ir::BinaryOp::Sub => BinaryOp::Sub,
         sv::ir::BinaryOp::Mul => BinaryOp::Mul,
@@ -7118,7 +7131,7 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp, operands_signed: bool) -> BinaryOp {
         sv::ir::BinaryOp::Gt => BinaryOp::GtU,
         sv::ir::BinaryOp::Ge if operands_signed => BinaryOp::GeS,
         sv::ir::BinaryOp::Ge => BinaryOp::GeU,
-    }
+    })
 }
 
 pub(crate) fn sv_top_not_found(name: String) -> ParserError {

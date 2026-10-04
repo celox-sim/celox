@@ -602,6 +602,7 @@ fn left_associate_const_binary(expr: ConstExpr) -> ConstExpr {
 
 fn binary_precedence(op: BinaryOp) -> u8 {
     match op {
+        BinaryOp::Pow => 12,
         BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 11,
         BinaryOp::Add | BinaryOp::Sub => 10,
         BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 9,
@@ -1174,6 +1175,7 @@ pub(super) fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -
         "*" => Some(BinaryOp::Mul),
         "/" => Some(BinaryOp::Div),
         "%" => Some(BinaryOp::Mod),
+        "**" => Some(BinaryOp::Pow),
         "<<" => Some(BinaryOp::Shl),
         "<<<" => Some(BinaryOp::Shl),
         ">>" => Some(BinaryOp::Shr),

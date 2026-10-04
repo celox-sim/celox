@@ -19,6 +19,7 @@ pub mod symbol;
 pub mod syntax;
 pub mod typecheck;
 
+pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
 
 /// Internal marker used to defer division-by-zero state handling until the
@@ -103,11 +104,15 @@ pub fn analyze_source_module_with_parameter_overrides(
 
 /// Analyze only one module from a source file while preserving the literal
 /// types of its parameter override expressions.
+///
+/// `interfaces` describes modules declared in other sources, so that
+/// positional port and parameter connections to them can be resolved.
 pub fn analyze_source_module_with_parameter_expr_overrides(
     code: &str,
     path: &Path,
     module_name: &str,
     parameter_overrides: &HashMap<String, ir::ConstExpr>,
+    interfaces: &ModuleInterfaces,
 ) -> Result<Ir, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;
     let parameter_overrides = parameter_overrides
@@ -118,8 +123,19 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
         &syntax_tree,
         module_name,
         &parameter_overrides,
+        &interfaces.clone().into_iter().collect(),
     )?;
     analyze::analyze_source(source)
+}
+
+/// The positional interface (ports and overridable parameters) of every
+/// module declared in a source, without analyzing the module bodies.
+pub fn source_module_interfaces(
+    code: &str,
+    path: &Path,
+) -> Result<ModuleInterfaces, AnalyzerError> {
+    let syntax_tree = syntax::parse_source(code, path)?;
+    ast::Source::module_interfaces_from_syntax(&syntax_tree)
 }
 
 #[cfg(test)]
