@@ -37,6 +37,7 @@ class ProtocolRules(unittest.TestCase):
         last = formal['trace'][-1]['state_after']
         self.assertEqual(last['axi_scope_bad']['value'], bool(independent['capacity_exceeded']))
         self.assertEqual(last['axi_environment_bad']['value'], bool(independent['environment_violations']))
+        self.assertEqual(last['axi_write_pair_pending']['value'], independent['write_pairing']['pending'])
         # Compare each rule, not just the overall pass/fail bit.
         for name, info in rules().items():
             if config['role'] == 'link' or info['owner'] == config['role']:
@@ -103,6 +104,53 @@ class ProtocolRules(unittest.TestCase):
         self.assertEqual(check_trace(pending, CONFIG)['status'], 'sampled_prefix_passed')
         # No completed pair: do not guess a missing address or strobe.
         self.compare([row(rst=True), w(15)], 'sampled_prefix_passed')
+
+    def test_stalled_offers_checked_before_ready_and_pending_is_explicit(self):
+        for dw in (32, 64):
+            config = {**CONFIG, 'data_width': dw}; offset = dw // 8 - 1
+            for mask in (0, 1 << offset, 1):
+                aw = row(awvalid=True, awaddr=offset)
+                w = row(wvalid=True, wstrb=mask)
+                both = row(awvalid=True, awaddr=offset, wvalid=True, wstrb=mask)
+                traces = [
+                    [row(rst=True), {**aw, 'awready': True}, w],
+                    [row(rst=True), {**w, 'wready': True}, aw],
+                    [row(rst=True), both, both],
+                ]
+                for frames in traces:
+                    expected = 'protocol_violation' if mask == 1 else 'sampled_prefix_passed'
+                    report = self.compare(frames, expected, ['write_address_strobe'] if mask == 1 else [], config)
+                    if mask == 1:
+                        self.assertEqual(report['guarantee_violations'][0]['edge'], 1 if frames[1] == both else 2)
+                    else:
+                        self.assertEqual(report['write_pairing']['status'], 'known_offers_checked')
+            for frames in ([row(rst=True), aw], [row(rst=True), w]):
+                report = self.compare(frames, 'sampled_prefix_passed', config=config)
+                self.assertEqual(report['write_pairing']['status'], 'pending')
+                self.assertTrue(report['write_pairing']['pending'])
+            illegal = [row(rst=True), row(awvalid=True, awaddr=offset, wvalid=True, wstrb=1)]
+            self.compare(illegal, 'environment_invalid', config={**config, 'role': 'subordinate'})
+            self.compare(illegal, 'protocol_violation', ['write_address_strobe'], {**config, 'role': 'manager'})
+
+    def test_live_offers_do_not_skip_accepted_queue_positions(self):
+        # Current AW is transaction 1, but live W still belongs to accepted AW0.
+        frames = [row(rst=True), row(awvalid=True, awready=True, awaddr=0),
+                  row(awvalid=True, awaddr=1, wvalid=True, wready=True, wstrb=1)]
+        report = self.compare(frames, 'sampled_prefix_passed')
+        self.assertEqual(report['write_pairing']['status'], 'pending')
+        report = self.compare(frames + [row(awvalid=True, awaddr=1, wvalid=True, wstrb=1)], 'protocol_violation', ['write_address_strobe'])
+        self.assertEqual(report['guarantee_violations'][0]['edge'], 3)
+        # Mirror the index boundary: accepted W0 is zero; live W1 is illegal.
+        frames = [row(rst=True), row(wvalid=True, wready=True, wstrb=0),
+                  row(awvalid=True, awready=True, awaddr=1, wvalid=True, wstrb=1)]
+        self.compare(frames, 'sampled_prefix_passed')
+        report = self.compare(frames + [row(awvalid=True, awaddr=1, wvalid=True, wstrb=1)], 'protocol_violation', ['write_address_strobe'])
+        self.assertEqual(report['guarantee_violations'][0]['edge'], 3)
+        # READY may remain low forever; a stable legal known offer has no deadline.
+        stable = row(awvalid=True, awaddr=1, wvalid=True, wstrb=8)
+        self.compare([row(rst=True)] + [stable] * 20, 'sampled_prefix_passed')
+        # Changing the presumed pending transaction is independently a stability fault.
+        self.compare([row(rst=True), stable, {**stable, 'awaddr': 0}], 'protocol_violation', ['aw_payload_stable'])
 
     def test_every_channel_valid_and_payload_stability(self):
         fields = {'aw': ('awaddr', 'awprot'), 'w': ('wdata', 'wstrb'), 'b': ('bresp',), 'ar': ('araddr', 'arprot'), 'r': ('rdata', 'rresp')}

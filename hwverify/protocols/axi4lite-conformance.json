@@ -124,17 +124,22 @@
     {
       "id": "address_strobe_consistency",
       "sections": [
-        "A3.4.4 (A3-56)",
+        "A3.2.2",
+        "A3.4.4 (A3-54, A3-56)",
         "B1.1.3"
       ],
       "applicability": "manager writes, full bus width, including W-before-AW",
       "enforcement": "sampled",
-      "evidence_or_gap": "Accepted AW/W streams pair oldest-to-oldest through independent bounded queues, including W-first and same-edge handshakes. Manager-owned write_address_strobe rejects active lanes below AWADDR modulo bus bytes; zero and sparse masks are legal. Pending unmatched offers and subordinate write effects are not established.",
+      "evidence_or_gap": "Earliest known corresponding AW/W payloads: oldest accepted queue head or current VALID offer when empty. Checks before READY, including both stalled, accepted AW plus stalled W and accepted W plus stalled AW; handshakes alone advance positions. Missing counterparts report pending, not validated; no fairness, eventual acceptance or subordinate write-effect claim.",
       "tests": [
         "test_address_strobe_offsets_zero_sparse_and_roles",
         "test_ordered_pairing_w_first_capacity_shift_and_reset",
         "manager_illegal_strobe_32",
-        "manager_illegal_strobe_64"
+        "manager_illegal_strobe_64",
+        "test_stalled_offers_checked_before_ready_and_pending_is_explicit",
+        "test_live_offers_do_not_skip_accepted_queue_positions",
+        "manager_illegal_strobe_32-stalled",
+        "manager_illegal_strobe_64-stalled"
       ]
     },
     {

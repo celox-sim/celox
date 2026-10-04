@@ -694,15 +694,33 @@ remain recorded despite later counterpart violations. Native guarantee replay
 stops at its first failure; inspect a separate objective or the complete concrete
 trace oracle when examining later events.
 
-### Accepted write address/strobe consistency
+### Offered write address/strobe consistency
 
-`write_address_strobe` checks Arm IHI 0022H A3.4.4 and B1.1.3 for the explicit
-32/64-bit full-width Lite profile. Independent bounded queues retain accepted AW
-address offsets and W strobes. The oldest entries pair when both exist, including
-W-first and same-edge handshakes; pairing does not wait for B. A mask is legal
-when no asserted lane is below `AWADDR modulo (data_width / 8)`. Aligned addresses
-permit any mask, and all-zero or sparse masks are legal. An unmatched pending
-channel does not establish a complete transaction and is not guessed.
+`write_address_strobe` checks Arm IHI 0022H A3.2.2, A3.4.4 and B1.1.3 for the
+explicit 32/64-bit full-width Lite profile. A3.2.2 requires valid payload when
+VALID is asserted; A3.4.4 permits arbitrary strobes only when WVALID is low and
+requires consistency with the unaligned address. Therefore a known corresponding
+AW/W offer is checked before READY, not only at acceptance.
+
+Independent bounded queues retain accepted AW address offsets and W strobes.
+Each channel's oldest unmatched accepted entry precedes its current VALID offer.
+The checker compares those oldest known counterparts; if a queue is empty, its
+current VALID payload supplies that side. This covers accepted AW with stalled
+W, accepted W with stalled AW, and both stalled first offers. A live offer cannot
+skip earlier accepted entries. Queue advancement still requires handshakes, and
+existing VALID/payload stability checks protect stalled offer identity. No READY
+fairness or completion deadline is assumed.
+
+A mask is legal when no asserted lane is below `AWADDR modulo (data_width / 8)`.
+Aligned addresses permit any mask; zero and sparse masks are legal. The concrete
+oracle and source result expose `write_pairing`: unmatched known positions are
+`pending`, not validated; `known_offers_checked` covers only the sampled known
+counterparts, not future offers or eventual acceptance. Invalid environment or
+capacity makes correlation `unknown_outside_legal_scope`; detected strobe faults
+remain `violated`. Search without a concrete trace reports correlation as
+`not_established_by_bounded_search`. Native state `axi_write_pair_pending` exposes
+the raw last-sample missing-counterpart indicator, meaningful only on a legal,
+in-scope prefix. An idle trace says `no_pending_offers`, not transaction coverage.
 
 This is manager-owned safety: manager/link guarantees check it, while subordinate
 checks treat it as a counterpart requirement. The queues reset with the monitor;
@@ -851,8 +869,8 @@ check: it must not be mistaken for proof of temporal offer causality.
 
 The [machine-readable AXI conformance inventory](../protocols/axi4lite-conformance.json)
 records exact sections, profiles, tests and outstanding gaps. It is explicitly
-partial, pending an independent completeness audit. Address/WSTRB consistency is checked for accepted pairs, including W-first
-traffic; response correspondence still needs independent transaction-origin
+partial, pending an independent completeness audit. Address/WSTRB consistency is checked for the earliest known corresponding
+offers, including stalled and W-first traffic; response correspondence still needs independent transaction-origin
 evidence, not response counters alone.
 Reset release, optional/default signal profiles and memory-versus-peripheral
 requirements remain visible gaps. No full AXI compliance claim is made.
