@@ -4,8 +4,9 @@ fn run() -> Result<(), String> {
     if args.len() < 2 || args.len() > 3 || args.get(2).is_some_and(|s| s != "--inline") {
         return Err("usage: lydite-celox-lift COMPILED.json BINDINGS.json [--inline]".into());
     }
-    let code = serde_json::from_slice(&fs::read(&args[0]).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let code: lydite_celox::compiled::Compiled =
+        serde_json::from_slice(&fs::read(&args[0]).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("invalid compile-only SIR export: {e}"))?;
     let config = serde_json::from_slice(&fs::read(&args[1]).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let result = lydite_celox::lift(&code, &config)?.to_json(args.len() == 3)?;

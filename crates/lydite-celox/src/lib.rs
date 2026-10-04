@@ -3,10 +3,15 @@
 //! No solver, simulator, sample values or uniqueness queries occur here. Branches
 //! are joined with guards, every selected state/input is arbitrary, and sparse
 //! NBA regions retain a write mask. Unsupported operations fail closed.
+use celox_design::{InitialStateData, RegionedStateAddr, StateAddr, VariableMetadata};
+use celox_sir::{BinaryOp, BlockId, RegisterId, SIRInstruction, SIROffset, SIRTerminator, UnaryOp};
+use compiled::{Compiled, Unit};
 use lydite_ir::{self as ir, Env, Lower, Res, Sort, Term};
+use num_bigint::BigUint;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod compiled;
 mod guard;
 
 type Addr = (u64, u64, u64);
@@ -15,22 +20,14 @@ fn num(v: &Value) -> Res<usize> {
         .and_then(|x| usize::try_from(x).ok())
         .ok_or("expected nonnegative integer".into())
 }
-fn arr(v: &Value) -> Res<&Vec<Value>> {
-    v.as_array().ok_or("expected array".into())
-}
 fn obj(v: &Value) -> Res<&Map<String, Value>> {
     v.as_object().ok_or("expected object".into())
 }
-fn addr(v: &Value) -> Res<Addr> {
-    Ok((
-        num(&v["instance_id"])? as u64,
-        num(&v["var_id"])? as u64,
-        if let Some(region) = v.get("region") {
-            num(region)? as u64
-        } else {
-            0
-        },
-    ))
+fn addr(a: &RegionedStateAddr) -> Addr {
+    (a.instance_id.0 as u64, a.var_id.0 as u64, a.region as u64)
+}
+fn state_addr(a: &StateAddr) -> Addr {
+    (a.instance_id.0 as u64, a.var_id.0 as u64, 0)
 }
 fn base(a: Addr) -> Addr {
     (a.0, a.1, 0)
@@ -221,20 +218,8 @@ fn cat(a: Term, c: Term) -> Res<Term> {
     }
     Ok(ir::node(Sort::Bv(w), "concat", vec![a, c]))
 }
-fn bytes(v: &Value) -> Res<u64> {
-    let a = arr(v)?;
-    if a.len() > 8 && a[8..].iter().any(|v| v != 0) {
-        return Err("constant exceeds 64 bits".into());
-    }
-    let mut n = 0;
-    for (i, v) in a.iter().take(8).enumerate() {
-        let x = num(v)?;
-        if x > 255 {
-            return Err("invalid byte".into());
-        }
-        n |= (x as u64) << (i * 8)
-    }
-    Ok(n)
+fn bytes(v: &BigUint) -> Res<u64> {
+    u64::try_from(v).map_err(|_| "constant exceeds 64 bits".into())
 }
 
 // Preserve whole-word writes as guarded updates. Partial writes invalidate this
@@ -529,14 +514,12 @@ fn word_to_term(t: Term, s: &Sort) -> Res<Term> {
 }
 // Celox VariableInfo/StateMetadata.width is the TOTAL flattened bit width,
 // including unpacked array dimensions. Divide by their product for a lane.
-fn storage_shape(metadata: &Value) -> Res<(u32, usize)> {
-    let total = num(&metadata["width"])?;
-    let count = arr(&metadata["array_dims"])?
-        .iter()
-        .try_fold(1usize, |a, b| {
-            a.checked_mul(num(b)?)
-                .ok_or_else(|| "storage dimension overflow".to_string())
-        })?;
+fn storage_shape(metadata: &VariableMetadata) -> Res<(u32, usize)> {
+    let total = metadata.width;
+    let count = metadata.array_dims.iter().try_fold(1usize, |a, b| {
+        a.checked_mul(*b)
+            .ok_or_else(|| "storage dimension overflow".to_string())
+    })?;
     if total == 0 || total > 65536 || count == 0 || !total.is_multiple_of(count) {
         return Err("invalid flattened storage shape or exceeds 65536-bit budget".into());
     }
@@ -546,28 +529,20 @@ fn storage_shape(metadata: &Value) -> Res<(u32, usize)> {
     }
     Ok((lane as u32, count))
 }
-fn signal(code: &Value, name: &str) -> Res<(Addr, u32, usize)> {
-    let found = arr(&code["signals"])?
+fn signal(code: &Compiled, name: &str) -> Res<(Addr, u32, usize)> {
+    let found = code
+        .signals
         .iter()
-        .filter(|s| {
-            s["instances"] == json!([])
-                && s["path"].as_array().is_some_and(|p| {
-                    p.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(".")
-                        == name
-                })
-        })
+        .filter(|s| s.instances.is_empty() && s.path.join(".") == name)
         .collect::<Vec<_>>();
     if found.len() != 1 {
         return Err(format!("missing/ambiguous top-level signal {name}"));
     }
     let s = found[0];
-    let (w, n) = storage_shape(&s["metadata"])?;
-    Ok((addr(&s["address"])?, w, n))
+    let (w, n) = storage_shape(&s.metadata)?;
+    Ok((state_addr(&s.address), w, n))
 }
-fn bindings(code: &Value, values: &Value) -> Res<Vec<Binding>> {
+fn bindings(code: &Compiled, values: &Value) -> Res<Vec<Binding>> {
     obj(values)?
         .iter()
         .map(|(key, v)| {
@@ -600,31 +575,28 @@ fn bindings(code: &Value, values: &Value) -> Res<Vec<Binding>> {
 /// to `{name,type,expr?}`. Input-only `expr` is a typed canonical expression
 /// over i. bindings; `overrides` replaces canonical input names, useful for reset lifting.
 /// `outputs` map observable names to `{signal,type,element?}`.
-pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
-    if code["status"] != "compiled_only_not_verified" {
+pub fn lift(code: &Compiled, config: &Value) -> Res<Transition> {
+    if code.status != "compiled_only_not_verified" {
         return Err("expected compile-only SIR export".into());
     }
-    if code["four_state"] != false {
+    if code.four_state {
         return Err(
             "symbolic lifting requires an explicit two-state frontend export (four_state=false)"
                 .into(),
         );
     }
-    for initial in arr(&code["design"]["initial_state"])? {
-        let data = obj(&initial["data"])?;
-        if data.len() != 1 || !data.contains_key("Writes") {
+    for initial in &code.design.initial_state {
+        let InitialStateData::Writes(runs) = &initial.data else {
             return Err("unsupported initial-state format".into());
-        }
-        for run in arr(&data["Writes"])? {
-            if arr(&run["mask_bytes"])?
-                .iter()
-                .any(|v| v.as_u64() != Some(0))
-            {
-                return Err("unknown/four-state initialization is unsupported".into());
-            }
+        };
+        if runs
+            .iter()
+            .any(|run| run.mask_bytes.iter().any(|v| *v != 0))
+        {
+            return Err("unknown/four-state initialization is unsupported".into());
         }
     }
-    if !arr(&code["design"]["cascaded_events"])?.is_empty() {
+    if !code.design.cascaded_events.is_empty() {
         return Err("cascaded events need an explicit multi-event model".into());
     }
     let inputs = bindings(code, &config["inputs"])?;
@@ -663,10 +635,9 @@ pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
         state: BTreeMap::new(),
         regs: BTreeMap::new(),
     };
-    for o in arr(&code["design"]["state_objects"])? {
-        let a = addr(&o["address"])?;
-        let m = &o["metadata"];
-        let (w, n) = storage_shape(m)?;
+    for o in &code.design.state_objects {
+        let a = state_addr(&o.address);
+        let (w, n) = storage_shape(&o.metadata)?;
         if frame.state.insert(a, Storage::new(w, n, false)).is_some() {
             return Err("duplicate storage address".into());
         }
@@ -702,7 +673,7 @@ pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
         frame,
         stats: Statistics::default(),
     };
-    l.phase(&code["sir"]["eval_comb"])?;
+    l.phase(&code.sir.eval_comb)?;
     let mut outputs = Env::new();
     for (name, v) in obj(&config["outputs"])? {
         let (a, w, n) = signal(code, v["signal"].as_str().ok_or("output signal")?)?;
@@ -724,11 +695,11 @@ pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
     let event = config["event"].as_str().ok_or("event must name a signal")?;
     let (mut event, _, _) = signal(code, event)?;
     let mut aliases = BTreeMap::new();
-    for pair in arr(&code["design"]["event_aliases"])? {
-        if arr(pair)?.len() != 2 {
-            return Err("invalid event alias".into());
-        }
-        if aliases.insert(addr(&pair[0])?, addr(&pair[1])?).is_some() {
+    for (alias, target) in &code.design.event_aliases {
+        if aliases
+            .insert(state_addr(alias), state_addr(target))
+            .is_some()
+        {
             return Err("duplicate event alias".into());
         }
     }
@@ -739,16 +710,16 @@ pub fn lift(code: &Value, config: &Value) -> Res<Transition> {
         }
         event = *target;
     }
-    let groups = arr(&code["sir"]["eval_apply_ffs"])?;
-    let selected = groups
+    let selected = code
+        .sir
+        .eval_apply_ffs
         .iter()
-        .filter(|g| addr(&g["event"]).ok() == Some(event))
+        .filter(|g| state_addr(&g.event) == event)
         .collect::<Vec<_>>();
     if selected.len() != 1 {
         return Err("selected event must have exactly one SIR group".into());
     }
-    let units = selected[0];
-    l.phase(&units["units"])?;
+    l.phase(&selected[0].units)?;
     let mut next = Env::new();
     for x in &states {
         let st = &l.frame.state[&x.address];
@@ -785,85 +756,78 @@ impl Lifter {
         }
         Ok(())
     }
-    fn phase(&mut self, units: &Value) -> Res<()> {
-        for unit in arr(units)? {
+    fn phase(&mut self, units: &[Unit]) -> Res<()> {
+        for unit in units {
             self.execute(unit)?
         }
         Ok(())
     }
-    fn access_guard(offset: &Value, regs: &BTreeMap<usize, Term>, at: usize) -> Res<Term> {
-        if let Some(x) = offset.get("Static") {
-            return Ok(b(num(x)? == at));
-        }
-        if let Some(x) = offset.get("PackedElements") {
-            return Ok(b(num(&x["bit_offset"])? == at));
-        }
-        let reg = |v: &Value| -> Res<Term> {
-            regs.get(&num(v)?)
+    fn access_guard(offset: &SIROffset, regs: &BTreeMap<usize, Term>, at: usize) -> Res<Term> {
+        let reg = |r: &RegisterId| -> Res<Term> {
+            regs.get(&r.0)
                 .cloned()
                 .ok_or("undefined offset register".into())
         };
-        if let Some(x) = offset.get("Dynamic") {
-            let x = reg(x)?;
-            return Ok(if width(&x) < 64 && (at as u64) >= 1u64 << width(&x) {
-                b(false)
-            } else {
-                eq(x.clone(), bv(width(&x), at as u64))
-            });
-        }
-        if let Some(x) = offset.get("Element") {
-            let ew = num(&x["element_width"])?;
-            if ew == 0 {
-                return Err("zero element width".into());
+        match offset {
+            SIROffset::Static(x) | SIROffset::PackedElements { bit_offset: x, .. } => {
+                Ok(b(*x == at))
             }
-            let off = num(&x["bit_offset"])?;
-            if at < off {
-                return Ok(b(false));
+            SIROffset::Dynamic(x) => {
+                let x = reg(x)?;
+                Ok(if width(&x) < 64 && (at as u64) >= 1u64 << width(&x) {
+                    b(false)
+                } else {
+                    eq(x.clone(), bv(width(&x), at as u64))
+                })
             }
-            let remainder = at - off;
-            let index = reg(&x["index"])?;
-            if x["dynamic_bit_offset"].is_null() {
-                if !remainder.is_multiple_of(ew) {
+            SIROffset::Element {
+                index,
+                element_width: ew,
+                bit_offset: off,
+                dynamic_bit_offset,
+            } => {
+                let (ew, off) = (*ew, *off);
+                if ew == 0 {
+                    return Err("zero element width".into());
+                }
+                if at < off {
                     return Ok(b(false));
                 }
-                let candidate = remainder / ew;
-                return Ok(
-                    if width(&index) < 64 && (candidate as u64) >= 1u64 << width(&index) {
-                        b(false)
-                    } else {
-                        eq(index.clone(), bv(width(&index), candidate as u64))
-                    },
+                let remainder = at - off;
+                let index = reg(index)?;
+                let Some(dynamic) = dynamic_bit_offset else {
+                    if !remainder.is_multiple_of(ew) {
+                        return Ok(b(false));
+                    }
+                    let candidate = remainder / ew;
+                    return Ok(
+                        if width(&index) < 64 && (candidate as u64) >= 1u64 << width(&index) {
+                            b(false)
+                        } else {
+                            eq(index.clone(), bv(width(&index), candidate as u64))
+                        },
+                    );
+                };
+                let dynamic = reg(dynamic)?;
+                // Bounds ensure the 64-bit arithmetic cannot wrap into a valid address.
+                let ix = resize(index, 64, false);
+                let dy = resize(dynamic, 64, false);
+                let bounded = and(
+                    compare("bvule", ix.clone(), bv(64, (remainder / ew) as u64)),
+                    compare("bvule", dy.clone(), bv(64, remainder as u64)),
                 );
+                let sum = op("bvadd", 64, op("bvmul", 64, ix, bv(64, ew as u64)), dy);
+                Ok(and(bounded, eq(sum, bv(64, remainder as u64))))
             }
-            let dynamic = reg(&x["dynamic_bit_offset"])?;
-            // Bounds ensure the 64-bit arithmetic cannot wrap into a valid address.
-            let ix = resize(index, 64, false);
-            let dy = resize(dynamic, 64, false);
-            let bounded = and(
-                compare("bvule", ix.clone(), bv(64, (remainder / ew) as u64)),
-                compare("bvule", dy.clone(), bv(64, remainder as u64)),
-            );
-            let sum = op("bvadd", 64, op("bvmul", 64, ix, bv(64, ew as u64)), dy);
-            return Ok(and(bounded, eq(sum, bv(64, remainder as u64))));
-        }
-        Err("unsupported SIR storage offset".into())
-    }
-    fn static_offset(off: &Value) -> Res<Option<usize>> {
-        if let Some(x) = off.get("Static") {
-            Ok(Some(num(x)?))
-        } else if let Some(x) = off.get("PackedElements") {
-            Ok(Some(num(&x["bit_offset"])?))
-        } else {
-            Ok(None)
         }
     }
-    fn load(&mut self, a: Addr, off: &Value, w: u32) -> Res<Term> {
+    fn load(&mut self, a: Addr, off: &SIROffset, w: u32) -> Res<Term> {
         if a.2 == 2 {
             return Err("sparse NBA region is write-only".into());
         }
         self.ensure(a)?;
         let st = &self.frame.state[&a];
-        if let Some(offset) = Self::static_offset(off)? {
+        if let Some(offset) = off.constant_bit_offset() {
             return st.read(offset, w);
         }
         self.stats.dynamic_accesses += 1;
@@ -877,9 +841,9 @@ impl Lifter {
         }
         Ok(value)
     }
-    fn store(&mut self, a: Addr, off: &Value, w: u32, value: Term) -> Res<()> {
+    fn store(&mut self, a: Addr, off: &SIROffset, w: u32, value: Term) -> Res<()> {
         self.ensure(a)?;
-        if let Some(offset) = Self::static_offset(off)? {
+        if let Some(offset) = off.constant_bit_offset() {
             return self
                 .frame
                 .state
@@ -905,7 +869,7 @@ impl Lifter {
         }
         Ok(())
     }
-    fn commit(&mut self, src: Addr, dst: Addr, off: &Value, w: usize) -> Res<()> {
+    fn commit(&mut self, src: Addr, dst: Addr, off: &SIROffset, w: usize) -> Res<()> {
         if w == 0 || w > 65536 {
             return Err("commit width outside 1..65536".into());
         }
@@ -918,7 +882,7 @@ impl Lifter {
             return Err("commit shape mismatch".into());
         }
         if src.2 == 2 {
-            if Self::static_offset(off)? != Some(0) || w != source.bits() {
+            if off.constant_bit_offset() != Some(0) || w != source.bits() {
                 return Err("partial sparse NBA commit is unsupported".into());
             }
             let target = self.frame.state.get_mut(&dst).unwrap();
@@ -946,7 +910,7 @@ impl Lifter {
                 .insert(src, Storage::new(source.lane, source.cells.len(), true));
             return Ok(());
         }
-        if let Some(offset) = Self::static_offset(off)? {
+        if let Some(offset) = off.constant_bit_offset() {
             if offset == 0 && w == source.bits() {
                 self.frame.state.insert(dst, source);
                 return Ok(());
@@ -971,53 +935,40 @@ impl Lifter {
         let value = self.load(src, off, w as u32)?;
         self.store(dst, off, w as u32, value)
     }
-    fn execute(&mut self, unit: &Value) -> Res<()> {
+    fn execute(&mut self, unit: &Unit) -> Res<()> {
         validate_unit(unit)?;
         self.stats.execution_units += 1;
         self.frame.regs.clear();
         self.frame.guard = b(true);
-        let blocks = obj(&unit["blocks"])?;
-        let types = obj(&unit["register_map"])?;
         let mut kinds = BTreeMap::new();
-        for (k, t) in types {
-            let type_object = obj(t)?;
-            if type_object.len() != 1 {
-                return Err("invalid register type tag".into());
-            }
-            let (knd, m) = type_object.iter().next().ok_or("empty register type")?;
-            if !matches!(knd.as_str(), "Bit" | "Logic") {
-                return Err("unknown register type".into());
-            }
-            let w = num(&m["width"])?;
+        for (k, t) in &unit.register_map {
+            let w = t.width();
             if !(1..=64).contains(&w) {
                 return Err(format!("SIR register width {w} outside 1..64"));
             }
-            kinds.insert(
-                k.parse::<usize>().map_err(|_| "invalid register id")?,
-                (w as u32, m["signed"].as_bool().unwrap_or(false)),
-            );
+            kinds.insert(k.0, (w as u32, t.is_signed()));
         }
-        for block in blocks.values() {
-            for inst in arr(&block["instructions"])? {
-                let (op, args) = obj(inst)?.iter().next().ok_or("empty instruction")?;
-                let aa = arr(args)?;
-                match op.as_str() {
-                    "Load" => self.ensure(addr(&aa[1])?)?,
-                    "Store" => self.ensure(addr(&aa[0])?)?,
-                    "Commit" => {
-                        self.ensure(addr(&aa[0])?)?;
-                        self.ensure(addr(&aa[1])?)?
+        for block in unit.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    SIRInstruction::Load(_, a, _, _) | SIRInstruction::Store(a, ..) => {
+                        self.ensure(addr(a))?
+                    }
+                    SIRInstruction::Commit(src, dst, ..) => {
+                        self.ensure(addr(src))?;
+                        self.ensure(addr(dst))?
                     }
                     _ => {}
                 }
             }
         }
-        let entry = num(&unit["entry_block_id"])?;
+        let get = |id: usize| unit.blocks.get(&BlockId(id)).ok_or("missing CFG target");
+        let entry = unit.entry_block_id.0;
         let mut marks = BTreeMap::new();
         let mut order = vec![];
         fn visit(
             id: usize,
-            blocks: &Map<String, Value>,
+            unit: &Unit,
             marks: &mut BTreeMap<usize, u8>,
             order: &mut Vec<usize>,
         ) -> Res<()> {
@@ -1029,15 +980,15 @@ impl Lifter {
                 _ => {}
             }
             marks.insert(id, 1);
-            let block = blocks.get(&id.to_string()).ok_or("missing CFG target")?;
-            for target in successors(&block["terminator"])? {
-                visit(target, blocks, marks, order)?
+            let block = unit.blocks.get(&BlockId(id)).ok_or("missing CFG target")?;
+            for target in successors(&block.terminator) {
+                visit(target, unit, marks, order)?
             }
             marks.insert(id, 2);
             order.push(id);
             Ok(())
         }
-        visit(entry, blocks, &mut marks, &mut order)?;
+        visit(entry, unit, &mut marks, &mut order)?;
         order.reverse();
         let mut incoming: BTreeMap<usize, Vec<Frame>> = BTreeMap::new();
         incoming.insert(entry, vec![self.frame.clone()]);
@@ -1050,146 +1001,116 @@ impl Lifter {
             if self.frame.guard == b(false) {
                 continue;
             }
-            let block = &blocks[&id.to_string()];
-            for instruction in arr(&block["instructions"])? {
+            let block = get(id)?;
+            for instruction in &block.instructions {
                 self.stats.instructions += 1;
-                let (o, a) = obj(instruction)?.iter().next().ok_or("empty instruction")?;
-                let args = arr(a)?;
-                let reg = |f: &Frame, v: &Value| -> Res<Term> {
+                let reg = |f: &Frame, r: &RegisterId| -> Res<Term> {
                     f.regs
-                        .get(&num(v)?)
+                        .get(&r.0)
                         .cloned()
-                        .ok_or_else(|| format!("undefined SIR register {v}"))
+                        .ok_or_else(|| format!("undefined SIR register {}", r.0))
                 };
-                let rwidth = |v: &Value| -> Res<u32> {
-                    Ok(kinds.get(&num(v)?).ok_or("untyped register")?.0)
+                let rwidth = |r: &RegisterId| -> Res<u32> {
+                    Ok(kinds.get(&r.0).ok_or("untyped register")?.0)
                 };
-                let result: Option<(usize, Term)> = match o.as_str() {
-                    "Imm" => {
-                        if bytes(&args[1]["mask"])? != 0 {
+                let result: Option<(usize, Term)> = match instruction {
+                    SIRInstruction::Imm(dst, value) => {
+                        if bytes(&value.mask)? != 0 {
                             return Err(
                                 "four-state immediate unsupported in symbolic two-state model"
                                     .into(),
                             );
                         }
-                        let w = rwidth(&args[0])?;
-                        let value = bytes(&args[1]["payload"])?;
+                        let w = rwidth(dst)?;
+                        let value = bytes(&value.payload)?;
                         if w < 64 && value >= 1u64 << w {
                             return Err("SIR immediate exceeds destination width".into());
                         }
-                        Some((num(&args[0])?, bv(w, value)))
+                        Some((dst.0, bv(w, value)))
                     }
-                    "Unary" => {
-                        let x = reg(&self.frame, &args[2])?;
-                        let signed = kinds[&num(&args[2])?].1;
+                    SIRInstruction::Unary(dst, name, src) => {
+                        let x = reg(&self.frame, src)?;
+                        let signed = kinds[&src.0].1;
+                        Some((dst.0, unary(*name, x, rwidth(dst)?, signed)?))
+                    }
+                    SIRInstruction::Binary(dst, lhs, name, rhs) => {
+                        let a = reg(&self.frame, lhs)?;
+                        let c = reg(&self.frame, rhs)?;
                         Some((
-                            num(&args[0])?,
-                            unary(
-                                args[1].as_str().ok_or("unary name")?,
-                                x,
-                                rwidth(&args[0])?,
-                                signed,
-                            )?,
+                            dst.0,
+                            binary(*name, a, c, rwidth(dst)?, kinds[&lhs.0].1, kinds[&rhs.0].1)?,
                         ))
                     }
-                    "Binary" => {
-                        let a = reg(&self.frame, &args[1])?;
-                        let c = reg(&self.frame, &args[3])?;
-                        Some((
-                            num(&args[0])?,
-                            binary(
-                                args[2].as_str().ok_or("binary name")?,
-                                a,
-                                c,
-                                rwidth(&args[0])?,
-                                kinds[&num(&args[1])?].1,
-                                kinds[&num(&args[3])?].1,
-                            )?,
-                        ))
-                    }
-                    "Load" => {
-                        let w = num(&args[3])?;
+                    SIRInstruction::Load(dst, a, off, w) => {
+                        let w = *w;
                         if !(1..=64).contains(&w) {
                             return Err("load width outside 1..64".into());
                         }
-                        if rwidth(&args[0])? != w as u32 {
+                        if rwidth(dst)? != w as u32 {
                             return Err("SIR load width mismatch".into());
                         }
-                        Some((
-                            num(&args[0])?,
-                            self.load(addr(&args[1])?, &args[2], w as u32)?,
-                        ))
+                        Some((dst.0, self.load(addr(a), off, w as u32)?))
                     }
-                    "Store" => {
-                        if args.len() != 6
-                            || !arr(&args[4])?.is_empty()
-                            || !arr(&args[5])?.is_empty()
-                        {
+                    SIRInstruction::Store(a, off, w, src, triggers, observers) => {
+                        if !triggers.is_empty() || !observers.is_empty() {
                             return Err("triggered/observed SIR store needs event semantics".into());
                         }
-                        let value = reg(&self.frame, &args[3])?;
-                        let w = num(&args[2])?;
+                        let value = reg(&self.frame, src)?;
+                        let w = *w;
                         if !(1..=64).contains(&w) {
                             return Err("store width outside 1..64".into());
                         }
                         if w as u32 > width(&value) {
                             return Err("SIR store wider than source".into());
                         }
-                        self.store(
-                            addr(&args[0])?,
-                            &args[1],
-                            w as u32,
-                            resize(value, w as u32, false),
-                        )?;
+                        self.store(addr(a), off, w as u32, resize(value, w as u32, false))?;
                         None
                     }
-                    "Commit" => {
-                        if args.len() != 5 || !arr(&args[4])?.is_empty() {
+                    SIRInstruction::Commit(src, dst, off, w, triggers) => {
+                        if !triggers.is_empty() {
                             return Err("triggered commit needs event semantics".into());
                         }
-                        self.commit(addr(&args[0])?, addr(&args[1])?, &args[2], num(&args[3])?)?;
+                        self.commit(addr(src), addr(dst), off, *w)?;
                         None
                     }
-                    "Slice" => {
-                        let x = reg(&self.frame, &args[1])?;
-                        let lo = u32::try_from(num(&args[2])?)
-                            .map_err(|_| "SIR slice offset overflow")?;
-                        let w = u32::try_from(num(&args[3])?)
-                            .map_err(|_| "SIR slice width overflow")?;
+                    SIRInstruction::Slice(dst, src, lo, w) => {
+                        let x = reg(&self.frame, src)?;
+                        let lo = u32::try_from(*lo).map_err(|_| "SIR slice offset overflow")?;
+                        let w = u32::try_from(*w).map_err(|_| "SIR slice width overflow")?;
                         if w == 0 || w > 64 || lo.checked_add(w).is_none_or(|n| n > width(&x)) {
                             return Err("invalid SIR slice".into());
                         }
-                        if rwidth(&args[0])? != w {
+                        if rwidth(dst)? != w {
                             return Err("SIR slice result width mismatch".into());
                         }
-                        Some((num(&args[0])?, extract(x, lo, w)))
+                        Some((dst.0, extract(x, lo, w)))
                     }
-                    "Concat" => {
-                        let mut parts = arr(&args[1])?.iter();
+                    SIRInstruction::Concat(dst, parts) => {
+                        let mut parts = parts.iter();
                         let mut x = reg(&self.frame, parts.next().ok_or("empty concat")?)?;
                         for part in parts {
                             x = cat(x, reg(&self.frame, part)?)?
                         }
-                        if rwidth(&args[0])? != width(&x) {
+                        if rwidth(dst)? != width(&x) {
                             return Err("SIR concat result width mismatch".into());
                         }
-                        Some((num(&args[0])?, x))
+                        Some((dst.0, x))
                     }
-                    "Mux" => {
-                        let w = rwidth(&args[0])?;
-                        if rwidth(&args[2])? != w || rwidth(&args[3])? != w {
+                    SIRInstruction::Mux(dst, cond, yes, no) => {
+                        let w = rwidth(dst)?;
+                        if rwidth(yes)? != w || rwidth(no)? != w {
                             return Err("SIR mux width mismatch".into());
                         }
                         Some((
-                            num(&args[0])?,
+                            dst.0,
                             ite(
-                                truth(reg(&self.frame, &args[1])?),
-                                resize(reg(&self.frame, &args[2])?, w, false),
-                                resize(reg(&self.frame, &args[3])?, w, false),
+                                truth(reg(&self.frame, cond)?),
+                                resize(reg(&self.frame, yes)?, w, false),
+                                resize(reg(&self.frame, no)?, w, false),
                             ),
                         ))
                     }
-                    _ => return Err(format!("unsupported symbolic SIR instruction {o}")),
+                    _ => return Err(unsupported(instruction)),
                 };
                 if let Some((r, value)) = result {
                     self.frame.regs.insert(
@@ -1202,41 +1123,50 @@ impl Lifter {
                     );
                 }
             }
-            let term = &block["terminator"];
-            if term == "Return" {
-                returns.push(self.frame.clone());
-                continue;
-            }
-            let (kind, data) = obj(term)?.iter().next().ok_or("empty terminator")?;
-            let mut edges = vec![];
-            match kind.as_str() {
-                "Jump" => edges.push((num(&data[0])?, arr(&data[1])?.clone(), b(true))),
-                "Branch" => {
+            let mut edges: Vec<(usize, &[RegisterId], Term)> = vec![];
+            match &block.terminator {
+                SIRTerminator::Return => {
+                    returns.push(self.frame.clone());
+                    continue;
+                }
+                SIRTerminator::Jump(target, arguments) => {
+                    edges.push((target.0, arguments, b(true)))
+                }
+                SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                } => {
                     self.stats.branches += 1;
                     let cond = truth(
                         self.frame
                             .regs
-                            .get(&num(&data["cond"])?)
+                            .get(&cond.0)
                             .cloned()
                             .ok_or("undefined branch condition")?,
                     );
-                    for (key, g) in [("true_block", cond.clone()), ("false_block", not(cond))] {
-                        let target = &data[key];
-                        edges.push((num(&target[0])?, arr(&target[1])?.clone(), g));
+                    for ((target, arguments), g) in
+                        [(true_block, cond.clone()), (false_block, not(cond))]
+                    {
+                        edges.push((target.0, arguments, g));
                     }
                 }
-                "Switch" => {
+                SIRTerminator::Switch {
+                    selector,
+                    cases,
+                    default,
+                } => {
                     self.stats.branches += 1;
                     let selector = self
                         .frame
                         .regs
-                        .get(&num(&data["selector"])?)
+                        .get(&selector.0)
                         .cloned()
                         .ok_or("undefined switch selector")?;
                     let mut remaining = b(true);
                     let mut seen = BTreeSet::new();
-                    for case in arr(&data["cases"])? {
-                        let n = bytes(&case["value"])?;
+                    for case in cases {
+                        let n = bytes(&case.value)?;
                         if !seen.insert(n) {
                             return Err("duplicate switch case".into());
                         }
@@ -1244,17 +1174,14 @@ impl Lifter {
                             return Err("switch case exceeds selector width".into());
                         }
                         let cond = eq(selector.clone(), bv(width(&selector), n));
-                        edges.push((
-                            num(&case["target"])?,
-                            vec![],
-                            and(remaining.clone(), cond.clone()),
-                        ));
+                        edges.push((case.target.0, &[], and(remaining.clone(), cond.clone())));
                         remaining = and(remaining, not(cond));
                     }
-                    edges.push((num(&data["default"])?, vec![], remaining));
+                    edges.push((default.0, &[], remaining));
                 }
-                "Error" => return Err(format!("symbolically reachable SIR runtime error {data}")),
-                _ => return Err(format!("unsupported terminator {kind}")),
+                SIRTerminator::Error(code) => {
+                    return Err(format!("symbolically reachable SIR runtime error {code}"));
+                }
             }
             for (target, arguments, guard) in edges {
                 let guard = and(self.frame.guard.clone(), guard);
@@ -1263,7 +1190,7 @@ impl Lifter {
                 }
                 let mut frame = self.frame.clone();
                 frame.guard = guard;
-                let params = arr(&blocks[&target.to_string()]["params"])?;
+                let params = &get(target)?.params;
                 if params.len() != arguments.len() {
                     return Err("CFG argument arity mismatch".into());
                 }
@@ -1272,13 +1199,13 @@ impl Lifter {
                     .map(|r| {
                         frame
                             .regs
-                            .get(&num(r)?)
+                            .get(&r.0)
                             .cloned()
                             .ok_or("undefined CFG argument".into())
                     })
                     .collect::<Res<Vec<_>>>()?;
                 for (param, value) in params.iter().zip(values) {
-                    let p = num(param)?;
+                    let p = param.0;
                     if kinds.get(&p).ok_or("missing parameter type")?.0 != width(&value) {
                         return Err("CFG parameter width mismatch".into());
                     }
@@ -1294,25 +1221,38 @@ impl Lifter {
         Ok(())
     }
 }
-fn successors(term: &Value) -> Res<Vec<usize>> {
-    if term == "Return" {
-        return Ok(vec![]);
+fn successors(term: &SIRTerminator) -> Vec<usize> {
+    match term {
+        SIRTerminator::Jump(target, _) => vec![target.0],
+        SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => vec![true_block.0.0, false_block.0.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|c| c.target.0)
+            .chain([default.0])
+            .collect(),
+        SIRTerminator::Return | SIRTerminator::Error(_) => vec![],
     }
-    let (k, v) = obj(term)?.iter().next().ok_or("empty terminator")?;
-    match k.as_str() {
-        "Jump" => Ok(vec![num(&v[0])?]),
-        "Branch" => Ok(vec![num(&v["true_block"][0])?, num(&v["false_block"][0])?]),
-        "Switch" => {
-            let mut out = arr(&v["cases"])?
-                .iter()
-                .map(|c| num(&c["target"]))
-                .collect::<Res<Vec<_>>>()?;
-            out.push(num(&v["default"])?);
-            Ok(out)
-        }
-        "Error" => Ok(vec![]),
-        _ => Err("unsupported CFG terminator".into()),
-    }
+}
+fn unsupported(instruction: &SIRInstruction<RegionedStateAddr>) -> String {
+    let name = match instruction {
+        SIRInstruction::Imm(..) => "Imm",
+        SIRInstruction::Binary(..) => "Binary",
+        SIRInstruction::Unary(..) => "Unary",
+        SIRInstruction::Load(..) => "Load",
+        SIRInstruction::Store(..) => "Store",
+        SIRInstruction::Commit(..) => "Commit",
+        SIRInstruction::Concat(..) => "Concat",
+        SIRInstruction::Slice(..) => "Slice",
+        SIRInstruction::Mux(..) => "Mux",
+        SIRInstruction::RuntimeEvent { .. } => "RuntimeEvent",
+        SIRInstruction::CombCaptureEvent { .. } => "CombCaptureEvent",
+        SIRInstruction::CombCaptureEnableIfChanged { .. } => "CombCaptureEnableIfChanged",
+    };
+    format!("unsupported symbolic SIR instruction {name}")
 }
 fn merge_frames(mut frames: Vec<Frame>, stats: &mut Statistics) -> Res<Frame> {
     let mut merged = frames.remove(0);
@@ -1350,16 +1290,17 @@ fn compare(name: &str, a: Term, c: Term) -> Term {
     }
     ir::node(Sort::Bool, name, vec![a, c])
 }
-fn unary(name: &str, x: Term, w: u32, signed: bool) -> Res<Term> {
-    if matches!(name, "Minus" | "BitNot" | "ToTwoState") && width(&x) != w {
+fn unary(name: UnaryOp, x: Term, w: u32, signed: bool) -> Res<Term> {
+    use UnaryOp::*;
+    if matches!(name, Minus | BitNot | ToTwoState) && width(&x) != w {
         return Err("SIR unary operand/result width mismatch".into());
     }
-    if matches!(name, "LogicNot" | "And" | "Or" | "Xor") && w != 1 {
+    if matches!(name, LogicNot | And | Or | Xor) && w != 1 {
         return Err("SIR reduction result must be 1 bit".into());
     }
     Ok(match name {
-        "Ident" | "ToTwoState" => resize(x, w, name == "Ident" && signed),
-        "BitNot" => {
+        Ident | ToTwoState => resize(x, w, name == Ident && signed),
+        BitNot => {
             let x = resize(x, w, signed);
             if let Some(n) = constant(&x) {
                 bv(w, !n)
@@ -1367,77 +1308,66 @@ fn unary(name: &str, x: Term, w: u32, signed: bool) -> Res<Term> {
                 ir::node(Sort::Bv(w), "bvnot", vec![x])
             }
         }
-        "Minus" => op("bvsub", w, bv(w, 0), resize(x, w, true)),
-        "LogicNot" => boolword(not(truth(x)), w),
-        "And" => {
+        Minus => op("bvsub", w, bv(w, 0), resize(x, w, true)),
+        LogicNot => boolword(not(truth(x)), w),
+        And => {
             let n = width(&x);
             boolword(eq(x, bv(n, if n == 64 { !0 } else { (1 << n) - 1 })), w)
         }
-        "Or" => boolword(truth(x), w),
-        "Xor" => {
+        Or => boolword(truth(x), w),
+        Xor => {
             let mut v = b(false);
             for i in 0..width(&x) {
                 v = ir::node(Sort::Bool, "xor", vec![v, truth(extract(x.clone(), i, 1))])
             }
             boolword(v, w)
         }
-        _ => return Err(format!("unsupported symbolic unary {name}")),
+        PopCount | CountLeadingZeros | CountTrailingZeros => {
+            return Err(format!("unsupported symbolic unary {name}"));
+        }
     })
 }
-fn binary(name: &str, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<Term> {
-    if matches!(
-        name,
-        "Eq" | "Ne"
-            | "EqCase"
-            | "NeCase"
-            | "EqWildcard"
-            | "NeWildcard"
-            | "LtU"
-            | "LeU"
-            | "GtU"
-            | "GeU"
-            | "LtS"
-            | "LeS"
-            | "GtS"
-            | "GeS"
-    ) {
+fn binary(name: BinaryOp, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<Term> {
+    use BinaryOp::*;
+    // (relation, signed, swap): `None` is equality; for it `swap` negates.
+    let relation = match name {
+        Eq | EqCase | EqWildcard => Some((None, false, false)),
+        Ne | NeCase | NeWildcard => Some((None, false, true)),
+        LtU => Some((Some("bvult"), false, false)),
+        LeU => Some((Some("bvule"), false, false)),
+        GtU => Some((Some("bvult"), false, true)),
+        GeU => Some((Some("bvule"), false, true)),
+        LtS => Some((Some("bvslt"), true, false)),
+        LeS => Some((Some("bvsle"), true, false)),
+        GtS => Some((Some("bvslt"), true, true)),
+        GeS => Some((Some("bvsle"), true, true)),
+        _ => None,
+    };
+    if let Some((relation, signed, swap)) = relation {
         if width(&a) != width(&c) || w != 1 {
             return Err("SIR comparison requires equal operands and a 1-bit result".into());
         }
         let n = width(&a).max(width(&c));
-        let signed = name.ends_with('S');
         let mut a = resize(a, n, signed);
         let mut c = resize(c, n, signed);
-        let p = if name.starts_with("Eq") {
-            eq(a, c)
-        } else if name.starts_with("Ne") {
-            not(eq(a, c))
-        } else {
-            if name.starts_with("Gt") || name.starts_with("Ge") {
-                std::mem::swap(&mut a, &mut c)
+        let p = match relation {
+            None if swap => not(eq(a, c)),
+            None => eq(a, c),
+            Some(relation) => {
+                if swap {
+                    std::mem::swap(&mut a, &mut c)
+                }
+                compare(relation, a, c)
             }
-            compare(
-                match (
-                    name.ends_with('S'),
-                    name.starts_with("Le") || name.starts_with("Ge"),
-                ) {
-                    (false, false) => "bvult",
-                    (false, true) => "bvule",
-                    (true, false) => "bvslt",
-                    (true, true) => "bvsle",
-                },
-                a,
-                c,
-            )
         };
         return Ok(boolword(p, w));
     }
-    if matches!(name, "LogicAnd" | "LogicOr") {
+    if matches!(name, LogicAnd | LogicOr) {
         if w != 1 {
             return Err("SIR logical result must be 1 bit".into());
         }
         return Ok(boolword(
-            if name == "LogicAnd" {
+            if name == LogicAnd {
                 and(truth(a), truth(c))
             } else {
                 or(truth(a), truth(c))
@@ -1445,18 +1375,18 @@ fn binary(name: &str, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<Term
             w,
         ));
     }
-    if matches!(name, "Shl" | "Shr" | "Sar") {
-        let n = if name == "Shl" { w } else { w.max(width(&a)) };
-        let operand = resize(a.clone(), n, name == "Sar" || (name == "Shl" && sa));
+    if matches!(name, Shl | Shr | Sar) {
+        let n = if name == Shl { w } else { w.max(width(&a)) };
+        let operand = resize(a.clone(), n, name == Sar || (name == Shl && sa));
         let limit = if width(&c) < 64 && (n as u64) >= 1 << width(&c) {
             b(true)
         } else {
             compare("bvult", c.clone(), bv(width(&c), n as u64))
         };
         let amount = resize(c, n, false);
-        let shifted = if name == "Shl" {
+        let shifted = if name == Shl {
             op("bvshl", n, operand, amount)
-        } else if name == "Shr" {
+        } else if name == Shr {
             op("bvlshr", n, operand, amount)
         } else {
             let sign = truth(extract(operand.clone(), n - 1, 1));
@@ -1468,7 +1398,7 @@ fn binary(name: &str, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<Term
             );
             ite(sign, negshift, op("bvlshr", n, operand, amount))
         };
-        let fallback = if name == "Sar" {
+        let fallback = if name == Sar {
             let sign = truth(extract(shifted.clone(), n - 1, 1));
             ite(
                 sign,
@@ -1481,12 +1411,12 @@ fn binary(name: &str, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<Term
         return Ok(resize(ite(limit, shifted, fallback), w, false));
     }
     let opn = match name {
-        "Add" => "bvadd",
-        "Sub" => "bvsub",
-        "Mul" => "bvmul",
-        "And" => "bvand",
-        "Or" => "bvor",
-        "Xor" => "bvxor",
+        Add => "bvadd",
+        Sub => "bvsub",
+        Mul => "bvmul",
+        And => "bvand",
+        Or => "bvor",
+        Xor => "bvxor",
         _ => return Err(format!("unsupported symbolic binary {name}")),
     };
     Ok(op(opn, w, resize(a, w, sa), resize(c, w, false)))
@@ -1634,145 +1564,79 @@ mod tests;
 
 // Check structural boundaries before any indexed instruction access. The
 // compile-only exporter is trusted for language lowering, not for memory safety.
-fn validate_unit(unit: &Value) -> Res<()> {
-    let blocks = obj(&unit["blocks"])?;
-    let types = obj(&unit["register_map"])?;
+fn validate_unit(unit: &Unit) -> Res<()> {
+    let (blocks, types) = (&unit.blocks, &unit.register_map);
     if blocks.len() > 10000 || types.len() > 100000 {
         return Err("SIR unit exceeds structural budget".into());
     }
-    let reg = |v: &Value| -> Res<()> {
-        let r = num(v)?;
-        if !types.contains_key(&r.to_string()) {
-            return Err(format!("untyped SIR register {r}"));
+    let reg = |r: &RegisterId| -> Res<()> {
+        if !types.contains_key(r) {
+            return Err(format!("untyped SIR register {}", r.0));
         }
         Ok(())
     };
-    let target = |v: &Value| -> Res<()> {
-        let id = num(v)?;
-        if !blocks.contains_key(&id.to_string()) {
-            return Err(format!("missing CFG target {id}"));
+    let target = |id: &BlockId| -> Res<()> {
+        if !blocks.contains_key(id) {
+            return Err(format!("missing CFG target {}", id.0));
         }
         Ok(())
     };
-    let edge = |v: &Value| -> Res<()> {
-        let a = arr(v)?;
-        if a.len() != 2 {
-            return Err("invalid CFG edge".into());
-        }
-        target(&a[0])?;
-        for r in arr(&a[1])? {
-            reg(r)?
-        }
-        Ok(())
+    let edge = |id: &BlockId, arguments: &[RegisterId]| -> Res<()> {
+        target(id)?;
+        arguments.iter().try_for_each(reg)
     };
-    let offset = |v: &Value| -> Res<()> {
-        let o = obj(v)?;
-        if o.len() != 1 {
-            return Err("invalid storage offset tag".into());
-        }
-        let (k, x) = o.iter().next().unwrap();
-        match k.as_str() {
-            "Static" => {
-                num(x)?;
-            }
-            "PackedElements" => {
-                num(&x["bit_offset"])?;
-            }
-            "Dynamic" => reg(x)?,
-            "Element" => {
-                reg(&x["index"])?;
-                num(&x["element_width"])?;
-                num(&x["bit_offset"])?;
-                if !x["dynamic_bit_offset"].is_null() {
-                    reg(&x["dynamic_bit_offset"])?
-                }
-            }
-            _ => return Err("unknown storage offset".into()),
-        }
-        Ok(())
-    };
-    target(&unit["entry_block_id"])?;
+    let offset = |o: &SIROffset| o.dynamic_registers().iter().flatten().try_for_each(reg);
+    target(&unit.entry_block_id)?;
     for block in blocks.values() {
-        for param in arr(&block["params"])? {
-            reg(param)?
-        }
-        let instructions = arr(&block["instructions"])?;
-        if instructions.len() > 100000 {
+        block.params.iter().try_for_each(reg)?;
+        if block.instructions.len() > 100000 {
             return Err("SIR block exceeds instruction budget".into());
         }
-        for instruction in instructions {
-            let o = obj(instruction)?;
-            if o.len() != 1 {
-                return Err("invalid instruction tag".into());
-            }
-            let (k, v) = o.iter().next().unwrap();
-            let a = arr(v)?;
-            let (n, registers): (usize, &[usize]) = match k.as_str() {
-                "Imm" => (2, &[0]),
-                "Unary" => (3, &[0, 2]),
-                "Binary" => (4, &[0, 1, 3]),
-                "Load" => (4, &[0]),
-                "Store" => (6, &[3]),
-                "Commit" => (5, &[]),
-                "Concat" => (2, &[0]),
-                "Slice" => (4, &[0, 1]),
-                "Mux" => (4, &[0, 1, 2, 3]),
-                _ => return Err(format!("unsupported symbolic SIR instruction {k}")),
-            };
-            if a.len() != n {
-                return Err(format!("invalid {k} instruction arity"));
-            }
-            for index in registers {
-                reg(&a[*index])?
-            }
-            match k.as_str() {
-                "Load" => {
-                    addr(&a[1])?;
-                    offset(&a[2])?;
+        for instruction in &block.instructions {
+            match instruction {
+                SIRInstruction::Imm(d, _) => reg(d)?,
+                SIRInstruction::Unary(d, _, s) | SIRInstruction::Slice(d, s, ..) => {
+                    reg(d)?;
+                    reg(s)?
                 }
-                "Store" => {
-                    addr(&a[0])?;
-                    offset(&a[1])?;
+                SIRInstruction::Binary(d, a, _, c) => [d, a, c].into_iter().try_for_each(reg)?,
+                SIRInstruction::Load(d, _, o, _) | SIRInstruction::Store(_, o, _, d, ..) => {
+                    reg(d)?;
+                    offset(o)?
                 }
-                "Commit" => {
-                    addr(&a[0])?;
-                    addr(&a[1])?;
-                    offset(&a[2])?;
+                SIRInstruction::Commit(_, _, o, ..) => offset(o)?,
+                SIRInstruction::Concat(d, parts) => {
+                    reg(d)?;
+                    parts.iter().try_for_each(reg)?
                 }
-                "Concat" => {
-                    for r in arr(&a[1])? {
-                        reg(r)?
-                    }
-                }
-                _ => {}
+                SIRInstruction::Mux(d, c, a, e) => [d, c, a, e].into_iter().try_for_each(reg)?,
+                _ => return Err(unsupported(instruction)),
             }
         }
-        let t = &block["terminator"];
-        if t == "Return" {
-            continue;
-        }
-        let o = obj(t)?;
-        if o.len() != 1 {
-            return Err("invalid terminator tag".into());
-        }
-        let (k, v) = o.iter().next().unwrap();
-        match k.as_str() {
-            "Jump" => edge(v)?,
-            "Branch" => {
-                reg(&v["cond"])?;
-                edge(&v["true_block"])?;
-                edge(&v["false_block"])?;
+        match &block.terminator {
+            SIRTerminator::Jump(id, arguments) => edge(id, arguments)?,
+            SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
+                reg(cond)?;
+                edge(&true_block.0, &true_block.1)?;
+                edge(&false_block.0, &false_block.1)?;
             }
-            "Switch" => {
-                reg(&v["selector"])?;
-                target(&v["default"])?;
-                for case in arr(&v["cases"])? {
-                    target(&case["target"])?;
-                    bytes(&case["value"])?;
+            SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                reg(selector)?;
+                target(default)?;
+                for case in cases {
+                    target(&case.target)?;
+                    bytes(&case.value)?;
                 }
             }
-            "Error" => {}
-            _ => return Err("unsupported CFG terminator".into()),
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
     Ok(())

@@ -1,5 +1,7 @@
 use super::*;
+use celox_design::{DomainKind, PortTypeKind};
 use lydite_solver::finite::{Limits, SearchHint, Verdict, solve_with_hint};
+use serde::de::DeserializeOwned;
 
 fn var(name: &str, w: u32) -> Term {
     ir::var(name.into(), Sort::Bv(w))
@@ -33,13 +35,25 @@ fn commit(id: u64, src: u64, dst: u64, w: u32) -> Value {
 fn block(inst: Vec<Value>, term: Value) -> Value {
     json!({"params":[],"instructions":inst,"terminator":term})
 }
-fn unit(blocks: Value, widths: &[u32]) -> Value {
+fn typed<T: DeserializeOwned>(v: Value) -> T {
+    serde_json::from_value(v).unwrap()
+}
+fn unit(mut blocks: Value, widths: &[u32]) -> Unit {
     let types = widths
         .iter()
         .enumerate()
         .map(|(i, w)| (i.to_string(), json!({"Bit":{"width":w,"signed":false}})))
         .collect::<Map<_, _>>();
-    json!({"entry_block_id":0,"blocks":blocks,"register_map":types})
+    for (id, block) in blocks.as_object_mut().unwrap() {
+        block["id"] = json!(id.parse::<usize>().unwrap());
+    }
+    typed(json!({"entry_block_id":0,"blocks":blocks,"register_map":types}))
+}
+fn lift_json(code: &Value, config: &Value) -> Res<Transition> {
+    lift(
+        &serde_json::from_value(code.clone()).map_err(|e| e.to_string())?,
+        config,
+    )
 }
 fn lifter(values: &[(u64, u32, usize, &str)]) -> Lifter {
     let mut state = BTreeMap::new();
@@ -178,8 +192,9 @@ fn partial_dynamic_write_preserves_other_bits_and_crosses_lanes() {
 }
 #[test]
 fn element_offset_arithmetic_cannot_wrap_large_indices_into_storage() {
-    let offset =
-        json!({"Element":{"index":0,"element_width":8,"bit_offset":1,"dynamic_bit_offset":1}});
+    let offset = typed(
+        json!({"Element":{"index":0,"element_width":8,"bit_offset":1,"dynamic_bit_offset":1}}),
+    );
     let regs = BTreeMap::from([(0, var("index", 64)), (1, var("bit_offset", 64))]);
     let guard = Lifter::access_guard(&offset, &regs, 9).unwrap();
     let valid = or(
@@ -198,12 +213,12 @@ fn element_offset_arithmetic_cannot_wrap_large_indices_into_storage() {
 fn symbolic_shifts_cover_oversized_counts_and_sign_extension() {
     let x = var("x", 4);
     let shift = var("shift", 8);
-    for name in ["Shl", "Shr", "Sar"] {
+    for name in [BinaryOp::Shl, BinaryOp::Shr, BinaryOp::Sar] {
         let actual = binary(name, x.clone(), shift.clone(), 8, false, false).unwrap();
-        let extended = resize(x.clone(), 8, name == "Sar");
-        let expected = if name == "Shl" {
+        let extended = resize(x.clone(), 8, name == BinaryOp::Sar);
+        let expected = if name == BinaryOp::Shl {
             op("bvshl", 8, extended, shift.clone())
-        } else if name == "Shr" {
+        } else if name == BinaryOp::Shr {
             op("bvlshr", 8, extended, shift.clone())
         } else {
             let neg = truth(extract(x.clone(), 3, 1));
@@ -235,7 +250,7 @@ fn cyclic_cfg_and_unbound_state_fail_closed() {
 }
 #[test]
 fn dag_export_roundtrips_through_existing_typed_ir() {
-    let t = binary("Add", var("i.a", 8), var("s.q", 8), 8, false, false).unwrap();
+    let t = binary(BinaryOp::Add, var("i.a", 8), var("s.q", 8), 8, false, false).unwrap();
     let transition = Transition {
         next: Env::from([("q".into(), t.clone())]),
         outputs: Env::from([("sum".into(), t)]),
@@ -252,7 +267,7 @@ fn dag_export_roundtrips_through_existing_typed_ir() {
     );
 }
 
-fn compiled_unit(u: Value) -> (Value, Value) {
+fn compiled_unit(u: Unit) -> (Value, Value) {
     let signals = [
         ("clk", 0, 1, "Input"),
         ("en", 1, 1, "Input"),
@@ -261,7 +276,7 @@ fn compiled_unit(u: Value) -> (Value, Value) {
     ];
     let meta =
         |w| json!({"width":w,"array_dims":[],"is_4state":false,"kind":"Other","type_kind":"Bit"});
-    let code = json!({"status":"compiled_only_not_verified","four_state":false,"signals":signals.iter().map(|(name,id,w,kind)|json!({"path":[name],"instances":[],"address":address(*id,0),"kind":kind,"metadata":meta(*w)})).collect::<Vec<_>>(),"design":{"state_objects":signals.iter().map(|(_,id,w,_)|json!({"address":address(*id,0),"metadata":meta(*w)})).collect::<Vec<_>>(),"cascaded_events":[],"event_aliases":[],"initial_state":[]},"sir":{"eval_comb":[],"eval_apply_ffs":[{"event":address(0,0),"units":[u]}]}});
+    let code = json!({"status":"compiled_only_not_verified","four_state":false,"allow_always_ff_function_effects":true,"allowed_diagnostics":[],"runtime_event_sites":[],"frontend_lookup":"","signals":signals.iter().map(|(name,id,w,kind)|json!({"path":[name],"instances":[],"address":address(*id,0),"kind":kind,"signed":false,"metadata":meta(*w)})).collect::<Vec<_>>(),"design":{"state_objects":signals.iter().map(|(_,id,w,_)|json!({"address":address(*id,0),"metadata":meta(*w)})).collect::<Vec<_>>(),"ordered_events":[address(0,0)],"cascaded_events":[],"event_aliases":[],"reset_clocks":[],"initial_state":[]},"sir":{"eval_comb":[],"eval_apply_ffs":[{"event":address(0,0),"units":[u]}],"eval_comb_apply_ffs":[],"eval_only_ffs":[],"apply_ffs":[]}});
     let config = json!({"event":"clk","inputs":{"en":{"type":"bool"},"a":{"type":{"bv":8}}},"state":{"q":{"type":{"bv":8}}},"outputs":{"q":{"signal":"q","type":{"bv":8}}}});
     (code, config)
 }
@@ -272,7 +287,7 @@ fn public_bindings_preserve_arbitrary_prestate_and_preedge_outputs() {
         &[1, 8],
     );
     let (code, mut config) = compiled_unit(u);
-    let t = lift(&code, &config).unwrap();
+    let t = lift_json(&code, &config).unwrap();
     prove(t.outputs["q"].clone(), var("s.q", 8));
     prove(
         t.next["q"].clone(),
@@ -283,10 +298,10 @@ fn public_bindings_preserve_arbitrary_prestate_and_preedge_outputs() {
         ),
     );
     config["overrides"] = json!({"en":false});
-    let hold = lift(&code, &config).unwrap();
+    let hold = lift_json(&code, &config).unwrap();
     assert_eq!(hold.to_json(true).unwrap()["next"]["q"], "s.q");
     config["overrides"] = json!({"en":true});
-    let reset = lift(&code, &config).unwrap();
+    let reset = lift_json(&code, &config).unwrap();
     assert_eq!(reset.to_json(true).unwrap()["next"]["q"], "i.a");
     // A malformed/partial reset remains state-dependent; it is never zero-filled.
     witness(not(eq(hold.next["q"].clone(), bv(8, 0))));
@@ -303,32 +318,32 @@ fn bad_bindings_and_malformed_sir_fail_closed_without_panics() {
             2 => config["state"]["q"]["expr"] = json!(["bv", 8, 0]),
             _ => config["state"]["q"]["type"] = json!({"bv":4}),
         };
-        assert!(lift(&code, &config).is_err());
+        assert!(lift_json(&code, &config).is_err());
     }
     let mut malformed = code.clone();
     malformed["sir"]["eval_apply_ffs"][0]["units"][0]["blocks"]["0"]["instructions"] =
         json!([{"Store":[]}]);
-    assert!(lift(&malformed, &config).is_err());
+    assert!(lift_json(&malformed, &config).is_err());
     let mut malformed = code.clone();
     malformed["sir"]["eval_apply_ffs"][0]["units"][0]["blocks"]["0"]["terminator"] =
         json!({"Jump":[99,[]]});
-    assert!(lift(&malformed, &config).is_err());
+    assert!(lift_json(&malformed, &config).is_err());
     let mut malformed = code.clone();
     malformed["design"]["state_objects"]
         .as_array_mut()
         .unwrap()
         .push(code["design"]["state_objects"][0].clone());
-    assert!(lift(&malformed, &config).is_err());
+    assert!(lift_json(&malformed, &config).is_err());
 }
 #[test]
 fn typed_width_boundaries_and_signed_promotion_are_explicit() {
-    assert!(unary("Minus", var("a", 4), 8, false).is_err());
-    assert!(binary("Eq", var("a", 4), var("b", 8), 1, true, true).is_err());
-    assert!(binary("LtS", var("a", 4), var("b", 4), 8, true, true).is_err());
+    assert!(unary(UnaryOp::Minus, var("a", 4), 8, false).is_err());
+    assert!(binary(BinaryOp::Eq, var("a", 4), var("b", 8), 1, true, true).is_err());
+    assert!(binary(BinaryOp::LtS, var("a", 4), var("b", 4), 8, true, true).is_err());
     // SIR arithmetic promotes a signed lhs but treats the rhs as unsigned;
     // source context casts are already separate typed SIR instructions.
     prove(
-        binary("Add", var("a", 4), var("b", 4), 8, true, true).unwrap(),
+        binary(BinaryOp::Add, var("a", 4), var("b", 4), 8, true, true).unwrap(),
         op(
             "bvadd",
             8,
@@ -338,7 +353,7 @@ fn typed_width_boundaries_and_signed_promotion_are_explicit() {
     );
     // A signed declaration cannot change the logical right-shift's zero fill.
     prove(
-        binary("Shr", var("a", 4), var("b", 8), 8, true, false).unwrap(),
+        binary(BinaryOp::Shr, var("a", 4), var("b", 8), 8, true, false).unwrap(),
         op("bvlshr", 8, resize(var("a", 4), 8, false), var("b", 8)),
     );
     let overflow = unit(
@@ -388,7 +403,7 @@ fn four_state_unknown_initializers_and_event_ambiguity_reject() {
                 .unwrap()
                 .push(code["sir"]["eval_apply_ffs"][0].clone()),
         };
-        assert!(lift(&bad, &config).is_err(), "mode {mode}");
+        assert!(lift_json(&bad, &config).is_err(), "mode {mode}");
     }
 }
 #[test]
@@ -399,33 +414,39 @@ fn input_binding_cannot_hide_state_or_unbound_storage() {
     );
     let (code, mut config) = compiled_unit(u);
     config["inputs"]["a"]["expr"] = json!("s.q");
-    assert!(lift(&code, &config).is_err());
+    assert!(lift_json(&code, &config).is_err());
     config["inputs"].as_object_mut().unwrap().remove("a");
-    assert!(lift(&code, &config).unwrap_err().contains("unbound"));
+    assert!(lift_json(&code, &config).unwrap_err().contains("unbound"));
 }
 
 #[test]
 fn exported_array_width_is_total_not_per_element() {
-    assert_eq!(
-        storage_shape(&json!({"width":64,"array_dims":[2]})).unwrap(),
-        (32, 2)
-    );
-    assert_eq!(
-        storage_shape(&json!({"width":512,"array_dims":[4,4]})).unwrap(),
-        (32, 16)
-    );
-    for metadata in [
-        json!({"width":65,"array_dims":[2]}),
-        json!({"width":64,"array_dims":[0]}),
-        json!({"width":131072,"array_dims":[4096]}),
-    ] {
-        assert!(storage_shape(&metadata).is_err());
+    let shape = |width, array_dims: &[usize]| {
+        storage_shape(&VariableMetadata {
+            width,
+            is_4state: false,
+            kind: DomainKind::Other,
+            type_kind: PortTypeKind::Bit,
+            array_dims: array_dims.to_vec(),
+        })
+    };
+    assert_eq!(shape(64, &[2]).unwrap(), (32, 2));
+    assert_eq!(shape(512, &[4, 4]).unwrap(), (32, 16));
+    for (width, array_dims) in [(65, &[2]), (64, &[0]), (131072, &[4096])] {
+        assert!(shape(width, array_dims).is_err());
     }
 }
 
 #[test]
+fn typed_export_round_trips_the_actual_wire_format() {
+    let raw = include_str!("../tests/fixtures/array_read_write2.json");
+    let code: Compiled = serde_json::from_str(raw).unwrap();
+    let wire: Value = serde_json::from_str(&code.to_json().unwrap()).unwrap();
+    assert_eq!(wire, serde_json::from_str::<Value>(raw).unwrap());
+}
+#[test]
 fn actual_veryl_array_layout_read_old_write_and_reset() {
-    let code: Value =
+    let code: Compiled =
         serde_json::from_str(include_str!("../tests/fixtures/array_read_write2.json")).unwrap();
     let mut config = json!({"event":"clk","inputs":{"rst":{"type":"bool"},"we":{"type":"bool"},"wa":{"type":{"bv":1}},"wd":{"type":{"bv":32}},"ra0":{"type":{"bv":1}}},"state":{"m0":{"signal":"mem","element":0,"type":{"bv":32}},"m1":{"signal":"mem","element":1,"type":{"bv":32}},"q0":{"type":{"bv":32}}},"outputs":{},"overrides":{"rst":false}});
     let t = lift(&code, &config).unwrap();
@@ -570,7 +591,7 @@ fn split_initialization_is_checked_at_public_outputs() {
         &[4],
     );
     code["sir"]["eval_comb"] = json!([comb]);
-    let lifted = lift(&code, &config).unwrap();
+    let lifted = lift_json(&code, &config).unwrap();
     let nibble = extract(var("i.a", 8), 0, 4);
     prove(
         lifted.outputs["q"].clone(),
@@ -580,7 +601,7 @@ fn split_initialization_is_checked_at_public_outputs() {
         json!({"0":block(vec![load(0,2,0,4),first],json!("Return"))}),
         &[4]
     )]);
-    assert!(lift(&code, &config).unwrap_err().contains("unbound"));
+    assert!(lift_json(&code, &config).unwrap_err().contains("unbound"));
 }
 
 #[test]

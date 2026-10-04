@@ -2576,6 +2576,8 @@ dependencies = [
  "celox-test-suite-veryl",
  "lydite-ir",
  "lydite-solver",
+ "num-bigint",
+ "serde",
  "serde_json",
  "veryl-analyzer",
  "veryl-metadata",

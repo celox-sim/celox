@@ -2,13 +2,14 @@
 //! assertion operands. Uses the same explicit semantic FF extension as Celox's
 //! reusable suite adapter, recorded in every output.
 use celox_frontend_veryl::{BuildConfig, loop_provenance::LoopSourceTable};
+use lydite_celox::compiled::{Compiled, Signal};
 use serde_json::{Value, json};
 use std::path::Path;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
 
-fn compile(design: &Value) -> Result<Value, String> {
+fn compile(design: &Value) -> Result<Compiled, String> {
     symbol_table::clear();
     attribute_table::clear();
     let metadata = Metadata::create_default("prj").map_err(|e| e.to_string())?;
@@ -99,68 +100,35 @@ fn compile(design: &Value) -> Result<Value, String> {
                 var_id: *id,
             };
             if let Some(state) = lookup.source_to_state.get(&address) {
-                signals.push(json!({"instances":instance_path.0,"path":variable.path,"kind":variable.var_kind,
-                    "signed":variable.signed,"metadata":variable.metadata,"address":state}));
+                signals.push(Signal {
+                    instances: instance_path.0.clone(),
+                    path: variable.path.clone(),
+                    kind: variable.var_kind,
+                    signed: variable.signed,
+                    metadata: variable.metadata.clone(),
+                    address: *state,
+                });
             }
         }
     }
     let scheduled = output.scheduled;
-    let sir = scheduled.sir;
-    let groups = [
-        (
-            "eval_comb",
-            sir.eval_comb.iter().map(|u| json!(u)).collect::<Vec<_>>(),
-        ),
-        (
-            "eval_apply_ffs",
-            sir.eval_apply_ffs
-                .iter()
-                .map(|(k, v)| json!({"event":k,"units":v}))
-                .collect(),
-        ),
-        (
-            "eval_comb_apply_ffs",
-            sir.eval_comb_apply_ffs
-                .iter()
-                .map(|(k, v)| json!({"event":k,"units":v}))
-                .collect(),
-        ),
-        (
-            "eval_only_ffs",
-            sir.eval_only_ffs
-                .iter()
-                .map(|(k, v)| json!({"event":k,"units":v}))
-                .collect(),
-        ),
-        (
-            "apply_ffs",
-            sir.apply_ffs
-                .iter()
-                .map(|(k, v)| json!({"event":k,"units":v}))
-                .collect(),
-        ),
-    ];
-    let mut phases = serde_json::Map::new();
-    for (name, units) in groups {
-        phases.insert(name.to_string(), json!(units));
-    }
-    Ok(
-        json!({"status":"compiled_only_not_verified", "four_state":design["four_state"].as_bool().unwrap_or(false), "allow_always_ff_function_effects":true,
-        "allowed_diagnostics":allowed,"signals":signals,"runtime_event_sites":scheduled.runtime_schema.runtime_event_sites,"design":{
-        "state_objects":scheduled.design.state_objects.iter().map(|(address,metadata)|json!({"address":address,"metadata":metadata})).collect::<Vec<_>>(),
-        "initial_state":scheduled.design.initial_state,
-        "ordered_events":scheduled.design.events.ordered_events,
-        "cascaded_events":scheduled.design.events.cascaded_events,
-        "event_aliases":scheduled.design.events.aliases.iter().map(|(a,b)|json!([a,b])).collect::<Vec<_>>(),
-        "reset_clocks":scheduled.design.events.reset_clocks.iter().map(|(a,b)|json!([a,b])).collect::<Vec<_>>()},"sir":phases,
-        "frontend_lookup":format!("{:?}",scheduled.frontend_lookup)}),
-    )
+    Ok(Compiled {
+        status: "compiled_only_not_verified".into(),
+        four_state: design["four_state"].as_bool().unwrap_or(false),
+        allow_always_ff_function_effects: true,
+        allowed_diagnostics: allowed,
+        signals,
+        runtime_event_sites: scheduled.runtime_schema.runtime_event_sites,
+        design: scheduled.design.into(),
+        sir: scheduled.sir.into(),
+        frontend_lookup: format!("{:?}", scheduled.frontend_lookup),
+    })
 }
 fn main() {
     let path = std::env::args().nth(1).expect("DESIGN.json");
     let design: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     match compile(&design) {
-        Ok(value) => println!("{}", serde_json::to_string(&value).unwrap()),
+        Ok(compiled) => println!("{}", compiled.to_json().unwrap()),
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1)

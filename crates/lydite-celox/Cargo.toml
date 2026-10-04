@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 lydite-ir.workspace = true
+num-bigint.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 # The bridge binaries compile, simulate and test Veryl designs with the
 # in-tree Celox.
