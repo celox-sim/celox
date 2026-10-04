@@ -60,6 +60,7 @@ def check_memory(trace, contract):
                 if read is None or (value(before,'rdata'),value(before,'rresp')) != read: raise ValueError('wrong accepted readback')
                 reads.append(read); read = None
             if value(before,'arvalid') and value(before,'arready'):
+                if read is not None: raise ValueError('accepted AR overwrites pending one-slot read')
                 word = value(before,'araddr') // lanes * lanes
                 read = (int.from_bytes(old_memory[word],'little'),0) if word in old_memory else (0,3)
         for location in contract['locations']:
@@ -123,6 +124,55 @@ def run(root, good, cli, axi, out):
             if result['status']!='trace_no_failure':raise RuntimeError(result)
         check_memory(replay.load_json(out/f'memory-{width}-active-high-effects'/'simulation.json')['trace'],contract)
         results.append({'case':f'memory_{width}_reset_polarity','status':'passed'})
+        cleared=root/('memory-idle-read-clear-'+str(width));shutil.copytree(path,cleared)
+        source=cleared/'memory.veryl';source.write_text(source.read_text().replace('if rvalid && rready { rvalid = 0; }','if rvalid && rready { rvalid = 0; rdata = 0; rresp = 0; }'))
+        for obligation in OBLIGATIONS:
+            result=cli(f'memory-{width}-idle-clear-search-{obligation}','search',cleared/'memory-contract.json',obligation)
+            if result['status']!='bounded_no_failure':raise RuntimeError(result)
+        file=cleared/'idle-clear.json';replay.write(file,[z,row(),row(arvalid=True),row(),row(rready=True),row(),row(arvalid=True,araddr=lanes*2),row(),row(rready=True),row()])
+        result=cli(f'memory-{width}-idle-clear-readback','stimulus',cleared/'memory-contract.json','readback','--inputs',file)
+        if result['status']!='trace_no_failure':raise RuntimeError(result)
+        observed=check_memory(replay.load_json(out/f'memory-{width}-idle-clear-readback'/'simulation.json')['trace'],contract)
+        if observed['accepted_reads']!=[(contract['locations'][0]['initial'],0),(0,3)]:raise RuntimeError('idle-clear cover vacuous')
+        result=axi(f'memory-{width}-idle-clear-axi','stimulus',cleared/'memory-axi.json','--inputs',file)
+        if result['status']!='trace_no_failure' or result['independent']['status']!='sampled_prefix_passed':raise RuntimeError(result)
+        results.append({'case':f'memory_{width}_idle_read_payload_clear','status':'passed'})
+        # An actual one-slot DUT must not replace a stalled read, even when
+        # old/new responses happen to have equal data. Retire/refill is permitted.
+        overwrite=root/('memory-read-overwrite-'+str(width));shutil.copytree(path,overwrite)
+        source=overwrite/'memory.veryl';source.write_text(source.read_text().replace('assign arready = !rvalid;','assign arready = 1;').replace('if rvalid && rready { rvalid = 0; }','if rvalid && rready && !(arvalid && arready) { rvalid = 0; }'))
+        for obligation in ('capacity','readback'):
+            saved=out/f'memory-{width}-read-overwrite-{obligation}.regression.json'
+            result=cli(f'memory-{width}-read-overwrite-search-{obligation}','search',overwrite/'memory-contract.json',obligation,'--regression',saved)
+            if result['status']!='reset_reachable_failure':raise RuntimeError(result)
+            result=cli(f'memory-{width}-read-overwrite-replay-{obligation}','replay',overwrite/'memory-contract.json',obligation,'--regression',saved)
+            if result['status']!='reset_reachable_failure':raise RuntimeError(result)
+        for label,address in [('different_data',lanes),('equal_data',0),('different_response',lanes*2)]:
+            frames=[z,row(),row(arvalid=True),row(arvalid=True,araddr=address),row(arvalid=True,araddr=address),row(arvalid=True,araddr=address,rready=True),row(arvalid=True,araddr=address),row(rready=True)]
+            file=overwrite/(label+'.json');replay.write(file,frames)
+            for obligation in OBLIGATIONS:
+                result=cli(f'memory-{width}-read-stall-good-{label}-{obligation}','stimulus',binding,obligation,'--inputs',file)
+                if result['status']!='trace_no_failure':raise RuntimeError(result)
+            check_memory(replay.load_json(out/f'memory-{width}-read-stall-good-{label}-readback'/'simulation.json')['trace'],contract)
+            for obligation in ('capacity','readback'):
+                result=cli(f'memory-{width}-read-overwrite-{label}-{obligation}','stimulus',overwrite/'memory-contract.json',obligation,'--inputs',file)
+                expected='trace_no_failure' if label=='equal_data' and obligation=='readback' else 'reset_reachable_failure'
+                if result['status']!=expected:raise RuntimeError(result)
+            observed=replay.load_json(out/f'memory-{width}-read-overwrite-{label}-capacity'/'simulation.json')['trace']
+            try:check_memory(observed,contract)
+            except ValueError as e:
+                if 'accepted AR overwrites pending' not in str(e):raise
+            else:raise RuntimeError('oracle missed pending read overwrite')
+            results.append({'case':f'memory_{width}_read_overwrite_{label}','status':'passed','scope':'explicit one-slot application read capacity; equal responses do not hide accepted requests'})
+        # The same always-ready fixture is valid on this retire/refill trace.
+        # This checks the contract relation, not global AXI structural compliance.
+        file=overwrite/'refill.json';replay.write(file,[z,row(),row(arvalid=True),row(arvalid=True,araddr=lanes,rready=True),row(rready=True)])
+        for obligation in OBLIGATIONS:
+            result=cli(f'memory-{width}-read-refill-{obligation}','stimulus',overwrite/'memory-contract.json',obligation,'--inputs',file)
+            if result['status']!='trace_no_failure':raise RuntimeError(result)
+        observed=check_memory(replay.load_json(out/f'memory-{width}-read-refill-readback'/'simulation.json')['trace'],contract)
+        if observed['accepted_reads']!=[(contract['locations'][0]['initial'],0),(contract['locations'][1]['initial'],0)]:raise RuntimeError('read retire/refill cover vacuous')
+        results.append({'case':f'memory_{width}_read_retire_refill','status':'passed'})
         if width!=32: continue
         overflow=root/'memory-overrun';shutil.copytree(path,overflow);source=overflow/'memory.veryl';source.write_text(source.read_text().replace('assign awready = !a_full;','assign awready = 1;'))
         result=cli('memory-overrun-search','search',overflow/'memory-contract.json','capacity')

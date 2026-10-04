@@ -101,7 +101,10 @@ def memory_write(document, name, address_width, data_width, locations, initial, 
     signals, memory cells and response pins. Effects have no invented deadline.
     Byte lanes are little-endian; addresses select aligned bus-width words.
     Unmapped addresses have no write effect and respond DECERR; reads return zero.
-    Readback is an explicit one-edge, read-before-write application contract.
+    Readback is an explicit one-slot, one-edge, read-before-write application
+    contract. A pending response must retire before another read is accepted;
+    simultaneous retirement/refill is allowed. Buffered read designs need a
+    separate FIFO contract, not this one-slot application template.
     Neither response IDs nor effect origins are assigned by a monitor.
     """
     if type(data_width) is not int or data_width not in (32, 64): raise ValueError('memory data width must be 32 or 64')
@@ -141,12 +144,12 @@ def memory_write(document, name, address_width, data_width, locations, initial, 
     read_code = ite(any_of(*(selected(inputs['ar_address'], a) for a in locations)), bv(2,0), bv(2,3))
     obligations = {
         'requests': (all_of(inv('s.aw_pending'),inv('s.w_pending')), True, all_of(*requests)),
-        'capacity': (True, True, inv(any_of(all_of(push_a,'s.aw_pending',inv(retire)),all_of(push_w,'s.w_pending',inv(retire))))),
+        'capacity': (True, True, inv(any_of(all_of(push_a,'s.aw_pending',inv(retire)),all_of(push_w,'s.w_pending',inv(retire)),all_of(read_push,'s.read_valid',inv(inputs['r_ready']))))),
         'effects': (all_of(*reset_cells), True, all_of(*effects)),
         'completion': (inv('s.applied'), True, all_of(ite(apply,all_of('s.aw_pending','s.w_pending',inv('s.applied')),True),
                             ite(retire,'s.applied',True),eq('n.applied',ite(retire,False,any_of('s.applied',apply))))),
         'response': (inv('s.b_valid'), response, ite(all_of('s.b_valid',inv(inputs['b_ready'])),all_of('n.b_valid',eq('n.b_response','s.b_response')),True)),
-        'readback': (inv('s.read_valid'), True, all_of(eq('n.read_valid',any_of(read_push,all_of('s.read_valid',inv(inputs['r_ready'])))),
-                           eq('n.read_data',ite(read_push,read_value,'s.read_data')),eq('n.read_response',ite(read_push,read_code,'s.read_response')))),
+        'readback': (inv('s.read_valid'), True, all_of(ite(all_of('s.read_valid',inv(inputs['r_ready'])),all_of('n.read_valid',eq('n.read_data','s.read_data'),eq('n.read_response','s.read_response')),True),eq('n.read_valid',any_of(read_push,all_of('s.read_valid',inv(inputs['r_ready'])))),
+                           ite('n.read_valid',all_of(eq('n.read_data',ite(read_push,read_value,'s.read_data')),eq('n.read_response',ite(read_push,read_code,'s.read_response'))),True))),
     }
     return {key: _attach(document, name + '_' + key, types, bindings, *parts) for key, parts in obligations.items()}

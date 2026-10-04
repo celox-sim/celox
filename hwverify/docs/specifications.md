@@ -848,15 +848,17 @@ adapter's `memory_write` descriptor in
 [the example binding](../examples/source-contracts/memory-contract.json) supplies
 explicit memory-register locations/reset contents, input aliases, request-storage
 state, and actual effect/response signals. It supports 32/64-bit words and 1–16
-explicit aligned cells. The example has two cells and one outstanding AW/W pair;
+explicit aligned cells, one pending read response, and one outstanding AW/W pair.
+The example has two cells;
 it is a memory model, not inferred semantics for an arbitrary peripheral.
 
 The six independently checked documents are:
 
 - `requests`: accepted AW and W payloads enter their actual source holding slots
   independently and remain there while pending. Inactive payload bits are free.
-- `capacity`: neither holding slot is overwritten by a new acceptance before
-  retirement (same-edge retirement/replacement is representable). This is the
+- `capacity`: neither write holding slot nor the pending read slot is overwritten
+  by a new acceptance before retirement (same-edge retirement/replacement is
+  representable, including read retire/refill). This is the
   declared adapter capacity, not an AXI-wide outstanding-transaction limit.
 - `effects`: actual memory-register transitions equal byte-enabled updates from
   the captured request, only on the bound application event. Disabled lanes,
@@ -869,9 +871,19 @@ The six independently checked documents are:
   region's status, and remains stable while stalled. This explicitly binds the
   response to the write-effect lifecycle rather than assigning response-time tags.
 - `readback`: an accepted read returns the pre-edge addressed memory word and
-  status on the next state, retaining it under backpressure. This is the example's
-  explicit one-edge **read-before-write** contract, not a normative AXI latency or
+  status on the next state, retaining it under backpressure. Payload is unconstrained
+  while the next response is invalid; clearing idle RDATA/RRESP is supported. This is the example's
+  explicit one-slot, one-edge **read-before-write** contract, not a normative AXI latency or
   universal simultaneous-access ordering rule.
+
+Buffered read implementations need a separately declared FIFO correspondence
+contract; this memory template does not impose its one-slot capacity on arbitrary
+AXI designs. The independent byte-array oracle counts a pending accepted read
+until response handshake and rejects replacement, even for identical addresses
+and data. Actual 32/64-bit always-ready mutants exercise different data, equal
+data and different response status under a stall; both original witness replay
+and explicit legal retire/refill traces are checked. Stall retention is an
+independent `readback` clause and never assumes the sibling capacity obligation.
 
 All six must succeed for the same source/semantic binding before combining their
 claims. The function/region model is independently supplied: byte lanes are

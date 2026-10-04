@@ -242,7 +242,7 @@ fn search_with_limits(
                     .collect::<Res<BTreeMap<_, _>>>()?;
                 inputs.push(raw_inputs(&row));
             }
-            // A selected satisfying prefix need not constrain future frames.
+            // The solver models the full trajectory, including later frames.
             // Replay stops at its first actual failure and ignores later inputs.
             match execute(spec, selected, &inputs, true) {
                 Ok(trace) => {
@@ -603,6 +603,49 @@ mod tests {
                     validate_reachable(&s, &result["witness"]).unwrap();
                 }
             }
+        }
+    }
+    #[test]
+    fn early_deadline_failure_survives_later_cancellation_or_completion() {
+        for cancellation in [false, true] {
+            let mut d = document();
+            d["implementation"]["next"]["count"] = json!(["add", "s.count", ["bv", 4, 1]]);
+            d["implementation"]["responses"]["request_done"]["accept"] =
+                json!(["eq", "s.count", ["bv", 4, 0]]);
+            d["implementation"]["responses"]["request_done"]["assume"] = if cancellation {
+                json!(["not", "i.stall"])
+            } else {
+                json!(true)
+            };
+            d["implementation"]["operations"]["advance"] = if cancellation {
+                json!(false)
+            } else {
+                json!(["eq", "s.count", ["bv", 4, 3]])
+            };
+            let s = spec(&d);
+            // Acceptance at edge 1 expires at edge 3. At edge 4 the interval
+            // cancels/completes, but extending to edge 6 must retain the failure.
+            let mut extension = [(false, false); 6];
+            if cancellation {
+                extension[3].1 = true;
+            }
+            let concrete = check_stimulus(&s, "response_deadline", &inputs(&extension)).unwrap();
+            assert_eq!(concrete["status"], "reset_reachable_failure");
+            assert_eq!(
+                concrete["trace"].as_array().unwrap().last().unwrap()["edge"],
+                3
+            );
+            let result = search_reachable(&s, "response_deadline", 6).unwrap();
+            assert_eq!(result["status"], "reset_reachable_failure");
+            assert_eq!(
+                result["witness"]["trace"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["edge"],
+                3
+            );
+            validate_reachable(&s, &result["witness"]).unwrap();
         }
     }
     #[test]
