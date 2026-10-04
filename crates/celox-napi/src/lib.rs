@@ -668,6 +668,7 @@ struct CachedBuild {
     stable_size: u32,
     total_size: u32,
     state_fingerprint: u64,
+    state_schema: Arc<celox::StateSchema>,
     /// Pre-computed VCD signal descriptors so VCD works on cache hits.
     vcd_descs: Vec<celox::VcdSignalDesc>,
 }
@@ -916,6 +917,24 @@ impl HandleBackend {
         }
     }
 
+    fn save_state_file(&self, schema: &celox::StateSchema) -> celox::StateFile {
+        match self {
+            Self::Default(backend) => schema.capture(backend),
+            Self::Tiered(backend) => schema.capture(backend.as_ref()),
+        }
+    }
+
+    fn load_state_file(
+        &mut self,
+        schema: &celox::StateSchema,
+        file: &celox::StateFile,
+    ) -> std::result::Result<(), celox::StateMismatch> {
+        match self {
+            Self::Default(backend) => schema.load(backend, file),
+            Self::Tiered(backend) => schema.load(backend.as_mut(), file),
+        }
+    }
+
     fn restore_state(
         &mut self,
         image: &celox::StateImage,
@@ -944,6 +963,7 @@ pub struct NativeSimulatorHandle {
     stable_size: u32,
     total_size: u32,
     state_fingerprint: u64,
+    state_schema: Arc<celox::StateSchema>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -995,6 +1015,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
         let state_fingerprint = sim.state_fingerprint();
+        let state_schema = sim.state_schema();
         let vcd_descs = sim.build_vcd_descs(four_state);
         let runtime_errors = runtime_errors_by_name(sim.program());
 
@@ -1021,6 +1042,7 @@ impl NativeSimulatorHandle {
                 stable_size: stable_size as u32,
                 total_size: total_size as u32,
                 state_fingerprint,
+                state_schema: Arc::clone(&state_schema),
                 vcd_descs: vcd_descs.clone(),
             });
             let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1051,6 +1073,7 @@ impl NativeSimulatorHandle {
             stable_size: stable_size as u32,
             total_size: total_size as u32,
             state_fingerprint,
+            state_schema,
         })
     }
 
@@ -1072,6 +1095,7 @@ impl NativeSimulatorHandle {
         let (_, total_size) = sim.memory_as_ptr();
         let stable_size = sim.stable_region_size();
         let state_fingerprint = sim.state_fingerprint();
+        let state_schema = sim.state_schema();
         let runtime_errors = runtime_errors_by_name(sim.program());
 
         let layout_map = build_signal_layout(&signals, four_state);
@@ -1100,6 +1124,7 @@ impl NativeSimulatorHandle {
             stable_size: stable_size as u32,
             total_size: total_size as u32,
             state_fingerprint,
+            state_schema,
         })
     }
 
@@ -1132,6 +1157,7 @@ impl NativeSimulatorHandle {
             stable_size: cached.stable_size,
             total_size: cached.total_size,
             state_fingerprint: cached.state_fingerprint,
+            state_schema: Arc::clone(&cached.state_schema),
         })
     }
 
@@ -1446,6 +1472,42 @@ impl NativeSimulatorHandle {
             .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
 
+    /// Save the value of every state object, by path, as state file bytes.
+    #[napi]
+    pub fn save_state(&mut self) -> Result<Buffer> {
+        let runtime_errors = self.runtime_errors.clone();
+        let b = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        b.eval_comb()
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
+        state_file_bytes(&b.save_state_file(&self.state_schema))
+    }
+
+    /// Load state file bytes, matching objects by path, and settle
+    /// combinational logic.
+    #[napi]
+    pub fn load_state(&mut self, bytes: Uint8Array) -> Result<()> {
+        if self.vcd_writer.is_some() {
+            return Err(Error::from_reason(
+                celox::CheckpointError::VcdAttached.to_string(),
+            ));
+        }
+        let file = parse_state_file(&bytes)?;
+        let runtime_errors = self.runtime_errors.clone();
+        let b = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        b.load_state_file(&self.state_schema, &file)
+            .map_err(|mismatch| {
+                Error::from_reason(celox::StateError::Mismatch(mismatch).to_string())
+            })?;
+        b.eval_comb()
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))
+    }
+
     /// Return the simulator's stable memory region as a zero-copy `Uint8Array`.
     /// JS can access `.buffer` to get the underlying `ArrayBuffer`.
     #[napi]
@@ -1489,6 +1551,27 @@ pub struct NativeSimulationHandle {
     /// Default `maxSteps` for `waitUntil` / `waitForCycles`, sourced from
     /// `[simulation] max_steps` in `celox.toml`. `None` when not set.
     default_max_steps: Option<u32>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn state_file_bytes(file: &celox::StateFile) -> Result<Buffer> {
+    let mut bytes = Vec::new();
+    file.write_to(&mut bytes)
+        .map_err(|e| Error::from_reason(format!("failed to encode state: {e}")))?;
+    Ok(bytes.into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_state_file(bytes: &[u8]) -> Result<celox::StateFile> {
+    celox::StateFile::read_from(bytes).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+/// A periodic clock of a [`NativeSimulationHandle`].
+#[cfg(not(target_arch = "wasm32"))]
+#[napi(object)]
+pub struct NapiClockPeriod {
+    pub event_id: u32,
+    pub period: f64,
 }
 
 /// Saved state of a [`NativeSimulatorHandle`].
@@ -1837,6 +1920,51 @@ impl NativeSimulationHandle {
         // JS reads outputs straight from memory, so settle them now.
         sim.eval_comb()
             .map_err(|e| Error::from_reason(format!("{}", e)))
+    }
+
+    /// Periodic clocks currently registered, including those restored from a
+    /// checkpoint or state file.
+    #[napi]
+    pub fn clock_periods(&self) -> Result<Vec<NapiClockPeriod>> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim
+            .clock_periods()
+            .into_iter()
+            .map(|(event_id, period)| NapiClockPeriod {
+                event_id: event_id as u32,
+                period: period as f64,
+            })
+            .collect())
+    }
+
+    /// Save the design state, time, clocks and pending events, by name, as
+    /// state file bytes.
+    #[napi]
+    pub fn save_state(&mut self) -> Result<Buffer> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        let file = sim
+            .save_state()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        state_file_bytes(&file)
+    }
+
+    /// Load state file bytes saved from a simulation. Combinational logic is
+    /// settled as part of loading.
+    #[napi]
+    pub fn load_state(&mut self, bytes: Uint8Array) -> Result<()> {
+        let file = parse_state_file(&bytes)?;
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.load_state(&file)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Return the simulation's stable memory region as a zero-copy `Uint8Array`.

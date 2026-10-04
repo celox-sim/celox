@@ -571,6 +571,37 @@ export class Simulator<P = Record<string, unknown>> {
 		this._state.dirty = false;
 	}
 
+	/**
+	 * Save the value of every state object, by signal path, as state file
+	 * bytes. Unlike a checkpoint, a state file loads into simulators built
+	 * with another backend or optimization level, and can be written to disk.
+	 */
+	saveState(): Uint8Array {
+		this.ensureAlive();
+		if (!this._handle.saveState) {
+			throw new Error("This simulator does not support state files");
+		}
+		const bytes = this._handle.saveState();
+		this._state.dirty = false;
+		return bytes;
+	}
+
+	/**
+	 * Load state file bytes saved by `saveState()`, matching signals by path.
+	 *
+	 * Throws without changing anything if a register, memory or input of this
+	 * design is missing from the file or has another width, or if VCD output
+	 * is enabled.
+	 */
+	loadState(bytes: Uint8Array): void {
+		this.ensureAlive();
+		if (!this._handle.loadState) {
+			throw new Error("This simulator does not support state files");
+		}
+		this._handle.loadState(bytes);
+		this._state.dirty = false;
+	}
+
 	/** Release native resources. */
 	dispose(): void {
 		if (!this._disposed) {

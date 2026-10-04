@@ -52,6 +52,9 @@ export interface RawNapiSimulationHandle {
 	sharedMemory(): Uint8Array;
 	checkpoint?(): NativeSimulationCheckpoint;
 	restore?(checkpoint: NativeSimulationCheckpoint): void;
+	saveState?(): Uint8Array;
+	loadState?(bytes: Uint8Array): void;
+	clockPeriods?(): { eventId: number; period: number }[];
 	dispose(): void;
 }
 
@@ -819,6 +822,12 @@ export function wrapDirectSimulatorHandle(
 					restore: (checkpoint) => raw.restore!(checkpoint),
 				}
 			: {}),
+		...(raw.saveState && raw.loadState
+			? {
+					saveState: () => raw.saveState!(),
+					loadState: (bytes) => raw.loadState!(bytes),
+				}
+			: {}),
 	};
 }
 
@@ -862,6 +871,13 @@ export function wrapDirectSimulationHandle(
 					restore: (checkpoint) => raw.restore!(checkpoint),
 				}
 			: {}),
+		...(raw.saveState && raw.loadState
+			? {
+					saveState: () => raw.saveState!(),
+					loadState: (bytes) => raw.loadState!(bytes),
+				}
+			: {}),
+		...(raw.clockPeriods ? { clockPeriods: () => raw.clockPeriods!() } : {}),
 	};
 }
 

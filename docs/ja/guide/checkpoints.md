@@ -70,6 +70,21 @@ sim.restore(&checkpoint)?;
 メモリのレイアウトに依存しないので、あるシミュレータで保存したファイルを、バックエンドや最適化レベルが異なる別のシミュレータに読み込めます。
 たとえば、最適化した native ビルドで失敗の直前の状態を保存し、`O0` のインタープリタで再現できます。
 
+`saveState()` はファイルの中身をバイト列で返し、`loadState()` はそれを受け取ります。
+
+```typescript
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync("before_failure.state", sim.saveState());
+
+const other = Simulator.fromSource<CounterPorts>(SOURCE, "Counter", {
+  optLevel: "O0",
+});
+other.loadState(readFileSync("before_failure.state"));
+```
+
+状態ファイルは native addon で使えます。WASM ビルドはまだ対応していません。
+
 Rust API では `StateFile` を介して保存・読み込みします。
 
 ```rust

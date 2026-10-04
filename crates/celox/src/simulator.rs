@@ -24,7 +24,7 @@ pub use checkpoint::{Checkpoint, CheckpointError, StateImage};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 #[cfg(feature = "host-runtime")]
-pub use state_file::{StateError, StateMismatch};
+pub use state_file::{StateError, StateMismatch, StateSchema};
 
 #[cfg(feature = "host-runtime")]
 mod host {
@@ -104,6 +104,8 @@ mod host {
         pub(super) comb_observer_initial_eval: bool,
         /// Identity of the state layout, computed on first checkpoint use.
         pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
+        /// State objects as state files name them, built on first use.
+        pub(super) state_schema: std::sync::OnceLock<Arc<state_file::StateSchema>>,
         pub(crate) diagnostics: crate::RuntimeDiagnostics,
         tick_timing_ticks: u64,
         tick_timing_eval_apply_ns: u64,
@@ -597,6 +599,7 @@ mod host {
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_initial_eval: true,
                 checkpoint_fingerprint: std::sync::OnceLock::new(),
+                state_schema: std::sync::OnceLock::new(),
                 diagnostics: crate::RuntimeDiagnostics::default(),
                 tick_timing_ticks: 0,
                 tick_timing_eval_apply_ns: 0,

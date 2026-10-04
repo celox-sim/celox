@@ -356,6 +356,12 @@ impl<B: SimBackend> Simulation<B> {
         self.state.time()
     }
 
+    /// Periodic clocks registered with [`Self::add_clock`] (or loaded with a
+    /// state), as (event id, period).
+    pub fn clock_periods(&self) -> Vec<(usize, u64)> {
+        self.state.clock_periods()
+    }
+
     /// Returns the time of the next scheduled event, if any.
     pub fn next_event_time(&self) -> Option<u64> {
         self.state.next_event_time()

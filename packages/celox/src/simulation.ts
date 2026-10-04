@@ -669,7 +669,7 @@ export class Simulation<P = Record<string, unknown>> {
 		if (!this._handle.checkpoint) {
 			throw new Error("This simulation does not support checkpoints");
 		}
-		return new SimulationCheckpoint(this._handle.checkpoint(), this._clocks);
+		return new SimulationCheckpoint(this._handle.checkpoint());
 	}
 
 	/**
@@ -684,10 +684,38 @@ export class Simulation<P = Record<string, unknown>> {
 			throw new Error("This simulation does not support checkpoints");
 		}
 		this._handle.restore(checkpoint._native);
-		this._clocks.clear();
-		for (const [name, clock] of checkpoint._clocks) {
-			this._clocks.set(name, clock);
+		this.syncClocks();
+		this._state.dirty = false;
+	}
+
+	/**
+	 * Save the value of every state object, by signal path, together with the
+	 * simulation time, clocks and pending events, as state file bytes.
+	 */
+	saveState(): Uint8Array {
+		this.ensureAlive();
+		if (!this._handle.saveState) {
+			throw new Error("This simulation does not support state files");
 		}
+		const bytes = this._handle.saveState();
+		this._state.dirty = false;
+		return bytes;
+	}
+
+	/**
+	 * Load state file bytes saved by `Simulation.saveState()`, including the
+	 * simulation time, clocks and pending events.
+	 *
+	 * Throws without changing anything if the file does not match this design
+	 * or was saved from a `Simulator`, or if VCD output is enabled.
+	 */
+	loadState(bytes: Uint8Array): void {
+		this.ensureAlive();
+		if (!this._handle.loadState) {
+			throw new Error("This simulation does not support state files");
+		}
+		this._handle.loadState(bytes);
+		this.syncClocks();
 		this._state.dirty = false;
 	}
 
@@ -705,6 +733,21 @@ export class Simulation<P = Record<string, unknown>> {
 	// -----------------------------------------------------------------------
 	// Internal
 	// -----------------------------------------------------------------------
+
+	/** Rebuild the clock registry from the clocks the handle now runs. */
+	private syncClocks(): void {
+		const periods = this._handle.clockPeriods?.();
+		if (!periods) return;
+		const names = new Map<number, string>();
+		for (const [name, id] of Object.entries(this._events)) {
+			if (!names.has(id)) names.set(id, name);
+		}
+		this._clocks.clear();
+		for (const { eventId, period } of periods) {
+			const name = names.get(eventId);
+			if (name !== undefined) this._clocks.set(name, { period, eventId });
+		}
+	}
 
 	private resolveEvent(name: string): number {
 		const id = this._events[name];

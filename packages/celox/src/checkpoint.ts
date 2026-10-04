@@ -24,9 +24,6 @@ export class SimulatorCheckpoint {
 	}
 }
 
-/** Clocks registered with `Simulation.addClock()`, by event name. */
-type ClockRegistry = ReadonlyMap<string, { period: number; eventId: number }>;
-
 /**
  * Saved state of a `Simulation`, created by `Simulation.checkpoint()`:
  * the design state together with simulation time, clocks and pending events.
@@ -34,13 +31,10 @@ type ClockRegistry = ReadonlyMap<string, { period: number; eventId: number }>;
 export class SimulationCheckpoint {
 	/** @internal */
 	readonly _native: NativeSimulationCheckpoint;
-	/** @internal */
-	readonly _clocks: ClockRegistry;
 
 	/** @internal */
-	constructor(native: NativeSimulationCheckpoint, clocks: ClockRegistry) {
+	constructor(native: NativeSimulationCheckpoint) {
 		this._native = native;
-		this._clocks = new Map(clocks);
 	}
 
 	/** Simulation time at which the checkpoint was taken. */

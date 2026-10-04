@@ -471,6 +471,16 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.next_event_time()
     }
 
+    /// Periodic clocks as (event id, period).
+    pub fn clock_periods(&self) -> Vec<(usize, u64)> {
+        self.scheduler
+            .clocks
+            .iter()
+            .enumerate()
+            .filter_map(|(id, clock)| Some((id, clock.as_ref()?.period)))
+            .collect()
+    }
+
     /// Capture the mutable scheduling state: time, pending events, clocks and
     /// the clock values edge detection compares against.
     pub fn snapshot(&self) -> SimulationSnapshot<B> {

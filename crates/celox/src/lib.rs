@@ -83,7 +83,7 @@ mod host_api {
     pub use crate::simulator::{
         Checkpoint, CheckpointError, DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal,
         RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder,
-        SimulatorOptions, StateError, StateImage, StateMismatch, TierPromotion,
+        SimulatorOptions, StateError, StateImage, StateMismatch, StateSchema, TierPromotion,
     };
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};
     pub use celox_macros::veryl_test;

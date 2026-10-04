@@ -124,6 +124,10 @@ export interface NativeFrontendSimulatorHandle
 	checkpoint?(): NativeCheckpoint;
 	/** Restore a checkpoint and settle combinational logic. */
 	restore?(checkpoint: NativeCheckpoint): void;
+	/** Save every state object by path as state file bytes. */
+	saveState?(): Uint8Array;
+	/** Load state file bytes and settle combinational logic. */
+	loadState?(bytes: Uint8Array): void;
 	initialMemoryBytes?: never;
 	combWasmBytes?: never;
 	eventWasmBytes?: never;
@@ -177,6 +181,10 @@ export interface NativeSimulatorHandle {
 	checkpoint?(): NativeCheckpoint;
 	/** Restore a checkpoint and settle combinational logic. */
 	restore?(checkpoint: NativeCheckpoint): void;
+	/** Save every state object by path as state file bytes. */
+	saveState?(): Uint8Array;
+	/** Load state file bytes and settle combinational logic. */
+	loadState?(bytes: Uint8Array): void;
 }
 
 /**
@@ -197,6 +205,12 @@ export interface NativeSimulationHandle {
 	checkpoint?(): NativeSimulationCheckpoint;
 	/** Restore a checkpoint and settle combinational logic. */
 	restore?(checkpoint: NativeSimulationCheckpoint): void;
+	/** Save the state, time, clocks and pending events as state file bytes. */
+	saveState?(): Uint8Array;
+	/** Load state file bytes and settle combinational logic. */
+	loadState?(bytes: Uint8Array): void;
+	/** Registered periodic clocks, by event ID. */
+	clockPeriods?(): { eventId: number; period: number }[];
 }
 
 /**

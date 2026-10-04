@@ -2,7 +2,7 @@
  * Checkpoint / restore through the native addon and the WASM bridge.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -243,6 +243,112 @@ describe("Simulation checkpoints", () => {
 		const checkpoint = sim.checkpoint();
 		expect(() => sim.restore(checkpoint)).toThrow(/VCD/);
 		sim.dispose();
+	});
+});
+
+describe("State files", () => {
+	test("a simulator state loads into a simulator of another optimization level", () => {
+		const source = Simulator.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+			{
+				optLevel: "O2",
+			},
+		);
+		startCounter(source);
+		source.tick(6);
+		const bytes = source.saveState();
+
+		const target = Simulator.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+			{
+				optLevel: "O0",
+			},
+		);
+		target.loadState(bytes);
+		expect([target.dut.count, target.dut.next]).toEqual([
+			source.dut.count,
+			source.dut.next,
+		]);
+		expect(countTrace(target, 5)).toEqual(countTrace(source, 5));
+		source.dispose();
+		target.dispose();
+	});
+
+	test("state files survive a round trip through the file system", () => {
+		const source = Simulator.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+		);
+		startCounter(source);
+		source.tick(3);
+		const file = path.join(path.dirname(vcdPath()), "counter.state");
+		writeFileSync(file, source.saveState());
+
+		const target = Simulator.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+		);
+		target.loadState(readFileSync(file));
+		expect(target.dut.count).toBe(3n);
+		source.dispose();
+		target.dispose();
+	});
+
+	test("a state of another design is rejected without changes", () => {
+		const source = Simulator.fromSource(OTHER_SOURCE, "Other");
+		const target = Simulator.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+		);
+		startCounter(target);
+		target.tick(2);
+		expect(() => target.loadState(source.saveState())).toThrow(
+			/does not match the design/,
+		);
+		expect(target.dut.count).toBe(2n);
+		source.dispose();
+		target.dispose();
+	});
+
+	test("a simulation state carries time, clocks and pending events", () => {
+		const source = Simulation.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+		);
+		source.addClock("clk", { period: 10 });
+		source.dut.rst = 0n;
+		source.runUntil(20);
+		source.dut.rst = 1n;
+		source.dut.en = 1n;
+		source.runUntil(100);
+		const bytes = source.saveState();
+
+		// The target registers no clock: the state file supplies it.
+		const target = Simulation.fromSource<CounterPorts>(
+			COUNTER_SOURCE,
+			"Counter",
+		);
+		target.loadState(bytes);
+		expect(target.time()).toBe(100);
+		expect(target.dut.count).toBe(source.dut.count);
+		target.waitForCycles("clk", 3);
+		source.waitForCycles("clk", 3);
+		expect(target.time()).toBe(source.time());
+		expect(target.dut.count).toBe(source.dut.count);
+		source.dispose();
+		target.dispose();
+	});
+
+	test("a simulation rejects a state saved from a simulator", () => {
+		const simulator = Simulator.fromSource(COUNTER_SOURCE, "Counter");
+		const simulation = Simulation.fromSource(COUNTER_SOURCE, "Counter");
+		expect(() => simulation.loadState(simulator.saveState())).toThrow(
+			/no simulation schedule/,
+		);
+		simulator.dispose();
+		simulation.dispose();
 	});
 });
 

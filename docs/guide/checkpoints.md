@@ -79,6 +79,23 @@ or optimization level. This lets you, for example, capture the state of an
 optimized native build just before a failure and replay it on the
 interpreter at `O0`.
 
+`saveState()` returns the file contents as bytes, and `loadState()` takes
+them back:
+
+```typescript
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync("before_failure.state", sim.saveState());
+
+const other = Simulator.fromSource<CounterPorts>(SOURCE, "Counter", {
+  optLevel: "O0",
+});
+other.loadState(readFileSync("before_failure.state"));
+```
+
+State files are available with the native addon. The WASM build does not
+support them yet.
+
 The Rust API saves to and loads from a `StateFile`:
 
 ```rust
