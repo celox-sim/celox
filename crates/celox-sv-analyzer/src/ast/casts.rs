@@ -76,6 +76,70 @@ pub(super) fn cast_is_supported(
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
     cast_zero_type(cast, syntax_tree, const_env, type_aliases).is_some()
+        || matches!(cast.nodes.0, sv_parser::CastingType::Signing(_))
+        || cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases).is_some()
+}
+
+/// Lower a runtime cast of `expr`.
+///
+/// A size cast `N'(x)` and `signed'(x)` / `unsigned'(x)` keep or set the
+/// operand's own signedness, while a type cast `T'(x)` yields `T`'s signedness.
+/// In every case the operand is extended according to its own signedness, as in
+/// an assignment to a variable of the target type. Casts to two-state types
+/// turn unknown bits into zero.
+pub(super) fn runtime_cast_expr(
+    cast: &sv_parser::Cast,
+    expr: Expr,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let const_env = &packed_dimensions.const_env;
+    let type_aliases = &packed_dimensions.type_aliases;
+    if let Some(r#type) = cast_zero_type(cast, syntax_tree, const_env, type_aliases) {
+        return Some(Expr::Resize {
+            expr: Box::new(expr),
+            width: r#type.width,
+            signed: r#type.signed,
+        });
+    }
+    if let sv_parser::CastingType::Signing(signing) = &cast.nodes.0 {
+        let width = expr_static_width(&expr, packed_dimensions)?;
+        return Some(Expr::Resize {
+            expr: Box::new(expr),
+            width,
+            signed: matches!(**signing, sv_parser::Signing::Signed(_)),
+        });
+    }
+    let target = cast_target_type(&cast.nodes.0, syntax_tree, const_env, type_aliases)?;
+    let operand_signed = expr_signedness(
+        &expr,
+        &packed_dimensions.expression_signedness,
+        &packed_dimensions.functions,
+    )?;
+    let expr = if cast_target_is_two_state(&cast.nodes.0, syntax_tree, const_env, type_aliases) {
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(expr),
+        }
+    } else {
+        expr
+    };
+    let resized = Expr::Resize {
+        expr: Box::new(expr),
+        width: target.width,
+        signed: operand_signed,
+    };
+    if casting_type_is_numeric_size(&cast.nodes.0, syntax_tree, const_env, type_aliases)
+        || target.signed == operand_signed
+    {
+        Some(resized)
+    } else {
+        Some(Expr::Resize {
+            expr: Box::new(resized),
+            width: target.width,
+            signed: target.signed,
+        })
+    }
 }
 
 pub(super) fn constant_cast_is_supported(

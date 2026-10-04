@@ -2306,9 +2306,10 @@ fn lower_glue_parent_expr(
             then_expr,
             else_expr,
         } => {
-            let arms_signed =
-                sv_glue_expr_is_signed(then_expr, variables, name_to_id, parameter_types)
-                    && sv_glue_expr_is_signed(else_expr, variables, name_to_id, parameter_types);
+            let arms_signed = sv_glue_expr_is_signed(then_expr, variables, name_to_id, parameter_types)
+                    && sv_glue_expr_is_signed(else_expr, variables, name_to_id, parameter_types)
+                    // An unsigned context makes the whole expression unsigned.
+                    && context_signed != Some(false);
             let arm_context =
                 sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                     .map(|natural_width| {
@@ -3798,7 +3799,7 @@ fn lower_expr_with_context(
                 variables,
                 name_to_id,
                 parameter_types,
-            );
+            ) && context_signed != Some(false);
             let arm_context =
                 sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                     .map(|natural_width| {
@@ -6251,7 +6252,7 @@ fn lower_expr_to_sir_with_context(
                 variables,
                 name_to_id,
                 parameter_types,
-            );
+            ) && context_signed != Some(false);
             let arm_context =
                 sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                     .map(|natural_width| {

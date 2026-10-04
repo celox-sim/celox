@@ -59,7 +59,6 @@ all_backends! {
     }
 
     fn test_comb_override_dependency(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_override_dependency";
     }
 
@@ -69,7 +68,6 @@ all_backends! {
     }
 
     fn test_comb_function_call_early_return(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_early_return";
     }
 
@@ -83,7 +81,6 @@ all_backends! {
     }
 
     fn test_comb_function_call_local_and_return_width_coercion(sim) {
-        @ignore_on(sv);
         @case "basic::test_comb_function_call_local_and_return_width_coercion";
     }
 

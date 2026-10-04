@@ -51,8 +51,8 @@ use case::{
     mark_exhaustive_fallback, two_state_case_item_reachability,
 };
 use casts::{
-    cast_is_supported, cast_zero_type, constant_cast_const_expr, constant_cast_is_supported,
-    expr_type_from_type, resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast,
+    cast_is_supported, constant_cast_const_expr, constant_cast_is_supported, expr_type_from_type,
+    resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast, runtime_cast_expr,
     runtime_constant_cast_const_expr,
 };
 use comb_process::{comb_processes_from_module_node, fold_conditional_assignment_over};
@@ -106,7 +106,7 @@ use functions::{
 };
 use inlining::{
     expand_assignment_calls, expand_expr_calls, expand_ff_process_calls, expand_process_calls,
-    expr_signedness_with_return_types, substitute_expr_idents,
+    expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
 };
 use instances::{
     connection_references_net, expr_ident_name, identifier_text, instances_from_module_node,

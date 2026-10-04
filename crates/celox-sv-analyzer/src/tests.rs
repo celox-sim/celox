@@ -2245,6 +2245,23 @@ fn guarded_partial_writes_keep_tracked_value_linear() {
 }
 
 #[test]
+fn accepts_runtime_casts_and_signedness_system_functions() {
+    for (name, body) in [
+        ("size cast", "assign o = 16'(a);"),
+        ("narrowing size cast", "assign o = 16'(4'(a));"),
+        ("signing cast", "assign o = signed'(a);"),
+        ("int cast", "assign o = int'(a);"),
+        ("$signed", "assign o = $signed(a);"),
+        ("$unsigned in always_comb", "always_comb o = $unsigned(a);"),
+    ] {
+        let source =
+            format!("module Top(input logic [7:0] a, output logic [31:0] o); {body} endmodule");
+        analyze_source(&source, Path::new("runtime_cast.sv"))
+            .unwrap_or_else(|error| panic!("{name} must analyze: {error}"));
+    }
+}
+
+#[test]
 fn restricts_enum_alias_types_to_the_declared_base() {
     let ir = analyze_source(
         r#"
@@ -3906,13 +3923,22 @@ fn analyzes_veryl_emitted_benchmark_sv() {
 }
 
 #[test]
-fn rejects_unlowered_constructs_in_veryl_emitted_sources() {
+fn rejects_unlowered_constructs() {
     let error = analyze_source(
+        "module Top(output logic y); initial y = 1'b0; endmodule",
+        Path::new("initial.sv"),
+    )
+    .expect_err("unlowered constructs must not be silently ignored");
+    assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
+}
+
+#[test]
+fn analyzes_veryl_emitted_fifo_with_runtime_casts() {
+    analyze_source(
         include_str!("../testdata/verilator/Fifo.sv"),
         Path::new("Fifo.sv"),
     )
-    .expect_err("unlowered constructs must not be silently ignored");
-    assert!(matches!(error, AnalyzerError::Unsupported(_)));
+    .expect("Veryl-emitted FIFO uses only supported constructs");
 }
 
 #[test]

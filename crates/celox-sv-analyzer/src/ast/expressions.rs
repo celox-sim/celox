@@ -233,17 +233,7 @@ fn expr_from_primary_with_types(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            cast_zero_type(
-                cast,
-                syntax_tree,
-                &packed_dimensions.const_env,
-                &packed_dimensions.type_aliases,
-            )
-            .map(|r#type| Expr::Resize {
-                expr: Box::new(expr),
-                width: r#type.width,
-                signed: r#type.signed,
-            })
+            runtime_cast_expr(cast, expr, syntax_tree, packed_dimensions)
         }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
@@ -309,6 +299,20 @@ pub(super) fn expr_from_function_subroutine_call(
         };
         let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
         let args = call.nodes.1.nodes.1.0.contents();
+        if matches!(name, "$signed" | "$unsigned")
+            && args.len() == 1
+            && call.nodes.1.nodes.1.1.is_none()
+        {
+            // Reinterpret the operand's signedness without changing its width.
+            let arg =
+                expr_from_expression_with_types(args[0].as_ref()?, syntax_tree, packed_dimensions)?;
+            let width = expr_static_width(&arg, packed_dimensions)?;
+            return Some(Expr::Resize {
+                expr: Box::new(arg),
+                width,
+                signed: name == "$signed",
+            });
+        }
         let constant_clog2 =
             packed_dimensions.constant_indexed_base && name == "$clog2" && args.len() == 1;
         if (!constant_clog2

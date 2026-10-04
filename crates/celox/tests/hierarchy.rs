@@ -149,7 +149,7 @@ assign seen_o = seen;
     }
 
     fn test_instance_output_concat_advances_each_destination(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "hierarchy::test_instance_output_concat_advances_each_destination";
     }
 

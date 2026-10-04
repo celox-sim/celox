@@ -5,27 +5,22 @@ mod test_utils;
 all_backends! {
 
     fn test_case_basic_comb(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_case_basic_comb";
     }
 
     fn test_switch_basic_comb(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_switch_basic_comb";
     }
 
     fn test_case_multiarm(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_case_multiarm";
     }
 
     fn test_case_nested_in_if(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_case_nested_in_if";
     }
 
     fn test_case_block_body(sim) {
-        @ignore_on(sv);
         @case "case_switch::test_case_block_body";
     }
 

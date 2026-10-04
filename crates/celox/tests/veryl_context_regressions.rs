@@ -6,8 +6,6 @@ mod test_utils;
 // cargo test -p celox --test veryl_context_regressions -- --include-ignored --skip ::sv
 all_backends! {
     fn part_select_of_signed_is_unsigned(sim) {
-        // SV frontend cannot lower this always_comb assignment expression.
-        @ignore_on(sv);
         @case "veryl_context_regressions::part_select_of_signed_is_unsigned";
     }
     fn signed_part_select_sign_extends(sim) {
@@ -21,8 +19,6 @@ all_backends! {
         @case "veryl_context_regressions::signed_struct_member_sign_extends";
     }
     fn wide_logical_operand_keeps_result_type(sim) {
-        // SV frontend cannot lower the emitted cast.
-        @ignore_on(sv);
         @case "veryl_context_regressions::wide_logical_operand_keeps_result_type";
     }
     fn constant_ternary_keeps_both_arm_types(sim) {
@@ -30,7 +26,6 @@ all_backends! {
         @case "veryl_context_regressions::constant_ternary_keeps_both_arm_types";
     }
     fn signed_cast_of_folded_constant_sign_extends(sim) {
-        @ignore_on(sv);
         @case "veryl_context_regressions::signed_cast_of_folded_constant_sign_extends";
     }
     fn case_on_signed_target_matches_negative_labels(sim) {
