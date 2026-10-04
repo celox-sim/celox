@@ -57,4 +57,8 @@ def check_trace(rows, config):
         held = {ch: [row[n] for n in fields] for ch, fields in payloads.items() if row[ch + 'valid'] and not row[ch + 'ready']}
     return {'guarantee_violations': guarantees, 'environment_violations': environment, 'capacity_exceeded': capacity,
             'accepted_transfers': transfers, 'outstanding': counts,
+            'conditional_guarantees': 'failed' if guarantees else 'passed',
+            'environment': 'invalid' if environment else 'legal_sampled_prefix',
+            'capacity': 'exceeded' if capacity else 'in_scope',
+            'environment_nonvacuity': {'checked': False, 'scope': 'concrete trace only; no quantified environment or cover check'},
             'status': 'protocol_violation' if guarantees else 'environment_invalid' if environment else 'scope_exceeded' if capacity else 'sampled_prefix_passed'}

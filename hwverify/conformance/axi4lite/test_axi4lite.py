@@ -18,8 +18,8 @@ def row(**kw):
     result = {n: False if t == 'bool' else 0 for n, t in signal_types(CONFIG).items()}
     return {**result, 'rst': False, **kw}
 
-def core(rows, config):
-    request = {'version': 1, 'document': trace_document(config), 'mode': 'check_stimulus', 'goal': 'safety', 'inputs': rows}
+def core(rows, config, objective='guarantees'):
+    request = {'version': 1, 'document': trace_document(config, objective), 'mode': 'check_stimulus', 'goal': 'safety', 'inputs': rows}
     p = subprocess.run([ROOT / 'target/release/hwverify-replay'], input=json.dumps(request), text=True, capture_output=True, timeout=20)
     if p.returncode: raise AssertionError(p.stdout + p.stderr)
     return json.loads(p.stdout)
@@ -133,6 +133,59 @@ class ProtocolRules(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)['status'], 'trace_no_failure')
         # The separate known expectation detects this deliberately broken checker.
         self.assertNotEqual(bool(independent['guarantee_violations']), json.loads(p.stdout)['status'] == 'reset_reachable_failure')
+
+    def test_conditional_api_dispositions_and_separate_objectives(self):
+        config = {**CONFIG, 'role': 'subordinate', 'capacity': 1}
+        illegal = [row(rst=True), row(awvalid=True), row()]
+        overflow = [row(rst=True), row(awvalid=True, awready=True), row(awvalid=True, awready=True)]
+        for rows, failing, expected in [(illegal, 'environment', 'environment_invalid'), (overflow, 'scope', 'scope_exceeded')]:
+            report = check_trace(rows, config)
+            self.assertEqual(report['status'], expected)
+            self.assertEqual(report['conditional_guarantees'], 'passed')
+            self.assertFalse(report['environment_nonvacuity']['checked'])
+            self.assertEqual(core(rows, config)['status'], 'trace_no_failure')
+            self.assertEqual(core(rows, config, failing)['status'], 'reset_reachable_failure')
+        self.assertEqual(check_trace(illegal, config)['environment'], 'invalid')
+        self.assertEqual(check_trace(overflow, config)['capacity'], 'exceeded')
+        legal = check_trace([row(rst=True), row()], config)
+        self.assertEqual((legal['environment'], legal['capacity']), ('legal_sampled_prefix', 'in_scope'))
+        self.assertFalse(legal['environment_nonvacuity']['checked'])
+
+    def test_fault_on_capacity_overflow_edge_is_not_masked(self):
+        config = {**CONFIG, 'role': 'subordinate', 'capacity': 1}
+        rows = [row(rst=True), row(awvalid=True, awready=True), row(awvalid=True, awready=True, rvalid=True)]
+        report = check_trace(rows, config)
+        self.assertEqual(report['capacity_exceeded'], [{'edge': 2, 'channel': 'aw'}])
+        self.assertEqual(report['guarantee_violations'], [{'edge': 2, 'rule': 'r_requires_ar'}])
+        self.compare(rows, 'protocol_violation', ['r_requires_ar'], config)
+
+    def test_earlier_fault_survives_later_counterpart_fault(self):
+        config = {**CONFIG, 'role': 'subordinate'}
+        rows = [row(rst=True), row(rvalid=True, awvalid=True), row()]
+        report = check_trace(rows, config)
+        self.assertEqual(report['status'], 'protocol_violation')
+        self.assertEqual(report['guarantee_violations'], [{'edge': 1, 'rule': 'r_requires_ar'}])
+        self.assertEqual(report['environment_violations'], [{'edge': 2, 'rule': 'aw_valid_stable'}])
+        self.assertEqual(core(rows, config)['status'], 'reset_reachable_failure')
+        # Guarantee replay stops at the first fault. A separate scope run proceeds
+        # through the later counterpart fault and exposes the sticky DUT flag.
+        full = core(rows, config, 'scope')
+        self.assertEqual(len(full['trace']), 3)
+        state = full['trace'][-1]['state_after']
+        self.assertTrue(state['axi_environment_bad']['value'])
+        self.assertTrue(state['axi_bad_r_requires_ar']['value'])
+
+    def test_same_edge_counterpart_fault_ends_conditional_prefix(self):
+        config = {**CONFIG, 'role': 'subordinate'}
+        rows = [row(rst=True), row(awvalid=True), row(rvalid=True)]
+        report = check_trace(rows, config)
+        self.assertEqual(report['status'], 'environment_invalid')
+        self.assertEqual(report['guarantee_violations'], [])
+        self.assertEqual(report['environment_violations'], [{'edge': 2, 'rule': 'aw_valid_stable'}])
+        self.assertEqual(core(rows, config)['status'], 'trace_no_failure')
+        self.assertEqual(core(rows, config, 'environment')['status'], 'reset_reachable_failure')
+        # With no counterpart assumptions, link mode detects both faults.
+        self.compare(rows, 'protocol_violation', ['aw_valid_stable', 'r_requires_ar'], {**config, 'role': 'link'})
 
     def test_seeded_full_channel_sequences(self):
         rng = random.Random(20261004)

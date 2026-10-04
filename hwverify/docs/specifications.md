@@ -664,6 +664,36 @@ separate cover. The examples require actual handshakes, not merely idle traces. 
 `stimulus` run reports environment violations explicitly. Exit 0 means the
 request completed; inspect the status. Tool/mapping/divergence errors exit 2.
 
+The Python document APIs default to **conditional guarantees**, not complete
+trace acceptance. Generate the other objectives independently:
+
+```python
+from protocols.axi4lite import trace_document
+checks = {goal: trace_document(config, objective=goal)
+          for goal in ("guarantees", "environment", "scope")}
+# For source documents, call bind(original_document, ..., objective=goal)
+# separately on the original, uninstrumented document for each goal.
+```
+
+`environment` checks counterpart violations; `scope` checks capacity on a legal
+counterpart prefix. Inspect these results separately from guarantees. Concrete
+replay states also expose `axi_environment_bad` and raw `axi_scope_bad`; raw
+capacity overflow is recorded even outside a legal counterpart prefix.
+`axi4lite_reference.check_trace(rows, config)` returns separate
+`conditional_guarantees`, `environment`, and `capacity` dispositions. Its existing
+aggregate `status` prioritizes a detected DUT fault, then invalid environment,
+then exceeded capacity; only `sampled_prefix_passed` means this supplied prefix
+is both legal and in scope. `environment_nonvacuity.checked` is explicitly false:
+these trace dispositions do not claim a quantified environment or cover check.
+
+A capacity overflow does not mask a DUT fault on that same edge. A counterpart
+violation **does** end the conditional prefix on its own edge, so a coincident
+DUT violation is outside that conditional obligation; trace-only `link` mode
+checks both without counterpart assumptions. Previously detected DUT faults
+remain recorded despite later counterpart violations. Native guarantee replay
+stops at its first failure; inspect a separate objective or the complete concrete
+trace oracle when examining later events.
+
 ### AXI limits and validation
 
 The gate runs the existing Celox replay tests plus positive source scenarios,

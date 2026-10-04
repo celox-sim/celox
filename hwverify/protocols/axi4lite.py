@@ -127,6 +127,15 @@ def bind(document, config, signals, reset_signals, objective='guarantees'):
 
     Existing components/bindings remain checked. The first version deliberately
     requires a single unconditional tick; event-selective bindings are rejected.
+
+    Default objective='guarantees' is CONDITIONAL: success does not establish a
+    legal counterpart or in-capacity trace. Call bind on the ORIGINAL document
+    separately with objective='environment' and objective='scope'. Environment
+    checks counterpart rules; scope checks capacity on a legal counterpart prefix.
+    Concrete replay state also exposes axi_environment_bad and axi_scope_bad
+    (the latter is raw overflow, even outside a legal counterpart prefix).
+    No objective establishes environment nonvacuity; provide a positive stimulus
+    or a separate cover. Never interpret guarantee success alone as link success.
     """
     parameters(config)
     doc = copy.deepcopy(document)
@@ -157,8 +166,14 @@ def bind(document, config, signals, reset_signals, objective='guarantees'):
     return doc
 
 
-def trace_document(config):
-    """Standalone library binding for fully supplied sampled-bus trace checks."""
+def trace_document(config, objective='guarantees'):
+    """Standalone sampled-bus binding with the same objectives/caveats as bind.
+
+    Generate separate documents for 'guarantees', 'environment', and 'scope'.
+    Default guarantee success is conditional, not proof of a legal/in-scope trace.
+    For concrete rows, axi4lite_reference.check_trace returns these dispositions
+    separately and explicitly reports that environment nonvacuity is unchecked.
+    """
     types = signal_types(config)
     base = {'version': 3, 'kind': 'specification', 'name': 'AXI4-Lite sampled contract',
             'inputs': {'rst': 'bool', **types}, 'observations': {}, 'operations': {'tick': {}},
@@ -167,4 +182,4 @@ def trace_document(config):
             'implementation': {'composition': 'Bus', 'reset_input': 'rst', 'state': {}, 'reset': {}, 'next': {}, 'wires': {},
                                'operations': {'tick': True}, 'binding': {'states': {'Clock': {}}, 'observations': {}}}}
     signals = {n: 'i.' + n for n in types}
-    return bind(base, config, signals, signals)
+    return bind(base, config, signals, signals, objective)
