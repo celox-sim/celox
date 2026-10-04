@@ -675,8 +675,8 @@ export class Simulation<P = Record<string, unknown>> {
 	/**
 	 * Return to the state saved in `checkpoint`, including its simulation time.
 	 *
-	 * Throws if the checkpoint comes from another design. VCD output records
-	 * the restored values as changes at the next `dump()`.
+	 * Throws if the checkpoint comes from another design, or if VCD output has
+	 * already passed the checkpoint's time; call `switchVcd()` first then.
 	 */
 	restore(checkpoint: SimulationCheckpoint): void {
 		this.ensureAlive();
@@ -690,9 +690,8 @@ export class Simulation<P = Record<string, unknown>> {
 
 	/**
 	 * Finish the current VCD file and continue the waveform in a new file at
-	 * `path`, whose timestamps start over. Use it to record a simulation rewound
-	 * by `restore()` or `loadState()`: `dump()` rejects a timestamp earlier
-	 * than the last one it wrote.
+	 * `path`, whose timestamps start over. Call it before `restore()` or
+	 * `loadState()` returns to a time the current file has already passed.
 	 */
 	switchVcd(path: string): void {
 		this.ensureAlive();
@@ -721,7 +720,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 * simulation time, clocks and pending events.
 	 *
 	 * Throws without changing anything if the file does not match this design
-	 * or was saved from a `Simulator`.
+	 * or was saved from a `Simulator`, or if VCD output has already passed the
+	 * saved time; call `switchVcd()` first then.
 	 */
 	loadState(bytes: Uint8Array): void {
 		this.ensureAlive();

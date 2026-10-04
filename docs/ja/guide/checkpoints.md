@@ -56,14 +56,16 @@ sim.time(); // 100
 
 VCD 出力は復元をまたいで記録を続けます。次の `dump()` で、復元した値が変化として書き込まれます。
 VCD ファイルは時刻を巻き戻せないため、最後に書いた時刻より前の時刻で `dump()` すると例外を投げます。
-巻き戻した `Simulation` や、チェックポイントから分岐した各シナリオを記録するには、`switchVcd()` で新しいファイルに切り替えます。
+
+`Simulation` はステップごとに dump するので、VCD ファイルがすでに通過した時刻へ戻る `restore()` や `loadState()` は、何も変更せずに例外を投げます。
+先に `switchVcd()` で新しいファイルに切り替えてください。チェックポイントから分岐した各シナリオを別々のファイルに記録するときも同じ方法を使います。
 
 ```typescript
 const sim = Simulation.fromSource(SOURCE, "Counter", { vcd: "./main.vcd" });
 // ...
-sim.restore(checkpoint);
 sim.switchVcd("./retry.vcd"); // 新しいファイルでは時刻が 0 から始まる
-sim.dump(sim.time());
+sim.restore(checkpoint);
+sim.runUntil(500);
 ```
 
 Rust では、`dump()` が panic する代わりに `try_dump()` がこれらのエラーを返し、`switch_vcd()` で新しいファイルを始めます。

@@ -120,7 +120,7 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
 
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
-        self.dump(timestamp);
+        self.dump_unless_rewound(timestamp);
     }
 }
 
@@ -258,6 +258,7 @@ impl<B: SimBackend> Simulation<B> {
     /// objects are matched.
     pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
+        self.simulator.check_vcd_rewind(record.time)?;
         let parts = self.simulator.resolve_schedule(record)?;
         self.simulator.load_state(file)?;
         self.state.import_schedule(parts);
@@ -266,8 +267,13 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Return to the state saved in `checkpoint`, including its simulation
     /// time. See [`Simulator::restore`] for what is not rolled back.
+    ///
+    /// The simulation dumps VCD output at every step, so a restore to a time
+    /// the VCD file has already passed is rejected; call [`Self::switch_vcd`]
+    /// first.
     pub fn restore(&mut self, checkpoint: &SimulationCheckpoint<B>) -> Result<(), CheckpointError> {
         self.simulator.validate_restore(&checkpoint.simulator)?;
+        self.simulator.check_vcd_rewind(checkpoint.time())?;
         let events = self.simulator.backend.id_to_event_slice();
         self.state
             .restore(&checkpoint.schedule, |event| {
@@ -357,7 +363,7 @@ impl<B: SimBackend> Simulation<B> {
             self.step()?;
         }
         self.state.set_time(end_time);
-        self.dump(end_time);
+        self.simulator.dump_unless_rewound(end_time);
         Ok(())
     }
 

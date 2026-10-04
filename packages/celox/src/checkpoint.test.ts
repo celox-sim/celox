@@ -249,7 +249,7 @@ describe("Simulation checkpoints", () => {
 		fork.dispose();
 	});
 
-	test("a restored simulation records into a new VCD file", () => {
+	test("a simulation switches VCD files before rewinding", () => {
 		const first = vcdPath();
 		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
 			vcd: first,
@@ -258,15 +258,35 @@ describe("Simulation checkpoints", () => {
 		sim.runUntil(50);
 		const checkpoint = sim.checkpoint();
 		sim.runUntil(100);
-		sim.dump(sim.time());
-		sim.restore(checkpoint);
-		expect(() => sim.dump(sim.time())).toThrow(/earlier than the last dumped/);
+		expect(() => sim.restore(checkpoint)).toThrow(/rewind the VCD output/);
+		expect(sim.time()).toBe(100);
 
 		const second = path.join(path.dirname(first), "second.vcd");
 		sim.switchVcd(second);
-		sim.dump(sim.time());
+		sim.restore(checkpoint);
+		sim.runUntil(80);
 		sim.dispose();
-		expect(readFileSync(second, "utf8")).toContain("#50");
+		const vcd = readFileSync(second, "utf8");
+		expect(vcd).toContain("#55");
+		expect(vcd).toContain("#80");
+	});
+
+	test("saving settles inputs written through the DUT", () => {
+		const source = `
+module Pass (clk: input clock, a: input logic<8>, y: output logic<8>) {
+    assign y = a + 8'd1;
+}
+`;
+		const sim = Simulation.fromSource<{ a: bigint; readonly y: bigint }>(
+			source,
+			"Pass",
+		);
+		sim.dut.a = 5n;
+		expect(sim.dut.y).toBe(6n); // settles combinational logic
+		sim.dut.a = 7n;
+		sim.saveState();
+		expect(sim.dut.y).toBe(8n);
+		sim.dispose();
 	});
 });
 

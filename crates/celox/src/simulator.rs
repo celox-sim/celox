@@ -929,6 +929,33 @@ mod host {
             Ok(())
         }
 
+        /// Dump unless `timestamp` precedes what the VCD file already
+        /// records, as after `run_until` to an earlier time.
+        pub(crate) fn dump_unless_rewound(&mut self, timestamp: u64) {
+            let rewound = self
+                .vcd_writer
+                .as_ref()
+                .and_then(|writer| writer.last_timestamp())
+                .is_some_and(|last| timestamp < last);
+            if !rewound {
+                self.dump(timestamp);
+            }
+        }
+
+        /// Reject a return to `time` if the VCD file has already passed it.
+        pub(crate) fn check_vcd_rewind(&self, time: u64) -> Result<(), CheckpointError> {
+            match self
+                .vcd_writer
+                .as_ref()
+                .and_then(|writer| writer.last_timestamp())
+            {
+                Some(last_dumped) if time < last_dumped => {
+                    Err(CheckpointError::VcdRewind { time, last_dumped })
+                }
+                _ => Ok(()),
+            }
+        }
+
         /// Finish the current VCD file and continue the waveform in a new
         /// file at `path`, whose timestamps start over. Use it to record a
         /// simulation rewound by a restore. Fails if the simulator was built

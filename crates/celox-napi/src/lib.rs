@@ -1968,6 +1968,10 @@ impl NativeSimulationHandle {
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        // JS writes inputs straight to memory without marking the simulation
+        // dirty, so settle combinational logic before saving it.
+        sim.eval_comb()
+            .map_err(|e| Error::from_reason(format!("{}", e)))?;
         let file = sim
             .save_state()
             .map_err(|e| Error::from_reason(e.to_string()))?;

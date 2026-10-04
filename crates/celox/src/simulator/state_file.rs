@@ -317,13 +317,24 @@ impl<B: SimBackend> Simulator<B> {
             .map(|object| (object.signal.offset, object.path.clone()))
             .collect();
         let event_path = |event: B::Event| self.program.get_path(&event.addr());
+        // An event normally drives its own signal. Name that signal by the
+        // event's path: other objects may share its storage under paths that
+        // another build keeps separate.
+        let signal_path = |event: &SimEvent<B>| {
+            let own = self.backend.resolve_signal(&event.event_ref.addr());
+            if own.offset == event.signal.offset {
+                event_path(event.event_ref)
+            } else {
+                signal_paths
+                    .get(&event.signal.offset)
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        };
         let named = |event: &SimEvent<B>| ScheduledEvent {
             time: event.time,
             event: event_path(event.event_ref),
-            signal: signal_paths
-                .get(&event.signal.offset)
-                .cloned()
-                .unwrap_or_default(),
+            signal: signal_path(event),
             value: event.next_val,
         };
         ScheduleRecord {

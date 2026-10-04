@@ -333,3 +333,73 @@ fn loading_into_a_vcd_simulator_records_the_loaded_values() {
         "{vcd}"
     );
 }
+
+#[test]
+fn simulation_schedule_names_clocks_by_their_own_path() {
+    // `core.clk` sorts before `sys_clk` and may share its storage when
+    // identity aliases are merged; the saved clock must still be `sys_clk`.
+    let design = r#"
+        module Child (clk: input clock, q: output logic<8>) {
+            always_ff (clk) { q = q + 8'd1; }
+        }
+        module Top (sys_clk: input clock, q: output logic<8>) {
+            inst core: Child (clk: sys_clk, q);
+        }
+    "#;
+    let trace = |sim: &mut Simulation| {
+        let q = sim.signal("q");
+        (0..10)
+            .map(|_| {
+                sim.step().unwrap();
+                (sim.time(), sim.get(q))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut source = Simulation::builder(design, "Top")
+        .opt_level(OptLevel::O2)
+        .build()
+        .unwrap();
+    source.add_clock("sys_clk", 10, 5);
+    trace(&mut source);
+    let file = through_bytes(&source.save_state().unwrap());
+    let schedule = file.schedule.as_ref().unwrap();
+    assert!(
+        schedule
+            .events
+            .iter()
+            .all(|event| event.signal == "sys_clk"),
+        "{schedule:?}"
+    );
+
+    let mut target = Simulation::builder(design, "Top")
+        .opt_level(OptLevel::O0)
+        .build()
+        .unwrap();
+    target.load_state(&file).unwrap();
+    assert_eq!(trace(&mut target), trace(&mut source));
+}
+
+#[test]
+fn simulation_load_refuses_to_rewind_vcd() {
+    let mut source = Simulation::builder(DESIGN, "Top").build().unwrap();
+    source.add_clock("clk", 10, 5);
+    source.run_until(30).unwrap();
+    let file = source.save_state().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut target = Simulation::builder(DESIGN, "Top")
+        .vcd(dir.path().join("wave.vcd"))
+        .build()
+        .unwrap();
+    target.add_clock("clk", 10, 5);
+    target.run_until(100).unwrap();
+    assert!(matches!(
+        target.load_state(&file),
+        Err(StateError::Checkpoint(
+            celox::CheckpointError::VcdRewind { .. }
+        ))
+    ));
+    target.switch_vcd(dir.path().join("loaded.vcd")).unwrap();
+    target.load_state(&file).unwrap();
+    assert_eq!(target.time(), 30);
+}

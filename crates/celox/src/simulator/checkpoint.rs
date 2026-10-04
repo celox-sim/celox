@@ -122,6 +122,13 @@ pub enum CheckpointError {
     ExternalComponents,
     #[error("the checkpoint was taken from a different design")]
     DesignMismatch,
+    /// A time-based simulation dumps VCD output at every step, so it cannot
+    /// return to a time its VCD file has already passed.
+    #[error(
+        "returning to time {time} would rewind the VCD output, which reached time {last_dumped}; \
+         switch to a new VCD file first"
+    )]
+    VcdRewind { time: u64, last_dumped: u64 },
 }
 
 impl<B: SimBackend> Simulator<B> {

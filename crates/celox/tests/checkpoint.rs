@@ -334,3 +334,37 @@ fn simulation_checkpoint_forks_into_another_simulation() {
     assert_eq!(fork.time(), source.time());
     assert_eq!(timed_trace(&mut fork, 400), timed_trace(&mut source, 400));
 }
+
+#[test]
+fn simulation_restore_refuses_to_rewind_vcd_until_switched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sim = Simulation::builder(COUNTER, "Top")
+        .vcd(dir.path().join("first.vcd"))
+        .build()
+        .unwrap();
+    sim.add_clock("clk", 10, 5);
+    sim.run_until(50).unwrap();
+    let checkpoint = sim.checkpoint().unwrap();
+    sim.run_until(100).unwrap();
+    assert_eq!(
+        sim.restore(&checkpoint),
+        Err(CheckpointError::VcdRewind {
+            time: 50,
+            last_dumped: 100
+        })
+    );
+    assert_eq!(sim.time(), 100, "a rejected restore changes nothing");
+
+    let second = dir.path().join("second.vcd");
+    sim.switch_vcd(&second).unwrap();
+    sim.restore(&checkpoint).unwrap();
+    sim.run_until(80).unwrap();
+    sim.flush_vcd().unwrap();
+    let vcd = std::fs::read_to_string(&second).unwrap();
+    assert!(vcd.contains("#55") && vcd.contains("#80"), "{vcd}");
+
+    // Running "until" an earlier time does not dump into the past.
+    sim.run_until(60).unwrap();
+    sim.flush_vcd().unwrap();
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), vcd);
+}

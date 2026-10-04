@@ -61,16 +61,19 @@ sim.time(); // 100
 
 VCD output keeps recording across a restore: the next `dump()` writes the
 restored values as changes. A VCD file cannot go back in time, so `dump()`
-throws when its timestamp is earlier than the last one written. To record a
-rewound `Simulation`, or each scenario forked from a checkpoint, continue in a
-new file with `switchVcd()`:
+throws when its timestamp is earlier than the last one written.
+
+A `Simulation` dumps at every step, so `restore()` and `loadState()` throw,
+without changing anything, when they would return to a time the VCD file has
+already passed. Continue in a new file with `switchVcd()` first; this is also
+how to record each scenario forked from a checkpoint in its own file:
 
 ```typescript
 const sim = Simulation.fromSource(SOURCE, "Counter", { vcd: "./main.vcd" });
 // ...
-sim.restore(checkpoint);
 sim.switchVcd("./retry.vcd"); // timestamps start over in the new file
-sim.dump(sim.time());
+sim.restore(checkpoint);
+sim.runUntil(500);
 ```
 
 In Rust, `try_dump()` returns these errors instead of panicking like

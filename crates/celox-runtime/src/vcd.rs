@@ -206,6 +206,12 @@ impl<W: Write> VcdWriter<W> {
         self.output.writer.get_ref()
     }
 
+    /// The last timestamp written to the file, if any. Later dumps must not
+    /// be earlier.
+    pub fn last_timestamp(&self) -> Option<u64> {
+        self.header_written.then_some(self.timestamp)
+    }
+
     /// Make the next [`Self::dump_backend`] compare every signal: memory
     /// changed without marking VCD activity, for example by restoring a
     /// checkpoint.
