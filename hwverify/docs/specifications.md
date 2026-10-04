@@ -798,10 +798,30 @@ reset epochs remain rejected by the source replay route.
 read/write offer searches, two outstanding requests, stalls, repeated addresses,
 simultaneous events, full-queue backpressure, reset polarity, mutations, incorrect
 bindings, reset-phase mismatches on VALID/data/READY under both polarities, physical
-endpoint aliases, and stale witnesses. Its separate complete AXI depth-10 search currently
-returns `Unknown` from the finite solver term-depth budget; this is retained in
-`results.json`, not counted as a protocol proof. Actual scenario traces independently
-pass the ordinary AXI checks. Other example/test results do not discharge this limit.
+endpoint aliases, and stale witnesses. The complete AXI guarantee and capacity
+queries at depth 10 are now mandatory bounded no-failure regressions, alongside
+independent actual scenario traces. A future `Unknown` fails this regression.
+
+The bounded-search encoder balances each frame's conjunction of reset/transition
+equations instead of extending one linear chain. It retains every equation and
+failure predicate; solver limits and original-formula/model replay are unchanged.
+For this 54-state example at depth 10, the reset-prefix conjunction spine drops
+from 604 levels to 16. The previous finite solver stopped before encoding terms
+because its unchanged depth limit is 512. Three identical-query runs measured
+median native-process times of 0.183 s (guarantees) and 0.115 s (capacity), now both
+bounded no-failure. Baseline medians were 0.078 s / 0.059 s but returned `Unknown`,
+not proofs. The guarantee run encoded 6,065 terms / 38,952 final clauses, using
+5,254,624 work units; capacity used 5,607 terms / 37,716 clauses and 2,971,153 work
+units. Timings are environment-dependent; this is a completed-query improvement,
+not a claim that failed queries were slower.
+
+`conformance/source-contracts/measure_search.py --out DIR --baseline-binary PATH`
+records identical request hashes, binary hashes, three raw runs and solver counters
+for both queries (omit the baseline argument to measure just the current binary).
+Native regressions exhaust all seven-input Boolean valuations and exercise wide
+frames, first/middle/last equation mutations, reset failures, final-edge failures,
+original-transition replay, and a deliberately insufficient depth budget. These
+checks do not convert a bounded result into an unbounded safety theorem.
 
 ### Explicit optional response-output profile
 

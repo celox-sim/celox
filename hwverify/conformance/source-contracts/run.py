@@ -34,12 +34,9 @@ def main():
             expect(cli('read-search-' + obligation, 'search', fifo, obligation), 'bounded_no_failure')
         passed('read_all_independent_obligations', depth=10)
         bus_search = axi('read-axi-search', 'search', good / 'axi-binding.json')
-        if bus_search['status'] == 'unknown':
-            reason = replay.load_json(args.out / 'read-axi-search' / 'search.json').get('reason')
-            if reason != 'finite solver term depth budget exhausted': raise RuntimeError(bus_search)
-            results.append({'case': 'full_axi_search', 'status': 'unknown', 'depth': 10, 'reason': reason})
-        else:
-            expect(bus_search, 'bounded_no_failure'); passed('full_axi_search', depth=10)
+        expect(bus_search, 'bounded_no_failure')
+        if bus_search['capacity_search'] != 'bounded_no_failure': raise RuntimeError(bus_search)
+        passed('full_axi_search', depth=10, capacity='bounded_no_failure')
         if bus_search['structural']['status'] != 'verified': raise RuntimeError(bus_search['structural'])
         for channel in ('write', 'read'):
             for obligation in ('resource', 'launch'):
