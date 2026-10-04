@@ -1,5 +1,5 @@
 //! Native structural contract checker over a preserved source graph artifact.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read};
 fn main() {
     let result = (|| -> Result<Value, String> {

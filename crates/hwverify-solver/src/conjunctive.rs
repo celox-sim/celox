@@ -5,7 +5,7 @@
 //! Default solver limits are unchanged PER LEMMA; aggregate cost is reported.
 use crate::{Check, QueryOptions};
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashSet};
 use std::time::Instant;
 
@@ -791,11 +791,13 @@ mod tests {
         assert_eq!(result["backend"], "conjunctive_lemmas");
         assert_eq!(result["status"], "passed");
         assert_eq!(result["original_attempt"]["status"], "unknown");
-        assert!(result["children"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["backend"] == "finite_bv"));
+        assert!(
+            result["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["backend"] == "finite_bv")
+        );
         check
             .query_implication_timed(
                 "child_unknown",
@@ -828,10 +830,12 @@ mod tests {
         let result = check.reports.last().unwrap();
         assert_eq!(result["status"], "counterexample");
         assert_eq!(result["finite"]["original_formula_validated"], true);
-        assert!(result["evidence"]
-            .as_str()
-            .unwrap()
-            .contains("original_sat_recheck"));
+        assert!(
+            result["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("original_sat_recheck")
+        );
         check
             .query_implication_timed(
                 "replay_unknown",
@@ -852,16 +856,18 @@ mod tests {
             "dead_unsupported".into(),
             node(Sort::Bv(8), "unsupported", vec![bv(8, 0)]),
         );
-        assert!(check
-            .query_implication_timed(
-                "unsupported",
-                boolv(true),
-                boolv(true),
-                &context,
-                true,
-                Timeouts::default()
-            )
-            .is_err());
+        assert!(
+            check
+                .query_implication_timed(
+                    "unsupported",
+                    boolv(true),
+                    boolv(true),
+                    &context,
+                    true,
+                    Timeouts::default()
+                )
+                .is_err()
+        );
         std::fs::remove_dir_all(folder).unwrap();
     }
     #[test]

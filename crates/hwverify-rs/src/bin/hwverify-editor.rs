@@ -1,7 +1,7 @@
 //! Isolated, finite-only editor worker. One request, no persistent proof handles.
 use hwverify_ir::Design;
-use hwverify_syntax::{parse_document, SyntaxError};
-use serde_json::{json, Value};
+use hwverify_syntax::{SyntaxError, parse_document};
+use serde_json::{Value, json};
 use std::{
     fs,
     io::{self, Read},
@@ -230,9 +230,11 @@ fn run(request: &Value) -> Result<Value, Value> {
 fn main() {
     // Reproducible editor settings; no inherited automatic search or raised budget.
     for (key, _) in std::env::vars().filter(|(k, _)| k.starts_with("HWVERIFY_")) {
-        std::env::remove_var(key);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(key) };
     }
-    std::env::set_var("HWVERIFY_SOLVER", "finite");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("HWVERIFY_SOLVER", "finite") };
     let mut bytes = vec![];
     let response = match io::stdin()
         .take(64 * 1024 * 1024 + 1)
@@ -283,10 +285,12 @@ mod tests {
             let diagnostic = binding_failure_diagnostic(&binding, "test.hwv").unwrap();
             assert_eq!(diagnostic["severity"], 1);
             assert_eq!(diagnostic["span"]["line"], 12);
-            assert!(diagnostic["message"]
-                .as_str()
-                .unwrap()
-                .contains("binding_step"));
+            assert!(
+                diagnostic["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("binding_step")
+            );
         }
         assert!(binding_failure_diagnostic(&json!({"status":"verified"}), "test.hwv").is_none());
     }

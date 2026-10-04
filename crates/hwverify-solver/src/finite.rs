@@ -6,7 +6,7 @@
 //! and total sparse-array model replay. Unsupported terms or exhausted budgets yield Unknown.
 //! Diagnostics are not proof certificates: UNSAT trusts this Rust implementation.
 use hwverify_ir::{Env, Res, Sort, Term};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     time::{Duration, Instant},
@@ -230,11 +230,7 @@ impl Budget {
     }
 }
 fn mask(w: u32) -> u64 {
-    if w == 64 {
-        u64::MAX
-    } else {
-        (1u64 << w) - 1
-    }
+    if w == 64 { u64::MAX } else { (1u64 << w) - 1 }
 }
 fn valid_sort(s: &Sort) -> bool {
     matches!(s, Sort::Bool | Sort::Bv(1..=64))
@@ -2573,9 +2569,11 @@ mod tests {
             node(Sort::Bool, "=>", vec![a, alternatives]),
         ] {
             blast.term(&opaque, &mut budget, 0).unwrap();
-            assert!(split_choices(&opaque, &blast, &mut budget)
-                .unwrap()
-                .is_empty());
+            assert!(
+                split_choices(&opaque, &blast, &mut budget)
+                    .unwrap()
+                    .is_empty()
+            );
         }
         let (formula, _) = split_fixture(true);
         let malformed = Env::from([("dead".into(), node(Sort::Bool, "unsupported", vec![]))]);
@@ -2958,9 +2956,11 @@ mod tests {
                     "{clauses:?}"
                 );
                 if exists {
-                    assert!(clauses
-                        .iter()
-                        .all(|c| c.iter().any(|&p| truth(&sat.values, p) > 0)));
+                    assert!(
+                        clauses
+                            .iter()
+                            .all(|c| c.iter().any(|&p| truth(&sat.values, p) > 0))
+                    );
                 }
             }
         }

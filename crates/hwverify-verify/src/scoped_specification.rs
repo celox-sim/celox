@@ -2,7 +2,7 @@
 //! without changing the legacy checker. Generated identities stay private.
 use hwverify_ir::{Res, ScopedSpecification};
 use hwverify_solver::Check;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 
 /// Check every declared target against its own interface and examples. Each

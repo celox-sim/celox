@@ -2,9 +2,9 @@
 //!
 //! This module cannot mint a proof handle. All proposed equalities, rewritten
 //! obligations and both sides of every split are checked by `ProofBundle`.
-use crate::{equality_sharing::EqualityPool, Check, CutBudgetMode, ProofBundle, SequentHandle};
+use crate::{Check, CutBudgetMode, ProofBundle, SequentHandle, equality_sharing::EqualityPool};
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     time::Instant,
@@ -27,7 +27,7 @@ pub(crate) fn mode() -> Res<Option<CutBudgetMode>> {
         _ => {
             return Err(
                 "HWVERIFY_AUTOMATIC_PROOFS must be 0, independent_lemmas or shared_query".into(),
-            )
+            );
         }
     };
     if mode.is_some() && !crate::finite_only() {
@@ -513,7 +513,7 @@ impl Check {
                         false,
                         Some("no useful frontier or split".into()),
                     ),
-                ))
+                ));
             }
             Err(error) => return Ok((false, planner.stats(prefix_count, false, Some(error)))),
         };
@@ -658,14 +658,16 @@ mod tests {
                 z3: "must-not-run".into(),
                 reports: vec![],
             };
-            assert!(checker
-                .query_automatic_proof(
-                    "orientation",
-                    and(pre, not(goal)),
-                    &Env::new(),
-                    CutBudgetMode::IndependentLemmas
-                )
-                .unwrap());
+            assert!(
+                checker
+                    .query_automatic_proof(
+                        "orientation",
+                        and(pre, not(goal)),
+                        &Env::new(),
+                        CutBudgetMode::IndependentLemmas
+                    )
+                    .unwrap()
+            );
             let r = &checker.reports[0];
             assert_eq!(
                 r["status"],
@@ -768,14 +770,16 @@ mod tests {
             work: MAX_PLAN_WORK,
             ..Default::default()
         };
-        assert!(planner
-            .build(
-                &sum("a"),
-                &sum("b"),
-                &mut vec![],
-                &EqualityPool::new(boolv(true))
-            )
-            .is_err());
+        assert!(
+            planner
+                .build(
+                    &sum("a"),
+                    &sum("b"),
+                    &mut vec![],
+                    &EqualityPool::new(boolv(true))
+                )
+                .is_err()
+        );
     }
     #[test]
     fn fresh_kernel_accepts_correct_plan_and_replays_complement_mutation() {
@@ -803,9 +807,11 @@ mod tests {
                 z3: "must-not-run".into(),
                 reports: vec![],
             };
-            assert!(check
-                .query_automatic_proof("automatic", formula, &context, mode)
-                .unwrap());
+            assert!(
+                check
+                    .query_automatic_proof("automatic", formula, &context, mode)
+                    .unwrap()
+            );
             let r = &check.reports[0];
             crate::proof_bundle::validate_report(r).unwrap();
             assert_eq!(r["solver_result"], if bad { "sat" } else { "unsat" });

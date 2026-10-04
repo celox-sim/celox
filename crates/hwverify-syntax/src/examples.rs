@@ -102,7 +102,9 @@ impl Lower<'_> {
                 if outputs.is_some_and(|outputs| outputs.contains(name)) {
                     return Err(SyntaxError {
                         filename: self.filename.into(),
-                        message: format!("{path}: ambiguous name {name}: both a quantified variable and an output; rename the quantified variable, or use o.{name} for the output"),
+                        message: format!(
+                            "{path}: ambiguous name {name}: both a quantified variable and an output; rename the quantified variable, or use o.{name} for the output"
+                        ),
                         span: self.spans.get(path).cloned(),
                     });
                 }
@@ -113,7 +115,9 @@ impl Lower<'_> {
             {
                 return Err(SyntaxError {
                     filename: self.filename.into(),
-                    message: format!("{path}: quantified variables have no next-state value; remove the prime from {name}"),
+                    message: format!(
+                        "{path}: quantified variables have no next-state value; remove the prime from {name}"
+                    ),
                     span: self.spans.get(path).cloned(),
                 });
             }

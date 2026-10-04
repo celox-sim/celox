@@ -1,7 +1,7 @@
 //! Pure finite-word/array expression representation and memory laws. No I/O.
 use std::{
     cmp::Ordering,
-    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     rc::Rc,
 };

@@ -7,6 +7,6 @@ publish = false
 [workspace]
 
 [dependencies]
-hwverify-ir = { path = "../../crates/ir" }
-hwverify-solver = { path = "../../crates/solver" }
+hwverify-ir = { path = "../../../crates/hwverify-ir" }
+hwverify-solver = { path = "../../../crates/hwverify-solver" }
 serde_json = "1"

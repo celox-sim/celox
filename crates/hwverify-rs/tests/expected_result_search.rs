@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::{fs, path::PathBuf, process::Command};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn run(
     model: &str,

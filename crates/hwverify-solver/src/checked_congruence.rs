@@ -1,8 +1,8 @@
 //! Opt-in, current-query acyclic equality cuts. Proposals carry no authority.
 //! Independent lemma budgets and strict shared query budgets are distinct.
-use crate::{finite, Check, QueryOptions};
+use crate::{Check, QueryOptions, finite};
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -548,12 +548,14 @@ mod tests {
         );
         assert_eq!(s.plan.equality_query(0).0.args[0], s.plan.antecedent(true));
         // A cut equal to the whole opposite operand is never proposed.
-        assert!(Plan::new(&and(
-            boolv(true),
-            not(eq(ite(var("g".into(), Sort::Bool), v("x"), v("y")), v("z")))
-        ))
-        .unwrap()
-        .is_none());
+        assert!(
+            Plan::new(&and(
+                boolv(true),
+                not(eq(ite(var("g".into(), Sort::Bool), v("x"), v("y")), v("z")))
+            ))
+            .unwrap()
+            .is_none()
+        );
     }
     #[test]
     fn handles_reject_missing_duplicate_foreign_changed_and_stale() {
@@ -628,9 +630,10 @@ mod tests {
                 out,
                 reports: vec![],
             };
-            assert!(c
-                .query_checked_congruence_limited(name, bad, &ctx, mode, limits)
-                .unwrap());
+            assert!(
+                c.query_checked_congruence_limited(name, bad, &ctx, mode, limits)
+                    .unwrap()
+            );
             c.reports.remove(0)
         };
         for mode in [CutBudgetMode::SharedQuery, CutBudgetMode::IndependentLemmas] {
@@ -645,11 +648,13 @@ mod tests {
             assert_eq!(r["coverage"]["complete"], true);
             assert_eq!(r["children"].as_array().unwrap().len(), 3);
             if mode == CutBudgetMode::SharedQuery {
-                assert!(r["children"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|c| c["backend"] == "finite_bv"));
+                assert!(
+                    r["children"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|c| c["backend"] == "finite_bv")
+                );
             }
         }
         // A false proposed equality must not become a parent counterexample.
@@ -668,11 +673,13 @@ mod tests {
         );
         assert_eq!(r["status"], "passed");
         assert_eq!(r["coverage"]["proof_route"], "original_recheck");
-        assert!(r["children"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["solver_result"] == "sat"));
+        assert!(
+            r["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["solver_result"] == "sat")
+        );
         let invalid = and(
             boolv(true),
             not(eq(

@@ -2,10 +2,10 @@
 //! Parameters are universally symbolic, immutable ghost values, never live inputs.
 use hwverify_ir::*;
 use hwverify_solver::{
-    partition::{budgeted_query, infer_partitions},
     Check,
+    partition::{budgeted_query, infer_partitions},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 // Keep the explicit state environments visible at this proof-obligation boundary.

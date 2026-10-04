@@ -23,19 +23,21 @@ FRONTEND="$REPO/conformance/veryl-proof/target/debug/veryl-proof-frontend"
 test -x "$FRONTEND"
 cp conformance/veryl-proof/work/provenance.json "$OUT/frontend-provenance.json"
 cargo build --release --locked -p hwverify-rs -p hwverify-sir
-cargo fmt --all --check
+cargo fmt --check -p hwverify-ir -p hwverify-rs -p hwverify-sir -p hwverify-solver -p hwverify-syntax -p hwverify-verify
 python3 - "$OUT" "$REPO" "$FRONTEND" <<'PYHASH'
 import hashlib, json, pathlib, subprocess, sys
 out, root, frontend = map(pathlib.Path, sys.argv[1:])
-files = [root/'Cargo.toml', root/'Cargo.lock', frontend,
+# The Rust crates live in the repository-root Cargo workspace.
+repo = root.parent
+files = [repo/'Cargo.toml', repo/'Cargo.lock', frontend,
          root/'target/release/hwverify-rs', root/'target/release/hwverify-sir-lift']
-for directory in ('crates/ir', 'crates/solver', 'crates/verify', 'crates/syntax',
-                  'crates/cli', 'crates/sir', 'conformance/veryl-symbolic'):
-    files.extend(p for p in (root/directory).rglob('*') if p.is_file()
+for directory in ('crates/hwverify-ir', 'crates/hwverify-solver', 'crates/hwverify-verify', 'crates/hwverify-syntax',
+                  'crates/hwverify-rs', 'crates/hwverify-sir', 'hwverify/conformance/veryl-symbolic'):
+    files.extend(p for p in (repo/directory).rglob('*') if p.is_file()
                  and '__pycache__' not in p.parts and p.suffix != '.pyc')
 files.extend((root/'audit/veryl_scaling').glob('*.py'))
 files.extend(root/p for p in ('examples/build_pipeline.py', 'examples/build_branch_pipeline.py', 'audit/interpreter.py'))
-(out/'tested-files.json').write_text(json.dumps({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)}, indent=2)+'\n')
+(out/'tested-files.json').write_text(json.dumps({str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)}, indent=2)+'\n')
 (out/'base-commit.txt').write_text(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True))
 PYHASH
 export Z3_TRIPWIRE_MARKER="$OUT/z3-invoked.txt"

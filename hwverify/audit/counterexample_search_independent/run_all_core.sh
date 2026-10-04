@@ -10,7 +10,7 @@ mkdir -p "$campaign/source"
 cp Cargo.toml Cargo.lock "$campaign/source/"
 cp -a crates "$campaign/source/"
 solver_root="$(cd "$campaign/source" && pwd)"
-sha256sum "$solver_root"/crates/solver/src/{finite,z3,quantified}.rs > "$campaign/frozen-source-hashes.txt"
+sha256sum "$solver_root"/../crates/hwverify-solver/src/{finite,z3,quantified}.rs > "$campaign/frozen-source-hashes.txt"
 FINITE_AUDIT_SOLVER_ROOT="$solver_root" FINITE_AUDIT_OUT="$campaign/prior-core" \
   audit/finite_speed_independent/run_core.sh
 BRANCH_AUDIT_SOLVER_ROOT="$solver_root" BRANCH_AUDIT_OUT="$campaign/mux-alias-core" \

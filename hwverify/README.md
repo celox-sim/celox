@@ -29,7 +29,7 @@ HWVERIFY_SOLVER=finite target/release/hwverify-rs audit/lemma_candidates/counter
 | 何を証明し、何を信頼しているか | [信頼境界](docs/trust.md) |
 | CPU例と現在のRV32I対象 | [小さなCPUモデル](docs/models.md)、[RV32I](docs/rv32i.md)、[メモリ合成](docs/memory-composition.md) |
 | 再現テストと保存証跡 | [検査・証跡の入口](audit/README.md) |
-| FPGA計測の再現と制限 | [合成・配置配線](synthesis/README.md) |
+| FPGA計測の再現と制限 | [合成・配置配線](https://github.com/tignear/hwverify/blob/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/synthesis/README.md) |
 
 ## 現在の検証範囲
 
@@ -38,4 +38,4 @@ HWVERIFY_SOLVER=finite target/release/hwverify-rs audit/lemma_candidates/counter
 - 元のVerylコーパスは665件を実行し、**663件通過＋2件の明示した言語制約**をCIのcoverage contractとしています。全665件成功という意味ではありません。
 - `.hwv` の補題も自動探索も同じ型付き候補APIを使います。候補や保存済みレポートは証明ではなく、現在のqueryに対する新しい検査が必要です。
 
-実際のcheckoutの合否は[CI](.github/workflows/veryl-fv.yml)と新しい実行結果で確認してください。過去の集計やハッシュは現在の証明を代替しません。Rustの変換・義務生成・カーネル・選択したsolverを信頼しており、処理系全体の形式的な正しさは証明していません。
+実際のcheckoutの合否は[CI](../.github/workflows/hwverify.yml)と新しい実行結果で確認してください。過去の集計やハッシュは現在の証明を代替しません。Rustの変換・義務生成・カーネル・選択したsolverを信頼しており、処理系全体の形式的な正しさは証明していません。

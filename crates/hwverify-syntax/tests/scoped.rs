@@ -70,7 +70,7 @@ fn signatures_named_connections_and_action_sets_lower_exactly() {
 
 #[test]
 fn scoped_fixture_sources_preserve_their_public_v4_json() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify");
     for name in [
         "scoped_budgeted_counter",
         "scoped_independent_counters",

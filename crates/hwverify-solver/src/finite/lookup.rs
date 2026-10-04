@@ -515,11 +515,7 @@ mod tests {
                         ]);
                         let chosen = if g { a } else { b };
                         let expected = if chosen == 0 {
-                            if g {
-                                chosen
-                            } else {
-                                2
-                            }
+                            if g { chosen } else { 2 }
                         } else if chosen == 1 {
                             0
                         } else {
@@ -617,10 +613,12 @@ mod tests {
         assert!(MAX_CREATED_NODES - state.created < 9);
         let mut term_limited = source_checked(&table, &Env::new(), &mut budget);
         budget.limits.max_terms = term_limited.source_nodes + 8;
-        assert!(term_limited
-            .distribute(&table, &mut budget)
-            .unwrap()
-            .is_none());
+        assert!(
+            term_limited
+                .distribute(&table, &mut budget)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(term_limited.created, 0);
         let before = budget.work;
         budget.limits.max_terms = 100_000;
@@ -1172,10 +1170,12 @@ mod word_normalization_tests {
         rows.insert(0, (0, bv(2, 3)));
         bads.push(selector(&w("rs", 2), &rows, w("r3", 2)));
         for t in bads {
-            assert!(Rewrite::default()
-                .read_write(&t, &mut b())
-                .unwrap()
-                .is_none());
+            assert!(
+                Rewrite::default()
+                    .read_write(&t, &mut b())
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
     #[test]

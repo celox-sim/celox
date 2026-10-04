@@ -160,7 +160,10 @@ impl Specification {
             extend_scope(&mut env, "i", &inputs);
             let defs = at(&child(&path, "steps"), named(&c["steps"]))?;
             if defs.keys().cloned().collect::<BTreeSet<_>>() != operations {
-                return fail(&child(&path,"steps"), "steps must define every operation exactly; use an explicit relation for stuttering");
+                return fail(
+                    &child(&path, "steps"),
+                    "steps must define every operation exactly; use an explicit relation for stuttering",
+                );
             }
             let steps = defs
                 .iter()
@@ -339,7 +342,7 @@ fn examples(
                     return fail(
                         &child(&path, "expect"),
                         "expect must be positive, negative, exists, not_exists, or forall",
-                    )
+                    );
                 }
             };
             let initial = observations(&example["initial"], &child(&path, "initial"), obs, &bound)?;

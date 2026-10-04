@@ -1,7 +1,7 @@
 //! Structural contracts over complete source-variable dependency artifacts.
 //! Separate from behavioral/temporal noninterference and physical timing.
 use hwverify_ir::{Sort, Specification};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub fn check(spec: &Specification, artifact: Option<&Value>) -> Result<Value, String> {

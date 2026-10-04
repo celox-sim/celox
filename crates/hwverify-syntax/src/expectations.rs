@@ -60,7 +60,7 @@ impl Lower<'_> {
                     return Err(self.error(
                         &span,
                         "expectation blocks allow expect clauses and nested all/any blocks only",
-                    ))
+                    ));
                 }
             }
         }

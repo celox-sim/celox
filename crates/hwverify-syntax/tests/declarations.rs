@@ -1,4 +1,4 @@
-use hwverify_syntax::{parse_document, ParsedDocument};
+use hwverify_syntax::{ParsedDocument, parse_document};
 use serde_json::json;
 
 const MODERN: &str = r#"specification "named views"
@@ -205,10 +205,12 @@ fn duplicate_declarations_and_legacy_aliases_never_overwrite() {
         "specification \"x\" component C { state {} state {} }",
         "design \"x\" contract { pre true; precondition true; }",
     ] {
-        assert!(parse_document(source, "duplicate.hwv")
-            .unwrap_err()
-            .message
-            .contains("duplicate"));
+        assert!(
+            parse_document(source, "duplicate.hwv")
+                .unwrap_err()
+                .message
+                .contains("duplicate")
+        );
     }
 }
 
@@ -348,9 +350,11 @@ fn canonical_paths_retain_precise_source_spans() {
         "/* 日本語 */ observation count = s.missing + 1u4;",
     );
     let error = parse(&source).validate_specification().unwrap_err();
-    assert!(error
-        .message
-        .contains("/implementation/binding/observations/count/1"));
+    assert!(
+        error
+            .message
+            .contains("/implementation/binding/observations/count/1")
+    );
     let span = error.span.unwrap();
     assert_eq!(&source[span.start..span.end], "s.missing");
     assert_eq!(

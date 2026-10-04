@@ -1,7 +1,7 @@
 //! Bounded admission tests for relational component products.
 use hwverify_ir::*;
 use hwverify_solver::Check;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 
 fn frame(vars: &Env, kind: &str, time: usize) -> Env {

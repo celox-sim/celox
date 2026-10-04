@@ -25,8 +25,9 @@ def write(path, value):
 
 def capture_provenance(out, checker):
     root = selected.ROOT
-    scope = ['Cargo.toml', 'Cargo.lock', 'crates', 'audit/veryl_scaling', 'audit/lemma_candidates',
-             'conformance/veryl-symbolic', '.github/workflows',
+    scope = ['../Cargo.toml', '../Cargo.lock', '../crates/hwverify-ir', '../crates/hwverify-rs', '../crates/hwverify-sir', '../crates/hwverify-solver', '../crates/hwverify-syntax', '../crates/hwverify-verify',
+             'audit/veryl_scaling', 'audit/lemma_candidates',
+             'conformance/veryl-symbolic', '../.github/workflows/hwverify.yml',
              'examples/build_pipeline.py', 'examples/build_branch_pipeline.py',
              'audit/interpreter.py']
     files = set()

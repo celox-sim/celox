@@ -1,10 +1,10 @@
 use hwverify_ir::Design;
 use hwverify_syntax::{parse_document, parse_json};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn out(name: &str) -> PathBuf {
     let dir = root().join("target/language-regression").join(name);
@@ -140,10 +140,12 @@ fn invalid_names_types_assignments_and_cycles_have_source_locations() {
         let parsed = parse_document(&source, "negative.hwv").unwrap();
         let error = parsed.validate().unwrap_err();
         assert!(error.message.contains(message), "{new}: {error}");
-        assert!(error
-            .span
-            .as_ref()
-            .is_some_and(|s| s.line > 0 && s.column > 0 && s.end > s.start));
+        assert!(
+            error
+                .span
+                .as_ref()
+                .is_some_and(|s| s.line > 0 && s.column > 0 && s.end > s.start)
+        );
         assert!(error.to_string().starts_with("negative.hwv:"));
     }
     for (old, new) in [
@@ -163,11 +165,13 @@ fn invalid_names_types_assignments_and_cycles_have_source_locations() {
 fn modified_parser_output_is_not_a_validated_design() {
     let mut parsed = parse_document(SIMPLE, "generated.hwv").unwrap();
     parsed.canonical["impl"]["next"]["x"] = json!(["add", true, true]);
-    assert!(parsed
-        .validate()
-        .unwrap_err()
-        .message
-        .contains("type error"));
+    assert!(
+        parsed
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("type error")
+    );
 }
 
 #[test]
@@ -311,17 +315,21 @@ fn language_preserves_modular_and_signed_literal_semantics() {
         assert_eq!(term, expected);
     }
     for text in ["18446744073709551616u64", "bv(64, -9223372036854775809)"] {
-        assert!(parse_document(
-            &format!("design \"literal\" {{ binding {text}; }}"),
-            "literal.hwv"
-        )
-        .is_err());
+        assert!(
+            parse_document(
+                &format!("design \"literal\" {{ binding {text}; }}"),
+                "literal.hwv"
+            )
+            .is_err()
+        );
     }
     for text in ["0u0", "0u65", "1 + 2"] {
         let source = SIMPLE.replace("binding spec.x == impl.x;", &format!("binding {text};"));
-        assert!(parse_document(&source, "literal.hwv")
-            .unwrap()
-            .validate()
-            .is_err());
+        assert!(
+            parse_document(&source, "literal.hwv")
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 }

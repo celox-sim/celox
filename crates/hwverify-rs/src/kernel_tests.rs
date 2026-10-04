@@ -106,16 +106,20 @@ fn structural_trial_scores_control_not_incidental_literals() {
     let sn = BTreeMap::from([("goal".into(), goal.clone())]);
     let (parts, plan) = crate::program::infer_partitions(&s, &inv, &sn, &goal);
     assert!(parts.is_some(), "{plan}");
-    assert!(plan["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|x| x["state"] == "control" && x["decision"] == "selected"));
-    assert!(!plan["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|x| x["state"] == "distract" && x["decision"] == "selected"));
+    assert!(
+        plan["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["state"] == "control" && x["decision"] == "selected")
+    );
+    assert!(
+        !plan["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["state"] == "distract" && x["decision"] == "selected")
+    );
     let mut covered = boolv(false);
     for (_, g) in parts.unwrap() {
         covered = node(Sort::Bool, "or", vec![covered, g]);

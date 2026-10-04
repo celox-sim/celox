@@ -1,7 +1,7 @@
 //! Conditional unsigned-rank progress, shared by v2 and relational responses.
 use hwverify_ir::*;
 use hwverify_solver::Check;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(crate) fn decreases(next: Term, current: Term) -> Term {

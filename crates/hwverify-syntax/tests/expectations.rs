@@ -1,4 +1,4 @@
-use hwverify_syntax::{parse_document, ParsedDocument, SyntaxError};
+use hwverify_syntax::{ParsedDocument, SyntaxError, parse_document};
 use serde_json::json;
 
 fn source(body: &str) -> String {
@@ -130,13 +130,34 @@ fn expectations_are_boolean_relations_and_all_declarations_are_checked() {
 #[test]
 fn unused_cycles_self_cycles_shadowing_and_duplicates_are_rejected() {
     for (body, message) in [
-        ("expectation a { expect b; } expectation b { expect a; } operation add { expect true; }", "cyclic"),
-        ("expectation a { expect a; } operation add { expect true; }", "cyclic"),
-        ("expectation value { expect true; } operation add { expect true; }", "shadows"),
-        ("expectation amount { expect true; } operation add { expect true; }", "shadows"),
-        ("expectation count { expect true; } operation add { expect true; }", "shadows"),
-        ("expectation a { expect true; } expectation a { expect false; } operation add { expect true; }", "duplicate"),
-        ("operation add { expect true; } operation add = true;", "duplicate"),
+        (
+            "expectation a { expect b; } expectation b { expect a; } operation add { expect true; }",
+            "cyclic",
+        ),
+        (
+            "expectation a { expect a; } operation add { expect true; }",
+            "cyclic",
+        ),
+        (
+            "expectation value { expect true; } operation add { expect true; }",
+            "shadows",
+        ),
+        (
+            "expectation amount { expect true; } operation add { expect true; }",
+            "shadows",
+        ),
+        (
+            "expectation count { expect true; } operation add { expect true; }",
+            "shadows",
+        ),
+        (
+            "expectation a { expect true; } expectation a { expect false; } operation add { expect true; }",
+            "duplicate",
+        ),
+        (
+            "operation add { expect true; } operation add = true;",
+            "duplicate",
+        ),
     ] {
         let error = failure(&source(body));
         assert!(error.message.contains(message), "{error}");
@@ -178,11 +199,13 @@ fn prime_restrictions_and_exact_illegal_token_spans() {
         "1u4' == value",
         "value'() == value",
     ] {
-        assert!(parse_document(
-            &source(&format!("operation add {{ expect {expression}; }}")),
-            "bad.hwv"
-        )
-        .is_err());
+        assert!(
+            parse_document(
+                &source(&format!("operation add {{ expect {expression}; }}")),
+                "bad.hwv"
+            )
+            .is_err()
+        );
     }
 }
 
@@ -346,7 +369,7 @@ fn dependency_depth_bound_is_independent_of_declaration_sort_order() {
 
 #[test]
 fn modern_example_sources_match_canonical_fixtures() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hwverify");
     for name in [
         "expectation_counter",
         "quantified_counter",

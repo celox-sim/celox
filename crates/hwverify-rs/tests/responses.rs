@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command};
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn source(scoped: bool) -> String {
     fs::read_to_string(root().join(if scoped {
@@ -112,8 +112,7 @@ fn rejects_stutter_deadlock_dropped_requests_overlap_and_bad_reset() {
             .unwrap()
             .remove("responses");
         assert_eq!(
-            check(&safety_only, &format!("idle-safety-only-{scoped}"))["implementation_binding"]
-                ["status"],
+            check(&safety_only, &format!("idle-safety-only-{scoped}"))["implementation_binding"]["status"],
             "verified"
         );
         let mut dropped = base.clone();
@@ -265,10 +264,12 @@ fn cli_progress_obligations_have_native_locations() {
     assert!(result.status.success());
     let report: Value = serde_json::from_slice(&result.stdout).unwrap();
     let location = &obligation(&report, "countdown_decreases")["source_location"];
-    assert!(location["uri"]
-        .as_str()
-        .unwrap()
-        .ends_with("scoped_response.hwv"));
+    assert!(
+        location["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("scoped_response.hwv")
+    );
     assert!(location["span"]["line"].as_u64().unwrap() > 30);
     assert!(
         cover(&report)["source_location"]["span"]["line"]
@@ -413,10 +414,12 @@ fn cover_is_optional_and_exhausted_budget_is_unknown() {
         let unknown = check(&doc, &format!("cover-unknown-{scoped}"));
         assert_eq!(cover(&unknown)["status"], "unknown");
         assert!(cover(&unknown)["witness"].is_null());
-        assert!(cover(&unknown)["reason"]
-            .as_str()
-            .unwrap()
-            .contains("budget"));
+        assert!(
+            cover(&unknown)["reason"]
+                .as_str()
+                .unwrap()
+                .contains("budget")
+        );
         for bad in [json!(0), json!(33), json!(1.5)] {
             let mut invalid = document(scoped);
             invalid["implementation"]["responses"]["request_done"]["cover_depth"] = bad;

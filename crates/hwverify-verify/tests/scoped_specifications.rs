@@ -1,10 +1,10 @@
 use hwverify_ir::ScopedSpecification;
 use hwverify_verify::check_scoped_specification;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 
 fn output(name: &str) -> PathBuf {

@@ -865,12 +865,14 @@ mod tests {
         assert!(same_formula(&a, &b, &mut budget).unwrap());
         assert!(budget.work < 100);
         assert!(!same_formula(&a, &not(b.clone()), &mut test_budget()).unwrap());
-        assert!(!same_formula(
-            &var("atom".into(), Sort::Bool),
-            &var("atom".into(), Sort::Bv(1)),
-            &mut test_budget()
-        )
-        .unwrap());
+        assert!(
+            !same_formula(
+                &var("atom".into(), Sort::Bool),
+                &var("atom".into(), Sort::Bv(1)),
+                &mut test_budget()
+            )
+            .unwrap()
+        );
         for limits in [
             Limits {
                 max_terms: 10,
@@ -885,15 +887,17 @@ mod tests {
                 ..Limits::default()
             },
         ] {
-            assert!(same_formula(
-                &a,
-                &b,
-                &mut Budget {
-                    limits,
-                    ..test_budget()
-                }
-            )
-            .is_err());
+            assert!(
+                same_formula(
+                    &a,
+                    &b,
+                    &mut Budget {
+                        limits,
+                        ..test_budget()
+                    }
+                )
+                .is_err()
+            );
         }
     }
     fn fixture(last_only: bool) -> (Term, Env) {
@@ -1271,10 +1275,12 @@ mod tests {
         assert_eq!(first.verdict, Verdict::Sat);
         assert!(first.original_formula_validated);
         // The mandatory control is propagated, so cannot consume a split slot.
-        assert!(!first
-            .stats
-            .control_variables
-            .contains(&"control06".to_string()));
+        assert!(
+            !first
+                .stats
+                .control_variables
+                .contains(&"control06".to_string())
+        );
         assert_eq!(
             first.stats.control_variables,
             second.stats.control_variables

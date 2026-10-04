@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
@@ -7,7 +7,7 @@ use std::{
 };
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn output(name: &str) -> PathBuf {
     let dir = root().join("target/scoped-cli-regression").join(name);
@@ -186,10 +186,12 @@ fn scoped_invalid_unused_definitions_fail_before_solver_or_json_emission() {
         assert_eq!(result.status.code(), Some(2));
         let report: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(report["status"], "invalid_or_tool_error");
-        assert!(report["error"]
-            .as_str()
-            .unwrap()
-            .contains("/specs/Unused/operations/bad"));
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .contains("/specs/Unused/operations/bad")
+        );
         assert!(!emitted.exists());
         assert!(!marker.exists());
     }

@@ -1,6 +1,6 @@
 use hwverify_ir::Specification;
 use hwverify_verify::induction::check_inductive_safety;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, process::Command};
 fn document() -> Value {
     json!({"version":3,"kind":"specification","name":"Two-register strengthening",
@@ -45,12 +45,14 @@ fn live_induction_rejects_unchecked_strengthening_and_keeps_original_targets() {
     let good = run("good", &d, &json!([a, b])).unwrap();
     assert_eq!(good["status"], "inductive_safety_verified");
     assert_eq!(good["candidates"].as_array().unwrap().len(), 2);
-    assert!(good["proofs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|q| q["backend"] == "checked_proof_bundle")
-        .all(|q| q["root"].is_number() && q["coverage"]["fresh_handles_only"] == true));
+    assert!(
+        good["proofs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|q| q["backend"] == "checked_proof_bundle")
+            .all(|q| q["root"].is_number() && q["coverage"]["fresh_handles_only"] == true)
+    );
     let bare = run("bare", &d, &json!([])).unwrap();
     assert_eq!(bare["status"], "induction_counterexample");
     let weak = run("weak", &d, &json!([candidate("weak", json!(true), vec![])])).unwrap();
@@ -304,7 +306,7 @@ fn input_dependent_and_repeated_reset_preserve_induction() {
     // Independently enumerate every six-edge reset/input pattern beginning in
     // reset (2,048 sequences), using the ORIGINAL typed reset/next expressions.
     // This does not relax the bounded replay format's single-reset restriction.
-    use hwverify_solver::finite::{evaluate_scalar_terms, Limits, Scalar};
+    use hwverify_solver::finite::{Limits, Scalar, evaluate_scalar_terms};
     use std::collections::BTreeMap;
     let m = &s.implementation().unwrap().machine;
     let mut repeated = 0;

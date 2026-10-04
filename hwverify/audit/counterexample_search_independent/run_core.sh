@@ -20,7 +20,7 @@ s+='\n[[bin]]\nname="counterexample-search-independent-audit"\npath='+json.dumps
 PY
 manifest="$COUNTEREXAMPLE_AUDIT_OUT/build-harness/Cargo.toml"
 cargo generate-lockfile --offline --manifest-path "$manifest"
-sha256sum "$solver_root"/crates/solver/src/{finite,z3,quantified}.rs "$COUNTEREXAMPLE_AUDIT_OUT"/audit-source/*.rs "$manifest" > "$COUNTEREXAMPLE_AUDIT_OUT/source-hashes.txt"
+sha256sum "$solver_root"/../crates/hwverify-solver/src/{finite,z3,quantified}.rs "$COUNTEREXAMPLE_AUDIT_OUT"/audit-source/*.rs "$manifest" > "$COUNTEREXAMPLE_AUDIT_OUT/source-hashes.txt"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hwverify-counterexample-independent-target}"
 cargo run --offline --locked --release --manifest-path "$manifest" 2>&1 | tee "$COUNTEREXAMPLE_AUDIT_OUT/run.log"
 sha256sum --check "$COUNTEREXAMPLE_AUDIT_OUT/source-hashes.txt" > "$COUNTEREXAMPLE_AUDIT_OUT/source-hashes-verified.txt"

@@ -10,8 +10,8 @@ def main():
     out=args.out.resolve();out.mkdir(parents=True,exist_ok=True)
     bins={k:getattr(args,k).resolve() for k in ('baseline','current')};z3=args.z3.resolve()
     hashes={k:sha(p) for k,p in bins.items()};rows=[];refs=[];search_identity=[]
-    source_files=[ROOT/'crates/solver/src'/n for n in ('finite.rs','z3.rs','quantified.rs')]+[ROOT/'examples'/f'{n}.json' for n in CASES]
-    source_hashes={str(p.relative_to(ROOT)):sha(p) for p in source_files}
+    source_files=[ROOT.parent/'crates/hwverify-solver/src'/n for n in ('finite.rs','z3.rs','quantified.rs')]+[ROOT/'examples'/f'{n}.json' for n in CASES]
+    source_hashes={str(p.relative_to(ROOT.parent)):sha(p) for p in source_files}
     (out/'input_hashes.json').write_text(json.dumps({'binaries':hashes,'sources':source_hashes},indent=2)+'\n')
     for label in ('baseline','current'):
       for case in CASES:
@@ -41,7 +41,7 @@ def main():
         rows.append({'label':label,'case':case,'status':report['status'],'exit_code':p.returncode,'wall_seconds_in_correctness_run':wall,'engine_summary':report['engine_summary'],'obligations':[{k:q[k] for k in ('name','backend','status','solver_result')} for q in report['obligations']]})
         print(label,case,report['status'],flush=True)
     for k,p in bins.items():assert sha(p)==hashes[k],('binary changed',p)
-    for p in source_files:assert sha(p)==source_hashes[str(p.relative_to(ROOT))],('source changed',p)
+    for p in source_files:assert sha(p)==source_hashes[str(p.relative_to(ROOT.parent))],('source changed',p)
     result={'status':'PASS','runs':rows,'original_smt_z3_rechecks':refs,'original_assertions_match_baseline':len(refs),'binary_hashes':hashes,'same_search_and_witness_summaries':search_identity,'source_hashes_unchanged':True,'timing_note':'Correctness run wall times are diagnostic only; no isolated speed claim.'}
     (out/'summary.json').write_text(json.dumps(result,indent=2)+'\n');print('All',len(refs),'original SMT assertions unchanged and independently rechecked')
 if __name__=='__main__':main()

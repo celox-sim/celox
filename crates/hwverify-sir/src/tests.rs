@@ -1,5 +1,5 @@
 use super::*;
-use hwverify_solver::finite::{solve_with_hint, Limits, SearchHint, Verdict};
+use hwverify_solver::finite::{Limits, SearchHint, Verdict, solve_with_hint};
 
 fn var(name: &str, w: u32) -> Term {
     ir::var(name.into(), Sort::Bv(w))
@@ -539,9 +539,11 @@ fn incomplete_initialization_rejects_reads_conditional_writes_and_joins() {
     // Even a defined slice stays unreadable until the entire lane is initialized.
     assert!(storage.read(0, 2).is_err());
     assert!(storage.read(6, 2).is_err());
-    assert!(storage
-        .write(6, 2, bv(2, 1), ir::var("g".into(), Sort::Bool))
-        .is_err());
+    assert!(
+        storage
+            .write(6, 2, bv(2, 1), ir::var("g".into(), Sort::Bool))
+            .is_err()
+    );
     assert!(Storage::merge(b(true), &storage, &storage).is_err());
     storage.write(6, 2, bv(2, 2), b(true)).unwrap();
     prove(storage.read(0, 8).unwrap(), bv(8, 142));
@@ -591,14 +593,16 @@ fn unbound_cross_lane_fragments_require_complete_individual_lanes() {
     assert!(storage.read(0, 8).is_err());
     assert!(storage.read(8, 8).is_err());
     assert!(storage.read(0, 16).is_err());
-    assert!(storage
-        .write(
-            0,
-            8,
-            var("replacement", 8),
-            ir::var("guard".into(), Sort::Bool)
-        )
-        .is_err());
+    assert!(
+        storage
+            .write(
+                0,
+                8,
+                var("replacement", 8),
+                ir::var("guard".into(), Sort::Bool)
+            )
+            .is_err()
+    );
     storage.write(0, 4, low.clone(), b(true)).unwrap();
     prove(
         storage.read(0, 8).unwrap(),

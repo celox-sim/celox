@@ -1,7 +1,7 @@
 //! Bounded actual failures from reset. Never seeds a trace from an induction model.
 use hwverify_ir::*;
 use hwverify_solver::finite::{self, Limits, Scalar, SearchHint, Verdict};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 fn or(a: Term, b: Term) -> Term {
@@ -17,10 +17,11 @@ fn conjunction(terms: &[Term]) -> Term {
     }
 }
 fn values(v: &BTreeMap<String, Scalar>) -> Value {
-    json!(v
-        .iter()
-        .map(|(k, v)| (k, v.json()))
-        .collect::<BTreeMap<_, _>>())
+    json!(
+        v.iter()
+            .map(|(k, v)| (k, v.json()))
+            .collect::<BTreeMap<_, _>>()
+    )
 }
 fn assignments(env: &Env, v: &BTreeMap<String, Scalar>) -> Res<BTreeMap<String, Scalar>> {
     env.iter()
@@ -62,16 +63,17 @@ fn input_values(v: &Value, types: &Env) -> Res<BTreeMap<String, Scalar>> {
         .collect()
 }
 fn raw_inputs(v: &BTreeMap<String, Scalar>) -> Value {
-    json!(v
-        .iter()
-        .map(|(k, v)| (
-            k,
-            match v {
-                Scalar::Bool(b) => json!(b),
-                Scalar::Bv { value, .. } => json!(value),
-            }
-        ))
-        .collect::<BTreeMap<_, _>>())
+    json!(
+        v.iter()
+            .map(|(k, v)| (
+                k,
+                match v {
+                    Scalar::Bool(b) => json!(b),
+                    Scalar::Bv { value, .. } => json!(value),
+                }
+            ))
+            .collect::<BTreeMap<_, _>>()
+    )
 }
 pub(crate) fn supported(s: &Specification) -> Res<()> {
     if crate::structure::check(s, None)?["status"] != "not_requested" {
@@ -445,9 +447,12 @@ pub fn observe_stimulus(
 mod tests {
     use super::*;
     fn document() -> Value {
-        hwverify_syntax::parse_document(include_str!("../../../examples/response.hwv"), "test.hwv")
-            .unwrap()
-            .canonical
+        hwverify_syntax::parse_document(
+            include_str!("../../../hwverify/examples/response.hwv"),
+            "test.hwv",
+        )
+        .unwrap()
+        .canonical
     }
     fn spec(v: &Value) -> Specification {
         Specification::from_json(v).unwrap()
@@ -669,13 +674,15 @@ mod tests {
             true
         );
         assert!(observe_stimulus(&s, "response_deadline", &rows, &["missing".into()]).is_err());
-        assert!(observe_stimulus(
-            &s,
-            "response_deadline",
-            &rows,
-            &["accept".into(), "accept".into()]
-        )
-        .is_err());
+        assert!(
+            observe_stimulus(
+                &s,
+                "response_deadline",
+                &rows,
+                &["accept".into(), "accept".into()]
+            )
+            .is_err()
+        );
     }
     #[test]
     fn deadline_counts_subsequent_edges_and_ignores_dut_pending_and_rank() {

@@ -30,7 +30,8 @@ def run(name, command, expected=0):
     return p
 
 lean_source = (HERE / 'MemoryRules.lean').read_text()
-rust_source = (ROOT / 'crates/ir/src/term.rs').read_text()
+TERM_RS = ROOT.parent / 'crates/hwverify-ir/src/term.rs'
+rust_source = TERM_RS.read_text()
 with tempfile.TemporaryDirectory(prefix='hwverify-memory-proof-') as td:
     td = Path(td)
     checked = run('lean_soundness', [args.lean, str(HERE / 'MemoryRules.lean')])
@@ -46,9 +47,10 @@ with tempfile.TemporaryDirectory(prefix='hwverify-memory-proof-') as td:
         f.write_text(source)
         p = run('reject_lean_' + label, [args.lean, str(f)], expected=1)
         assert 'unsolved goals' in p.stdout or 'error:' in p.stdout
-    (td / 'crates/ir/src').mkdir(parents=True)
-    (td / 'proof').mkdir()
-    shutil.copyfile(HERE / 'check_rust_rules.rs', td / 'proof/check_rust_rules.rs')
+    # Mirror the repository layout so check_rust_rules.rs's #[path] resolves.
+    (td / 'crates/hwverify-ir/src').mkdir(parents=True)
+    (td / 'hwverify/proof').mkdir(parents=True)
+    shutil.copyfile(HERE / 'check_rust_rules.rs', td / 'hwverify/proof/check_rust_rules.rs')
     for label, source in [
         ('actual', rust_source),
         ('no_alias', rust_source.replace('return ite(\n            eq(a.clone(), v[1].clone()),\n            v[2].clone(),\n            memory_read(v[0].clone(), a, budget - 1, rules),\n        );', 'return memory_read(v[0].clone(), a, budget - 1, rules);')),
@@ -56,15 +58,15 @@ with tempfile.TemporaryDirectory(prefix='hwverify-memory-proof-') as td:
     ]:
         if label != 'actual':
             assert source != rust_source, 'Rust shape changed: update mutation deliberately'
-        (td / 'crates/ir/src/term.rs').write_text(source)
+        (td / 'crates/hwverify-ir/src/term.rs').write_text(source)
         binary = td / ('check_' + label)
-        run('compile_rust_' + label, [args.rustc, '--edition=2021', '-O', str(td / 'proof/check_rust_rules.rs'), '-o', str(binary)])
+        run('compile_rust_' + label, [args.rustc, '--edition=2021', '-O', str(td / 'hwverify/proof/check_rust_rules.rs'), '-o', str(binary)])
         p = run('rust_' + label, [str(binary)], expected=0 if label == 'actual' else 1)
         if label != 'actual':
             assert 'mismatch' in p.stderr, 'failure must be a semantic mismatch'
 report = dict(status='pass', caveat='Lean proves a typed model; Rust correspondence is tested, not proved.',
-              files={str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                     for p in [HERE / 'MemoryRules.lean', HERE / 'ProgramRules.lean', HERE / 'check_rust_rules.rs', ROOT / 'crates/ir/src/term.rs']},
+              files={str(p.relative_to(ROOT.parent)): hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in [HERE / 'MemoryRules.lean', HERE / 'ProgramRules.lean', HERE / 'check_rust_rules.rs', TERM_RS]},
               checks=rows)
 args.out.write_text(json.dumps(report, indent=2, ensure_ascii=False)+'\n')
 print(json.dumps({'status': report['status'], 'checks': len(rows), 'out': str(args.out)}))

@@ -211,7 +211,7 @@ after changing the runner, model, source, or checker.
 
 ## Physical timing
 
-[Synthesis reproduction](../synthesis/README.md) preserves the five distinct
+[Synthesis reproduction](https://github.com/tignear/hwverify/blob/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/synthesis/README.md) preserves the five distinct
 source-bound experiments and every measured seed. Selected one-hot seeds 1 and 2
 meet the exploratory 100 MHz model; seed 3 fails. This is not board sign-off or
 arbitrary-placement assurance. Timing, bounded emitted-SV simulation, token-cycle

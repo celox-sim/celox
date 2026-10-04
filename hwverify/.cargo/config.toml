@@ -1,0 +1,5 @@
+# hwverify's scripts locate binaries and regression outputs under
+# hwverify/target. Cargo commands run from this directory build the
+# workspace crates there instead of the repository-root target directory.
+[build]
+target-dir = "target"

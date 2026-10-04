@@ -10,6 +10,8 @@ import unicodedata
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+# Links may point at the workspace crates in the enclosing Celox repository.
+REPO = ROOT.parent
 LINK = re.compile(r'!?\[[^\]\n]*\]\(<?([^\s)>]+)>?(?:\s+"[^"]*")?\)')
 
 
@@ -51,7 +53,7 @@ def check():
                 continue
             local = (path.parent / unquote(parsed.path)).resolve() if parsed.path else path
             checked += 1
-            if not local.is_relative_to(ROOT) or not local.exists():
+            if not local.is_relative_to(REPO) or not local.exists():
                 errors.append(f'{name}: missing/outside-checkout link {target}')
             elif parsed.fragment and local.suffix.lower() == '.md':
                 if unquote(parsed.fragment) not in anchors(local.read_text()):

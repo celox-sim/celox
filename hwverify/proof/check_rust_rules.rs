@@ -1,6 +1,6 @@
 //! Differential check against independent concrete semantics, using actual ir.rs.
 #![allow(dead_code)]
-#[path = "../crates/ir/src/term.rs"]
+#[path = "../../crates/hwverify-ir/src/term.rs"]
 mod ir;
 use ir::*;
 use std::collections::BTreeMap;

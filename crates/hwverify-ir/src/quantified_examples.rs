@@ -1,6 +1,6 @@
 //! Ordered typed input binders with one innermost execution binder.
 use crate::design::{at, child, declarations, fail};
-use crate::{keys, text, Env, ValidationError};
+use crate::{Env, ValidationError, keys, text};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -12,7 +12,7 @@ pub enum InputQuantifierKind {
 #[derive(Clone, Debug)]
 pub struct InputQuantifier {
     pub kind: InputQuantifierKind,
-    /// Source names map to hygienic solver variables; references use q.<name>.
+    /// Source names map to hygienic solver variables; references use `q.<name>`.
     pub variables: Env,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +46,10 @@ pub(crate) fn parse(
         Some("forall") => ExecutionQuantifier::Forall,
         _ => {
             if example.get("quantifiers").is_some() {
-                return fail(&child(path, "quantifiers"), "input quantifiers require explicit exists, not_exists, or forall execution expectation");
+                return fail(
+                    &child(path, "quantifiers"),
+                    "input quantifiers require explicit exists, not_exists, or forall execution expectation",
+                );
             }
             return Ok((None, Env::new()));
         }
@@ -73,7 +76,7 @@ pub(crate) fn parse(
                     return fail(
                         &child(&path, "kind"),
                         "input binder kind must be forall or exists; execution is innermost",
-                    )
+                    );
                 }
             };
             let variables = declarations(

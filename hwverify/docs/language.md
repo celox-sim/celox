@@ -8,7 +8,7 @@ version 2 `design`言語・意味論は互換性を維持している。
 [scoped specifications](scoped-specifications.md)を参照。
 
 `.hwv` は parol 5.0.2 で生成するパーサを使う。文法は
-`crates/syntax/src/hwv.par`。生成 AST を solver のデータ構造にせず、ソース位置付きの
+`crates/hwverify-syntax/src/hwv.par`。生成 AST を solver のデータ構造にせず、ソース位置付きの
 フロントエンドを経て、JSON 入力と共通の型付き `hwverify_ir::Design` を作る。
 JSON は既存の入出力・互換検査形式として残る。
 
@@ -28,7 +28,7 @@ cargo run -- examples/memory_increment_readable.hwv --check
 cargo run -- examples/memory_increment_readable.hwv --emit-json /tmp/memory.json
 cargo run -- examples/auto_array_sum.hwv --out /tmp/sum --z3 /path/to/z3
 cargo test --workspace --locked
-cargo install --path crates/cli --locked
+cargo install --path ../crates/hwverify-rs --locked
 ```
 
 `--check` と `--emit-json` は構文・名前・型等の検査だけを行い、証明済みとは表示しない。

@@ -1,7 +1,7 @@
 //! Finite complete-execution quantification, separate from legacy admission.
 use hwverify_ir::*;
 use hwverify_solver::{BinderKind, Check, QuantifiedFormula as Formula};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn input_prefix(mut body: Formula, inputs: &[InputQuantifier]) -> Formula {
     for binder in inputs.iter().rev() {

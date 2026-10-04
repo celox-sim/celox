@@ -214,13 +214,15 @@ def validate_group(out, group, summary, checker_hash):
 
 
 def source_files():
-    paths = {ROOT / 'Cargo.toml', ROOT / 'Cargo.lock', Path(__file__).with_name('ci-matrix.json'),
-             ROOT / '.github/workflows/veryl-fv.yml',
+    repo = ROOT.parent
+    paths = {repo / 'Cargo.toml', repo / 'Cargo.lock', Path(__file__).with_name('ci-matrix.json'),
+             repo / '.github/workflows/hwverify.yml',
              ROOT / 'conformance/veryl-symbolic/run_automatic_ci.sh',
              ROOT / 'conformance/veryl-proof/tools/z3-tripwire.sh',
              Path(__file__).with_name('test_ci.py')}
-    paths.update(ROOT.joinpath('crates').rglob('*.rs'))
-    paths.update(ROOT.joinpath('crates').rglob('Cargo.toml'))
+    for crate in repo.joinpath('crates').glob('hwverify-*'):
+        paths.update(crate.rglob('*.rs'))
+        paths.update(crate.rglob('Cargo.toml'))
     for module in tuple(sys.modules.values()):
         name = getattr(module, '__file__', None)
         if name:
@@ -263,8 +265,8 @@ def gate(out, checker):
         (out / 'provenance.json').write_text(json.dumps({'revision': revision,
             'python': sys.version, 'files': fingerprints,
             'source_snapshots': 'source-snapshots'}, indent=2) + '\n')
-        scope = ['crates', 'audit/automatic_proof', 'conformance/veryl-symbolic/run_automatic_ci.sh',
-                 '.github/workflows/veryl-fv.yml', 'Cargo.toml', 'Cargo.lock']
+        scope = ['../crates/hwverify-ir', '../crates/hwverify-rs', '../crates/hwverify-sir', '../crates/hwverify-solver', '../crates/hwverify-syntax', '../crates/hwverify-verify', 'audit/automatic_proof', 'conformance/veryl-symbolic/run_automatic_ci.sh',
+                 '../.github/workflows/hwverify.yml', '../Cargo.toml', '../Cargo.lock']
         (out / 'dirty.patch').write_bytes(subprocess.check_output(['git', 'diff', '--binary', 'HEAD', '--', *scope], cwd=ROOT))
         (out / 'untracked-source-paths.txt').write_bytes(subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '--', *scope], cwd=ROOT))
         tripwire = out / 'tripwire-bin'

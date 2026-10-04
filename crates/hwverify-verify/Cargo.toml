@@ -2,6 +2,8 @@
 name = "hwverify-verify"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 serde_json.workspace = true
@@ -10,3 +12,6 @@ hwverify-solver.workspace = true
 
 [dev-dependencies]
 hwverify-syntax.workspace = true
+
+[lints]
+workspace = true

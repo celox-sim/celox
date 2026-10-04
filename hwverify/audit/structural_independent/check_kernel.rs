@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-#[path="../../crates/ir/src/term.rs"] mod ir;
-#[path="../../crates/solver/src/kernel.rs"] mod kernel;
+#[path="../../../crates/hwverify-ir/src/term.rs"] mod ir;
+#[path="../../../crates/hwverify-solver/src/kernel.rs"] mod kernel;
 extern crate self as hwverify_ir;
 pub use ir::*;
 #[derive(Clone,Debug,PartialEq,Eq)] enum V { B(bool), W(u64), M(Vec<u64>) }

@@ -1,6 +1,6 @@
 //! Parol grammar -> source-located surface syntax -> canonical IR document.
 //! The generated grammar AST never crosses into the solver.
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -680,7 +680,7 @@ impl Lower<'_> {
                     return Err(self.error(
                         &self.span(&x.action_frame.actions),
                         "actions(...) blocks are only valid inside scoped traces",
-                    ))
+                    ));
                 }
                 g::Entry::Use(x) => {
                     self.scoped_use(&x.r#use, context, path, &mut result)?;
@@ -766,7 +766,7 @@ impl Lower<'_> {
                         _ => {
                             return Err(
                                 self.error(&span, format!("unexpected block {raw} in {context}"))
-                            )
+                            );
                         }
                     };
                     self.entries(
@@ -1179,7 +1179,7 @@ mod tests {
     }
     #[test]
     fn corpus_parses() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hwverify");
         for (dsl, json) in [
             (
                 "examples/auto_array_sum.hwv",
@@ -1247,10 +1247,12 @@ mod specification_surface_tests {
     #[test]
     fn invalid_member_expressions_and_malformed_traces_rejected() {
         for source in [
-          "specification \"x\" { compositions { P {members compose(1u8);}}}",
-          "specification \"x\" { components { C { examples { p {expect positive;trace {x=1u8;}}}}}}",
-          "specification \"x\" { components { C {state {} state {}}}}",
-        ] { assert!(parse_document(source,"bad.hwv").is_err()); }
+            "specification \"x\" { compositions { P {members compose(1u8);}}}",
+            "specification \"x\" { components { C { examples { p {expect positive;trace {x=1u8;}}}}}}",
+            "specification \"x\" { components { C {state {} state {}}}}",
+        ] {
+            assert!(parse_document(source, "bad.hwv").is_err());
+        }
     }
 }
 

@@ -166,7 +166,9 @@ impl Lower {
         let (out, smt) = match op {
             "not" | "and" | "or" | "xor" | "implies" => {
                 if sorts.iter().any(|s| s != &Sort::Bool) {
-                    return Err(format!("bool operator type error for {op}: expected Bool operands, found {sorts:?}"));
+                    return Err(format!(
+                        "bool operator type error for {op}: expected Bool operands, found {sorts:?}"
+                    ));
                 }
                 (Sort::Bool, if op == "implies" { "=>" } else { op })
             }
@@ -181,7 +183,9 @@ impl Lower {
             }
             "ite" => {
                 if sorts[0] != Sort::Bool || sorts[1] != sorts[2] {
-                    return Err(format!("ite type error: expected Bool condition and equal branch types, found {sorts:?}"));
+                    return Err(format!(
+                        "ite type error: expected Bool condition and equal branch types, found {sorts:?}"
+                    ));
                 }
                 (sorts[1].clone(), "ite")
             }
@@ -197,7 +201,9 @@ impl Lower {
                         ));
                     }
                 }
-                return Err(format!("memory read type error: expected memory and matching address width, found {sorts:?}"));
+                return Err(format!(
+                    "memory read type error: expected memory and matching address width, found {sorts:?}"
+                ));
             }
             "write" => {
                 if let Sort::Mem(a, w) = sorts[0] {
@@ -210,7 +216,9 @@ impl Lower {
                         ));
                     }
                 }
-                return Err(format!("memory write type error: expected memory, matching address and word widths, found {sorts:?}"));
+                return Err(format!(
+                    "memory write type error: expected memory, matching address and word widths, found {sorts:?}"
+                ));
             }
             "concat" => {
                 if let (Sort::Bv(a), Sort::Bv(b)) = (&sorts[0], &sorts[1]) {
@@ -222,7 +230,9 @@ impl Lower {
             }
             _ => {
                 if !same || !matches!(sorts[0], Sort::Bv(_)) {
-                    return Err(format!("word operator type error for {op}: expected equal word widths, found {sorts:?}"));
+                    return Err(format!(
+                        "word operator type error for {op}: expected equal word widths, found {sorts:?}"
+                    ));
                 }
                 let smt = match op {
                     "add" => "bvadd",

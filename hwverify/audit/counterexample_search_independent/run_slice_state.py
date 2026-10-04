@@ -17,7 +17,7 @@ a = p.parse_args()
 source = a.source.resolve()
 out = a.output.resolve()
 out.mkdir(parents=True, exist_ok=False)
-production = source/'crates/solver/src/finite.rs'
+production = source/'../crates/hwverify-solver/src/finite.rs'
 raw = production.read_bytes()
 checks = (AUDIT/'src/slice_state_tests.rs').read_bytes()
 (out/'finite.production.rs').write_bytes(raw)
@@ -33,7 +33,7 @@ publish = false
 [lib]
 path = "lib.rs"
 [dependencies]
-hwverify-ir = { path = '''+json.dumps(str(source/'crates/ir'))+''' }
+hwverify-ir = { path = '''+json.dumps(str(source/'../crates/hwverify-ir'))+''' }
 serde_json = "1"
 ''')
 env = dict(os.environ, CARGO_TARGET_DIR='/tmp/hwverify-counterexample-slice-audit-target')

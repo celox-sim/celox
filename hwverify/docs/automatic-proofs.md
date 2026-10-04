@@ -30,7 +30,7 @@ refinement children. Absent/`0` leaves the default behavior unchanged. Invalid
 settings, use outside finite mode, or a conflicting explicit proof-program budget
 mode are rejected. There is no external solver fallback.
 
-`crates/solver/src/automatic.rs` compares typed operator trees, proposes frontier
+`crates/hwverify-solver/src/automatic.rs` compares typed operator trees, proposes frontier
 equalities and exhaustive mux splits. Source names, ISA opcodes, numeric term IDs
 and saved results do not authorize a proof. Whole-word scheduling can prefer BV
 frontiers with variable endpoints before splitting their internal muxes. It is a

@@ -2,8 +2,8 @@
 //! Elaboration is pure: independent exported actions become Boolean activation
 //! inputs of one logical transition. Private state stutters on inactive leaves.
 use crate::design::{at, child, declarations, fail};
-use crate::{keys, named, text, Env, Sort, SpecImplementation, Specification, ValidationError};
-use serde_json::{json, Map, Value};
+use crate::{Env, Sort, SpecImplementation, Specification, ValidationError, keys, named, text};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Result<T> = std::result::Result<T, ValidationError>;
@@ -723,7 +723,12 @@ fn validate_connections(definitions: &BTreeMap<String, Definition<'_>>) -> Resul
                     },
                 })?;
                 if sort != parent_sort {
-                    return fail(&path, format!("connection type mismatch for {port}: expected {sort:?}, found {parent_sort:?}"));
+                    return fail(
+                        &path,
+                        format!(
+                            "connection type mismatch for {port}: expected {sort:?}, found {parent_sort:?}"
+                        ),
+                    );
                 }
             }
         }
@@ -816,7 +821,10 @@ fn summarize(
                     message: "operation group must be an array".into(),
                 })?;
                 if refs.is_empty() {
-                    return fail(&path, "operation group must be nonempty; use an empty trace actions list for idle");
+                    return fail(
+                        &path,
+                        "operation group must be nonempty; use an empty trace actions list for idle",
+                    );
                 }
                 for (index, reference) in refs.iter().enumerate() {
                     let path = child(&path, &index.to_string());
@@ -1055,13 +1063,13 @@ fn attach_implementation(
                 return fail(
                     "/implementation/inputs",
                     format!("missing target input {name}"),
-                )
+                );
             }
             Some(found) if found != sort => {
                 return fail(
                     &child("/implementation/inputs", name),
                     "implementation input type must match target input",
-                )
+                );
             }
             _ => {}
         }

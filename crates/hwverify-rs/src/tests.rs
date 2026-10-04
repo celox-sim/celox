@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 fn fixture(name: &str) -> Value {
     serde_json::from_slice(
         &fs::read(format!(
-            "{}/../../examples/{name}.json",
+            "{}/../../hwverify/examples/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         ))
         .unwrap(),
@@ -43,11 +43,13 @@ fn real_mutations_are_sat() {
     ] {
         let r = checked(n);
         assert_eq!(r["status"], "counterexample", "{n}: {r}");
-        assert!(r["obligations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|o| o["status"] == "counterexample" && o["solver_result"] == "sat"));
+        assert!(
+            r["obligations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["status"] == "counterexample" && o["solver_result"] == "sat")
+        );
     }
 }
 #[test]
@@ -62,23 +64,27 @@ fn input_rank_rejected() {
 fn input_binding_rejected() {
     let mut d = fixture("cpu");
     d["binding"] = json!(["eq", "i.stall", "impl.halted"]);
-    assert!(check(&d, z3(), output("bad_binding"))
-        .unwrap_err()
-        .contains("unknown reference i.stall"));
+    assert!(
+        check(&d, z3(), output("bad_binding"))
+            .unwrap_err()
+            .contains("unknown reference i.stall")
+    );
 }
 #[test]
 fn bool_word_mix_rejected() {
     let mut l = Lower::default();
-    assert!(l
-        .expr(&json!(["and", true, ["bv", 1, 1]]), &Env::new())
-        .is_err());
+    assert!(
+        l.expr(&json!(["and", true, ["bv", 1, 1]]), &Env::new())
+            .is_err()
+    );
 }
 #[test]
 fn width_mismatch_rejected() {
     let mut l = Lower::default();
-    assert!(l
-        .expr(&json!(["add", ["bv", 3, 1], ["bv", 4, 1]]), &Env::new())
-        .is_err());
+    assert!(
+        l.expr(&json!(["add", ["bv", 3, 1], ["bv", 4, 1]]), &Env::new())
+            .is_err()
+    );
 }
 #[test]
 fn literals_wrap() {
@@ -98,9 +104,11 @@ fn unknown_operator_rejected() {
 fn wire_cycle_rejected() {
     let mut d = fixture("cpu");
     d["impl"]["wires"]["bad"] = json!("w.bad");
-    assert!(check(&d, z3(), output("wire_cycle"))
-        .unwrap_err()
-        .contains("wire cycle"));
+    assert!(
+        check(&d, z3(), output("wire_cycle"))
+            .unwrap_err()
+            .contains("wire cycle")
+    );
 }
 #[test]
 fn memory_normalization_is_equivalent() {
@@ -143,9 +151,11 @@ fn memory_normalization_is_equivalent() {
 
 #[test]
 fn duplicate_json_keys_rejected() {
-    assert!(crate::json_input::parse(br#"{"version":2,"version":2}"#)
-        .unwrap_err()
-        .contains("duplicate JSON key"));
+    assert!(
+        crate::json_input::parse(br#"{"version":2,"version":2}"#)
+            .unwrap_err()
+            .contains("duplicate JSON key")
+    );
     assert!(crate::json_input::parse(br#"{"state":{"a":"bool","a":"bool"}}"#).is_err());
     assert!(crate::json_input::parse(br#"{"a":[true,3,null]}"#).is_ok());
 }
@@ -166,10 +176,11 @@ fn solver_unknown_and_witness_recheck_fail_closed() {
         out: dir.clone(),
         reports: vec![],
     };
-    assert!(q
-        .query("unstable_sat", boolv(true), false, &Env::new())
-        .unwrap_err()
-        .contains("witness recheck"));
+    assert!(
+        q.query("unstable_sat", boolv(true), false, &Env::new())
+            .unwrap_err()
+            .contains("witness recheck")
+    );
     assert!(q.reports.is_empty());
     fs::write(&script, "#!/bin/sh\ncat >/dev/null\necho unknown\n").unwrap();
     q.query("unknown", boolv(true), false, &Env::new()).unwrap();
@@ -180,11 +191,13 @@ fn solver_unknown_and_witness_recheck_fail_closed() {
 fn array_sum_total_correctness_and_refinement() {
     let r = checked("array_sum");
     assert_eq!(r["status"], "program_and_refinement_verified", "{r}");
-    assert!(r["obligations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|o| o["status"] == "passed"));
+    assert!(
+        r["obligations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["status"] == "passed")
+    );
 }
 #[test]
 fn array_sum_negative_contracts_and_programs() {
@@ -217,23 +230,29 @@ fn array_sum_negative_contracts_and_programs() {
 }
 #[test]
 fn array_sum_rejects_input_dependent_invariant_and_malformed_contract() {
-    assert!(check(
-        &fixture("array_sum_input_invariant"),
-        z3(),
-        output("program_input_inv")
-    )
-    .unwrap_err()
-    .contains("unknown reference i.stall"));
+    assert!(
+        check(
+            &fixture("array_sum_input_invariant"),
+            z3(),
+            output("program_input_inv")
+        )
+        .unwrap_err()
+        .contains("unknown reference i.stall")
+    );
     let mut d = fixture("array_sum");
     d["program_contract"]["rank"] = json!(true);
-    assert!(check(&d, z3(), output("program_bool_rank"))
-        .unwrap_err()
-        .contains("program rank must be unsigned word"));
+    assert!(
+        check(&d, z3(), output("program_bool_rank"))
+            .unwrap_err()
+            .contains("program rank must be unsigned word")
+    );
     d["program_contract"]["rank"] = json!(["bv", 10, 0]);
     d["program_contract"]["postcondition"] = json!("s.missing");
-    assert!(check(&d, z3(), output("program_bad_post_ref"))
-        .unwrap_err()
-        .contains("unknown reference s.missing"));
+    assert!(
+        check(&d, z3(), output("program_bad_post_ref"))
+            .unwrap_err()
+            .contains("unknown reference s.missing")
+    );
 }
 
 #[test]
@@ -262,14 +281,18 @@ fn program_terminal_and_step_soundness() {
 fn program_invalid_split_and_input_rank_rejected() {
     let mut d = fixture("array_sum");
     d["program_contract"]["rank"] = json!("i.start_index");
-    assert!(check(&d, z3(), output("program_input_rank"))
-        .unwrap_err()
-        .contains("unknown reference i.start_index"));
+    assert!(
+        check(&d, z3(), output("program_input_rank"))
+            .unwrap_err()
+            .contains("unknown reference i.start_index")
+    );
     let mut d = fixture("array_sum");
     d["program_contract"]["split"]["index"]["max"] = json!(256);
-    assert!(check(&d, z3(), output("program_bad_split_width"))
-        .unwrap_err()
-        .contains("split bounds invalid"));
+    assert!(
+        check(&d, z3(), output("program_bad_split_width"))
+            .unwrap_err()
+            .contains("split bounds invalid")
+    );
 }
 
 #[test]
@@ -282,11 +305,13 @@ fn program_precondition_must_allow_actual_reset() {
     ]);
     let r = check(&d, z3(), output("program_impossible_reset")).unwrap();
     assert_eq!(r["status"], "inadequate_contract");
-    assert!(r["obligations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|o| o["name"] == "program_pre_nonempty" && o["status"] == "failed_nonvacuity"));
+    assert!(
+        r["obligations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == "program_pre_nonempty" && o["status"] == "failed_nonvacuity")
+    );
 }
 
 #[test]
@@ -323,11 +348,13 @@ fn automatic_partitions_keep_complements_and_wrapped_literals() {
     q.query("all_states_covered", not(covered), false, &Env::new())
         .unwrap();
     assert_eq!(q.reports[0]["status"], "passed");
-    assert!(plan["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["state"] == "x" && c["values"] == json!([1, 2])));
+    assert!(
+        plan["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["state"] == "x" && c["values"] == json!([1, 2]))
+    );
 }
 
 #[test]
@@ -357,11 +384,13 @@ fn automatic_planning_is_order_independent_and_bounded() {
     p2.as_object_mut().unwrap().remove("scoring_seconds");
     assert_eq!(p, p2);
     assert!(p["partition_count"].as_u64().unwrap() <= 128);
-    assert!(p["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["decision"] == "low_marginal_benefit"));
+    assert!(
+        p["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["decision"] == "low_marginal_benefit")
+    );
     let many = (0..33)
         .map(|v| eq(s["x"].clone(), bv(8, v)))
         .fold(boolv(true), and);
@@ -374,12 +403,13 @@ fn automatic_planning_is_order_independent_and_bounded() {
 fn extension_amount_overflow_is_rejected() {
     let mut l = Lower::default();
     for op in ["zext", "sext"] {
-        assert!(l
-            .expr(
+        assert!(
+            l.expr(
                 &json!([op, 18446744073709551615u64, ["bv", 8, 0]]),
                 &Env::new()
             )
-            .is_err());
+            .is_err()
+        );
     }
 }
 
@@ -393,16 +423,20 @@ fn automatic_array_sum_and_empty_cases_fail_closed() {
     d["program_contract"]["cases"] = json!({});
     let r = check(&d, z3(), output("auto_empty_cases")).unwrap();
     assert_eq!(r["status"], "counterexample");
-    assert!(r["obligations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|o| o["name"] == "program_cases_cover" && o["status"] == "counterexample"));
+    assert!(
+        r["obligations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == "program_cases_cover" && o["status"] == "counterexample")
+    );
     let mut d = fixture("auto_array_sum");
     d["program_contract"] = json!({});
-    assert!(check(&d, z3(), output("auto_empty_contract"))
-        .unwrap_err()
-        .contains("missing field"));
+    assert!(
+        check(&d, z3(), output("auto_empty_contract"))
+            .unwrap_err()
+            .contains("missing field")
+    );
 }
 
 #[cfg(unix)]
@@ -420,12 +454,14 @@ fn automatic_unknown_never_verifies() {
     )
     .unwrap();
     assert_eq!(r["status"], "unknown");
-    assert!(r["obligations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|o| o["status"] == "unknown"
-            || (o["status"] == "passed" && o["backend"] == "structural_kernel")));
+    assert!(
+        r["obligations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["status"] == "unknown"
+                || (o["status"] == "passed" && o["backend"] == "structural_kernel"))
+    );
 }
 
 #[test]
@@ -470,14 +506,18 @@ fn every_invalid_json_field_is_validated_before_starting_a_solver() {
     let solver = script.to_str().unwrap().to_string();
     let mut d = fixture("array_sum");
     d["program_contract"]["postcondition"] = json!("s.unknown_late_field");
-    assert!(check(&d, solver.clone(), dir.clone())
-        .unwrap_err()
-        .contains("unknown reference"));
+    assert!(
+        check(&d, solver.clone(), dir.clone())
+            .unwrap_err()
+            .contains("unknown reference")
+    );
     d["program_contract"]["postcondition"] = json!(true);
     d["program_contract"]["split"]["index"]["max"] = json!(256);
-    assert!(check(&d, solver, dir)
-        .unwrap_err()
-        .contains("split bounds invalid"));
+    assert!(
+        check(&d, solver, dir)
+            .unwrap_err()
+            .contains("split bounds invalid")
+    );
     assert!(
         !marker.exists(),
         "invalid model launched the external solver"

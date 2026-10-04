@@ -1,7 +1,7 @@
 //! Proposed lemma data shared by hand-written proof programs and untrusted generators.
 //! Construction and typing confer no proof authority; only a live bundle can check it.
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LemmaCandidate {

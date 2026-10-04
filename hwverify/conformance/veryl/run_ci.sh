@@ -63,7 +63,7 @@ PY
 cd "$HERE"
 python3 generate.py
 # --locked forbids resolving newer dependencies. These are independent workspaces.
-cargo build --release --locked --manifest-path "$REPO/Cargo.toml" --target-dir "$REPO/target"
+cargo build --release --locked --manifest-path "$REPO/../Cargo.toml" --target-dir "$REPO/target" -p hwverify-ir -p hwverify-rs -p hwverify-sir -p hwverify-solver -p hwverify-syntax -p hwverify-verify
 cargo build --locked --manifest-path analyzer-probe/Cargo.toml --target-dir "$HERE/analyzer-probe/target"
 cargo build --locked --manifest-path Cargo.toml --target-dir "$HERE/target" -p extract-suite
 export HWVERIFY_BIN="$REPO/target/release/hwverify-rs"

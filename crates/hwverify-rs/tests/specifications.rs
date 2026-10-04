@@ -1,8 +1,8 @@
 use hwverify_ir::Specification;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command};
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn out(name: &str) -> PathBuf {
     let dir = root().join("target/specification-regression").join(name);
@@ -264,9 +264,11 @@ fn forever_stuttering_bridge_proves_only_safety_not_positive_example_realization
     let report = check(&doc, "stutter");
     assert_eq!(report["status"], "spec_examples_and_binding_verified");
     assert_eq!(case(&report, "Budgeted", "spend_all")["status"], "passed");
-    assert!(report["implementation_binding"]["limitations"]
-        .to_string()
-        .contains("No liveness"));
+    assert!(
+        report["implementation_binding"]["limitations"]
+            .to_string()
+            .contains("No liveness")
+    );
 }
 #[test]
 fn bridge_bindings_are_total_state_only_and_checked_before_solver() {
@@ -313,13 +315,35 @@ fn unknown_and_changed_sat_witness_recheck_fail_closed() {
     doc["components"]["A"]["examples"]["possible"] = example(true, json!({}), json!([]));
     let path = dir.join("spec.json");
     fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
-    for (name,script,status,exit) in [
-        ("unknown","#!/bin/sh\ncat >/dev/null\nprintf 'unknown\\n'\n","unknown",3),
-        ("changed","#!/bin/sh\ns=$(cat)\ncase \"$s\" in *get-model*) printf 'unknown\\n';; *) printf 'sat\\n';; esac\n","invalid_or_tool_error",2),
+    for (name, script, status, exit) in [
+        (
+            "unknown",
+            "#!/bin/sh\ncat >/dev/null\nprintf 'unknown\\n'\n",
+            "unknown",
+            3,
+        ),
+        (
+            "changed",
+            "#!/bin/sh\ns=$(cat)\ncase \"$s\" in *get-model*) printf 'unknown\\n';; *) printf 'sat\\n';; esac\n",
+            "invalid_or_tool_error",
+            2,
+        ),
     ] {
-        let shim=dir.join(name);fs::write(&shim,script).unwrap();fs::set_permissions(&shim,fs::Permissions::from_mode(0o755)).unwrap();
-        let output=Command::new(env!("CARGO_BIN_EXE_hwverify-rs")).arg(&path).arg("--out").arg(dir.join(name.to_string()+"-result")).arg("--z3").arg(shim).env("HWVERIFY_KERNEL","off").output().unwrap();
-        assert_eq!(output.status.code(),Some(exit));let r:Value=serde_json::from_slice(&output.stdout).unwrap();assert_eq!(r["status"],status);
+        let shim = dir.join(name);
+        fs::write(&shim, script).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_hwverify-rs"))
+            .arg(&path)
+            .arg("--out")
+            .arg(dir.join(name.to_string() + "-result"))
+            .arg("--z3")
+            .arg(shim)
+            .env("HWVERIFY_KERNEL", "off")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(exit));
+        let r: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(r["status"], status);
     }
 }
 #[test]
@@ -338,11 +362,13 @@ fn bridge_requires_exclusive_operation_selection_and_reset_has_priority() {
         doc["implementation"]["operations"]["add"].clone();
     let r = check(&doc, "overlap");
     assert_eq!(r["implementation_binding"]["status"], "failed");
-    assert!(r["implementation_binding"]["obligations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|o| o["name"] == "binding_operation_exclusive" && o["status"] == "counterexample"));
+    assert!(
+        r["implementation_binding"]["obligations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == "binding_operation_exclusive" && o["status"] == "counterexample")
+    );
     doc["implementation"]["operations"]["other"] = json!("i.rst");
     assert_eq!(
         check(&doc, "reset-priority")["implementation_binding"]["status"],
@@ -390,9 +416,11 @@ fn negative_only_suite_reports_missing_positive_coverage_without_claiming_consis
         .unwrap();
     assert_eq!(coverage["positive_examples"], 0);
     assert_eq!(coverage["negative_examples"], 1);
-    assert!(coverage["warnings"]
-        .to_string()
-        .contains("does not establish"));
+    assert!(
+        coverage["warnings"]
+            .to_string()
+            .contains("does not establish")
+    );
 }
 #[test]
 fn new_document_keyword_preserves_legacy_identifier_names() {

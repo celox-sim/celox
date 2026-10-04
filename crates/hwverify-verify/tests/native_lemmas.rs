@@ -40,12 +40,14 @@ fn native_syntax_has_one_canonical_api_and_direct_binders() {
         d["programs"][0]["steps"][0]["claim"],
         json!(["eq", "impl_next.x", "impl_next.x"])
     );
-    assert!(merge_lemma_source(
-        &SOURCE.replace("claim impl.x == 0u8;", "claim word' == word;"),
-        "bad-prime.hwv",
-        None
-    )
-    .is_err());
+    assert!(
+        merge_lemma_source(
+            &SOURCE.replace("claim impl.x == 0u8;", "claim word' == word;"),
+            "bad-prime.hwv",
+            None
+        )
+        .is_err()
+    );
     let inline = SOURCE.replacen("lemmas \"native\" {", "design \"inline\" { proof {", 1) + "}";
     let d = parse_document(&inline, "inline.hwv").unwrap();
     assert!(d.canonical["proof_programs"]["programs"].is_array());
@@ -62,21 +64,23 @@ fn cycle_width_and_module_boundary_diagnostics_are_source_linked() {
     assert!(err.contains("cycle") && err.contains("cycle.hwv:5:") && err.contains("cycle.hwv:6:"));
     assert!(merge_lemma_source("lemmas \"bad\" { binding false; }", "bad.hwv", None).is_err());
     assert!(merge_lemma_source(SOURCE, "bad-base.hwv", Some(&json!({}))).is_err());
-    assert!(merge_lemma_source(
-        &SOURCE.replace("guard impl.x == 0u8;", ""),
-        "missing.hwv",
-        None
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("missing guard"));
+    assert!(
+        merge_lemma_source(
+            &SOURCE.replace("guard impl.x == 0u8;", ""),
+            "missing.hwv",
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("missing guard")
+    );
 }
 #[test]
 fn real_rv_module_only_replaces_named_proposals() {
     let base = json!({"version":1,"mode":"independent_lemmas","variables":{},"lets":[{"id":"x_pre","expr":true},{"id":"x_post","expr":true}],"programs":[{"id":"x_operand1","match_rhs":["bv",8,0],"steps":[{"op":"candidate","id":"delivery","frame":"current_query","context":true,"guard":"let.x_pre","claim":"let.x_post","depends_on":[]},{"op":"project","id":"local","source":"delivery","path":[]},{"op":"use_candidate","id":"equality","candidate":"local","context":"$pre"}],"result":"equality"}]});
     let mut base = base;
     base["programs"].as_array_mut().unwrap().push(json!({"id":"m_address","match_rhs":["bv",8,0],"steps":[{"op":"candidate","id":"ir","frame":"current_query","context":["and","$pre","let.normal_m_address"],"guard":true,"claim":["eq","impl_next.m_ir","impl.x_ir"],"depends_on":[]}],"result":"ir"}));
-    let source = include_str!("../../../audit/lemma_candidates/rv-delivery.hwv");
+    let source = include_str!("../../../hwverify/audit/lemma_candidates/rv-delivery.hwv");
     let d = merge_lemma_source(source, "rv-delivery.hwv", Some(&base)).unwrap();
     assert_eq!(
         d["programs"][0]["steps"][1],
@@ -102,13 +106,15 @@ fn real_rv_module_only_replaces_named_proposals() {
 #[test]
 fn native_guard_worker() {
     if std::env::var("NATIVE_LEMMA_CHILD").is_err() {
-        assert!(Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "native_guard_worker", "--nocapture"])
-            .env("NATIVE_LEMMA_CHILD", "1")
-            .env("HWVERIFY_SOLVER", "finite")
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "native_guard_worker", "--nocapture"])
+                .env("NATIVE_LEMMA_CHILD", "1")
+                .env("HWVERIFY_SOLVER", "finite")
+                .status()
+                .unwrap()
+                .success()
+        );
         return;
     }
     let ctx = context();
@@ -151,9 +157,11 @@ fn native_guard_worker() {
         reports: vec![],
     };
     let g = eq(ctx["impl.x"].clone(), bv(8, 0));
-    assert!(program
-        .try_query(&mut check, "false_claim", &and(g.clone(), not(g)), &ctx)
-        .is_err());
+    assert!(
+        program
+            .try_query(&mut check, "false_claim", &and(g.clone(), not(g)), &ctx)
+            .is_err()
+    );
     let d = &check.reports[0]["lemma_candidates"];
     assert_eq!(d["candidates"][0]["validity"], "lemma_counterexample");
     assert_eq!(d["candidates"][0]["source"], "false-claim.hwv:5:11");

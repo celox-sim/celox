@@ -1,6 +1,7 @@
 /target/
 /.rustup/
-/.cargo/
+/.cargo/*
+!/.cargo/config.toml
 
 __pycache__/
 *.pyc

@@ -9,7 +9,7 @@ recorded runs, not the current checkout's CI status.
 ## Fresh required gates
 
 Run from the repository root with fresh output directories outside the checkout.
-The [workflow](../.github/workflows/veryl-fv.yml) is the authoritative ordering.
+The [workflow](../../.github/workflows/hwverify.yml) is the authoritative ordering.
 The original-corpus preparation builds the pinned frontend needed by the later
 symbolic/RV gates; a failed dependency fetch is a setup failure, never a pass.
 
@@ -38,7 +38,7 @@ contribute to closure, along with successful guarded use and source diagnostics.
 |---|---|
 | Automatic discovery | [Evidence summary](automatic_proof/evidence-summary.json), [fixed matrix](automatic_proof/ci-matrix.json), `audit.automatic_proof.test_generate`, `audit.automatic_proof.test_ci` |
 | Compound sharing | [Evidence summary](equality_sharing/evidence-summary.json), `audit.equality_sharing.test_generate`, `test_evidence`, `test_ci` |
-| Word frontiers | [Evidence summary](word_frontier/evidence-summary.json), `audit.word_frontier.test_generate`, `test_ci`, `rv_address_replay` |
+| Word frontiers | [Evidence summary](https://github.com/tignear/hwverify/blob/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/audit/word_frontier/evidence-summary.json), `audit.word_frontier.test_generate`, `test_ci`, `rv_address_replay` |
 | Guarded expansion | [Current orientation summary](guarded_expansion/orientation-summary.json), [initial summary](guarded_expansion/evidence-summary.json), `audit.guarded_expansion.test_generate`, `test_ci` |
 | Native lemmas | [Validation summary](lemma_candidates/validation-summary.json), Rust `lemma_candidates` / `native_lemmas` tests, `audit.lemma_candidates.test_migrate` |
 | Selected source proofs and mutations | `audit.veryl_scaling.test_rv32i_*`, `rv32i_selected_ci`; [sealed selected records](rv32i_milestone/evidence/manifest.json) |
@@ -46,7 +46,7 @@ contribute to closure, along with successful guarded use and source diagnostics.
 | Language and quantified/scoped examples | `scripts/test_json_to_hwv.py`, Rust CLI/syntax/verify tests; historical JSON/logs in `language_independent`, `syntax_0_8_independent`, `prime_0_9_independent`, `bare_quantifiers_independent`, `composition_independent` |
 | Concrete CPU oracle and counterexample replay | `cpu_simulation.py`, `replay_counterexamples.py`, `interpreter.py`; `cpu_simulation_results.json`, `counterexample_replay_results.json` |
 | Structural/finite solver campaigns | `structural_solver`, `structural_independent`, `finite_solver_independent`, `finite_speed_independent`, `branch_solver_scaling*`, `branch_solver_decomposition*`, `expected_result_search*`; corresponding JSON/log/query trees under `results/` |
-| Physical implementation | [Synthesis reproduction](../synthesis/README.md), [emitted-SV differential/mutation instructions](veryl_scaling/split_candidate_tests/README.md) |
+| Physical implementation | [Synthesis reproduction](https://github.com/tignear/hwverify/blob/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/synthesis/README.md), [emitted-SV differential/mutation instructions](veryl_scaling/split_candidate_tests/README.md) |
 | Small memory-law formalization | [Lean proof and Rust comparison](../proof/README-ja.md) |
 
 Independent integer interpretation and SAT replay supplement the checker; they do
@@ -87,7 +87,7 @@ roots and is not required for portable verification. A failed second extraction
 pass may leave a partial new directory; never treat it as success.
 
 The two older `structural_solver/*.tar.gz` experiments are separately bound by
-[archive_manifest.json](structural_solver/archive_manifest.json). Their initial
+[archive_manifest.json](https://github.com/tignear/hwverify/blob/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/audit/structural_solver/archive_manifest.json). Their initial
 and pre-hash timings differ and are not replacements for the final recorded run.
 They retain unique bytes and are not duplicates of each other or the checkout.
 

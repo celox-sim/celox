@@ -1,5 +1,5 @@
 //! Bounded failure discovery and strict replay; no simulator or external solver.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read};
 fn run(v: &Value) -> Result<Value, String> {
     if v["version"] != 1 {

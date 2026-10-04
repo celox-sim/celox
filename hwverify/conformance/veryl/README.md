@@ -64,7 +64,7 @@ ignored; no prototype workspace paths are required. Use a new output directory
 for every run so stale reports cannot be mistaken for new results. Python
 optimization is rejected because source-mutation controls must execute.
 
-The workflow is [.github/workflows/veryl-fv.yml](../../.github/workflows/veryl-fv.yml):
+The workflow is [.github/workflows/hwverify.yml](../../../.github/workflows/hwverify.yml):
 `push` and `pull_request`, pinned official checkout/upload actions, read-only
 contents permission, no persisted credentials, no repository secrets passed to
 checks, no cache, and a 30-minute job limit. Audit upload runs even when a check

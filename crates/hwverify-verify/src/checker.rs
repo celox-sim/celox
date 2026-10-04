@@ -1,7 +1,7 @@
 //! Generic microstep/stuttering and finite-rank proof obligations.
 use hwverify_ir::*;
 use hwverify_solver::Check;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 pub fn check(doc: &Value, z3: String, out: PathBuf) -> Res<Value> {
     let design = Design::from_json(doc).map_err(|e| e.to_string())?;

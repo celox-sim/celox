@@ -1,7 +1,7 @@
 //! Sound complete partitions selected by typed-expression trial scoring.
 use crate::Check;
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     time::Instant,

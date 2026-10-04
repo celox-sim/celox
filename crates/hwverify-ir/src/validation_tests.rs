@@ -1,5 +1,5 @@
 use crate::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn document() -> Value {
     json!({
@@ -45,26 +45,32 @@ fn unused_wires_and_cycles_are_still_validated() {
 fn missing_assignments_and_late_contract_errors_are_rejected() {
     let mut doc = document();
     doc["spec"]["reset"] = json!({});
-    assert!(Design::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("assign every state"));
+    assert!(
+        Design::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("assign every state")
+    );
     let mut doc = document();
     doc["program_contract"]["rank"] = json!(true);
-    assert!(Design::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("program rank must be unsigned word"));
+    assert!(
+        Design::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("program rank must be unsigned word")
+    );
     doc["program_contract"]["rank"] = json!(["bv", 8, 0]);
     doc["program_contract"]["split"] = json!({"x":{"expr":"s.x","min":0,"max":256}});
     doc["program_contract"]
         .as_object_mut()
         .unwrap()
         .remove("partitioning");
-    assert!(Design::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("split bounds invalid"));
+    assert!(
+        Design::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("split bounds invalid")
+    );
 }
 #[test]
 fn typed_design_keeps_a_private_snapshot() {

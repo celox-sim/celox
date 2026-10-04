@@ -4,7 +4,7 @@
 //! through the existing live sequent checker with unchanged finite budgets.
 use hwverify_ir::*;
 use hwverify_solver::{Check, CutBudgetMode, ProofBundle};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 
 struct Proposed {

@@ -15,7 +15,7 @@ mod json_input {
 #[cfg(test)]
 use crate::checker::check;
 use crate::ir::Res;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{env, fs, path::PathBuf};
 enum Input {
     Design(ir::Design),
@@ -37,7 +37,9 @@ fn run() -> Res<i32> {
         return Err("usage: hwverify-rs DESIGN.{json,hwv} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--structural-artifact FILE.json] [--finite-search-hint query|sat|unsat]".into());
     }
     if args[0] == "--help" || args[0] == "-h" {
-        println!("hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--structural-artifact FILE.json] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence.");
+        println!(
+            "hwverify-rs DESIGN.{{json,hwv}} [--out DIR] [--z3 PATH] [--format json|hwv] [--check] [--emit-json FILE] [--lemmas FILE.hwv] [--structural-artifact FILE.json] [--finite-search-hint query|sat|unsat]\n--check and --emit-json validate all fields without running a solver.\nZ3_BIN sets the default solver executable.\nHWVERIFY_SOLVER=finite selects the bounded scalar Bool/BV backend without Z3 fallback.\n--finite-search-hint query (default) follows each query expectation; sat/unsat override finite search order only.\nHWVERIFY_FINITE_SEARCH_HINT sets the same default; the CLI option takes precedence."
+        );
         return Ok(0);
     }
     let mut out = PathBuf::from("results");
@@ -104,7 +106,8 @@ fn run() -> Res<i32> {
     // This single-threaded CLI selects the process-wide default. Library users
     // can instead pass QueryOptions without changing process environment.
     if let Some(hint) = finite_search_hint {
-        env::set_var("HWVERIFY_FINITE_SEARCH_HINT", hint);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("HWVERIFY_FINITE_SEARCH_HINT", hint) };
     } else {
         match env::var("HWVERIFY_FINITE_SEARCH_HINT") {
             Ok(hint) => {

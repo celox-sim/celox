@@ -296,14 +296,16 @@ fn guard_entailment_truth_tables_do_not_invent_conjuncts_or_disjuncts() {
     }
     let facts = HashSet::from([or(g.clone(), h.clone())]);
     assert!(!guard_entailed(&g, &facts, &mut HashMap::new(), &mut entailment_budget(), 0).unwrap());
-    assert!(!guard_entailed(
-        &and(g.clone(), h.clone()),
-        &HashSet::from([g]),
-        &mut HashMap::new(),
-        &mut entailment_budget(),
-        0
-    )
-    .unwrap());
+    assert!(
+        !guard_entailed(
+            &and(g.clone(), h.clone()),
+            &HashSet::from([g]),
+            &mut HashMap::new(),
+            &mut entailment_budget(),
+            0
+        )
+        .unwrap()
+    );
 }
 #[test]
 fn guard_entailment_enables_broader_guards_but_not_partial_guards() {

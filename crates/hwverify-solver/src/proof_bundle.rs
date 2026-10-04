@@ -1,8 +1,8 @@
 //! Fresh, acyclic sequent proofs. Serialized programs are only proposals;
 //! private live handles are the sole authority for derived proof steps.
-use crate::{finite, Check, CutBudgetMode, QueryOptions};
+use crate::{Check, CutBudgetMode, QueryOptions, finite};
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -844,12 +844,14 @@ mod tests {
             )
             .unwrap();
         assert!(b.instantiate(&universal, &[(v("u"), boolv(true))]).is_err());
-        assert!(b
-            .instantiate(&universal, &[(v("missing"), v("x"))])
-            .is_err());
-        assert!(b
-            .instantiate(&universal, &[(v("u"), v("x")), (v("u"), v("y"))])
-            .is_err());
+        assert!(
+            b.instantiate(&universal, &[(v("missing"), v("x"))])
+                .is_err()
+        );
+        assert!(
+            b.instantiate(&universal, &[(v("u"), v("x")), (v("u"), v("y"))])
+                .is_err()
+        );
         let instance = b.instantiate(&universal, &[(v("u"), v("x"))]).unwrap();
         let premise = b.prove("premise", boolv(true), boolv(true)).unwrap();
         let final_h = b.apply(&instance, &premise).unwrap();
@@ -883,9 +885,10 @@ mod tests {
         let projected = b.project(&theorem, &[1, 1]).unwrap();
         assert_eq!(projected.pre(), &and(p.clone(), g.clone()));
         assert!(b.project(&theorem, &[1, 0]).is_err());
-        assert!(b
-            .conditional_eq(p.clone(), not(g.clone()), &projected)
-            .is_err());
+        assert!(
+            b.conditional_eq(p.clone(), not(g.clone()), &projected)
+                .is_err()
+        );
         let conditional = b.conditional_eq(p.clone(), g.clone(), &projected).unwrap();
         assert_eq!(
             conditional.post(),
@@ -905,9 +908,10 @@ mod tests {
             .prove("rewritten", plan.pre().clone(), plan.post().clone())
             .unwrap();
         let positive = b.finish_rewrite(plan, &rewritten).unwrap();
-        assert!(b
-            .join(p.clone(), goal.clone(), g.clone(), &positive, &positive)
-            .is_err());
+        assert!(
+            b.join(p.clone(), goal.clone(), g.clone(), &positive, &positive)
+                .is_err()
+        );
         let negative = b
             .prove("complement", and(p.clone(), not(g.clone())), goal.clone())
             .unwrap();
@@ -961,14 +965,16 @@ mod tests {
 
         let mut c = checker("unsupported");
         let ctx = Env::from([("dead".into(), node(Sort::Bool, "unsupported", vec![]))]);
-        assert!(ProofBundle::new(
-            &mut c,
-            "unsupported",
-            &bad,
-            &ctx,
-            CutBudgetMode::IndependentLemmas
-        )
-        .is_err());
+        assert!(
+            ProofBundle::new(
+                &mut c,
+                "unsupported",
+                &bad,
+                &ctx,
+                CutBudgetMode::IndependentLemmas
+            )
+            .is_err()
+        );
         assert_eq!(c.reports[0]["status"], "unknown");
         let mut c = checker("resource");
         let mut b = ProofBundle::new(
@@ -992,11 +998,14 @@ mod tests {
             CutBudgetMode::IndependentLemmas,
         )
         .unwrap();
-        std::env::set_var("HWVERIFY_SOLVER", "z3");
-        assert!(b
-            .prove("forbidden backend", boolv(true), boolv(true))
-            .is_err());
-        std::env::set_var("HWVERIFY_SOLVER", "finite");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("HWVERIFY_SOLVER", "z3") };
+        assert!(
+            b.prove("forbidden backend", boolv(true), boolv(true))
+                .is_err()
+        );
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("HWVERIFY_SOLVER", "finite") };
         drop(b);
         assert_eq!(c.reports[0]["status"], "unknown");
         let mut c = checker("query_cap");
@@ -1039,9 +1048,10 @@ mod tests {
             CutBudgetMode::IndependentLemmas,
         )
         .unwrap();
-        assert!(b
-            .prove("false auxiliary", boolv(true), eq(v("a"), v("b")))
-            .is_err());
+        assert!(
+            b.prove("false auxiliary", boolv(true), eq(v("a"), v("b")))
+                .is_err()
+        );
         drop(b);
         assert_eq!(c.reports[0]["status"], "passed");
         assert_eq!(c.reports[0]["original_recheck"]["solver_result"], "unsat");

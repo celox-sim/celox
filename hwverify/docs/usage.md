@@ -60,7 +60,7 @@ covers local links and fragments in all tracked Markdown, including the sealed
 historical records retained unchanged.
 
 The mandatory hosted gates are defined in
-[the workflow](../.github/workflows/veryl-fv.yml). They include the original Veryl
+[the workflow](../../.github/workflows/hwverify.yml). They include the original Veryl
 corpus, symbolic RTL refinement, native lemma diagnostics, selected RV32I, fixed
 automatic-proof controls and original-formula mutants. For their exact commands,
 dependency preparation and evidence locations, use the [audit index](../audit/README.md).
@@ -68,10 +68,10 @@ Do not replace these gates with an old report or a reduced smoke run.
 
 ## Source layout
 
-`crates/ir` validates typed models; `crates/syntax` uses the parol grammar and
-source spans; `crates/solver` owns finite/Z3 solving and checked proof rules;
-`crates/verify` builds refinement/specification obligations; `crates/cli` provides
-the command line. [SIR lifting](../crates/sir/README.md) connects imported RTL.
+`crates/hwverify-ir` validates typed models; `crates/hwverify-syntax` uses the parol grammar and
+source spans; `crates/hwverify-solver` owns finite/Z3 solving and checked proof rules;
+`crates/hwverify-verify` builds refinement/specification obligations; `crates/hwverify-rs` provides
+the command line. [SIR lifting](../../crates/hwverify-sir/README.md) connects imported RTL.
 `examples/` and `audit/` contain generators, independent interpreters and tests.
 
 `python3 scripts/json_to_hwv.py INPUT.json OUTPUT.hwv` is a migration printer.

@@ -1,10 +1,10 @@
 use hwverify_ir::{ScopedSpecification, Specification};
 use hwverify_verify::{check_scoped_specification, check_specification};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn z3() -> String {
     std::env::var("Z3_BIN").unwrap_or_else(|_| {
@@ -140,10 +140,12 @@ fn scoped_outputs_and_action_sets_use_quantified_path() {
     )
     .unwrap();
     assert_eq!(case(&report, "all")["valid"], true);
-    assert!(case(&report, "all")["feasibility"]["evidence"]["evidence"]
-        .as_str()
-        .unwrap()
-        .starts_with("target_0000/"));
+    assert!(
+        case(&report, "all")["feasibility"]["evidence"]["evidence"]
+            .as_str()
+            .unwrap()
+            .starts_with("target_0000/")
+    );
 }
 
 #[test]
@@ -165,10 +167,12 @@ fn bound_scope_sort_shadowing_and_execution_interleaving_are_rejected() {
     let mut bad = base.clone();
     bad["components"]["C"]["examples"]["e"]["quantifiers"] =
         json!([binder("forall", "a"), binder("exists", "a")]);
-    assert!(Specification::from_json(&bad)
-        .unwrap_err()
-        .message
-        .contains("shadowing"));
+    assert!(
+        Specification::from_json(&bad)
+            .unwrap_err()
+            .message
+            .contains("shadowing")
+    );
     bad["components"]["C"]["examples"]["e"]["quantifiers"] =
         json!([{"kind":"execution","variables":{"a":"bool"}}]);
     assert!(Specification::from_json(&bad).is_err());
@@ -259,18 +263,32 @@ fn unknown_witness_is_unavailable_and_changed_sat_recheck_is_an_error() {
         json!({"e":example("exists",json!([binder("exists","a")]),json!(true))}),
     );
     for (name, script) in [
-        ("unknown_witness", "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *declare-fun*) printf 'unknown\\n';; *) printf 'sat\\n';; esac\n"),
-        ("changed_witness", "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *get-model*) printf 'unknown\\n';; *) printf 'sat\\n';; esac\n"),
+        (
+            "unknown_witness",
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *declare-fun*) printf 'unknown\\n';; *) printf 'sat\\n';; esac\n",
+        ),
+        (
+            "changed_witness",
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *get-model*) printf 'unknown\\n';; *) printf 'sat\\n';; esac\n",
+        ),
     ] {
-        let out=root().join("target/quantified-regressions").join(name);
-        std::fs::create_dir_all(&out).unwrap();let fake=out.join("solver.sh");
-        std::fs::write(&fake,script).unwrap();std::fs::set_permissions(&fake,std::fs::Permissions::from_mode(0o700)).unwrap();
-        let report=check_specification(&Specification::from_json(&document).unwrap(),fake.display().to_string(),out);
-        if name=="changed_witness" { assert!(report.unwrap_err().contains("no SAT result certified")); }
-        else {
-            let report=report.unwrap();let entry=case(&report,"e");
-            assert_eq!(entry["concrete_witness"],Value::Null);
-            assert_eq!(entry["witness_diagnostics"][0]["found"],Value::Null);
+        let out = root().join("target/quantified-regressions").join(name);
+        std::fs::create_dir_all(&out).unwrap();
+        let fake = out.join("solver.sh");
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let report = check_specification(
+            &Specification::from_json(&document).unwrap(),
+            fake.display().to_string(),
+            out,
+        );
+        if name == "changed_witness" {
+            assert!(report.unwrap_err().contains("no SAT result certified"));
+        } else {
+            let report = report.unwrap();
+            let entry = case(&report, "e");
+            assert_eq!(entry["concrete_witness"], Value::Null);
+            assert_eq!(entry["witness_diagnostics"][0]["found"], Value::Null);
         }
     }
 }

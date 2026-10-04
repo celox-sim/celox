@@ -5,7 +5,7 @@
 use crate::lemma_candidate::LemmaCandidate;
 use hwverify_ir::*;
 use hwverify_solver::{Check, CutBudgetMode, ProofBundle, RewritePlan, SequentHandle};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const MAX_PROGRAMS: usize = 16;
@@ -977,32 +977,40 @@ mod tests {
             }
         };
         let programs = ProofPrograms::from_json(&document(), &ctx).unwrap();
-        assert!(programs
-            .try_query(&mut checker("valid"), "valid", &original, &ctx)
-            .unwrap());
+        assert!(
+            programs
+                .try_query(&mut checker("valid"), "valid", &original, &ctx)
+                .unwrap()
+        );
         let stale = [("impl.x".into(), var("different_x".into(), Sort::Bv(8)))]
             .into_iter()
             .collect();
-        assert!(programs
-            .try_query(&mut checker("stale"), "stale", &original, &stale)
-            .is_err());
+        assert!(
+            programs
+                .try_query(&mut checker("stale"), "stale", &original, &stale)
+                .is_err()
+        );
         // Same RHS matches, but cannot prove a different false original goal.
         let false_query = and(boolv(true), not(eq(x, bv(8, 0))));
-        assert!(programs
-            .try_query(&mut checker("false_goal"), "false_goal", &false_query, &ctx)
-            .is_err());
+        assert!(
+            programs
+                .try_query(&mut checker("false_goal"), "false_goal", &false_query, &ctx)
+                .is_err()
+        );
         let mut forged = document();
         forged["programs"][0]["steps"][0]["pre"] = json!(true);
         forged["programs"][0]["steps"][0]["post"] = json!(true);
         let forged = ProofPrograms::from_json(&forged, &ctx).unwrap();
-        assert!(forged
-            .try_query(
-                &mut checker("wrong_result"),
-                "wrong_result",
-                &original,
-                &ctx
-            )
-            .is_err());
+        assert!(
+            forged
+                .try_query(
+                    &mut checker("wrong_result"),
+                    "wrong_result",
+                    &original,
+                    &ctx
+                )
+                .is_err()
+        );
         let mut inst = document();
         inst["variables"] = json!({"a":{"bv":8}});
         inst["programs"][0]["steps"] = json!([
@@ -1012,14 +1020,15 @@ mod tests {
         let mut inst = ProofPrograms::from_json(&inst, &ctx).unwrap();
         // Direct mutation is test-only; runtime must still reject type forgery.
         inst.programs[0].steps[1]["substitution"][0]["to"] = json!(true);
-        assert!(inst
-            .try_query(
+        assert!(
+            inst.try_query(
                 &mut checker("wrong_instantiation"),
                 "wrong_instantiation",
                 &original,
                 &ctx
             )
-            .is_err());
+            .is_err()
+        );
         let mut consumed = document();
         consumed["programs"][0]["steps"] = json!([
             {"op":"prove","id":"e","pre":"$pre","post":["eq","impl.x",["bv",8,0]]},
@@ -1032,8 +1041,10 @@ mod tests {
             .steps
             .push(json!({"op":"finish_rewrite","id":"again","plan":"r","proof":"p"}));
         consumed.programs[0].result = "again".into();
-        assert!(consumed
-            .try_query(&mut checker("consumed"), "consumed", &original, &ctx)
-            .is_err());
+        assert!(
+            consumed
+                .try_query(&mut checker("consumed"), "consumed", &original, &ctx)
+                .is_err()
+        );
     }
 }

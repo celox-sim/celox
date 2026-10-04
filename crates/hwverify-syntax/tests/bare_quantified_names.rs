@@ -43,8 +43,7 @@ fn bare_names_preserve_canonical_json_in_every_example_expression_scope() {
     old.validate_scoped_specification().unwrap();
     assert_eq!(parsed.canonical, old.canonical);
     assert_eq!(
-        parsed.canonical["specs"]["Counter"]["examples"]["property"]["trace"][0]["inputs"]
-            ["amount"],
+        parsed.canonical["specs"]["Counter"]["examples"]["property"]["trace"][0]["inputs"]["amount"],
         "q.a"
     );
     let span = parsed
@@ -55,7 +54,9 @@ fn bare_names_preserve_canonical_json_in_every_example_expression_scope() {
 
 #[test]
 fn output_collision_is_explicit_without_changing_qualified_compatibility() {
-    let bare = source("forall count: bv<4>; execution forall; initial {} trace { add(amount: count) => count == 0u4; }");
+    let bare = source(
+        "forall count: bv<4>; execution forall; initial {} trace { add(amount: count) => count == 0u4; }",
+    );
     let error = parse_document(&bare, "ambiguous.hwv").unwrap_err();
     assert!(error.message.contains("ambiguous name count"));
     assert!(error.message.contains("rename the quantified variable"));
@@ -64,7 +65,9 @@ fn output_collision_is_explicit_without_changing_qualified_compatibility() {
     assert_eq!(&bare[span.start..span.end], "count");
     assert!(bare[..span.start].ends_with("=> "));
 
-    let explicit = source("forall count: bv<4>; execution forall; initial { count = count; } trace { add(amount: count) => o.count == q.count; }");
+    let explicit = source(
+        "forall count: bv<4>; execution forall; initial { count = count; } trace { add(amount: count) => o.count == q.count; }",
+    );
     let parsed = parse_document(&explicit, "explicit.hwv").unwrap();
     parsed.validate_scoped_specification().unwrap();
     let example = &parsed.canonical["specs"]["Counter"]["examples"]["property"];
@@ -78,7 +81,9 @@ fn output_collision_is_explicit_without_changing_qualified_compatibility() {
 
 #[test]
 fn input_and_private_state_names_do_not_capture_bound_aliases() {
-    let text = source("forall amount: bv<4>; exists value: bv<4>; execution exists; initial { count = value; } trace { add(amount: amount) => count == value + amount; }");
+    let text = source(
+        "forall amount: bv<4>; exists value: bv<4>; execution exists; initial { count = value; } trace { add(amount: amount) => count == value + amount; }",
+    );
     let parsed = parse_document(&text, "local.hwv").unwrap();
     parsed.validate_scoped_specification().unwrap();
     let spec = &parsed.canonical["specs"]["Counter"];
@@ -137,24 +142,30 @@ fn bindings_are_example_local_and_unbound_names_still_fail() {
         .unwrap()
         .validate_scoped_specification()
         .unwrap_err();
-    assert!(error
-        .message
-        .contains("/examples/second/trace/0/inputs/amount"));
+    assert!(
+        error
+            .message
+            .contains("/examples/second/trace/0/inputs/amount")
+    );
 }
 
 #[test]
 fn quantified_values_cannot_be_primed() {
     for expression in ["a'", "a''", "q.a'", "a’"] {
-        let text = source(&format!("forall a: bv<4>; execution forall; initial {{}} trace {{ add(amount: {expression}) => true; }}"));
+        let text = source(&format!(
+            "forall a: bv<4>; execution forall; initial {{}} trace {{ add(amount: {expression}) => true; }}"
+        ));
         assert!(parse_document(&text, "prime.hwv").is_err(), "{expression}");
     }
     let text = source(
         "forall a: bv<4>; execution forall; initial {} trace { add(amount: a) => a' == a; }",
     );
     let error = parse_document(&text, "prime.hwv").unwrap_err();
-    assert!(error
-        .message
-        .contains("quantified variables have no next-state value"));
+    assert!(
+        error
+            .message
+            .contains("quantified variables have no next-state value")
+    );
     let span = error.span.unwrap();
     assert_eq!(&text[span.start..span.end], "a'");
 }

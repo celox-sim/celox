@@ -31,7 +31,7 @@ def main():
     if old=='counterexample_search_independent' and f.name=='main.rs':text=text.replace('    scheduling_cases::run(&mut a);','    if std::env::var("AUDIT_DECLARED_HINT").unwrap() == "sat" { scheduling_cases::run(&mut a); }')
    f.write_text(text)
   if not (src/'semantics.rs').exists():shutil.copy(ROOT/'audit/finite_speed_independent/src/semantics.rs',src/'semantics.rs')
-  cargo='[package]\nname="expected-audit-'+label+'"\nversion="0.1.0"\nedition="2021"\npublish=false\n[workspace]\n[[bin]]\nname="expected-audit-'+label+'"\npath='+json.dumps(str(src/'main.rs'))+'\n[dependencies]\nhwverify-ir={path='+json.dumps(str(source/'crates/ir'))+'}\nhwverify-solver={path='+json.dumps(str(source/'crates/solver'))+'}\nserde_json="1"\n'
+  cargo='[package]\nname="expected-audit-'+label+'"\nversion="0.1.0"\nedition="2021"\npublish=false\n[workspace]\n[[bin]]\nname="expected-audit-'+label+'"\npath='+json.dumps(str(src/'main.rs'))+'\n[dependencies]\nhwverify-ir={path='+json.dumps(str(source/'../crates/hwverify-ir'))+'}\nhwverify-solver={path='+json.dumps(str(source/'../crates/hwverify-solver'))+'}\nserde_json="1"\n'
   (dest/'Cargo.toml').write_text(cargo);manifest=str(dest/'Cargo.toml')
   run(['cargo','generate-lockfile','--offline','--manifest-path',manifest],env,dest/'lock.log')
   run(['cargo','build','--offline','--locked','--release','--manifest-path',manifest],env,dest/'build.log')

@@ -2,6 +2,8 @@
 name = "hwverify-sir"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 hwverify-ir.workspace = true
@@ -13,3 +15,6 @@ hwverify-solver.workspace = true
 [[bin]]
 name = "hwverify-sir-lift"
 path = "src/main.rs"
+
+[lints]
+workspace = true

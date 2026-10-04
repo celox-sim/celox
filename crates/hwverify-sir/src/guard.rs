@@ -211,7 +211,7 @@ impl Normalizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hwverify_solver::finite::{solve, Limits, Verdict};
+    use hwverify_solver::finite::{Limits, Verdict, solve};
     #[test]
     fn word_mux_normalization_preserves_all_predicate_assignments() {
         let a = ir::var("a".into(), Sort::Bool);
@@ -261,7 +261,7 @@ mod tests {
 #[cfg(test)]
 mod additional_tests {
     use super::*;
-    use hwverify_solver::finite::{solve, Limits, Verdict};
+    use hwverify_solver::finite::{Limits, Verdict, solve};
     #[test]
     fn budget_exhaustion_preserves_the_original_term() {
         let original = ir::ite(ir::var("g".into(), Sort::Bool), ir::bv(8, 1), ir::bv(8, 2));

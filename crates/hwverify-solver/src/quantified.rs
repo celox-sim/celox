@@ -1,6 +1,6 @@
 //! Scoped quantified SMT. Deliberately bypasses the quantifier-free structural
 //! kernel: its UNSAT rewrites have no quantified-formula correctness contract.
-use crate::{solver, Check};
+use crate::{Check, solver};
 use hwverify_ir::{Env, Res, Sort, Term};
 use serde_json::json;
 use std::{
@@ -249,7 +249,9 @@ impl Check {
             .map(|(name, sort)| format!("(declare-fun {name} () {})", sort.smt()))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut script = format!("(set-option :timeout {timeout_ms})\n(set-option :produce-models true)\n(set-logic ALL)\n{declarations}\n(assert {expression})\n(check-sat)\n");
+        let mut script = format!(
+            "(set-option :timeout {timeout_ms})\n(set-option :produce-models true)\n(set-logic ALL)\n{declarations}\n(assert {expression})\n(check-sat)\n"
+        );
         let emission_seconds = start.elapsed().as_secs_f64();
         if crate::z3::finite_only() {
             let (search_hint, search_hint_source) =

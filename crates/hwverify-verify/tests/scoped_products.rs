@@ -1,10 +1,10 @@
 use hwverify_ir::ScopedSpecification;
 use hwverify_verify::check_scoped_specification;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 
 fn output(name: &str) -> PathBuf {
@@ -247,11 +247,13 @@ fn shared_output_relations_conjoin_and_can_be_contradictory() {
         }
     });
     let report = check(&doc, "contradictory-shared-output");
-    assert!(report["examples"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|example| example["status"] == "passed"));
+    assert!(
+        report["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|example| example["status"] == "passed")
+    );
     assert_eq!(report["status"], "implementation_binding_failed");
     assert_eq!(
         binding_obligation(&report, "binding_product_preservation")["status"],
@@ -280,9 +282,11 @@ fn output_only_contract_allows_unconstrained_idle_output_changes() {
     });
     let report = check(&doc, "output-only-idle");
     assert_eq!(report["status"], "spec_examples_and_binding_verified");
-    assert!(report["implementation_binding"]["limitations"]
-        .to_string()
-        .contains("no general observable-stutter claim"));
+    assert!(
+        report["implementation_binding"]["limitations"]
+            .to_string()
+            .contains("no general observable-stutter claim")
+    );
 }
 
 #[test]

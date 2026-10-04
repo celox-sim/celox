@@ -3,7 +3,7 @@
 //! freshly checked by ProofBundle before an exact rewrite consumes it.
 use crate::{ProofBundle, SequentHandle};
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 const MAX_FACTS: usize = 64;
@@ -342,18 +342,20 @@ mod tests {
             vec![g.clone(), eq(v("value"), definition.clone())],
         ));
         assert!(pool.expansion(&v("value"), &target, &[]).0.is_none());
-        assert!(pool
-            .expansion(&v("value"), &target, &[(g.clone(), false)])
-            .0
-            .is_none());
+        assert!(
+            pool.expansion(&v("value"), &target, &[(g.clone(), false)])
+                .0
+                .is_none()
+        );
         assert_eq!(
             pool.expansion(&v("value"), &target, &[(g.clone(), true)]).0,
             Some(definition)
         );
-        assert!(pool
-            .expansion(&v("value"), &word("bvadd", v("c"), v("d")), &[(g, true)])
-            .0
-            .is_none());
+        assert!(
+            pool.expansion(&v("value"), &word("bvadd", v("c"), v("d")), &[(g, true)])
+                .0
+                .is_none()
+        );
         let negative = EqualityPool::new(not(eq(v("value"), target.clone())));
         assert!(negative.expansion(&v("value"), &target, &[]).0.is_none());
     }

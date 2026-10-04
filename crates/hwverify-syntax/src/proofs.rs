@@ -192,7 +192,7 @@ impl Lower<'_> {
                             return Err(self.error(
                                 &self.span(keyword),
                                 "proof blocks accept forall, let, target and mode",
-                            ))
+                            ));
                         }
                     }
                 }
@@ -201,7 +201,7 @@ impl Lower<'_> {
                         filename: self.filename.into(),
                         span: None,
                         message: "proof blocks accept forall, let, target and mode".into(),
-                    })
+                    });
                 }
             }
         }
@@ -229,7 +229,7 @@ impl Lower<'_> {
                         _ => {
                             return Err(
                                 self.error(&self.span(key), "target properties are rhs and result")
-                            )
+                            );
                         }
                     };
                     if !properties.insert(field) {
@@ -320,7 +320,7 @@ impl Lower<'_> {
                             return Err(self.error(
                                 &self.span(key),
                                 "targets accept lemma, let, use, rhs and result",
-                            ))
+                            ));
                         }
                     };
                     (id, step, token)
@@ -378,7 +378,7 @@ impl Lower<'_> {
                         filename: self.filename.into(),
                         span: None,
                         message: "unsupported proof target entry".into(),
-                    })
+                    });
                 }
             };
             if !declared.insert(id.clone()) {

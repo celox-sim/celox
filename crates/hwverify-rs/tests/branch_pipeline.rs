@@ -14,7 +14,7 @@ const FAULTS: [&str; 7] = [
 ];
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn fixture(name: &str) -> Value {
     serde_json::from_slice(&fs::read(root().join(format!("examples/{name}.json"))).unwrap())
@@ -90,9 +90,11 @@ fn finite_branch_pipeline_proves_and_rejects_seven_faults_without_z3() {
                 .any(|q| q["name"] == "microstep_refinement" && q["status"] == "counterexample"));
         }
         if name.ends_with("stall_branch") {
-            assert!(obligations
-                .iter()
-                .any(|q| q["name"] == "hold_contract" && q["status"] == "counterexample"));
+            assert!(
+                obligations
+                    .iter()
+                    .any(|q| q["name"] == "hold_contract" && q["status"] == "counterexample")
+            );
         }
     }
 }

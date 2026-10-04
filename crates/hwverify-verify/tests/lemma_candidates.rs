@@ -1,7 +1,7 @@
 use hwverify_ir::*;
 use hwverify_solver::Check;
 use hwverify_verify::{lemma_candidate::LemmaCandidate, proof_program::ProofPrograms};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, process::Command};
 fn candidate(id: &str, guard: Value, claim: Value) -> Value {
     LemmaCandidate {
@@ -35,18 +35,22 @@ fn human_and_programmatic_data_have_one_typed_representation() {
 #[test]
 fn malformed_width_frame_cycles_and_uncovered_cases_reject() {
     let mut c = candidate("c", json!(true), json!(["eq", "impl.x", ["bv", 16, 0]]));
-    assert!(ProofPrograms::from_json(
-        &metadata(vec![c.clone()], "c", "independent_lemmas"),
-        &context()
-    )
-    .is_err());
+    assert!(
+        ProofPrograms::from_json(
+            &metadata(vec![c.clone()], "c", "independent_lemmas"),
+            &context()
+        )
+        .is_err()
+    );
     c["claim"] = json!(true);
     c["frame"] = json!("next_cycle_induction");
-    assert!(ProofPrograms::from_json(
-        &metadata(vec![c.clone()], "c", "independent_lemmas"),
-        &context()
-    )
-    .is_err());
+    assert!(
+        ProofPrograms::from_json(
+            &metadata(vec![c.clone()], "c", "independent_lemmas"),
+            &context()
+        )
+        .is_err()
+    );
     c["frame"] = json!("current_query");
     c["depends_on"] = json!(["c"]);
     let err = ProofPrograms::from_json(
@@ -66,22 +70,26 @@ fn malformed_width_frame_cycles_and_uncovered_cases_reject() {
     assert!(err.contains("(c)") && err.contains("(d)") && err.contains("cycle"));
     let missing =
         json!({"op":"join","id":"j","pre":"$pre","goal":"$goal","guard":"i.g","positive":"c"});
-    assert!(ProofPrograms::from_json(
-        &metadata(
-            vec![candidate("c", json!(true), json!(true)), missing],
-            "j",
-            "independent_lemmas"
-        ),
-        &context()
-    )
-    .is_err());
+    assert!(
+        ProofPrograms::from_json(
+            &metadata(
+                vec![candidate("c", json!(true), json!(true)), missing],
+                "j",
+                "independent_lemmas"
+            ),
+            &context()
+        )
+        .is_err()
+    );
     let mut forged = candidate("c", json!(true), json!(true));
     forged["checked"] = json!(true);
-    assert!(ProofPrograms::from_json(
-        &metadata(vec![forged], "c", "independent_lemmas"),
-        &context()
-    )
-    .is_err());
+    assert!(
+        ProofPrograms::from_json(
+            &metadata(vec![forged], "c", "independent_lemmas"),
+            &context()
+        )
+        .is_err()
+    );
 }
 #[test]
 fn live_candidate_boundaries() {
@@ -219,9 +227,10 @@ fn live_worker() {
         z3: "FORBIDDEN".into(),
         reports: vec![],
     };
-    assert!(p
-        .try_query(&mut check, "stale", &and(goal.clone(), not(goal)), &stale)
-        .is_err());
+    assert!(
+        p.try_query(&mut check, "stale", &and(goal.clone(), not(goal)), &stale)
+            .is_err()
+    );
     assert!(check.reports.is_empty());
     // A difficult valid arithmetic claim must not release a dependent handle on Unknown.
     let mut d = metadata(
@@ -333,15 +342,16 @@ fn live_worker() {
         reports: vec![],
     };
     let g = eq(ctx["impl.x"].clone(), bv(8, 0));
-    assert!(p
-        .try_query(
+    assert!(
+        p.try_query(
             &mut check,
             "identity",
             &and(g.clone(), not(g)),
             &substituted
         )
         .unwrap_err()
-        .contains("stale proof-program context"));
+        .contains("stale proof-program context")
+    );
     assert!(check.reports.is_empty());
     fs::remove_dir_all(root).unwrap();
 }

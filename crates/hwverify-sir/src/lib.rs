@@ -4,7 +4,7 @@
 //! are joined with guards, every selected state/input is arbitrary, and sparse
 //! NBA regions retain a write mask. Unsupported operations fail closed.
 use hwverify_ir::{self as ir, Env, Lower, Res, Sort, Term};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod guard;
@@ -1023,7 +1023,7 @@ impl Lifter {
         ) -> Res<()> {
             match marks.get(&id) {
                 Some(1) => {
-                    return Err("cyclic SIR CFG requires an explicit loop bound/invariant".into())
+                    return Err("cyclic SIR CFG requires an explicit loop bound/invariant".into());
                 }
                 Some(2) => return Ok(()),
                 _ => {}
@@ -1545,12 +1545,16 @@ impl Export {
                     .collect::<Vec<_>>();
             vec![
                 json!("extract"),
-                json!(parts[2]
-                    .parse::<u32>()
-                    .map_err(|_| "invalid internal extract")?),
-                json!(parts[3]
-                    .parse::<u32>()
-                    .map_err(|_| "invalid internal extract")?),
+                json!(
+                    parts[2]
+                        .parse::<u32>()
+                        .map_err(|_| "invalid internal extract")?
+                ),
+                json!(
+                    parts[3]
+                        .parse::<u32>()
+                        .map_err(|_| "invalid internal extract")?
+                ),
             ]
         } else if t.0.op.starts_with("(_ zero_extend ") || t.0.op.starts_with("(_ sign_extend ") {
             let parts =
@@ -1564,9 +1568,11 @@ impl Export {
                 } else {
                     "sext"
                 }),
-                json!(parts[2]
-                    .parse::<u32>()
-                    .map_err(|_| "invalid internal extension")?),
+                json!(
+                    parts[2]
+                        .parse::<u32>()
+                        .map_err(|_| "invalid internal extension")?
+                ),
             ]
         } else {
             let name = match t.0.op.as_str() {

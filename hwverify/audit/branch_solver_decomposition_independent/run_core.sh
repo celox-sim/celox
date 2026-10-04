@@ -21,7 +21,7 @@ PY
   manifest="$BRANCH_AUDIT_OUT/build-harness/Cargo.toml"
   cargo generate-lockfile --offline --manifest-path "$manifest"
 fi
-sha256sum "$solver_root"/crates/solver/src/{finite,z3,quantified}.rs audit/branch_solver_decomposition_independent/src/*.rs audit/finite_speed_independent/src/semantics.rs "$manifest" > "$BRANCH_AUDIT_OUT/source-hashes.txt"
+sha256sum "$solver_root"/../crates/hwverify-solver/src/{finite,z3,quantified}.rs audit/branch_solver_decomposition_independent/src/*.rs audit/finite_speed_independent/src/semantics.rs "$manifest" > "$BRANCH_AUDIT_OUT/source-hashes.txt"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/hwverify-branch-decomposition-independent-target}"
 cargo run --offline --locked --release --manifest-path "$manifest" 2>&1 | tee "$BRANCH_AUDIT_OUT/run.log"
 sha256sum --check "$BRANCH_AUDIT_OUT/source-hashes.txt" > "$BRANCH_AUDIT_OUT/source-hashes-verified.txt"

@@ -1,6 +1,6 @@
 //! SMT-LIB emission and isolated Z3 subprocess/evidence I/O.
 use hwverify_ir::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -309,7 +309,10 @@ impl Check {
                     .saturating_sub(start.elapsed().as_millis() as u64);
             }
         }
-        let base=format!("(set-option :timeout {timeout_ms})\n(set-option :produce-models true)\n(set-logic QF_AUFBV)\n{}\n(assert {b})\n(check-sat)\n",e.lines.join("\n"));
+        let base = format!(
+            "(set-option :timeout {timeout_ms})\n(set-option :produce-models true)\n(set-logic QF_AUFBV)\n{}\n(assert {b})\n(check-sat)\n",
+            e.lines.join("\n")
+        );
         let emission_seconds = start.elapsed().as_secs_f64();
         let kernel_start = Instant::now();
         let use_kernel =
@@ -320,7 +323,11 @@ impl Check {
             let kernel_compute_seconds = kernel_start.elapsed().as_secs_f64();
             let mut residual_emitter = Emitter::default();
             let residual_name = residual_emitter.emit(&attempt.residual);
-            let residual_text = format!("; DIAGNOSTIC ONLY: contextual residual may omit assumptions; not equivalent standalone to original query.\n{}\n; residual {}\n",residual_emitter.lines.join("\n"),residual_name);
+            let residual_text = format!(
+                "; DIAGNOSTIC ONLY: contextual residual may omit assumptions; not equivalent standalone to original query.\n{}\n; residual {}\n",
+                residual_emitter.lines.join("\n"),
+                residual_name
+            );
             fs::write(
                 self.out.join(format!("{name}.kernel-residual.smt2")),
                 residual_text,

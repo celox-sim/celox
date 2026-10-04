@@ -22,7 +22,7 @@ impl Lower<'_> {
                         "unexpected interface declaration {} in {context}",
                         keyword.text()
                     ),
-                ))
+                ));
             }
         };
         let span = self.span(name);
@@ -61,7 +61,7 @@ impl Lower<'_> {
                         return Err(self.error(
                             &self.span(direction),
                             "interface ports require input or output",
-                        ))
+                        ));
                     }
                 };
                 self.spans

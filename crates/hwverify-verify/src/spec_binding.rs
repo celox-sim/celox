@@ -2,7 +2,7 @@
 //! deterministic witness into every private state and shared observation.
 use hwverify_ir::*;
 use hwverify_solver::Check;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 fn pairs(from: &Env, to: &Env) -> BTreeMap<Term, Term> {
     from.iter()

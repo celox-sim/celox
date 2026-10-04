@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{fs, path::PathBuf, process::Command};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hwverify")
 }
 fn fixture(name: &str) -> Value {
     serde_json::from_slice(&fs::read(root().join(format!("examples/{name}.json"))).unwrap())

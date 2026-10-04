@@ -1,5 +1,5 @@
 use super::*;
-use crate::{bv, Sort};
+use crate::{Sort, bv};
 
 fn leaf() -> Value {
     json!({
@@ -52,11 +52,12 @@ fn standalone_and_composition_have_independent_complete_v3_targets() {
         leaf.specification.compositions()["Counter"].examples.len(),
         1
     );
-    assert!(leaf
-        .specification
-        .components()
-        .values()
-        .all(|leaf| leaf.examples.is_empty()));
+    assert!(
+        leaf.specification
+            .components()
+            .values()
+            .all(|leaf| leaf.examples.is_empty())
+    );
     assert!(leaf.specification.inputs().contains_key("amount"));
     assert!(!leaf.specification.inputs().contains_key("delta"));
     let target = &scoped.targets()["Machine"];
@@ -65,9 +66,11 @@ fn standalone_and_composition_have_independent_complete_v3_targets() {
         target.instance_paths.values().collect::<Vec<_>>(),
         [&"counter".to_string()]
     );
-    assert!(target.specification.compositions()["Machine"]
-        .examples
-        .is_empty());
+    assert!(
+        target.specification.compositions()["Machine"]
+            .examples
+            .is_empty()
+    );
     let component = target.specification.components().values().next().unwrap();
     assert_eq!(
         component.invariant.0.args[0],
@@ -206,16 +209,20 @@ fn rejects_direct_and_indirect_cycles_before_expansion() {
     let empty_cycle = |target: &str| json!({"inputs": {}, "outputs": {}, "instances": {"child": {"target": target, "connections": {}}}, "examples": {}});
     let mut doc = document();
     doc["compositions"]["Loop"] = empty_cycle("Loop");
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("composition cycle"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("composition cycle")
+    );
     doc["compositions"]["Loop"] = empty_cycle("Other");
     doc["compositions"]["Other"] = empty_cycle("Loop");
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("composition cycle"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("composition cycle")
+    );
 }
 
 #[test]
@@ -228,19 +235,23 @@ fn rejects_unknown_targets_empty_compositions_and_mixed_operations() {
     );
     let mut doc = document();
     doc["compositions"]["Machine"]["instances"] = json!({});
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("at least one instance"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("at least one instance")
+    );
     let mut doc = document();
     doc["specs"]["Other"] = leaf();
     doc["specs"]["Other"]["operations"] = json!({"different": true});
     doc["compositions"]["Machine"]["instances"]["other"] =
         json!({"target": "Other", "connections": {"amount": "delta", "value": "result"}});
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("identical nonempty operation sets"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("identical nonempty operation sets")
+    );
 }
 
 #[test]
@@ -266,10 +277,12 @@ fn rejects_global_capture_even_when_parent_or_implementation_has_matching_name()
     let mut doc = document();
     doc["implementation"] = implementation();
     doc["specs"]["Counter"]["operations"]["advance"] = json!("i.rst");
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("unknown local reference i.rst"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("unknown local reference i.rst")
+    );
 }
 
 #[test]
@@ -334,21 +347,27 @@ fn implementation_controls_only_extend_the_selected_target() {
         target.implementation.as_ref().unwrap().composition,
         "Machine"
     );
-    assert!(!scoped.targets()["Counter"]
-        .specification
-        .inputs()
-        .contains_key("rst"));
-    assert!(scoped.targets()["Counter"]
-        .specification
-        .implementation()
-        .is_none());
+    assert!(
+        !scoped.targets()["Counter"]
+            .specification
+            .inputs()
+            .contains_key("rst")
+    );
+    assert!(
+        scoped.targets()["Counter"]
+            .specification
+            .implementation()
+            .is_none()
+    );
     let id = target.instance_paths.keys().next().unwrap();
-    assert!(target
-        .implementation
-        .as_ref()
-        .unwrap()
-        .states
-        .contains_key(id));
+    assert!(
+        target
+            .implementation
+            .as_ref()
+            .unwrap()
+            .states
+            .contains_key(id)
+    );
 }
 
 #[test]
@@ -359,10 +378,12 @@ fn implementation_requires_exact_target_inputs_leaf_paths_and_output_bindings() 
         .as_object_mut()
         .unwrap()
         .remove("delta");
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("missing target input delta"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("missing target input delta")
+    );
     doc["implementation"]["inputs"]["delta"] = json!("bool");
     assert_eq!(
         ScopedSpecification::from_json(&doc).unwrap_err().path,
@@ -408,26 +429,32 @@ fn nested_binding_uses_full_path_and_state_only_expressions() {
     );
     assert!(error.message.contains("unknown reference i.delta"));
     doc["implementation"]["binding"]["states"] = json!({"nested": {"x": "s.count"}});
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("every instantiated leaf path"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("every instantiated leaf path")
+    );
 }
 
 #[test]
 fn strict_shapes_and_namespace_collisions_are_rejected() {
     let mut doc = document();
     doc["specs"]["Counter"]["inputs"]["value"] = json!({"bv": 8});
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("input and output names must be distinct"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("input and output names must be distinct")
+    );
     let mut doc = document();
     doc["compositions"]["Counter"] = composition("Counter");
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("spec and composition names must be distinct"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("spec and composition names must be distinct")
+    );
     for (field, extra) in [("specs", "steps"), ("compositions", "members")] {
         let mut doc = document();
         let name = if field == "specs" {
@@ -436,18 +463,22 @@ fn strict_shapes_and_namespace_collisions_are_rejected() {
             "Machine"
         };
         doc[field][name][extra] = json!({});
-        assert!(ScopedSpecification::from_json(&doc)
-            .unwrap_err()
-            .message
-            .contains("unsupported field"));
+        assert!(
+            ScopedSpecification::from_json(&doc)
+                .unwrap_err()
+                .message
+                .contains("unsupported field")
+        );
     }
     let mut doc = document();
     doc["compositions"]["Machine"]["instances"]["a.b"] =
         doc["compositions"]["Machine"]["instances"]["counter"].clone();
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("invalid field name a.b"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("invalid field name a.b")
+    );
 }
 
 #[test]
@@ -456,14 +487,18 @@ fn generated_component_identity_never_collides_with_target_name() {
     doc["specs"]["__scoped_leaf_0"] = leaf();
     let scoped = ScopedSpecification::from_json(&doc).unwrap();
     let target = &scoped.targets()["__scoped_leaf_0"];
-    assert!(!target
-        .specification
-        .components()
-        .contains_key("__scoped_leaf_0"));
-    assert!(target
-        .specification
-        .compositions()
-        .contains_key("__scoped_leaf_0"));
+    assert!(
+        !target
+            .specification
+            .components()
+            .contains_key("__scoped_leaf_0")
+    );
+    assert!(
+        target
+            .specification
+            .compositions()
+            .contains_key("__scoped_leaf_0")
+    );
 }
 
 #[test]
@@ -511,10 +546,12 @@ fn expansion_limit_rejects_exponential_products_before_allocating_them() {
         doc["compositions"][&name] = json!({"inputs": {}, "outputs": {}, "instances": {"a": {"target": previous, "connections": {}}, "b": {"target": previous, "connections": {}}}, "examples": {}});
         previous = name;
     }
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("4096-leaf expansion limit"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("4096-leaf expansion limit")
+    );
 }
 
 #[test]
@@ -526,18 +563,20 @@ fn nesting_limit_accounts_for_memoized_subtrees() {
         doc["compositions"][&name] = json!({"inputs": {}, "outputs": {}, "instances": {"child": {"target": previous, "connections": {}}}, "examples": {}});
         previous = name;
     }
-    assert!(ScopedSpecification::from_json(&doc)
-        .unwrap_err()
-        .message
-        .contains("64-level nesting limit"));
+    assert!(
+        ScopedSpecification::from_json(&doc)
+            .unwrap_err()
+            .message
+            .contains("64-level nesting limit")
+    );
 }
 
 #[test]
 fn scoped_examples_validate_and_keep_each_declared_example_exactly_once() {
     for source in [
-        include_str!("../../../../examples/scoped_budgeted_counter.json"),
-        include_str!("../../../../examples/scoped_independent_counters.json"),
-        include_str!("../../../../examples/scoped_contradictory_outputs.json"),
+        include_str!("../../../../hwverify/examples/scoped_budgeted_counter.json"),
+        include_str!("../../../../hwverify/examples/scoped_independent_counters.json"),
+        include_str!("../../../../hwverify/examples/scoped_contradictory_outputs.json"),
     ] {
         let document: Value = serde_json::from_str(source).unwrap();
         let scoped = ScopedSpecification::from_json(&document).unwrap();
@@ -550,11 +589,13 @@ fn scoped_examples_validate_and_keep_each_declared_example_exactly_once() {
             .targets()
             .values()
             .map(|target| {
-                assert!(target
-                    .specification
-                    .components()
-                    .values()
-                    .all(|component| component.examples.is_empty()));
+                assert!(
+                    target
+                        .specification
+                        .components()
+                        .values()
+                        .all(|component| component.examples.is_empty())
+                );
                 target
                     .specification
                     .compositions()
@@ -582,10 +623,12 @@ fn document_expansion_limit_bounds_many_individually_small_targets() {
         let name = format!("Wrapper{index}");
         document["compositions"][&name] = json!({"inputs": {}, "outputs": {}, "instances": {"leaf": {"target": previous, "connections": {}}}, "examples": {}});
     }
-    assert!(ScopedSpecification::from_json(&document)
-        .unwrap_err()
-        .message
-        .contains("16384 elaborated-leaf limit"));
+    assert!(
+        ScopedSpecification::from_json(&document)
+            .unwrap_err()
+            .message
+            .contains("16384 elaborated-leaf limit")
+    );
 }
 
 fn independent_actions_document() -> Value {
@@ -895,20 +938,28 @@ fn generated_controls_and_tick_avoid_user_and_implementation_names() {
         target.specification.operations(),
         &BTreeSet::from(["__scoped_tick_".into()])
     );
-    assert!(target
-        .implementation_inputs
-        .contains_key("__scoped_action_0_"));
-    assert!(!target
-        .implementation_inputs
-        .contains_key("__scoped_action_0__"));
-    assert!(target
-        .specification
-        .inputs()
-        .contains_key("__scoped_action_0"));
-    assert!(!target
-        .specification
-        .inputs()
-        .contains_key("__scoped_action_0_"));
+    assert!(
+        target
+            .implementation_inputs
+            .contains_key("__scoped_action_0_")
+    );
+    assert!(
+        !target
+            .implementation_inputs
+            .contains_key("__scoped_action_0__")
+    );
+    assert!(
+        target
+            .specification
+            .inputs()
+            .contains_key("__scoped_action_0")
+    );
+    assert!(
+        !target
+            .specification
+            .inputs()
+            .contains_key("__scoped_action_0_")
+    );
 }
 
 #[test]
@@ -936,10 +987,12 @@ fn witness_validation_keeps_real_term_identities_and_rejects_selector_map_errors
         json!({"advance": ["bv", 8, 0]}),
     ] {
         doc["implementation"]["operations"] = selectors;
-        assert!(ScopedSpecification::from_json(&doc)
-            .unwrap_err()
-            .path
-            .starts_with("/implementation/operations"));
+        assert!(
+            ScopedSpecification::from_json(&doc)
+                .unwrap_err()
+                .path
+                .starts_with("/implementation/operations")
+        );
     }
 }
 

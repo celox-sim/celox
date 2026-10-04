@@ -1,7 +1,7 @@
 //! Bounded existential adequacy evidence, separate from response proof obligations.
 use hwverify_ir::*;
 use hwverify_solver::finite::{self, Limits, Scalar, SearchHint, Verdict};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(crate) fn check(
@@ -131,10 +131,12 @@ fn substitutions(original: &Env, frame: &Env) -> BTreeMap<Term, Term> {
         .collect()
 }
 fn values_json(values: &BTreeMap<String, Scalar>) -> Value {
-    json!(values
-        .iter()
-        .map(|(k, v)| (k, v.json()))
-        .collect::<BTreeMap<_, _>>())
+    json!(
+        values
+            .iter()
+            .map(|(k, v)| (k, v.json()))
+            .collect::<BTreeMap<_, _>>()
+    )
 }
 
 /// Recompute the reset and every next state using the ORIGINAL expressions and
@@ -236,7 +238,7 @@ mod tests {
     fn example() -> Specification {
         Specification::from_json(
             &hwverify_syntax::parse_document(
-                include_str!("../../../examples/response.hwv"),
+                include_str!("../../../hwverify/examples/response.hwv"),
                 "response.hwv",
             )
             .unwrap()
@@ -288,15 +290,17 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert!(replay(
-            implementation,
-            spec.inputs(),
-            c,
-            2,
-            &model,
-            Limits::default()
-        )
-        .is_ok());
+        assert!(
+            replay(
+                implementation,
+                spec.inputs(),
+                c,
+                2,
+                &model,
+                Limits::default()
+            )
+            .is_ok()
+        );
         for (key, value) in [
             ("edge0.state_after.busy", Scalar::Bool(true)),
             ("edge0.input.rst", Scalar::Bool(false)),
@@ -320,14 +324,16 @@ mod tests {
         }
         let mut missing = model;
         missing.remove("edge0.input.request");
-        assert!(replay(
-            implementation,
-            spec.inputs(),
-            c,
-            2,
-            &missing,
-            Limits::default()
-        )
-        .is_err());
+        assert!(
+            replay(
+                implementation,
+                spec.inputs(),
+                c,
+                2,
+                &missing,
+                Limits::default()
+            )
+            .is_err()
+        );
     }
 }
