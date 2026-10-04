@@ -449,7 +449,8 @@ impl NativeProgramInstance {
             )),
             RuntimeEvent::Display { .. }
             | RuntimeEvent::Write { .. }
-            | RuntimeEvent::AssertContinue { .. } => None,
+            | RuntimeEvent::AssertContinue { .. }
+            | RuntimeEvent::Finish => None,
         }) {
             return Err(celox_runtime::SimulatorErrorCode::Runtime {
                 message,

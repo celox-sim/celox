@@ -6305,7 +6305,7 @@ fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
         Ok(_) => panic!("reachable invalid hierarchy unexpectedly compiled"),
         Err(error) => error.to_string(),
     };
-    assert!(error.contains("module \"Missing\""), "{error}");
+    assert!(error.contains("`Missing`"), "{error}");
 }
 
 #[test]

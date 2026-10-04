@@ -13,7 +13,7 @@ use super::{
     module::ModuleParser,
 };
 use crate::{
-    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError,
+    BuildConfig, HashMap, HashSet, ParserError,
     symbolic::artifact::{ExternalHierarchy, SymbolicRtl},
 };
 
@@ -148,13 +148,10 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                         let external_name =
                             resource_table::get_str_value(sv.name).unwrap_or_default();
                         let local_id = external.roots.get(&external_name).ok_or_else(|| {
-                            ParserError::unsupported(
-                                64,
-                                LoweringPhase::SimulatorParser,
-                                "systemverilog module instantiation",
-                                format!("module \"{}\" was not supplied", sv.name),
-                                None,
-                            )
+                            ParserError::MissingExternalModule {
+                                name: external_name.clone(),
+                                source_location: None,
+                            }
                         })?;
                         validate_external_module_graph(
                             *local_id,
@@ -361,9 +358,7 @@ fn validate_external_module_graph(
         return Ok(());
     }
     if !active.insert(module_id) {
-        return Err(ParserError::unsupported(
-            64,
-            LoweringPhase::SimulatorParser,
+        return Err(ParserError::illegal_context(
             "recursive systemverilog module instantiation",
             format!("cycle includes external module {module_id}"),
             None,
@@ -377,13 +372,10 @@ fn validate_external_module_graph(
         )
     })?;
     if let Some(name) = module.unresolved_instances.first() {
-        return Err(ParserError::unsupported(
-            64,
-            LoweringPhase::SimulatorParser,
-            "systemverilog module instantiation",
-            format!("module \"{name}\" was not supplied"),
-            None,
-        ));
+        return Err(ParserError::MissingExternalModule {
+            name: name.to_string(),
+            source_location: None,
+        });
     }
     for blocks in module.sim_module.glue_blocks.values() {
         for block in blocks {

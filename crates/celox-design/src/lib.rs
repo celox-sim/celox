@@ -59,6 +59,8 @@ pub enum RuntimeEventKind {
     Write,
     AssertContinue,
     AssertFatal,
+    /// `$finish` executed by the design (IEEE 1800-2023 20.2).
+    Finish,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
