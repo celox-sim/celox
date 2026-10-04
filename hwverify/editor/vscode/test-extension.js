@@ -40,7 +40,7 @@ async function run() {
     }
     onNotification(method, handler) {this.notifications ||= new Map(); this.notifications.set(method, handler);}
     async sendRequest(method, params, cancel) {
-      calls.push([method, params, cancel]);
+      calls.push([method, params, cancel, arguments.length]);
       if (method === 'textDocument/codeLens') return [{command: {title: 'Check prefix', arguments: [options]}}];
       return {diagnosticOnly: true};
     }
@@ -48,7 +48,7 @@ async function run() {
   }
   const sandbox = {module: {exports: {}}, require: name => {
     if (name === 'vscode') return vscode;
-    if (name === 'vscode-languageclient/node') return {LanguageClient};
+    if (name === 'vscode-languageclient/node') return {LanguageClient, ErrorAction: {Shutdown: 2}, CloseAction: {DoNotRestart: 1}};
     throw new Error(name);
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'extension.js'), 'utf8'), sandbox);
@@ -74,6 +74,9 @@ async function run() {
   assert.equal((await commands.get('hwverify.prove')({...options, branch: 0})).diagnosticOnly, true);
   assert.equal((await api.checkProof(options, token)).diagnosticOnly, true);
   assert.equal(calls.filter(x => x[0] === 'workspace/executeCommand').at(-1)[2], token);
+  await api.checkProof(options);
+  assert.equal(calls.filter(x => x[0] === 'workspace/executeCommand').at(-1)[3], 2);
+  assert.equal(instance.options.errorHandler.closed().action, 1);
   await commands.get('hwverify.associate')();
   assert(calls.some(x => x[1]?.arguments?.[0]?.baseUri === 'file:///base.hwv'));
   await commands.get('hwverify.clearBase')();

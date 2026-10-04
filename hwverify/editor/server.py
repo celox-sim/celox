@@ -536,9 +536,13 @@ class Server:
     def dispatch(self, message):
         rid = message.get('id')
         method = message.get('method')
-        p = message.get('params') or {}
+        p = message.get('params')
+        if p is None:
+            p = {}
         with self.lock:
             try:
+                if not isinstance(p, dict):
+                    raise ValueError('LSP method parameters must be an object')
                 if method == 'initialize':
                     self.reply(rid, {'capabilities': {'positionEncoding': 'utf-16', 'textDocumentSync': {'openClose': True, 'change': 2}, 'definitionProvider': True, 'completionProvider': {'triggerCharacters': ['.']}, 'hoverProvider': True, 'codeLensProvider': {'resolveProvider': False}, 'executeCommandProvider': {'commands': ['hwverify.prove', 'hwverify.setBase']}}, 'serverInfo': {'name': 'hwverify', 'version': '0.1.0'}})
                 elif method == 'shutdown':

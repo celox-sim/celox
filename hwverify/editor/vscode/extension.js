@@ -1,6 +1,6 @@
 'use strict';
 const vscode = require('vscode');
-const { LanguageClient } = require('vscode-languageclient/node');
+const { LanguageClient, ErrorAction, CloseAction } = require('vscode-languageclient/node');
 let client;
 
 async function activate(context) {
@@ -20,13 +20,20 @@ async function activate(context) {
   client = new LanguageClient('hwverify', 'hwverify', {
     command: config.get('python'), args: [server, '--worker', worker]
   }, {documentSelector: [{scheme: 'file', language: 'hwverify'}, {scheme: 'file', language: 'json'}],
-      synchronize: {fileEvents: watcher}, middleware: {executeCommand: (command, args, next) => command === 'hwverify.prove' ? prove(args[0]) : next(command, args)}});
+      synchronize: {fileEvents: watcher},
+      errorHandler: {error: () => ({action: ErrorAction.Shutdown}), closed: () => ({action: CloseAction.DoNotRestart})},
+      middleware: {executeCommand: (command, args, next) => command === 'hwverify.prove' ? prove(args[0]) : next(command, args)}});
   await client.start();
   client.onNotification('hwverify/statusChanged', () => {});
   const proofStarted = new vscode.EventEmitter();
   context.subscriptions.push(proofStarted);
   client.onNotification('hwverify/proofStarted', event => proofStarted.fire(event));
-  const checkProof = (options, token) => client.sendRequest('workspace/executeCommand', {command: 'hwverify.prove', arguments: [options]}, token);
+  const checkProof = (options, token) => {
+    const params = {command: 'hwverify.prove', arguments: [options]};
+    // The string-method overload treats an explicit undefined token as a
+    // second positional parameter, producing [params, null] on the wire.
+    return token === undefined ? client.sendRequest('workspace/executeCommand', params) : client.sendRequest('workspace/executeCommand', params, token);
+  };
   // Own the command so CodeLens and the palette both get cancellable progress.
   prove = async (options) => {
     if (!options) {

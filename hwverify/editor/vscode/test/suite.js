@@ -46,6 +46,9 @@ function onNextProofStarted(api, uri, version, interrupt) {
 }
 
 exports.run = async function run() {
+  let stage;
+  const enter = name => {stage = name; console.log(`[hwverify E2E] ${name}`);};
+  enter('open document and activate extension');
   const uri = vscode.Uri.file(path.join(process.env.HWVERIFY_EXTENSION_TEST_WORKSPACE, 'counter.hwv'));
   const doc = await vscode.workspace.openTextDocument(uri);
   await vscode.window.showTextDocument(doc);
@@ -59,10 +62,13 @@ exports.run = async function run() {
   const diagnostics = () => vscode.languages.getDiagnostics(uri);
   const options = {uri: uri.toString(), program: 'counter_step', branch: 0};
   const proofAt = () => doc.positionAt(doc.getText().indexOf('lemma step') + 'lemma '.length);
+  let failure;
   try {
+    enter('definition, completion and CodeLens');
     // Real VS Code providers, actual languageclient, Python LSP and Rust worker.
     const defs = await until('definition provider', async () => {
-      const result = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', uri, doc.positionAt(source.indexOf('step(context')));
+      enter('checked proof command and exact hover identity');
+    const result = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', uri, doc.positionAt(source.indexOf('step(context')));
       return result?.length ? result : null;
     });
     assert.equal(defs[0].uri.toString(), uri.toString());
@@ -72,6 +78,7 @@ exports.run = async function run() {
     const lenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', uri);
     assert(lenses.some(l => l.command?.command === 'hwverify.prove'));
 
+    enter('Unicode/CRLF unsaved edits and diagnostics');
     const unicode = source.replace('Counter with native lemma proposals', 'A\u2028B\u2029C\u0085😀').replace('binding impl.x', 'binding /* 😀\u2028 */ impl.x');
     await replace(doc, unicode);
     assert(await vscode.window.activeTextEditor.edit(edit => edit.setEndOfLine(vscode.EndOfLine.CRLF)));
@@ -87,6 +94,7 @@ exports.run = async function run() {
 
     // Invoke the same registered command as CodeLens; explicit branch avoids a
     // modal input dialog, while still using the real progress/result handler.
+    enter('checked proof command and exact hover identity');
     const result = await vscode.commands.executeCommand('hwverify.prove', options);
     assert(result?.diagnosticOnly);
     assert(result.proof.reports[0].lemma_candidates.target_closed);
@@ -100,16 +108,19 @@ exports.run = async function run() {
       `Document version: ${result.documentVersion}`
     ], encodePlainHover, {uri: uri.toString(), position: proofAt(), documentVersion: doc.version, requestIdentity: result.requestIdentity});
 
+    enter('invalidate checked hover after edit');
     await replace(doc, source + '\n// invalidate checked snapshot\n');
     await until('proof status cleared on unsaved edit', () => !diagnostics().some(d => d.message.includes('proved')));
     await until('hover does not reuse a stale proof', async () => hoverMarkdown(await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, proofAt())).split('\n').includes(encodePlainHover('Proof status: not checked for this document version. Run an explicit proof command.')));
 
+    enter('uncancelled extension API request and bounded Unknown');
     const hard = source.replace('    forall word: bv<8>;', '    mode shared_query;\n    forall a: bv<64>; forall b: bv<64>; forall c: bv<64>;').replace("claim impl.x' == spec.x';", 'claim a * (b + c) == a * b + a * c;');
     await replace(doc, hard);
     // Proves synchronization with the current unsaved buffer before testing
     // cancellation; this is a real bounded solver Unknown, not a fake worker.
     const unknown = await api.checkProof(options);
     assert.equal(unknown.proof.reports[0].lemma_candidates.candidates[0].validity, 'unknown_budget');
+    enter('cancel after real worker startup');
     const cancellation = new vscode.CancellationTokenSource();
     const cancellationStarted = onNextProofStarted(api, uri, doc.version, () => cancellation.cancel());
     const cancelled = api.checkProof(options, cancellation.token).then(() => {throw new Error('cancelled proof unexpectedly returned a verdict');}, error => error);
@@ -118,16 +129,19 @@ exports.run = async function run() {
     assert([-32800, -32801].includes(cancelledError.code), String(cancelledError));
     cancellation.dispose();
 
+    enter('edit after real worker startup');
     const staleStarted = onNextProofStarted(api, uri, doc.version, () => replace(doc, source + '\n// edit during real proof request\n'));
     const stale = api.checkProof(options).then(() => {throw new Error('edited proof unexpectedly returned a verdict');}, error => error);
     await staleStarted;
     const staleError = await stale;
     assert([-32800, -32801].includes(staleError.code), String(staleError));
     await until('no stale proof diagnostics', () => !diagnostics().some(d => d.message.includes('proved')));
+    enter('fresh proof after interruption');
     const fresh = await api.checkProof(options);
     assert(fresh.proof.reports[0].lemma_candidates.target_closed);
     assert.notEqual(fresh.identity, result.identity);
     assert.equal(fresh.documentVersion, doc.version);
+    enter('cross-target witness attribution');
     const twoTargets = source.replace("claim impl.x' == spec.x';", "claim impl.x' == spec.x' + 1u8;").replace('    }\n  }\n}\n', '    }\n    target other { rhs 0u8; lemma untouched { context true; guard pre; claim true; } use other_done: untouched(context: pre); result other_done; }\n  }\n}\n');
     await replace(doc, twoTargets);
     const failed = await api.checkProof(options);
@@ -139,7 +153,13 @@ exports.run = async function run() {
     assert(!unrelated.includes(encodePlainHover('Checked target query')), JSON.stringify({unexpectedQuery: unrelated}));
     assert(!unrelated.includes(encodePlainHover('Witnesses for')), JSON.stringify({unexpectedWitness: unrelated}));
     console.log('PASS: real VS Code Extension Host activation, diagnostics, providers, checked command, Unknown, cancellation and stale-result invalidation');
+  } catch (error) {
+    failure = error;
+    console.error(`[hwverify E2E failed at ${stage}]`, error.stack || error);
+    console.error('[hwverify diagnostics]', JSON.stringify(diagnostics()));
+    throw error;
   } finally {
-    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    try {await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');}
+    catch (error) {if (!failure) throw error; console.error('[hwverify cleanup error]', error);}
   }
 };

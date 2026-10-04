@@ -176,8 +176,12 @@ npm test --prefix editor/vscode
 
 The first run downloads the pinned VS Code build from Microsoft's distribution
 service. Missing display dependencies or a failed download cause a failing test;
-CI never silently skips this gate. Fast protocol and client-wiring tests remain
-separate. The runner uses its standard isolated test-host flags, including its
+CI never silently skips this gate. Test stages are logged, and failures dump the
+isolated Extension Host and language-client logs (including server stderr).
+Transport failure stops the language client; it does not silently restart to
+make a failing test pass. Reload the window after fixing a connection failure.
+Fast Python protocol, pinned JavaScript JSON-RPC integration and client-wiring
+tests remain separate. The runner uses its standard isolated test-host flags, including its
 own Electron sandbox flags; these do not change the production extension's
 workspace-trust requirement.
 

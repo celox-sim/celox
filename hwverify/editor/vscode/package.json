@@ -79,6 +79,7 @@
   },
   "scripts": {
     "test": "node test/run-extension-host.js",
-    "test:unit": "node test-extension.js && node test/hover-contract.test.js"
+    "test:unit": "node test-extension.js && node test/hover-contract.test.js",
+    "test:rpc": "node test/rpc-integration.js"
   }
 }
