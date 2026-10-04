@@ -705,7 +705,7 @@ monitor to a separately implemented procedural oracle. Actual source runs cover
 AW-first, W-first, simultaneous, continuous traffic and response backpressure;
 mutant stimuli also run on correct RTL with explicit expected transfer counts.
 
-Unchecked: input-to-output combinational paths, VALID dependence on READY or
+The sampled contracts alone leave unchecked: input-to-output combinational paths, VALID dependence on READY or
 other channels, asynchronous reset assertion/deassertion and reset-release VALID
 timing, transaction-identity ordering and functional address/data/strobe behavior,
 fairness/liveness, X/Z, CDC, bursts, IDs and other AXI variants. Source replay uses
@@ -718,3 +718,112 @@ explicit reset epochs. Neither constitutes an asynchronous-reset timing check.
 This experimental tooling is provided as-is, with no AXI certification or fitness
 claim. Review its assumptions and independently validate it for your use. This
 notice does not change the repository's licensing terms or provide legal guarantees.
+
+## Native source structural contracts
+
+A v3 component may require absence of a combinational path independently of its
+behavioral relations. This is **new source-graph checking**, not a temporal or
+physical timing proof. See the complete [native example](../examples/no_comb_path.hwv)
+and [Veryl source](../examples/no_comb_path.veryl).
+
+```text
+component Isolation {
+  init true;
+  invariant true;
+  steps { tick = true; }
+  structure {
+    no_comb_path isolated { from i.a; to o.y; }
+  }
+}
+```
+
+Endpoints reference declared shared inputs (`i.a`) or observations (`o.y`) for
+their names/types. `implementation` binds them **separately** to actual source
+signals, not to the behavioral state-only observation expressions:
+
+```text
+endpoints { i.a = a; o.y = y; }
+```
+
+Mappings are plain typed signal paths, including named child ports. Expressions,
+undeclared logical endpoints and direction/width mismatches are rejected. A
+hardware endpoint binding does not itself prove that a behavioral abstraction
+matches the same physical signal. Existing behavioral refinement obligations
+remain separate. Nested v3 compositions collect contracts from their selected
+components, retain qualified rule names, and apply the existing duplicate-member
+checks. V4 structural declarations are not implemented and are rejected.
+
+With the pinned frontend and release binaries built, run:
+
+```sh
+python3 conformance/celox-replay/structure_project.py examples/no_comb_path.project.json --out /tmp/no-comb-path
+```
+
+The source command checks structural obligations only. To check the native
+behavioral model and structural obligations together using that artifact:
+
+```sh
+cargo run --release --bin hwverify-rs -- examples/no_comb_path.hwv --structural-artifact /tmp/no-comb-path/structural-graph.json --out /tmp/combined
+```
+
+This checks the supplied native behavioral model; it does not by itself establish
+that its reset/next abstraction matches the RTL. Source lowering/replay provides
+that separate connection. Structural violations produce `structural_contract_failed`;
+unbound/unsupported structural checks keep the combined result `unknown`.
+
+The small manifest names `version: 1`, `top`, a nonempty list of source filenames,
+and `specification`; files must remain within its directory. The command compiles
+the original source with the existing pinned frontend, extracts a graph from the
+**original source tokens**, cross-checks every variable and instance path against
+typed frontend reflection, and runs the generic Rust `hwverify-structure` checker.
+The source parser is part of the trusted frontend boundary. The Rust checker
+validates and traverses its artifact; it does not independently recompile RTL or
+authenticate an arbitrary caller-supplied graph.
+
+The graph contains whole-variable data, control and hierarchy-connection edges.
+Assignments in supported positive-edge `always_ff` blocks produce explicit
+sequential cuts. Data/control paths through combinational assignments remain even
+in `a ^ a`, masked expressions, overwritten assignments or constant branches.
+Thus `violated` means a path in this conservative **source-variable graph**; it
+need not imply a sensitizable path or a path in optimized synthesized hardware.
+No absence claim is inferred from simplified behavioral expressions or SAT
+support sets. A register cut does not establish independence from historical
+READY values or compliance with transaction-offer dependency requirements.
+
+Supported source subset: scalar bit/logic widths 1–64, ordinary assignments,
+expressions without function calls/casts/selects, `always_comb`, block `if/else`,
+positive-edge `always_ff` with an ordinary clock, and fully named scalar module
+connections. Parent/child aliases and sequential boundaries are retained.
+Generics, generate blocks, arrays/slices, interfaces, external/opaque modules,
+functions, casts, loops, case statements, `else if`, and typed/asynchronous reset
+constructs are unsupported. Source budgets are explicit. Any unsupported construct
+or incomplete reflection coverage makes the **whole artifact unsupported**;
+there is no assumption that a missing subgraph is isolated.
+
+Results are `verified`, `violated`, `unsupported`, `unbound`, or
+`invalid_or_tool_error` (`not_requested` if no contracts are declared). Only `verified` completes the requested structural
+checks. Path witnesses identify source files/lines and edge kinds; reports retain
+native declaration locations, source identity, extractor identity, coverage and
+sequential cuts. The CLI exits 0 for verified, 1 for violated, 3 for incomplete
+checks and 2 for invalid/tool errors. An ordinary `hwverify-rs` or editor proof
+without the source artifact reports the structural obligations as unbound and
+keeps the overall result `unknown`; the editor provides a blocking declaration
+location diagnostic. Behavioral replay rejects documents with retained structural
+contracts, rather than silently ignoring them.
+
+The AXI source entry point now generates a separate native structural composition
+for every protocol input/output pair and uses this same checker. It emits
+`structure-model.json`, `structural-graph.json` and `structural-result.json` beside
+the sampled evidence. A path reports `structural_violation`; incomplete structural
+coverage prevents a successful combined result. Clock/reset physical timing and
+registered wait-on-READY remain separate unchecked obligations. The regression
+suite deliberately includes a registered READY wait that passes this structural
+check: it must not be mistaken for proof of temporal offer causality.
+
+The [machine-readable AXI conformance inventory](../protocols/axi4lite-conformance.json)
+records exact sections, profiles, tests and outstanding gaps. It is explicitly
+partial, pending an independent completeness audit. Address/WSTRB consistency
+needs ordered AW/W pairing even when W arrives first; response correspondence
+needs independent transaction-origin evidence, not response counters alone.
+Reset release, optional/default signal profiles and memory-versus-peripheral
+requirements remain visible gaps. No full AXI compliance claim is made.

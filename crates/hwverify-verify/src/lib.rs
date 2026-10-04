@@ -4,7 +4,7 @@ mod program;
 pub use checker::{check, check_design, check_editor_request, validate_proof_metadata};
 
 mod specification;
-pub use specification::check_specification;
+pub use specification::{check_specification, check_specification_structural};
 mod spec_binding;
 
 mod scoped_specification;
@@ -20,3 +20,5 @@ mod acceptance_cover;
 mod progress;
 
 pub mod reachable;
+
+pub mod structure;

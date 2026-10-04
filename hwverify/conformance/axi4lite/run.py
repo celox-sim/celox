@@ -124,6 +124,18 @@ def main():
         if capacity['status'] != 'scope_exceeded' or not capacity['independent']['capacity_exceeded'] or unsaved.exists():
             raise RuntimeError('capacity overflow was hidden or mislabeled a protocol violation')
         results.append({'case': 'capacity_control', 'status': capacity['status']})
+        structural = root / 'structural'; shutil.copytree(EXAMPLE, structural)
+        source = structural / 'subordinate.veryl'
+        source.write_text(source.read_text().replace('assign awready = !a_full;', 'assign awready = !a_full || (bready && !bready);'))
+        result = cli('search', structural / 'binding.json', '--out', args.out / 'structural-cancelled-input')
+        if result['status'] != 'structural_violation' or result['structural']['status'] != 'violated': raise RuntimeError('simplification hid a source path')
+        results.append({'case': 'structural_cancelled_input', 'status': result['status']})
+        waiting = root / 'registered-wait'; shutil.copytree(EXAMPLE, waiting)
+        source = waiting / 'manager.veryl'
+        source.write_text(source.read_text().replace('start_write && !write_busy', 'start_write && !write_busy && awready && wready'))
+        result = cli('search', waiting / 'manager-binding.json', '--out', args.out / 'registered-ready-wait')
+        if result['structural']['status'] != 'verified': raise RuntimeError('registered dependency incorrectly labeled combinational')
+        results.append({'case': 'registered_ready_wait', 'structural': 'verified', 'temporal_causality': 'unchecked'})
         # Role/pin direction and type validation reject swapped/proxy mappings.
         binding = replay.load_json(good / 'binding.json')
         for name, change in [('role', lambda b: b['config'].update(role='manager')),
