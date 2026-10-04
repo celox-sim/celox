@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1 (2026-10-04)
+
+## What's Changed
+* fix(release): reject unsafe package includes in CI by @tignear in https://github.com/celox-sim/celox/pull/1002
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.10.0...v0.10.1
+
 ## 0.10.0 (2026-10-03)
 
 ## What's Changed
