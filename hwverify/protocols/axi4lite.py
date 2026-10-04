@@ -90,8 +90,8 @@ def monitor(config, signals, reset_signals):
         reg(ch + '_held', 'bool', False, all_of(valid, inv(ready)))
         for n in payload: reg('last_' + n, types[n], bv(types[n]['bv'], 0), signals[n])
     handshake = {c: all_of(signals[c + 'valid'], signals[c + 'ready']) for c in CHANNELS}
-    violations['b_requires_aw_w'] = all_of(signals['bvalid'], any_of(eq(s('aw_count'), bv(width, 0)), eq(s('w_count'), bv(width, 0))))
-    violations['r_requires_ar'] = all_of(signals['rvalid'], eq(s('ar_count'), bv(width, 0)))
+    violations['b_requires_aw_w'] = all_of(inv(s('scope_bad')), signals['bvalid'], any_of(eq(s('aw_count'), bv(width, 0)), eq(s('w_count'), bv(width, 0))))
+    violations['r_requires_ar'] = all_of(inv(s('scope_bad')), signals['rvalid'], eq(s('ar_count'), bv(width, 0)))
     violations['b_response_code'] = all_of(signals['bvalid'], eq(signals['bresp'], bv(2, 1)))
     violations['r_response_code'] = all_of(signals['rvalid'], eq(signals['rresp'], bv(2, 1)))
     overflow = []
@@ -130,7 +130,10 @@ def monitor(config, signals, reset_signals):
                 old = s(ch + '_pair_' + str(at)) if at < cap else bv(bits, 0)
                 return ite(all_of(push, eq(count, bv(width, at))), value, old)
             reg(ch + '_pair_' + str(index), {'bv': bits}, bv(bits, 0), ite(pair, appended(index + 1), appended(index)))
-    violations['write_address_strobe'] = all_of(known_pair, any_of(*(
+    # Truncation after an earlier overflow loses transaction correspondence.
+    # Do not turn that loss into a counterpart violation; current-edge overflow
+    # does not yet invalidate the pre-edge queue and must not mask a real fault.
+    violations['write_address_strobe'] = all_of(inv(s('scope_bad')), known_pair, any_of(*(
         all_of(eq(heads['aw'], bv(config['address_width'], offset)),
                inv(eq(expr('band', heads['w'], bv(lanes, (1 << offset) - 1)), bv(lanes, 0))))
         for offset in range(1, min(lanes, 1 << config['address_width'])))))

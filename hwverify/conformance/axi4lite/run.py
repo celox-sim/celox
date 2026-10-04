@@ -168,6 +168,15 @@ def main():
         if capacity['status'] != 'scope_exceeded' or not capacity['independent']['capacity_exceeded'] or unsaved.exists():
             raise RuntimeError('capacity overflow was hidden or mislabeled a protocol violation')
         results.append({'case': 'capacity_control', 'status': capacity['status']})
+        bounded = root / 'truncated-pairing'; shutil.copytree(EXAMPLE, bounded)
+        source = bounded / 'subordinate.veryl'
+        source.write_text(source.read_text().replace('assign awready = !a_full;', 'assign awready = 1;').replace('assign wready = !d_full;', 'assign wready = 1;').replace('assign bvalid = a_full && d_full;', 'assign bvalid = a_full && d_full && 0;'))
+        frames = [inputs(rst=True), inputs(awvalid=True), inputs(awvalid=True),
+                  inputs(awvalid=True, awaddr=1, wvalid=True, wstrb=1), inputs(wvalid=True, wstrb=1), inputs(wvalid=True, wstrb=2)]
+        stimulus = root / 'truncated-pairing.json'; replay.write(stimulus, frames)
+        result = cli('stimulus', bounded / 'binding.json', '--inputs', stimulus, '--out', args.out / 'truncated-pairing')
+        if result['status'] != 'scope_exceeded' or result['independent']['environment_violations'] or result['write_pairing']['status'] != 'unknown_outside_legal_scope': raise RuntimeError('truncated source correlation became a protocol accusation')
+        results.append({'case': 'truncated_pairing', 'status': result['status'], 'correlation': result['write_pairing']['status']})
         structural = root / 'structural'; shutil.copytree(EXAMPLE, structural)
         source = structural / 'subordinate.veryl'
         source.write_text(source.read_text().replace('assign awready = !a_full;', 'assign awready = !a_full || (bready && !bready);'))

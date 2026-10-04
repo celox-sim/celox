@@ -39,8 +39,8 @@ def check_trace(rows, config):
                 if ch in held:
                     if not row[ch + 'valid']: violations.append((ch + '_valid_stable', owners[ch]))
                     if [row[n] for n in fields] != held[ch]: violations.append((ch + '_payload_stable', owners[ch]))
-            if row['bvalid'] and (not counts['aw'] or not counts['w']): violations.append(('b_requires_aw_w', 'subordinate'))
-            if row['rvalid'] and not counts['ar']: violations.append(('r_requires_ar', 'subordinate'))
+            if not out_of_scope and row['bvalid'] and (not counts['aw'] or not counts['w']): violations.append(('b_requires_aw_w', 'subordinate'))
+            if not out_of_scope and row['rvalid'] and not counts['ar']: violations.append(('r_requires_ar', 'subordinate'))
             for ch in ('b', 'r'):
                 if row[ch + 'valid'] and row[ch + 'resp'] == 1: violations.append((ch + '_response_code', 'subordinate'))
             known_aw = addresses + ([row['awaddr']] if row['awvalid'] else [])
@@ -48,7 +48,7 @@ def check_trace(rows, config):
             missing = len(known_aw) - len(known_w)
             pairing = {'status': 'pending' if missing else 'known_offers_checked' if known_aw and known_w else 'no_pending_offers',
                        'pending': bool(missing), 'unmatched_aw': max(0, missing), 'unmatched_w': max(0, -missing)}
-            if known_aw and known_w:
+            if not out_of_scope and known_aw and known_w:
                 offset = known_aw[0] % (config['data_width'] // 8)
                 if any(known_w[0] & (1 << lane) for lane in range(offset)):
                     violations.append(('write_address_strobe', 'manager'))

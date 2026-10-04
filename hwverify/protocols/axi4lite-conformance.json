@@ -138,6 +138,7 @@
         "manager_illegal_strobe_64",
         "test_stalled_offers_checked_before_ready_and_pending_is_explicit",
         "test_live_offers_do_not_skip_accepted_queue_positions",
+        "test_truncated_pair_queues_cannot_accuse_after_capacity_overflow",
         "manager_illegal_strobe_32-stalled",
         "manager_illegal_strobe_64-stalled"
       ]

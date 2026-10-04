@@ -728,7 +728,12 @@ oldest-entry consumption and simultaneous append preserve ordering. Existing
 AW/W-to-B outstanding counts still define capacity independently. An unmatched
 queue cannot exceed its outstanding count on a legal prefix, so capacity remains
 a tool bound, not a strobe rule. Earlier failures remain sticky, including a
-strobe fault on the same edge as capacity overflow. Native trace replay uses one
+strobe fault on the same edge as capacity overflow. After an earlier overflow,
+truncated pair queues and saturated response counters no longer establish
+transaction correspondence or multiplicity. New address/strobe and response-
+prerequisite accusations are therefore suppressed at their raw predicates,
+including counterpart/environment flags. Correlation is unknown outside scope;
+earlier definite faults remain recorded. Native trace replay uses one
 initial reset; the independent oracle additionally tests repeated reset epochs.
 
 This does not prove subordinate byte-write effects, memory contents, or response

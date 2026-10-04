@@ -152,6 +152,51 @@ class ProtocolRules(unittest.TestCase):
         # Changing the presumed pending transaction is independently a stability fault.
         self.compare([row(rst=True), stable, {**stable, 'awaddr': 0}], 'protocol_violation', ['aw_payload_stable'])
 
+    def test_truncated_pair_queues_cannot_accuse_after_capacity_overflow(self):
+        # Full unbounded manager stream is (addr,strobe): (0,1),(0,1),(1,2).
+        # Capacity-1 truncation used to pair the second W with the third AW.
+        frames = [row(rst=True), row(awvalid=True, awready=True), row(awvalid=True, awready=True),
+                  row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=1),
+                  row(wvalid=True, wready=True, wstrb=1), row(wvalid=True, wready=True, wstrb=2)]
+        for role in ('manager', 'subordinate', 'link'):
+            config = {**CONFIG, 'capacity': 1, 'role': role}
+            report = self.compare(frames, 'scope_exceeded', config=config)
+            self.assertFalse(report['environment_violations'])
+            self.assertFalse(report['guarantee_violations'])
+            self.assertEqual(report['write_pairing']['status'], 'unknown_outside_legal_scope')
+            self.assertEqual(core(frames, config, 'environment')['status'], 'trace_no_failure')
+            # The same stream with sufficient storage establishes legal pairing.
+            self.compare(frames, 'sampled_prefix_passed', config={**config, 'capacity': 3})
+            # Saturated response-accounting counters likewise lose multiplicity.
+            transfer = row(awvalid=True, awready=True, wvalid=True, wready=True, arvalid=True, arready=True)
+            response = row(bvalid=True, bready=True, rvalid=True, rready=True)
+            counted = [row(rst=True), transfer, transfer, response, response]
+            bounded = self.compare(counted, 'scope_exceeded', config=config)
+            self.assertFalse(bounded['environment_violations'])
+            self.assertEqual(core(counted, config, 'environment')['status'], 'trace_no_failure')
+            self.compare(counted, 'sampled_prefix_passed', config={**config, 'capacity': 2})
+            same_edge = [row(rst=True), row(awvalid=True, awready=True, awaddr=1),
+                         row(awvalid=True, awready=True, wvalid=True, wready=True, wstrb=1)]
+            expected = 'environment_invalid' if role == 'subordinate' else 'protocol_violation'
+            required = [] if role == 'subordinate' else ['write_address_strobe']
+            report = self.compare(same_edge, expected, required, config)
+            self.assertEqual(report['write_pairing']['status'], 'violated')
+            self.assertTrue(report['capacity_exceeded'])
+            # A real earlier offered-payload fault remains recorded after overflow.
+            earlier = [row(rst=True), row(awvalid=True, awaddr=1, wvalid=True, wstrb=1),
+                       row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=1),
+                       row(awvalid=True, awready=True), row(awvalid=True, awready=True)]
+            full = check_trace(earlier, config)
+            self.assertEqual(full['write_pairing']['status'], 'violated')
+            self.assertTrue(full['capacity_exceeded'])
+            observed = full['environment_violations'] if role == 'subordinate' else full['guarantee_violations']
+            self.assertTrue(any(v == {'edge': 1, 'rule': 'write_address_strobe'} for v in observed))
+            objective = 'guarantees' if role == 'subordinate' else 'environment'
+            replayed = core(earlier, config, objective)
+            state = replayed['trace'][-1]['state_after']
+            self.assertTrue(state['axi_scope_bad']['value'])
+            self.assertTrue(state['axi_environment_bad' if role == 'subordinate' else 'axi_bad_write_address_strobe']['value'])
+
     def test_every_channel_valid_and_payload_stability(self):
         fields = {'aw': ('awaddr', 'awprot'), 'w': ('wdata', 'wstrb'), 'b': ('bresp',), 'ar': ('araddr', 'arprot'), 'r': ('rdata', 'rresp')}
         for ch, payload in fields.items():
