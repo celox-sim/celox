@@ -151,7 +151,9 @@ impl StateSchema {
     /// Write the state saved in `file` into `backend`, matching objects by
     /// path. Every object that holds state in this design must be present
     /// with the same width; otherwise nothing is written and the differences
-    /// are returned. The caller must re-evaluate combinational logic.
+    /// are returned. Saved combinational values are written too, as starting
+    /// points for combinational loops. The caller must re-evaluate
+    /// combinational logic.
     pub fn load<B: SimBackend>(
         &self,
         backend: &mut B,
@@ -166,6 +168,14 @@ impl StateSchema {
         let mut writes = Vec::new();
         for object in &self.objects {
             if object.role == StateRole::Comb {
+                // Combinational values are recomputed, but a combinational
+                // loop (a latch made of gates) settles from its current
+                // value, so start it from the saved one when there is one.
+                if let Some(saved) = saved.get(object.path.as_str())
+                    && saved.width == object.signal.width
+                {
+                    writes.push((object.signal, *saved));
+                }
                 continue;
             }
             match saved.get(object.path.as_str()) {

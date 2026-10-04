@@ -403,3 +403,43 @@ fn simulation_load_refuses_to_rewind_vcd() {
     target.load_state(&file).unwrap();
     assert_eq!(target.time(), 30);
 }
+
+#[test]
+fn loading_restores_the_state_of_combinational_loops() {
+    // A set/reset latch built from cross-coupled NOR gates holds its state in
+    // a combinational loop.
+    let design = r#"
+        module Top (s: input logic, r: input logic, q: output logic) {
+            var v: logic<2>;
+            assign v[0] = ~(r | v[1]);
+            assign v[1] = ~(s | v[0]);
+            assign q = v[0];
+        }
+    "#;
+    let build = || {
+        let loop_net = (vec![], vec!["v".to_owned()]);
+        Simulator::builder(design, "Top")
+            .true_loop(loop_net.clone(), loop_net, 10)
+            .build()
+            .unwrap()
+    };
+    let pulse = |sim: &mut Simulator, port: &str| {
+        let signal = sim.signal(port);
+        sim.modify(|io| io.set(signal, 1u8)).unwrap();
+        sim.eval_comb().unwrap();
+        sim.modify(|io| io.set(signal, 0u8)).unwrap();
+        sim.eval_comb().unwrap();
+    };
+    let mut source = build();
+    pulse(&mut source, "s");
+    let q = source.signal("q");
+    assert_eq!(source.get(q), 1u8.into());
+    let file = source.save_state().unwrap();
+
+    let mut target = build();
+    pulse(&mut target, "r");
+    let q = target.signal("q");
+    assert_eq!(target.get(q), 0u8.into());
+    target.load_state(&file).unwrap();
+    assert_eq!(target.get(q), 1u8.into());
+}

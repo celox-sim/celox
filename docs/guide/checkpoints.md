@@ -129,7 +129,8 @@ other.load_state(&file)?;
 Loading needs every register, memory and input of the design to be present
 with the same width. If any is missing, nothing is changed and the error lists
 the differences. Combinational signals are recomputed after loading, so they
-need not match. A `Simulation` state file also records the time, clocks and
+need not match; their saved values only seed combinational loops declared with
+`true_loop`, which settle back into the saved state. A `Simulation` state file also records the time, clocks and
 pending events by name.
 
 The `celox` command line tool inspects state files:
@@ -142,7 +143,8 @@ celox state diff native.state interpreter.state
 `diff` exits with status 1 when the files differ. Both commands skip
 combinational signals unless you pass `--comb`. Dead store elimination at
 `O2` leaves unread combinational signals unwritten, so their saved values are
-stale.
+stale. The state of combinational loops is held by combinational signals too,
+so `diff` compares it only with `--comb`.
 
 ## Further Reading
 

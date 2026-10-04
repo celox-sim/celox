@@ -338,7 +338,6 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
-    #[serde(default)]
     pub(crate) comb_writes: HashSet<AbsoluteAddr>,
 }
 
