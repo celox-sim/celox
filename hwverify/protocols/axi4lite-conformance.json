@@ -63,10 +63,21 @@
         "A3.1.2"
       ],
       "applicability": "manager VALID after reset release",
-      "enforcement": "unchecked",
-      "evidence_or_gap": "requires explicit release event/edge semantics; current source replay starts with one reset edge",
-      "tests": [],
-      "next_evidence": "Define explicit pre-edge ARESETn and post-edge output observations. A manager may first assert VALID after a rising edge that samples reset high: the pre-edge sample at the first such edge must still have AW/W/ARVALID low. Add phase-aware release evidence and repeated-reset tests before enforcement; current initial post-reset row alone cannot certify synchronous release or between-edge behavior."
+      "enforcement": "sampled",
+      "evidence_or_gap": "manager_reset_release_valid checks AW/W/ARVALID low in settled pre-edge values on the first released tick; post-edge assertion is permitted immediately. Generic first_release_guard lowers to native state/reset/next expressions. Source evidence retains both phases and declared polarity; one initial reset only. No physical deassertion/glitch/recovery/removal claim.",
+      "tests": [
+        "test_first_release_pre_edge_only_and_subordinate_rules",
+        "test_generic_first_release_guard_is_plain_native_ir",
+        "release_good_0",
+        "release_good_1",
+        "release_early_aw_0",
+        "release_early_w_0",
+        "release_early_ar_0",
+        "release_early_aw_1",
+        "release_early_w_1",
+        "release_early_ar_1"
+      ],
+      "subordinate_scope": "A3.1.2 requires B/RVALID low during reset but names only manager AW/W/ARVALID for earliest release. Existing B/R prerequisites separately reject unsolicited first-edge responses; no invented subordinate idle-cycle rule."
     },
     {
       "id": "no_comb_path",

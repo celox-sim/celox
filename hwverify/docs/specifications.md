@@ -694,6 +694,55 @@ remain recorded despite later counterpart violations. Native guarantee replay
 stops at its first failure; inspect a separate objective or the complete concrete
 trace oracle when examining later events.
 
+### First reset-release sample
+
+`manager_reset_release_valid` checks the manager rule in Arm IHI 0022H A3.1.2,
+Figure A3-1. During the first released tick, settled **before-edge** AWVALID,
+WVALID and ARVALID must be low. They may become high immediately **after** that
+tick. This does not require another idle cycle or constrain request latency.
+The rule is a manager/link guarantee and a subordinate-side counterpart condition.
+A3.1.2 names only those manager outputs in its earliest-release sentence;
+subordinate B/RVALID remains subject to reset-low and accepted-request
+prerequisites, rather than an invented additional release-delay rule.
+
+The generic helper `protocols.sampled_phase.first_release_guard(state_name,
+required_before)` produces ordinary native v3 state/reset/next expressions and
+a violation predicate. A private phase bit resets to true, clears on the first
+unconditional nonreset tick, and gates `not required_before`. Callers must merge
+its state with collision checks and route its violation into a checked obligation.
+For example, an equivalent native implementation fragment is:
+
+```text
+state release_pending: bool;
+state release_bad: bool;
+reset { release_pending = true; release_bad = false; }
+next {
+  release_pending = false;
+  release_bad = s.release_bad || (s.release_pending && i.valid);
+}
+```
+
+The phase guard observes the current input/state expressions; it does not test
+`n.valid`. AXI uses it with the conjunction of the three manager VALID-low
+predicates. Normal native type validation applies. This is a library expression,
+not a new special-purpose native solver or syntax construct.
+
+The source result's `reset_release.source_phases` retains original Celox
+`before` and `after` VALID observations for the reset and first released ticks.
+The adapter drives each frame, settles combinational logic, records `before`,
+ticks the declared positive-edge clock, then records `after`. Reset polarity is
+resolved from the existing project manifest. Formal replay uses the same pre-edge
+signal expressions; the independent oracle checks the concrete samples.
+A reset-only prefix reports release as `pending`, not passed.
+
+The native/source scope remains exactly one initial reset. Later reset frames
+are rejected by both replay and the simulator adapter. The standalone oracle can
+inspect explicitly supplied repeated epochs, but this does not authorize a
+repeated-reset source or formal claim. Physical synchronous deassertion,
+asynchronous assertion, glitches, recovery/removal and behavior between sampled
+phases remain external timing obligations. Sampled success is not physical reset
+compliance.
+
 ### Offered write address/strobe consistency
 
 `write_address_strobe` checks Arm IHI 0022H A3.2.2, A3.4.4 and B1.1.3 for the
@@ -738,9 +787,8 @@ initial reset; the independent oracle additionally tests repeated reset epochs.
 
 This does not prove subordinate byte-write effects, memory contents, or response
 transaction origin. The conformance inventory retains separate unchecked entries
-for those claims. Its `next_evidence` fields describe phase-aware reset release,
-explicit optional-signal/default profiles, and independently bound response
-origins. None of those plans is an implemented compliance claim.
+for those claims. Its remaining `next_evidence` fields describe explicit
+optional-signal/default profiles and independently bound response origins. None of those plans is an implemented compliance claim.
 
 ### AXI limits and validation
 
@@ -754,7 +802,7 @@ AW-first, W-first, simultaneous, continuous traffic and response backpressure;
 mutant stimuli also run on correct RTL with explicit expected transfer counts.
 
 The sampled contracts alone leave unchecked: input-to-output combinational paths, VALID dependence on READY or
-other channels, asynchronous reset assertion/deassertion and reset-release VALID
+other channels, physical asynchronous reset assertion/deassertion, glitches and recovery/removal
 timing, transaction-identity ordering and functional address/data/strobe behavior,
 fairness/liveness, X/Z, CDC, bursts, IDs and other AXI variants. Source replay uses
 a single positive-edge clock, ordinary bit synchronous reset, scalar two-state
@@ -877,5 +925,5 @@ records exact sections, profiles, tests and outstanding gaps. It is explicitly
 partial, pending an independent completeness audit. Address/WSTRB consistency is checked for the earliest known corresponding
 offers, including stalled and W-first traffic; response correspondence still needs independent transaction-origin
 evidence, not response counters alone.
-Reset release, optional/default signal profiles and memory-versus-peripheral
-requirements remain visible gaps. No full AXI compliance claim is made.
+Physical reset timing, repeated-reset source execution, optional/default signal
+profiles and memory-versus-peripheral requirements remain visible gaps. No full AXI compliance claim is made.

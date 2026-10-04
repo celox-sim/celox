@@ -4,13 +4,14 @@ Pure canonical-IR generation. No DUT guarantee is an environment assumption.
 Counters are observation-only ghosts, never simulation inputs or DUT state.
 """
 import copy
+from protocols.sampled_phase import first_release_guard
 
 SOURCE = 'https://developer.arm.com/-/media/Arm%20Developer%20Community/PDF/IHI0022H_amba_axi_protocol_spec.pdf'
 CHANNELS = {'aw': ('manager', ('awaddr', 'awprot')), 'w': ('manager', ('wdata', 'wstrb')),
             'b': ('subordinate', ('bresp',)), 'ar': ('manager', ('araddr', 'arprot')),
             'r': ('subordinate', ('rdata', 'rresp'))}
 UNCHECKED = ['input-to-output combinational paths', 'VALID independence from READY and cross-channel causality',
-             'asynchronous reset assertion, deassertion and reset-release VALID timing', 'functional address/data/strobe semantics and response ordering by transaction identity',
+             'physical reset assertion/deassertion timing, glitches and recovery/removal; repeated reset epochs in native/source replay', 'functional address/data/strobe semantics and response ordering by transaction identity',
              'eventual completion, fairness, throughput and response deadlines', 'X/Z, CDC, bursts, IDs, AXI4/AXI5 extensions']
 
 def parameters(config):
@@ -43,6 +44,7 @@ def rules():
         result[name] = {'owner': 'subordinate', 'section': 'B1.1.1'}
     for owner in ('manager', 'subordinate'):
         result[owner + '_reset_valid'] = {'owner': owner, 'section': 'A3.1.2'}
+    result['manager_reset_release_valid'] = {'owner': 'manager', 'section': 'A3.1.2 Figure A3-1'}
     result['write_address_strobe'] = {'owner': 'manager', 'section': 'A3.2.2/A3.4.4/B1.1.3'}
     return result
 
@@ -137,6 +139,9 @@ def monitor(config, signals, reset_signals):
         all_of(eq(heads['aw'], bv(config['address_width'], offset)),
                inv(eq(expr('band', heads['w'], bv(lanes, (1 << offset) - 1)), bv(lanes, 0))))
         for offset in range(1, min(lanes, 1 << config['address_width'])))))
+    phase = first_release_guard('axi_release_pending', inv(any_of(*(signals[ch + 'valid'] for ch in ('aw', 'w', 'ar')))))
+    state.update(phase['state']); reset.update(phase['reset']); nxt.update(phase['next'])
+    violations['manager_reset_release_valid'] = phase['violation']
     metadata = rules()
     reset_bad = {}
     for owner in ('manager', 'subordinate'):

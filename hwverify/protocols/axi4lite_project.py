@@ -89,6 +89,7 @@ def prepare(path, out):
     project['scope_document'] = bind(base, config, signals, reset_signals, 'scope')
     project['axi'] = binding
     project['identity']['axi_binding_sha256'] = replay.sha(replay.canonical(binding))
+    project['identity']['sampled_phase_library_sha256'] = replay.sha((ROOT / 'protocols/sampled_phase.py').read_bytes())
     project['identity']['axi_library_sha256'] = replay.sha((ROOT / 'protocols/axi4lite.py').read_bytes())
     project['identity']['axi_replay_sha256'] = replay.sha(Path(__file__).read_bytes())
     project['identity']['axi_reference_sha256'] = replay.sha((ROOT / 'protocols/axi4lite_reference.py').read_bytes())
@@ -113,6 +114,11 @@ def simulate(project, inputs, out):
             row[name] = bool(value) if signal_types(project['axi']['config'])[name] == 'bool' else value
         rows.append(row)
     independent = check_trace(rows, project['axi']['config'])
+    independent['reset_release']['source_phases'] = [
+        {'edge': frame['edge'], 'reset_active': frame['edge'] == 0,
+         **{phase: {ch: bool(int(frame[phase][project['manifest']['signals'][project['axi']['signals'][ch + 'valid']]['signal']])) for ch in ('aw', 'w', 'ar', 'b', 'r')} for phase in ('before', 'after')}}
+        for frame in actual['trace'][:2]]
+    independent['reset_release']['scope'] = 'one initial reset: settled before/after samples from original Celox source; no physical timing or repeated-reset claim'
     # Source-independent native specs may fail too. AXI-only failure must agree.
     checked = json.loads((out / 'original-replay.json').read_text())
     flags = any(v['value'] for n, v in checked['trace'][-1]['state_after'].items() if n.startswith('axi_bad_') and
@@ -170,6 +176,7 @@ def main():
             if args.mode == 'replay' and status != 'reset_reachable_failure': raise ValueError('saved failure did not reproduce')
             summary = {'status': (independent['status'] if status == 'trace_no_failure' and independent['status'] != 'sampled_prefix_passed' else status), 'independent': independent, 'identity': project['identity'], 'unchecked': UNCHECKED}
         summary['write_pairing'] = summary.get('independent', {}).get('write_pairing', {'status': 'not_established_by_bounded_search', 'scope': 'Known-pair safety only; counterpart arrival and completion are not established'})
+        summary['reset_release'] = summary.get('independent', {}).get('reset_release', {'status': 'included_in_bounded_conditional_checks', 'scope': 'one initial reset; manager pre-edge obligation only; no physical timing claim'})
         summary['structural'] = project['structural']
         if project['structural']['status'] == 'verified':
             summary['unchecked'] = ['synthesized-netlist/physical combinational paths'] + [item for item in UNCHECKED if item != 'input-to-output combinational paths']
