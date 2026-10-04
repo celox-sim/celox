@@ -6,7 +6,7 @@ use veryl_analyzer::ir::{
     ForRange, HierVarRef, Statement, SystemFunctionKind, SystemFunctionOutput,
 };
 
-use crate::{HashMap, LoweringPhase, ParserError};
+use crate::{HashMap, ParserError};
 
 pub(crate) type PreparedReadmem = HashMap<
     veryl_parser::token_range::TokenRange,
@@ -150,9 +150,7 @@ fn read_hierarchical_memory(
         .iter()
         .try_fold(1usize, |depth, &dim| depth.checked_mul(dim));
     let invalid = |detail| {
-        ParserError::unsupported(
-            111,
-            LoweringPhase::SimulatorParser,
+        ParserError::illegal_context(
             "$readmemh destination",
             detail,
             Some(&reference.comptime.token),

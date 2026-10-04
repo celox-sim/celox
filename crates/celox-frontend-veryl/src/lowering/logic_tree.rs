@@ -20,7 +20,7 @@ pub use state::{BoundaryMap, SymbolicStore};
 use std::{collections::BTreeSet, hash::Hash};
 
 use crate::{
-    HashMap, HashSet, LoweringPhase, ParserError,
+    HashMap, HashSet, ParserError,
     bitaccess::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
         eval_var_select_with_geometry, select_geometry,
@@ -574,14 +574,9 @@ fn eval_statement(
         Statement::SystemFunctionCall(call) => {
             eval_system_function_call_side_effects(module, store, boundaries, call, arena)
         }
-        Statement::FunctionCall(fc) => eval_statement_form_function_call(
-            module,
-            store,
-            boundaries,
-            fc,
-            arena,
-            LoweringPhase::CombLowering,
-        ),
+        Statement::FunctionCall(fc) => {
+            eval_statement_form_function_call(module, store, boundaries, fc, arena)
+        }
         Statement::TbMethodCall(_) => Err(ParserError::illegal_context(
             "statement in always_comb",
             "testbench method call".to_string(),
@@ -675,13 +670,60 @@ fn eval_system_function_call_side_effects(
         | SystemFunctionKind::Unsigned(input) => {
             eval_input(module, &mut store, &mut boundaries, input, arena)?;
         }
-        SystemFunctionKind::Bits(_)
-        | SystemFunctionKind::Size(..)
-        | SystemFunctionKind::Readmemh(_, _)
-        | SystemFunctionKind::Finish => {}
+        SystemFunctionKind::Readmemh(filename, output) => {
+            apply_readmem_writes(module, &mut store, call, filename, output, arena)?;
+        }
+        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(..) | SystemFunctionKind::Finish => {
+        }
     }
 
     Ok((store, boundaries))
+}
+
+/// `$readmemh` in a combinational block drives the locations named by the
+/// file with its contents (IEEE 1800-2023 21.4). The file is read at compile
+/// time; locations the file does not name keep their values.
+fn apply_readmem_writes(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    call: &SystemFunctionCall,
+    filename: &SystemFunctionInput,
+    output: &veryl_analyzer::ir::SystemFunctionOutput,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(), ParserError> {
+    let veryl_analyzer::ir::SystemFunctionOutput::Local(destinations) = output else {
+        return Err(ParserError::illegal_context(
+            "$readmemh destination",
+            "a hierarchical destination is only valid in a testbench",
+            Some(&call.comptime.token),
+        ));
+    };
+    let image = crate::module::readmem_image(module, filename, destinations, 16, |dst| {
+        dst.index
+            .0
+            .iter()
+            .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
+            .collect()
+    })?;
+    let destination = &destinations[0];
+    for run in image.runs {
+        let node = arena.alloc(SLTNode::Constant(
+            BigUint::from_bytes_le(&run.value_bytes),
+            BigUint::from_bytes_le(&run.mask_bytes),
+            run.bit_width,
+            false,
+        ))?;
+        update_assignment_range(
+            module,
+            store,
+            destination,
+            BitAccess::new(run.bit_offset, run.bit_offset + run.bit_width - 1),
+            (node, HashSet::default()),
+            false,
+            arena,
+        )?;
+    }
+    Ok(())
 }
 
 fn eval_statements(
@@ -1261,7 +1303,6 @@ fn eval_loop_statement(
                 state.boundaries,
                 fc,
                 arena,
-                LoweringPhase::CombLowering,
             )?;
             apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
         }
@@ -1905,7 +1946,18 @@ fn collect_written_system_function_call(
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
         | SystemFunctionKind::Unsigned(input) => collect_input(input),
-        SystemFunctionKind::Readmemh(input, _) => collect_input(input),
+        SystemFunctionKind::Readmemh(input, output) => {
+            collect_input(input)?;
+            if let veryl_analyzer::ir::SystemFunctionOutput::Local(destinations) = output {
+                for destination in destinations {
+                    let width = resolve_total_width(module, &module.variables[&destination.id])?;
+                    out.entry(destination.id)
+                        .or_default()
+                        .push(BitAccess::new(0, width - 1));
+                }
+            }
+            Ok(())
+        }
         SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
             for input in inputs {
                 collect_input(input)?;
@@ -2714,12 +2766,9 @@ fn eval_statement_form_function_call(
     mut boundaries: BoundaryMap<VarId>,
     call: &veryl_analyzer::ir::FunctionCall,
     arena: &mut SLTNodeArena<VarId>,
-    phase: LoweringPhase,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let Some(function) = module.functions.get(&call.id) else {
-        return Err(ParserError::unsupported(
-            60,
-            phase,
+        return Err(ParserError::internal(
             "function call",
             format!("unknown function id: {:?}", call.id),
             Some(&call.comptime.token),
@@ -2731,9 +2780,7 @@ fn eval_statement_form_function_call(
     } else {
         function.get_function(&[])
     }) else {
-        return Err(ParserError::unsupported(
-            60,
-            phase,
+        return Err(ParserError::internal(
             "function call specialization",
             format!("{call}"),
             Some(&call.comptime.token),

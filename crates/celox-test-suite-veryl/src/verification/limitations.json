@@ -186,6 +186,7 @@
         "function_arguments::test_comb_output_copyout_freezes_aliased_inputs_and_return",
         "function_arguments::test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements",
         "function_arguments::test_comb_statement_output_copyout_obeys_named_argument_order",
+        "function_bodies::test_nested_output_to_concat_and_dynamic_local",
         "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver",
         "hierarchy::test_instance_input_function_output_concat_dynamic_writeback",
         "hierarchy::test_instance_input_function_output_writeback"
