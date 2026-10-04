@@ -229,6 +229,8 @@ def main():
         result = cli('search', waiting / 'manager-binding.json', '--out', args.out / 'registered-ready-wait')
         if result['structural']['status'] != 'verified': raise RuntimeError('registered dependency incorrectly labeled combinational')
         results.append({'case': 'registered_ready_wait', 'structural': 'verified', 'temporal_causality': 'unchecked'})
+        from optional_profiles import run as optional_profile_controls
+        results.extend(optional_profile_controls(root, args.out, good, cli, scenarios))
         # Role/pin direction and type validation reject swapped/proxy mappings.
         binding = replay.load_json(good / 'binding.json')
         for name, change in [('role', lambda b: b['config'].update(role='manager')),

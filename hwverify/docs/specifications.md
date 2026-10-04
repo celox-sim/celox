@@ -694,6 +694,63 @@ remain recorded despite later counterpart violations. Native guarantee replay
 stops at its first failure; inspect a separate objective or the complete concrete
 trace oracle when examining later events.
 
+### Explicit optional response-output profile
+
+Version 1 AXI bindings still require the full signal set. Version 2 supports one
+narrow optional profile: an AXI4-Lite subordinate with **both BRESP and RRESP
+absent**, declared not to support exclusive accesses or generate error responses.
+Arm IHI 0022H A9.1 and A9.3.6 provide the omission conditions; Tables A9-2/A9-4
+supply the two-bit OKAY defaults. B1.1.1 refers Lite optional signals to A9.
+This is profile support, not a requirement that every subordinate omit responses.
+
+Keep the existing `project`, `config` and `signals` binding fields, set
+`version` to 2, omit `bresp` and `rresp` from `signals`, and add:
+
+```json
+"profile": {
+  "name": "subordinate_no_error_responses",
+  "capabilities": {
+    "supports_exclusive_accesses": false,
+    "generates_error_responses": false
+  },
+  "omitted": {
+    "bresp": {"port": "bresp", "type": {"bv": 2}},
+    "rresp": {"port": "rresp", "type": {"bv": 2}}
+  }
+}
+```
+
+The declared port names must be absent from the actual top-level frontend
+reflection, not merely removed from the binding. Remove the corresponding
+physical signal mappings from the source project and their placeholder wires
+from the native specification; no fake observed wire is created. All other AXI
+signals remain explicitly mapped with normal direction/width checks. Every actual
+top-level output must be one of those mapped AXI outputs for this initial profile.
+Thus declaring fake absent names cannot hide remaining response ports. Additional
+non-AXI outputs, partial response omission, manager-side omissions, other defaults,
+and unknown profiles are unsupported configurations rather than protocol faults.
+
+Only after validation does the binder use the ordinary native constant `0u2` for
+normal/reset response samples. Simulation samples come from real ports for all
+present signals; the two synthesized canonical response values are labeled as
+profile defaults in `axi-profile.json`, `axi-contract.json`, and result/oracle
+`signal_profile` metadata. Reports include their normative origin, reflected
+absence evidence, and the list of source-sampled signals. Structural obligations
+cover real ports only; absent signals do not acquire fictional physical endpoints.
+
+The two capability values are **explicit user declarations**, not deductions or
+functional proofs from missing pins. Results remain conditional on them and on
+correct integration of the default values. Physical tie-offs/interconnect wiring,
+internal error semantics and functional completeness are not verified. Changes to
+the profile invalidate saved replay identity. No required VALID/READY signal is
+defaulted, and version 1 never infers defaults from missing mappings.
+
+Source tests compare 32/64-bit omitted designs with explicit-OKAY counterparts
+using bounded formal search and identical concrete traffic, including AW-first,
+W-first, simultaneous channels and backpressure. This is bounded/concrete evidence,
+not an unbounded equivalence theorem. Existing protocol mutants must still fail;
+configuration errors must remain `project_error`, not protocol counterexamples.
+
 ### First reset-release sample
 
 `manager_reset_release_valid` checks the manager rule in Arm IHI 0022H A3.1.2,
@@ -926,4 +983,5 @@ partial, pending an independent completeness audit. Address/WSTRB consistency is
 offers, including stalled and W-first traffic; response correspondence still needs independent transaction-origin
 evidence, not response counters alone.
 Physical reset timing, repeated-reset source execution, optional/default signal
-profiles and memory-versus-peripheral requirements remain visible gaps. No full AXI compliance claim is made.
+profiles beyond the explicit optional-response profile and memory-versus-peripheral
+requirements remain visible gaps. No full AXI compliance claim is made.
