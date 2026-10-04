@@ -18,6 +18,35 @@ jobs:
       - name: Check local documentation links and headings
         run: python3 scripts/check_docs.py
 
+  editor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out hwverify
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build the isolated editor worker
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup override set 1.98.1
+          cargo build --release --locked --bin hwverify-editor
+      - name: Check LSP lifecycle and fresh proof outcomes over stdio
+        run: python3 -m unittest editor.test_server -v
+      - name: Install and check the pinned VS Code client
+        run: |
+          npm ci --prefix editor/vscode --ignore-scripts --no-audit --no-fund
+          node --check editor/vscode/extension.js
+          npm run test:unit --prefix editor/vscode
+          npm run test:rpc --prefix editor/vscode
+      - name: Install Extension Host display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb xauth libgtk-3-0t64 libgbm1 libnss3 libasound2t64 libxshmfence1
+      - name: Exercise real VS Code Extension Host with the checked Rust worker
+        timeout-minutes: 5
+        run: xvfb-run -a npm test --prefix editor/vscode
+
   veryl-fv:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

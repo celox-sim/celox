@@ -245,3 +245,88 @@ pub fn check_design(design: &Design, z3: String, out: PathBuf) -> Res<Value> {
         json!({"status":status,"name":doc.get("name"),"obligations":q.reports,"normalization":l.rules,"partition_plan":partition_plan,"engine_summary":engine_summary,"claim":"Reset-established inductive microstep/ISA-step correspondence; spec steps iff implementation commit, otherwise stutters; unsigned rank strictly decreases on enabled noncommit transitions", "limitations":["Rust structural-kernel UNSAT, the selected finite Bool/BV solver or Z3 fallback, Rust lowering, specification and binding are trusted; diagnostics are not independent proof certificates; existing Lean memory theorems do not certify these solvers","Progress is conditional on enabled at every noncommit step; external stalls may continue forever","Supplied binding adequacy is not inferred; no RTL import or synthesis claim","Nonvacuity checks are satisfiability in the relation, not reset reachability"],"program_contract":doc.get("program_contract").map(|_| "ISA total correctness from precondition with immutable parameters; implementation transfer assumes no subsequent reset and continuously enabled progress until termination"),"reset":"active-high synchronous priority; reset expressions may use shared inputs"}),
     )
 }
+
+/// Explicit editor proof request for one source target, or its prefix through a
+/// candidate/use. Results are diagnostics only; all handles die in this call.
+pub fn check_editor_request(
+    design: &Design,
+    program: &str,
+    step: Option<&str>,
+    branch: Option<usize>,
+    out: PathBuf,
+) -> Res<Value> {
+    let (_, _, ctx) = proof_context(design)?;
+    let metadata = design
+        .document()
+        .get("proof_programs")
+        .ok_or("design has no proof declarations")?;
+    let programs = crate::proof_program::ProofPrograms::from_json(metadata, &ctx)?;
+    let whole = and(
+        ctx["binding_before"].clone(),
+        not(ctx["binding_after"].clone()),
+    );
+    let queries = if programs.matches_target(program, &whole) {
+        vec![whole]
+    } else {
+        hwverify_solver::implication_queries(
+            ctx["binding_before"].clone(),
+            ctx["binding_after"].clone(),
+        )?
+        .into_iter()
+        .filter(|q| programs.matches_target(program, q))
+        .collect()
+    };
+    if queries.is_empty() {
+        return Err("target rhs does not match a current refinement query".into());
+    }
+    if branch.is_none() && queries.len() != 1 {
+        return Err(format!(
+            "target matches {} branches; supply a zero-based branch index",
+            queries.len()
+        ));
+    }
+    let index = branch.unwrap_or(0);
+    let bad = queries
+        .get(index)
+        .ok_or("branch index outside current target")?;
+    let mut q = Check {
+        out,
+        z3: "EDITOR_EXTERNAL_SOLVER_FORBIDDEN".into(),
+        reports: vec![],
+    };
+    let result = if let Some(step) = step {
+        programs.check_through_step(&mut q, "editor", bad, &ctx, program, step)
+    } else {
+        programs.check_target(&mut q, "editor", bad, &ctx, program)
+    };
+    if q.reports.is_empty() {
+        return Err(result.err().unwrap_or("no matching proof target".into()));
+    }
+    let mut budget = 512;
+    let query = editor_term(bad, &ctx, &mut budget, 0);
+    Ok(
+        json!({"query":query,"query_display_truncated":budget==0,"reports":q.reports,"error":result.err(),"branch":index,"matching_branches":queries.len(),"scope":if step.is_some(){"program_prefix"}else{"target_program"},"saved_reports_are_authority":false}),
+    )
+}
+
+// Bounded explanatory rendering only. Never parsed back or used as evidence.
+fn editor_term(term: &Term, context: &Env, budget: &mut usize, depth: usize) -> String {
+    if *budget == 0 || depth > 64 {
+        *budget = 0;
+        return "…".into();
+    }
+    *budget -= 1;
+    if let Some((name, _)) = context.iter().find(|(_, value)| *value == term) {
+        return name.clone();
+    }
+    if term.0.args.is_empty() {
+        return term.0.op.clone();
+    }
+    let args = term
+        .0
+        .args
+        .iter()
+        .map(|a| editor_term(a, context, budget, depth + 1))
+        .collect::<Vec<_>>();
+    format!("({} {})", term.0.op, args.join(" "))
+}

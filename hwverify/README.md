@@ -18,6 +18,7 @@ HWVERIFY_SOLVER=finite target/release/hwverify-rs audit/lemma_candidates/counter
 
 | 目的 | 参照先 |
 |---|---|
+| VS Codeで編集・補題の明示的な検査 | [Editor / LSP](docs/usage.md#editor-and-language-server) |
 | 実行方法、終了コード、開発・CIチェック | [使い方](docs/usage.md) |
 | `.hwv` の記法とJSONへの対応 | [言語](docs/language.md)、[JSON v2](docs/schema.md) |
 | 関係仕様と再利用可能なモジュール | [v3仕様](docs/specifications.md)、[v4 scoped仕様](docs/scoped-specifications.md)、[expectationとtrace](docs/expectations.md) |

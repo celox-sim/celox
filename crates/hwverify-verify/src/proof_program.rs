@@ -583,6 +583,88 @@ impl ProofPrograms {
         original_bad: &Term,
         original_context: &Env,
     ) -> Res<bool> {
+        self.execute_query(check, name, original_bad, original_context, None)
+    }
+
+    /// Editor-only prefix execution: fresh proofs through the requested step,
+    /// never a certificate for the unexecuted remainder of the target program.
+    pub fn check_through_step(
+        &self,
+        check: &mut Check,
+        name: &str,
+        bad: &Term,
+        context: &Env,
+        program: &str,
+        step: &str,
+    ) -> Res<bool> {
+        let selected = self
+            .programs
+            .iter()
+            .find(|p| p.id == program)
+            .ok_or("unknown target")?;
+        if !selected.steps.iter().any(|s| {
+            s["id"] == step && matches!(s["op"].as_str(), Some("candidate" | "use_candidate"))
+        }) {
+            return Err("select a lemma or use declaration".into());
+        }
+        let only = Self {
+            programs: vec![selected.clone()],
+            ..self.clone_for_editor()
+        };
+        only.execute_query(check, name, bad, context, Some(step))
+    }
+    fn clone_for_editor(&self) -> Self {
+        Self {
+            mode: self.mode,
+            context: self.context.clone(),
+            original_context: self.original_context.clone(),
+            environment: self.environment.clone(),
+            programs: self.programs.clone(),
+        }
+    }
+    pub fn matches_target(&self, program: &str, bad: &Term) -> bool {
+        let mut tail = bad;
+        while tail.0.op == "and" && tail.0.args.len() == 2 {
+            tail = &tail.0.args[1];
+        }
+        if tail.0.op != "not" || tail.0.args.len() != 1 {
+            return false;
+        }
+        let goal = &tail.0.args[0];
+        goal.0.op == "="
+            && goal.0.args.len() == 2
+            && self
+                .programs
+                .iter()
+                .any(|p| p.id == program && p.rhs == goal.0.args[1])
+    }
+    pub fn check_target(
+        &self,
+        check: &mut Check,
+        name: &str,
+        bad: &Term,
+        context: &Env,
+        program: &str,
+    ) -> Res<bool> {
+        let selected = self
+            .programs
+            .iter()
+            .find(|p| p.id == program)
+            .ok_or("unknown target")?;
+        let only = Self {
+            programs: vec![selected.clone()],
+            ..self.clone_for_editor()
+        };
+        only.execute_query(check, name, bad, context, None)
+    }
+    fn execute_query(
+        &self,
+        check: &mut Check,
+        name: &str,
+        original_bad: &Term,
+        original_context: &Env,
+        stop: Option<&str>,
+    ) -> Res<bool> {
         // Context identity is checked before even matching a target. Formals only
         // extend the original environment with fresh universally free variables.
         if original_context != &self.original_context {
@@ -721,6 +803,9 @@ impl ProofPrograms {
                 };
                 add_handle(&mut env, id, &handle)?;
                 handles.insert(id.into(), handle);
+                if stop == Some(id) {
+                    return Ok(());
+                }
             }
             bundle.finish(existing(&handles, &Value::String(program.result.clone()))?)?;
             Ok(())
@@ -728,6 +813,18 @@ impl ProofPrograms {
         if check.reports.len() == before + 1 {
             let report = check.reports.last_mut().unwrap();
             annotate_candidates(report, &program.result, &mut candidates, &mut uses);
+            if stop.is_some() {
+                for candidate in &mut candidates {
+                    if candidate["validity"] == "established"
+                        && candidate["usefulness"] == "established_but_unused"
+                    {
+                        candidate["usefulness"] = json!("not_evaluated_in_prefix");
+                    }
+                }
+            }
+            if let Some(step) = stop {
+                report["editor_prefix_through"] = json!(step);
+            }
             report["lemma_candidates"] = json!({"program":program.id,"target_closed":report["status"]=="passed",
                 "candidates":candidates,"uses":uses,"saved_reports_are_authority":false,
                 "error":execution.as_ref().err()});
