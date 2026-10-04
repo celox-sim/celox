@@ -19,6 +19,7 @@ def check_trace(rows, config):
         raise ValueError('trace must start with a sampled reset')
     counts = {'aw': 0, 'w': 0, 'ar': 0}; held = {}; env_invalid = False; out_of_scope = False
     addresses = []; strobes = []
+    release_pending = True; release_samples = []
     pairing = {'status': 'no_pending_offers', 'pending': False, 'unmatched_aw': 0, 'unmatched_w': 0}
     guarantees = []; environment = []; capacity = []; transfers = dict.fromkeys(payloads, 0)
     for edge, row in enumerate(rows):
@@ -30,11 +31,17 @@ def check_trace(rows, config):
         if row['rst']:
             counts = dict.fromkeys(counts, 0); held = {}; env_invalid = False; out_of_scope = False
             addresses = []; strobes = []
+            release_pending = True
             pairing = {'status': 'no_pending_offers', 'pending': False, 'unmatched_aw': 0, 'unmatched_w': 0}
             for owner in ('manager', 'subordinate'):
                 if any(row[c + 'valid'] for c in payloads if owners[c] == owner):
                     violations.append((owner + '_reset_valid', owner))
         else:
+            if release_pending:
+                bad = any(row[ch + 'valid'] for ch in ('aw', 'w', 'ar'))
+                release_samples.append({'edge': edge, 'phase': 'settled_before_tick', 'manager_valid': {ch: row[ch + 'valid'] for ch in ('aw', 'w', 'ar')}, 'status': 'violated' if bad else 'passed'})
+                if bad: violations.append(('manager_reset_release_valid', 'manager'))
+                release_pending = False
             for ch, fields in payloads.items():
                 if ch in held:
                     if not row[ch + 'valid']: violations.append((ch + '_valid_stable', owners[ch]))
@@ -79,7 +86,8 @@ def check_trace(rows, config):
     elif environment or capacity:
         pairing['status'] = 'unknown_outside_legal_scope'
     pairing['scope'] = 'last sampled offer positions; missing counterpart is pending, not validated; no completion guarantee'
-    return {'write_pairing': pairing, 'guarantee_violations': guarantees, 'environment_violations': environment, 'capacity_exceeded': capacity,
+    release = {'status': 'violated' if any(s['status'] == 'violated' for s in release_samples) else 'pending' if release_pending else 'passed', 'samples': release_samples, 'scope': 'sampled first release per supplied reset epoch; no physical timing claim'}
+    return {'reset_release': release, 'write_pairing': pairing, 'guarantee_violations': guarantees, 'environment_violations': environment, 'capacity_exceeded': capacity,
             'accepted_transfers': transfers, 'outstanding': counts,
             'conditional_guarantees': 'failed' if guarantees else 'passed',
             'environment': 'invalid' if environment else 'legal_sampled_prefix',

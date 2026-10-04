@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import re
 from pathlib import Path
 import shutil
 import sys
@@ -38,12 +39,12 @@ def inputs(**kw):
 def scenarios():
     z = inputs(rst=True)
     return {
-        'reset_idle': ([z, inputs(), inputs()], {'aw': 0, 'w': 0, 'b': 0, 'ar': 0, 'r': 0}),
-        'aw_first': ([z, inputs(awvalid=True), inputs(), inputs(wvalid=True, wdata=7, wstrb=15), inputs(), inputs(), inputs(bready=True)], {'aw': 1, 'w': 1, 'b': 1, 'ar': 0, 'r': 0}),
-        'w_first': ([z, inputs(wvalid=True, wdata=7, wstrb=0), inputs(), inputs(awvalid=True), inputs(), inputs(), inputs(bready=True)], {'aw': 1, 'w': 1, 'b': 1, 'ar': 0, 'r': 0}),
-        'simultaneous_backpressure': ([z, inputs(awvalid=True, wvalid=True, arvalid=True), inputs(), inputs(), inputs(bready=True, rready=True)], {'aw': 1, 'w': 1, 'b': 1, 'ar': 1, 'r': 1}),
-        'continuous': ([z] + [inputs(awvalid=True, wvalid=True, arvalid=True, bready=True, rready=True)] * 6, {'aw': 3, 'w': 3, 'b': 3, 'ar': 3, 'r': 3}),
-        'pending_without_deadline': ([z, inputs(awvalid=True)] + [inputs()] * 12, {'aw': 1, 'w': 0, 'b': 0, 'ar': 0, 'r': 0}),
+        'reset_idle': ([z, inputs(), inputs(), inputs()], {'aw': 0, 'w': 0, 'b': 0, 'ar': 0, 'r': 0}),
+        'aw_first': ([z, inputs(), inputs(awvalid=True), inputs(), inputs(wvalid=True, wdata=7, wstrb=15), inputs(), inputs(), inputs(bready=True)], {'aw': 1, 'w': 1, 'b': 1, 'ar': 0, 'r': 0}),
+        'w_first': ([z, inputs(), inputs(wvalid=True, wdata=7, wstrb=0), inputs(), inputs(awvalid=True), inputs(), inputs(), inputs(bready=True)], {'aw': 1, 'w': 1, 'b': 1, 'ar': 0, 'r': 0}),
+        'simultaneous_backpressure': ([z, inputs(), inputs(awvalid=True, wvalid=True, arvalid=True), inputs(), inputs(), inputs(bready=True, rready=True)], {'aw': 1, 'w': 1, 'b': 1, 'ar': 1, 'r': 1}),
+        'continuous': ([z, inputs()] + [inputs(awvalid=True, wvalid=True, arvalid=True, bready=True, rready=True)] * 6, {'aw': 3, 'w': 3, 'b': 3, 'ar': 3, 'r': 3}),
+        'pending_without_deadline': ([z, inputs(), inputs(awvalid=True)] + [inputs()] * 12, {'aw': 1, 'w': 0, 'b': 0, 'ar': 0, 'r': 0}),
     }
 
 def main():
@@ -116,6 +117,45 @@ def main():
             counterpart = cli('stimulus', good / 'manager-binding.json', '--inputs', stimuli, '--out', args.out / (name + '-good'))
             if counterpart['status'] != 'trace_no_failure' or counterpart['independent']['status'] != 'sampled_prefix_passed': raise RuntimeError('correct manager failed')
             results.append({'case': name, 'status': result['status']})
+        # Same original RTL under both declared reset polarities. A valid output
+        # may rise immediately AFTER the first released tick, not before it.
+        for active in (0, 1):
+            phase_good = root / ('release-good-' + str(active)); shutil.copytree(EXAMPLE, phase_good)
+            path = phase_good / 'manager.veryl'
+            if active == 1: path.write_text(path.read_text().replace('!rst_n', 'rst_n'))
+            manifest = replay.load_json(phase_good / 'manager-project.json'); manifest['reset']['active'] = active
+            replay.write(phase_good / 'manager-project.json', manifest)
+            first = root / ('release-first-' + str(active) + '.json')
+            replay.write(first, [manager_row(rst=True), manager_row(start_write=True, start_read=True)])
+            result = cli('stimulus', phase_good / 'manager-binding.json', '--inputs', first, '--out', args.out / ('release-good-' + str(active)))
+            phase = result['reset_release']['source_phases'][1]
+            if result['status'] != 'trace_no_failure' or result['reset_release']['status'] != 'passed' or any(phase['before'][ch] for ch in ('aw', 'w', 'ar')) or not all(phase['after'][ch] for ch in ('aw', 'w', 'ar')): raise RuntimeError('first released tick incorrectly requires another idle cycle')
+            results.append({'case': 'release_good_' + str(active), 'status': result['status'], 'before': phase['before'], 'after': phase['after']})
+            repeated = root / ('release-repeated-' + str(active) + '.json')
+            replay.write(repeated, [manager_row(rst=True), manager_row(), manager_row(rst=True)])
+            unsupported = cli('stimulus', phase_good / 'manager-binding.json', '--inputs', repeated, '--out', args.out / ('release-repeated-' + str(active)), allowed=(2,))
+            if unsupported['status'] != 'project_error': raise RuntimeError('repeated source reset silently accepted')
+            for channel in ('aw', 'w', 'ar'):
+                name = 'release_early_' + channel + '_' + str(active)
+                bad = root / name; shutil.copytree(phase_good, bad)
+                path = bad / 'manager.veryl'; header, body = path.read_text().split(') {', 1)
+                signal = channel + 'valid'; private = signal + '_registered'
+                body = re.sub(r'\b' + signal + r'\b', private, body)
+                released = 'rst_n' if active == 0 else '!rst_n'
+                path.write_text(header + ') {\n    var ' + private + ': bit;\n    assign ' + signal + ' = ' + private + ' || ' + released + ';\n' + body)
+                manifest = replay.load_json(bad / 'manager-project.json'); manifest['state'][signal] = private
+                replay.write(bad / 'manager-project.json', manifest)
+                saved = args.out / (name + '.regression.json')
+                result = cli('search', bad / 'manager-binding.json', '--out', args.out / name, '--regression', saved)
+                if result['status'] != 'reset_reachable_failure' or 'manager_reset_release_valid' not in {v['rule'] for v in result['independent']['guarantee_violations']}: raise RuntimeError('early release mutation missed')
+                if not result['reset_release']['source_phases'][1]['before'][channel]: raise RuntimeError('mutation did not reproduce at before phase')
+                if result['independent']['environment_violations'] or result['independent']['capacity_exceeded']: raise RuntimeError('release witness needs legal counterpart')
+                again = cli('replay', bad / 'manager-binding.json', '--regression', saved, '--out', args.out / (name + '-replay'))
+                if again['status'] != 'reset_reachable_failure': raise RuntimeError('release regression lost')
+                stimuli = root / (name + '.json'); replay.write(stimuli, replay.load_json(saved)['inputs'])
+                corrected = cli('stimulus', phase_good / 'manager-binding.json', '--inputs', stimuli, '--out', args.out / (name + '-good'))
+                if corrected['status'] != 'trace_no_failure' or corrected['reset_release']['status'] != 'passed': raise RuntimeError('correct phase rejected')
+                results.append({'case': name, 'status': result['status'], 'required_rule': 'manager_reset_release_valid'})
         for dw in (32, 64):
             lanes = dw // 8; offset = lanes - 1
             template = root / ('strobes-' + str(dw)); shutil.copytree(EXAMPLE, template)
@@ -171,7 +211,7 @@ def main():
         bounded = root / 'truncated-pairing'; shutil.copytree(EXAMPLE, bounded)
         source = bounded / 'subordinate.veryl'
         source.write_text(source.read_text().replace('assign awready = !a_full;', 'assign awready = 1;').replace('assign wready = !d_full;', 'assign wready = 1;').replace('assign bvalid = a_full && d_full;', 'assign bvalid = a_full && d_full && 0;'))
-        frames = [inputs(rst=True), inputs(awvalid=True), inputs(awvalid=True),
+        frames = [inputs(rst=True), inputs(), inputs(awvalid=True), inputs(awvalid=True),
                   inputs(awvalid=True, awaddr=1, wvalid=True, wstrb=1), inputs(wvalid=True, wstrb=1), inputs(wvalid=True, wstrb=2)]
         stimulus = root / 'truncated-pairing.json'; replay.write(stimulus, frames)
         result = cli('stimulus', bounded / 'binding.json', '--inputs', stimulus, '--out', args.out / 'truncated-pairing')
