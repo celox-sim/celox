@@ -104,6 +104,8 @@ impl miette::Diagnostic for CompilationWarning {
 pub enum SimulatorErrorKind {
     FrontendArtifact(crate::FrontendArtifactError),
     SIRParser(crate::ParserError),
+    /// The Veryl source could not be parsed.
+    Syntax(veryl_parser::ParserError),
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
     Frontend(Vec<celox_frontend_veryl::FrontendDiagnostic>),
     Runtime(crate::RuntimeErrorCode),
@@ -243,6 +245,7 @@ impl fmt::Display for SimulatorError {
         match self.kind.as_ref() {
             SimulatorErrorKind::FrontendArtifact(error) => write!(f, "{error}")?,
             SimulatorErrorKind::SIRParser(e) => f.write_str(&render_diagnostic(e))?,
+            SimulatorErrorKind::Syntax(e) => f.write_str(&render_diagnostic(e))?,
             SimulatorErrorKind::Analyzer(errors) => {
                 for (i, e) in errors.iter().enumerate() {
                     if i > 0 {
@@ -280,6 +283,7 @@ impl std::error::Error for SimulatorError {
         match self.kind.as_ref() {
             SimulatorErrorKind::FrontendArtifact(error) => Some(error),
             SimulatorErrorKind::SIRParser(e) => Some(e),
+            SimulatorErrorKind::Syntax(e) => Some(e),
             SimulatorErrorKind::Runtime(e) => Some(e),
             SimulatorErrorKind::Codegen(error) => Some(error),
             _ => None,
