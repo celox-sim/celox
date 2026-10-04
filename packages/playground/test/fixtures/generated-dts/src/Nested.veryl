@@ -1,0 +1,15 @@
+// Variables in nested generate blocks have multi-segment paths.
+module Nested (
+    d: input  logic<8>,
+    q: output logic<8>,
+) {
+    if 1 :blk {
+        var inner: logic<8>;
+        if 1 :blk2 {
+            var deep: logic<8>;
+            assign deep  = d;
+            assign inner = deep;
+        }
+        assign q = inner;
+    }
+}
