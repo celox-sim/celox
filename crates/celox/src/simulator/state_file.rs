@@ -165,16 +165,18 @@ impl StateSchema {
             .map(|object| (object.path.as_str(), object))
             .collect();
         let mut mismatch = StateMismatch::default();
+        // Combinational values are recomputed, but a combinational loop (a
+        // latch made of gates) settles from its current value, so it starts
+        // from the saved one. They are written before the state, which wins
+        // where a combinational alias shares a register's storage.
+        let mut seeds = Vec::new();
         let mut writes = Vec::new();
         for object in &self.objects {
             if object.role == StateRole::Comb {
-                // Combinational values are recomputed, but a combinational
-                // loop (a latch made of gates) settles from its current
-                // value, so start it from the saved one when there is one.
                 if let Some(saved) = saved.get(object.path.as_str())
                     && saved.width == object.signal.width
                 {
-                    writes.push((object.signal, *saved));
+                    seeds.push((object.signal, *saved));
                 }
                 continue;
             }
@@ -203,7 +205,7 @@ impl StateSchema {
         if !mismatch.is_empty() {
             return Err(mismatch);
         }
-        for (signal, object) in writes {
+        for (signal, object) in seeds.into_iter().chain(writes) {
             let value = BigUint::from_bytes_le(&object.value);
             let mask = object
                 .mask
@@ -249,7 +251,8 @@ impl<B: SimBackend> Simulator<B> {
     ///
     /// Every object that holds state in this design must be present with the
     /// same width; otherwise nothing is changed and the differences are
-    /// returned. Combinational objects are recomputed. Runtime events do not
+    /// returned. If evaluating the loaded state fails, the previous state is
+    /// put back and the error returned. Combinational objects are recomputed. Runtime events do not
     /// fire for the jump to the loaded state. A schedule in the file is
     /// ignored. An attached VCD writer records the loaded values as changes
     /// at the next dump.
@@ -257,14 +260,19 @@ impl<B: SimBackend> Simulator<B> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
+        // Evaluating the loaded state can still fail (an oscillating
+        // combinational loop), so keep the current state to return to.
+        let previous = self.checkpoint()?;
         self.state_schema()
             .load(&mut self.backend, file)
             .map_err(StateError::Mismatch)?;
         // The loaded state replaces the simulation history, so combinational
         // observers take it as their baseline instead of reporting changes.
-        self.backend
-            .eval_comb()
-            .map_err(|error| StateError::Runtime(self.decorate_runtime_error(error)))?;
+        if let Err(error) = self.backend.eval_comb() {
+            let error = self.decorate_runtime_error(error);
+            self.restore(&previous)?;
+            return Err(StateError::Runtime(error));
+        }
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
         self.comb_observer_initial_eval = false;
         if let Some(writer) = &mut self.vcd_writer {

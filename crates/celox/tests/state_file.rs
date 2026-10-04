@@ -443,3 +443,79 @@ fn loading_restores_the_state_of_combinational_loops() {
     target.load_state(&file).unwrap();
     assert_eq!(target.get(q), 1u8.into());
 }
+
+#[test]
+fn stale_combinational_values_never_override_shared_state() {
+    // `w` copies `r`, so an optimized build lets it share `r`'s storage; a
+    // stale saved value for `w` must not replace the saved `r`.
+    let design = r#"
+        module Top (clk: input clock, d: input logic<8>, w: output logic<8>) {
+            var r: logic<8>;
+            always_ff (clk) { r = d; }
+            assign w = r;
+        }
+    "#;
+    let mut source = Simulator::builder(design, "Top")
+        .opt_level(OptLevel::O0)
+        .build()
+        .unwrap();
+    let (clk, d) = (source.event("clk"), source.signal("d"));
+    source.modify(|io| io.set(d, 7u8)).unwrap();
+    source.tick(clk).unwrap();
+    let mut file = source.save_state().unwrap();
+    let stale = file.objects.iter_mut().find(|o| o.path == "w").unwrap();
+    assert_eq!(stale.role, StateRole::Comb);
+    stale.value = vec![0x55];
+
+    for level in [OptLevel::O0, OptLevel::O1, OptLevel::O2] {
+        let mut target = Simulator::builder(design, "Top")
+            .opt_level(level)
+            .build()
+            .unwrap();
+        target.load_state(&file).unwrap();
+        let w = target.signal("w");
+        assert_eq!(target.get(w), 7u8.into(), "{level:?}");
+    }
+}
+
+#[test]
+fn a_failed_load_changes_nothing() {
+    // Driving `a` high makes the declared loop oscillate, so evaluating the
+    // loaded state fails.
+    let design = r#"
+        module Top (a: input logic, b: input logic<8>, y: output logic) {
+            var v: logic<2>;
+            assign v[0] = ~v[1] & a;
+            assign v[1] = v[0];
+            assign y = v[0];
+        }
+    "#;
+    let loop_net = (vec![], vec!["v".to_owned()]);
+    let mut source = Simulation::builder(design, "Top")
+        .true_loop(loop_net.clone(), loop_net.clone(), 10)
+        .build()
+        .unwrap();
+    source.run_until(30).unwrap();
+    let mut file = source.save_state().unwrap();
+    for object in &mut file.objects {
+        match object.path.as_str() {
+            "a" => object.value = vec![1],
+            "b" => object.value = vec![9],
+            _ => {}
+        }
+    }
+
+    let mut target = Simulation::builder(design, "Top")
+        .true_loop(loop_net.clone(), loop_net, 10)
+        .build()
+        .unwrap();
+    let b = target.signal("b");
+    target.modify(|io| io.set(b, 3u8)).unwrap();
+    target.run_until(10).unwrap();
+    assert!(matches!(
+        target.load_state(&file),
+        Err(StateError::Runtime(_))
+    ));
+    assert_eq!(target.time(), 10);
+    assert_eq!(target.get(b), 3u8.into());
+}
