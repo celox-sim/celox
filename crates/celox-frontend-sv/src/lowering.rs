@@ -1278,14 +1278,27 @@ fn array_element_connections(
             ) else {
                 return Ok(connection.clone());
             };
-            if actual_width == port_width {
+            // A fill literal ('0, '1, 'x) or an unsized constant takes its
+            // width from the port, so every element shares it.
+            let context_sized = matches!(
+                actual_expr,
+                sv::ir::Expr::Literal(literal)
+                    if unbased_fill_literal(literal).is_some()
+                        || !literal.contains('\'')
+                        || literal.starts_with('\'')
+            );
+            if actual_width == port_width || context_sized {
                 return Ok(connection.clone());
             }
+            let mismatch = || {
+                unsupported(format!(
+                    "`{}` is {actual_width} bits wide; a {port_width}-bit port of {count} elements needs {port_width} or {} bits",
+                    connection.formal,
+                    port_width * count
+                ))
+            };
             let sv::ir::Expr::Ident(name) = actual_expr else {
-                return Err(unsupported(format!(
-                    "`{}` is connected to a wider expression",
-                    connection.formal
-                )));
+                return Err(mismatch());
             };
             let unpacked = parent_signal_names
                 .get(name)
@@ -1316,9 +1329,12 @@ fn array_element_connections(
                             [] | [(_, 0)]
                         )
                 });
-            if actual_width != port_width * count || !zero_based {
+            if actual_width != port_width * count {
+                return Err(mismatch());
+            }
+            if !zero_based {
                 return Err(unsupported(format!(
-                    "`{}` is {actual_width} bits wide, for a {port_width}-bit port of {count} elements",
+                    "`{}` is split between the elements only from a vector declared [N-1:0]",
                     connection.formal
                 )));
             }
