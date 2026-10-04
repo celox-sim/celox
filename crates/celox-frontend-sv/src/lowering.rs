@@ -774,7 +774,7 @@ pub fn schedule_sources(
 
 fn sv_specialization_limit_error(name: String) -> ParserError {
     ParserError::unsupported(
-        64,
+        sv::SV_FRONTEND_TRACKING_ISSUE,
         LoweringPhase::SimulatorParser,
         "systemverilog module specialization limit exceeded (possible recursive instantiation)",
         name,
@@ -794,7 +794,7 @@ fn validate_sv_module_graph(
     }
     if !active.insert(key.clone()) {
         return Err(ParserError::unsupported(
-            64,
+            sv::SV_FRONTEND_TRACKING_ISSUE,
             LoweringPhase::SimulatorParser,
             "recursive systemverilog module instantiation",
             key.name.clone(),
@@ -1248,7 +1248,7 @@ fn array_element_connections(
 ) -> Result<Vec<LoweredSvPortConnection>, ParserError> {
     let unsupported = |detail: String| {
         ParserError::unsupported(
-            64,
+            sv::SV_FRONTEND_TRACKING_ISSUE,
             LoweringPhase::SimulatorParser,
             "systemverilog module instance array",
             detail,
@@ -1373,7 +1373,7 @@ pub(crate) fn attach_instance_glue(
         };
         if &child_key == current_key {
             return Err(ParserError::unsupported(
-                64,
+                sv::SV_FRONTEND_TRACKING_ISSUE,
                 LoweringPhase::SimulatorParser,
                 "recursive systemverilog module instantiation",
                 instance.module_name.clone(),
@@ -1430,7 +1430,7 @@ pub(crate) fn attach_instance_glue(
     )
     .map_err(|error| {
         ParserError::unsupported(
-            64,
+            error.tracking_issue(),
             LoweringPhase::SimulatorParser,
             "systemverilog combinational process lowering",
             error.to_string(),
@@ -1756,7 +1756,7 @@ fn build_instance_glue(
             .count();
         if matches != 1 || !connected_formals.insert(connection.formal.clone()) {
             return Err(ParserError::unsupported(
-                64,
+                sv::SV_FRONTEND_TRACKING_ISSUE,
                 LoweringPhase::SimulatorParser,
                 "unknown or duplicate systemverilog child port connection",
                 connection.formal.clone(),
@@ -1800,7 +1800,7 @@ fn build_instance_glue(
                     )
                     .ok_or_else(|| {
                         ParserError::unsupported(
-                            64,
+                            sv::SV_FRONTEND_TRACKING_ISSUE,
                             LoweringPhase::SimulatorParser,
                             "systemverilog input port connection",
                             format!("{formal} -> {actual}"),
@@ -1871,7 +1871,7 @@ fn build_instance_glue(
                     parent_parameter_types,
                 ) else {
                     return Err(ParserError::unsupported(
-                        64,
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
                         LoweringPhase::SimulatorParser,
                         "systemverilog output port lvalue connection",
                         format!("{formal} -> {actual}: {actual_expr:?}"),
@@ -1885,7 +1885,7 @@ fn build_instance_glue(
                 let Some(target_width) = target_width.filter(|target_width| *target_width != 0)
                 else {
                     return Err(ParserError::unsupported(
-                        64,
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
                         LoweringPhase::SimulatorParser,
                         "systemverilog output port lvalue connection",
                         format!("{formal} -> {actual}: {actual_expr:?}"),
@@ -7373,7 +7373,7 @@ pub(crate) fn sv_top_not_found(name: String) -> ParserError {
 
 pub(crate) fn unsupported_sv_instance(name: String) -> ParserError {
     ParserError::unsupported(
-        64,
+        sv::SV_FRONTEND_TRACKING_ISSUE,
         LoweringPhase::SimulatorParser,
         "systemverilog module instantiation",
         format!("name: \"{}\"", name),
@@ -7383,7 +7383,7 @@ pub(crate) fn unsupported_sv_instance(name: String) -> ParserError {
 
 pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
     ParserError::unsupported(
-        64,
+        sv::SV_FRONTEND_TRACKING_ISSUE,
         LoweringPhase::SimulatorParser,
         "systemverilog inout port",
         path,

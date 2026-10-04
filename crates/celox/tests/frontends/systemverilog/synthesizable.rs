@@ -795,3 +795,27 @@ fn task_timing_control_is_rejected() {
         .to_string();
     assert!(error.contains("Unsupported"), "{error}");
 }
+
+#[test]
+fn unsupported_constructs_name_their_tracking_issue() {
+    for (source, issue) in [
+        (
+            "module Top(input logic clk, input logic [7:0] a, output logic [7:0] q); \
+             logic [7:0] t; always_ff @(posedge clk) begin t = a; q <= t; end endmodule",
+            421,
+        ),
+        (
+            "module Top(input logic a, b, output logic y); and g(y, a, b); endmodule",
+            457,
+        ),
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("tracking.sv"))], "Top")
+            .build_cranelift()
+            .expect_err("the construct must be rejected")
+            .to_string();
+        assert!(
+            error.contains(&format!("[tracking issue #{issue}]")),
+            "{error}"
+        );
+    }
+}
