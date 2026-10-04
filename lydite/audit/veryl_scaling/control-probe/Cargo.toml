@@ -1,0 +1,9 @@
+[package]
+name = "control-probe"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+lydite-ir = { path = "../../../../crates/lydite-ir" }
+lydite-solver = { path = "../../../../crates/lydite-solver" }
+serde_json = "1"

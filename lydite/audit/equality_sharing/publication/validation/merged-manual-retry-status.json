@@ -1,0 +1,20 @@
+{
+  "status": "passed",
+  "checker_sha256": "aa774b750fecdf575fb1b26006a52706633d3abe994a72b1d11486bec29746d8",
+  "input_sha256": "1f9cac480cb2040850180df568bd43b96ccd4090090e4702a3c258b8fc49212a",
+  "command": [
+    "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite",
+    "/workspace/scratch/07f10565586c/selected-proof-program-contract-v2.json",
+    "--out",
+    "/workspace/scratch/07f10565586c/automatic-proof-phase2-manual-retry/proof",
+    "--z3",
+    "/workspace/scratch/07f10565586c/lydite-git-publish/conformance/veryl-proof/tools/z3-tripwire.sh"
+  ],
+  "exit_code": 0,
+  "wall_seconds": 114.5583350320012,
+  "report_present": true,
+  "children_passed": 436,
+  "other_obligations_passed": 7,
+  "external_solver_invoked": false,
+  "report_sha256": "1521cab7152c6b4947558387ac177067e2d50fba406d5744f869d9e6e7b406ac"
+}

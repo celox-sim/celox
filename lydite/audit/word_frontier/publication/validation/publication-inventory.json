@@ -1,0 +1,41 @@
+{
+  "base_commit": "39ec0d8dc1d55ab50997a4e8820fe674edaba471",
+  "source_manifest": "source-manifest.json",
+  "patch": "phase3.patch",
+  "inputs": [
+    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/audit/automatic_proof/selected-without-hints.json",
+    "/workspace/scratch/07f10565586c/selected-proof-program-contract-v2.json"
+  ],
+  "raw_evidence": [
+    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/phase2-final-no-hints",
+    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/phase3-word-frontier-selected",
+    "/workspace/scratch/07f10565586c/lydite-auto-proof-work/phase3-manual-compatible",
+    "/workspace/scratch/07f10565586c/phase3-prior-coverage-fresh",
+    "/workspace/scratch/07f10565586c/word-frontier-phase3-strict",
+    "/workspace/scratch/07f10565586c/phase3-rv-address-mutants",
+    "/workspace/scratch/07f10565586c/phase3-rv-source-replay-sealed"
+  ],
+  "generic_ledger": "audit/word_frontier/evidence-summary.json (contains every canonical and screening run path)",
+  "binary_archive_policy": "Exclude compiled checker/tool ELF/MZ binaries with explicit SHA256/size exclusion records. Preserve executable shell/Python source and all nonbinary evidence.",
+  "targeted_ci_commands": [
+    "python3 -m unittest audit.word_frontier.test_generate audit.word_frontier.test_ci",
+    "python3 -m audit.word_frontier.ci --checker target/release/lydite --expected-checker-sha256 $(sha256sum target/release/lydite | cut -d' ' -f1) --out FRESH_DIRECTORY"
+  ],
+  "preserve_existing_gates": true,
+  "notes": "RV Rust mutant success remains0/2; independent concrete replay is separate. No phase4 work.",
+  "generic_raw_evidence_directories": [
+    "/workspace/scratch/07f10565586c/word-frontier-final-alpha-baseline",
+    "/workspace/scratch/07f10565586c/word-frontier-final-alpha-candidate",
+    "/workspace/scratch/07f10565586c/word-frontier-final-w24-baseline",
+    "/workspace/scratch/07f10565586c/word-frontier-final-w24-candidate",
+    "/workspace/scratch/07f10565586c/word-frontier-final-w32-baseline",
+    "/workspace/scratch/07f10565586c/word-frontier-final-w32-candidate",
+    "/workspace/scratch/07f10565586c/word-frontier-phase3-strict",
+    "/workspace/scratch/07f10565586c/word-frontier-screen-baseline",
+    "/workspace/scratch/07f10565586c/word-frontier-screen-candidate",
+    "/workspace/scratch/07f10565586c/word-frontier-strict-controls-baseline",
+    "/workspace/scratch/07f10565586c/word-frontier-strict-controls-candidate"
+  ],
+  "review_status": "Final independent CI/replay/core audit approved; no critical blockers",
+  "no_further_experiments_planned": true
+}

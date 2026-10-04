@@ -1,9 +1,0 @@
-[package]
-name = "control-probe"
-version = "0.1.0"
-edition = "2024"
-[workspace]
-[dependencies]
-hwverify-ir = { path = "../../../../crates/hwverify-ir" }
-hwverify-solver = { path = "../../../../crates/hwverify-solver" }
-serde_json = "1"

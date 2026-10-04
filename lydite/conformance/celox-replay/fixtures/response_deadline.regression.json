@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "project": "response_deadline",
+  "goal": "response_deadline",
+  "depth": 5,
+  "identity": {
+    "celox_revision": "124a1315096d21b85d9d0d84fd7139363a181cad",
+    "manifest_sha256": "12043e85a478f3640addb3b7a780122078c8f4420edfa51926e7e6d633de727e",
+    "sources_sha256": "5506fbb04f4ecfc2f4fef41de424b2dae44dfa5682b7b930920d3e91b45f266b",
+    "specification_sha256": "00f525a84db174fc937a233c3751c00fb6292a3b406f07dd11b27cc0c41a9848",
+    "bindings_sha256": "08ff406511e1bd9e75aef95ce8914bc7b2f238129f5e9f23ba0e63197f836e22",
+    "document_sha256": "f6e063647814d607e6bb54b100a29f516fb0209275bbe394ddc65e6b5aab52dc",
+    "dependency_patches_sha256": "4ba8abd9b14edc12c8ceca52b9fccfbe6bcdccf9bc996410e118150cbc843491"
+  },
+  "inputs": [
+    {
+      "request": false,
+      "rst": true,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": true,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    }
+  ]
+}

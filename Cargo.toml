@@ -27,12 +27,12 @@ members = [
     "crates/celox-ts-gen",
     "crates/celox-wasm",
     "crates/celox-vpi",
-    "crates/hwverify-ir",
-    "crates/hwverify-rs",
-    "crates/hwverify-sir",
-    "crates/hwverify-solver",
-    "crates/hwverify-syntax",
-    "crates/hwverify-verify",
+    "crates/lydite-ir",
+    "crates/lydite",
+    "crates/lydite-sir",
+    "crates/lydite-solver",
+    "crates/lydite-syntax",
+    "crates/lydite-verify",
     "examples/my-frontend-napi",
 ]
 resolver = "2"
@@ -76,11 +76,11 @@ celox-test-suite-veryl   = { version = "=0.10.1", path = "crates/celox-test-suit
 celox-testbench         = { version = "=0.10.1", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.10.1", path = "crates/celox-ts-gen" } # x-release-please-version
 
-# hwverify is developed in this repository but not published to crates.io.
-hwverify-ir             = { path = "crates/hwverify-ir" }
-hwverify-solver         = { path = "crates/hwverify-solver" }
-hwverify-syntax         = { path = "crates/hwverify-syntax" }
-hwverify-verify         = { path = "crates/hwverify-verify" }
+# lydite is developed in this repository but not published to crates.io.
+lydite-ir             = { path = "crates/lydite-ir" }
+lydite-solver         = { path = "crates/lydite-solver" }
+lydite-syntax         = { path = "crates/lydite-syntax" }
+lydite-verify         = { path = "crates/lydite-verify" }
 
 veryl-analyzer = "0.22.0"
 veryl-emitter  = "0.22.0"

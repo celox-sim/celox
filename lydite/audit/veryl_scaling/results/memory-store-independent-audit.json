@@ -1,0 +1,948 @@
+{
+  "result": "Final independent audit passed; no soundness blocker found",
+  "checker_sha256": "a5db7545b1ca4ecdd09297061332518cf3a60c9f60fced5ab5897747e3242490",
+  "final_gate": "/workspace/shared/memory-store-final-fullgate",
+  "gate_status": {
+    "status": "passed",
+    "exit_code": 0,
+    "external_solver_invoked": false
+  },
+  "whole_gate_source_binary_pins_verified": 97,
+  "legacy_cases": {
+    "cases": 28,
+    "scaling-regression": 18,
+    "cpu-capacity-regression": 28,
+    "register-scaling-regression": 42,
+    "memory-contract-regression": 41
+  },
+  "legacy_case_count": 157,
+  "matrix": {
+    "negative_cases_verified": 63,
+    "source_binary_pins_verified": 50,
+    "checker_sha256": "a5db7545b1ca4ecdd09297061332518cf3a60c9f60fced5ab5897747e3242490",
+    "rows": [
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-load_address_association/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-load_response_corruption/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-fetch_address_high_drop/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-store_address_wiring/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-store_data_wiring/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-store_enable_wiring/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/wiring-bad-missing_bypass/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-fetch_address/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-load_address/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-high_address_drop/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-fetch_response/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-load_response/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-stale_load/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-port-bad-load_enable/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-no_flush/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-no_interlock/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-no_forward/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_data/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_address/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_missing/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_early/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_stall/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_operand/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/cpu-bad-store_interlock/report.json",
+        "target_counterexample": "microstep_refinement",
+        "queries": 8
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-wrong_write_address/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-wrong_write_data/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-ungated_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-ungated_cell_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-disabled_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-missing_bypass/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-wrong_bypass_address/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-off_by_one_mapping/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-other_cell_change/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-rom_change/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-recapture/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-reset_write_priority/report.json",
+        "target_counterexample": "binding_reset_establishes_product",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-4-bad-wrong_reset/report.json",
+        "target_counterexample": "binding_reset_establishes_product",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-wrong_write_address/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-wrong_write_data/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-ungated_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-ungated_cell_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-disabled_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-missing_bypass/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-wrong_bypass_address/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-off_by_one_mapping/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-other_cell_change/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-rom_change/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-recapture/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-reset_write_priority/report.json",
+        "target_counterexample": "binding_reset_establishes_product",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-16-bad-wrong_reset/report.json",
+        "target_counterexample": "binding_reset_establishes_product",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-wrong_write_address/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-wrong_write_data/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-ungated_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-ungated_cell_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-disabled_write/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-missing_bypass/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-wrong_bypass_address/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-off_by_one_mapping/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-other_cell_change/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-rom_change/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-recapture/report.json",
+        "target_counterexample": "binding_product_preservation",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-reset_write_priority/report.json",
+        "target_counterexample": "binding_reset_establishes_product",
+        "queries": 3
+      },
+      {
+        "path": "/workspace/shared/memory-store-final-fullgate/store-memory-reuse-regression/memory-64-bad-wrong_reset/report.json",
+        "target_counterexample": "binding_reset_establishes_product",
+        "queries": 3
+      }
+    ]
+  },
+  "direct_original_counterexample_replay": {
+    "independently_replayed_counterexamples": 63,
+    "rows": [
+      {
+        "case": "cpu-bad-fetch_address",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-fetch_response",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-high_address_drop",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-load_address",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-load_response",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-no_flush",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-no_forward",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-no_interlock",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-stale_load",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_address",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_data",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_early",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_interlock",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_missing",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_operand",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-bad-store_stall",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "cpu-port-bad-load_enable",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-disabled_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-missing_bypass",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-off_by_one_mapping",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-other_cell_change",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-recapture",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-reset_write_priority",
+        "obligation": "binding_reset_establishes_product",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-rom_change",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-ungated_cell_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-ungated_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-wrong_bypass_address",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-wrong_reset",
+        "obligation": "binding_reset_establishes_product",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-wrong_write_address",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-16-bad-wrong_write_data",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-disabled_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-missing_bypass",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-off_by_one_mapping",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-other_cell_change",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-recapture",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-reset_write_priority",
+        "obligation": "binding_reset_establishes_product",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-rom_change",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-ungated_cell_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-ungated_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-wrong_bypass_address",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-wrong_reset",
+        "obligation": "binding_reset_establishes_product",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-wrong_write_address",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-4-bad-wrong_write_data",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-disabled_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-missing_bypass",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-off_by_one_mapping",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-other_cell_change",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-recapture",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-reset_write_priority",
+        "obligation": "binding_reset_establishes_product",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-rom_change",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-ungated_cell_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-ungated_write",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-wrong_bypass_address",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-wrong_reset",
+        "obligation": "binding_reset_establishes_product",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-wrong_write_address",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "memory-64-bad-wrong_write_data",
+        "obligation": "binding_product_preservation",
+        "replay": "original scoped reset/preservation violation reproduced from independent imported-machine expression evaluation"
+      },
+      {
+        "case": "wiring-bad-fetch_address_high_drop",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "wiring-bad-load_address_association",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "wiring-bad-load_response_corruption",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "wiring-bad-missing_bypass",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "wiring-bad-store_address_wiring",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "wiring-bad-store_data_wiring",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      },
+      {
+        "case": "wiring-bad-store_enable_wiring",
+        "obligation": "microstep_refinement",
+        "replay": "original v2 pre-binding true; actual imported impl/spec transitions independently evaluated; post-binding false"
+      }
+    ]
+  },
+  "array_campaign": {
+    "seed": 620104,
+    "formulas": 1088,
+    "obligations": 8704,
+    "exhaustive_assignments_per_formula": 256,
+    "independent_sat_replays": 1012,
+    "counts": {
+      "sat": 4972,
+      "unsat": 3732
+    },
+    "checker_sha256": "a5db7545b1ca4ecdd09297061332518cf3a60c9f60fced5ab5897747e3242490",
+    "seconds": 35.179732660995796
+  },
+  "scalar_control_campaign": {
+    "cases": 140,
+    "obligations": 1120,
+    "cofactor_queries": 190,
+    "checker_sha256": "a5db7545b1ca4ecdd09297061332518cf3a60c9f60fced5ab5897747e3242490"
+  },
+  "cpu_integer_isa_campaign": [
+    {
+      "count": 4,
+      "seed": 620105,
+      "stats": {
+        "reset": 13,
+        "cycles": 4200,
+        "retirements": 3341,
+        "mapped_store": 52,
+        "store_load_collision": 21,
+        "load_retirement": 51,
+        "forced_stall_store": 1,
+        "stalled_store": 6,
+        "reset_pending_store": 1,
+        "unmapped_store": 10
+      },
+      "cpu_sha256": "0385a1ef86763df0c12dbde3730adc8ac92adbed46b85038c83b92f35a1e6e16",
+      "memory_sha256": "1083efa535e469e3d97ac88cde8fc049f5efe6a4c06f95c73eb86658a4170ca1",
+      "oracle": "plain integer retirement ISA and list RAM; actual imported hardware expressions executed; no generated contract/binding read"
+    },
+    {
+      "count": 16,
+      "seed": 620105,
+      "stats": {
+        "reset": 13,
+        "cycles": 4200,
+        "retirements": 2515,
+        "mapped_store": 293,
+        "store_load_collision": 157,
+        "load_retirement": 208,
+        "flush_younger_store": 89,
+        "unmapped_store": 140,
+        "forced_stall_store": 1,
+        "stalled_store": 85,
+        "reset_pending_store": 1
+      },
+      "cpu_sha256": "0385a1ef86763df0c12dbde3730adc8ac92adbed46b85038c83b92f35a1e6e16",
+      "memory_sha256": "faf937a8413bc2fbd0f5c8f393cb1dc35c8aa83d2491594441be8e120387e193",
+      "oracle": "plain integer retirement ISA and list RAM; actual imported hardware expressions executed; no generated contract/binding read"
+    },
+    {
+      "count": 64,
+      "seed": 620105,
+      "stats": {
+        "reset": 13,
+        "cycles": 4200,
+        "retirements": 2553,
+        "mapped_store": 601,
+        "store_load_collision": 153,
+        "load_retirement": 295,
+        "flush_younger_store": 170,
+        "forced_stall_store": 1,
+        "stalled_store": 120,
+        "reset_pending_store": 1
+      },
+      "cpu_sha256": "0385a1ef86763df0c12dbde3730adc8ac92adbed46b85038c83b92f35a1e6e16",
+      "memory_sha256": "292afb1d96abce67eafe6a2fa0555393b34403295b468dd54edab9d3d7919b5b",
+      "oracle": "plain integer retirement ISA and list RAM; actual imported hardware expressions executed; no generated contract/binding read"
+    }
+  ],
+  "cpu_mutation_simulation": [
+    {
+      "name": "cpu-fetch_address-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 4, 'provenance', 0)"
+    },
+    {
+      "name": "cpu-fetch_response-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 4, 'provenance', 0)"
+    },
+    {
+      "name": "cpu-high_address_drop-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 9, 'provenance', 4)"
+    },
+    {
+      "name": "cpu-load_address-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 6, 'gprs')"
+    },
+    {
+      "name": "cpu-load_enable-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 4, 'load_enable')"
+    },
+    {
+      "name": "cpu-load_response-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 6, 'gprs')"
+    },
+    {
+      "name": "cpu-no_flush-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 10, 'provenance', 8)"
+    },
+    {
+      "name": "cpu-no_forward-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 5, 'store_data_address')"
+    },
+    {
+      "name": "cpu-no_interlock-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 7, 'store_data_address')"
+    },
+    {
+      "name": "cpu-stale_load-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 14, 'gprs')"
+    },
+    {
+      "name": "cpu-store_address-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 8, 'store_data_address')"
+    },
+    {
+      "name": "cpu-store_data-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 5, 'store_data_address')"
+    },
+    {
+      "name": "cpu-store_early-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 4, 'enable')"
+    },
+    {
+      "name": "cpu-store_interlock-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 7, 'store_data_address')"
+    },
+    {
+      "name": "cpu-store_missing-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 5, 'enable')"
+    },
+    {
+      "name": "cpu-store_operand-import",
+      "detected": true,
+      "assertion": "AssertionError: (0, 5, 'store_data_address')"
+    },
+    {
+      "name": "cpu-store_stall-import",
+      "detected": true,
+      "assertion": "AssertionError: (1, 5, 'enable')"
+    }
+  ],
+  "session_tamper": {
+    "checker_sha256": "a5db7545b1ca4ecdd09297061332518cf3a60c9f60fced5ab5897747e3242490",
+    "case_count": 20,
+    "cases": [
+      {
+        "case": "forged_report_as_cpu_handle",
+        "rejected": true,
+        "reason": "no verified proof handle in this session"
+      },
+      {
+        "case": "forged_cross_session_handle",
+        "rejected": true,
+        "reason": "no verified proof handle in this session"
+      },
+      {
+        "case": "swapped_proof_roles",
+        "rejected": true,
+        "reason": "stale, mismatched, or cyclic proof dependency"
+      },
+      {
+        "case": "duplicate_dependency",
+        "rejected": true,
+        "reason": "cyclic or duplicate proof dependency"
+      },
+      {
+        "case": "cpu_source_mismatch",
+        "rejected": true,
+        "reason": "missing or mismatched checked import"
+      },
+      {
+        "case": "memory_source_mismatch",
+        "rejected": true,
+        "reason": "missing or mismatched checked import"
+      },
+      {
+        "case": "copied_machine_identity",
+        "rejected": true,
+        "reason": "missing or mismatched checked import"
+      },
+      {
+        "case": "capacity_mismatch",
+        "rejected": true,
+        "reason": "missing or mismatched checked import"
+      },
+      {
+        "case": "wiring_write_enable",
+        "rejected": true,
+        "reason": "connection graph differs from proved wiring"
+      },
+      {
+        "case": "wiring_write_address",
+        "rejected": true,
+        "reason": "connection graph differs from proved wiring"
+      },
+      {
+        "case": "wiring_write_data",
+        "rejected": true,
+        "reason": "connection graph differs from proved wiring"
+      },
+      {
+        "case": "tamper_cpu-import_source.veryl",
+        "rejected": true,
+        "reason": "stale source/frontend/lift artifact: /workspace/scratch/07f10565586c/store-audit/final-tamper/cpu-import/source.veryl"
+      },
+      {
+        "case": "tamper_memory-import_source.veryl",
+        "rejected": true,
+        "reason": "stale source/frontend/lift artifact: /workspace/scratch/07f10565586c/store-audit/final-tamper/memory-import/source.veryl"
+      },
+      {
+        "case": "tamper_memory-import_compiled.json",
+        "rejected": true,
+        "reason": "stale source/frontend/lift artifact: /workspace/scratch/07f10565586c/store-audit/final-tamper/memory-import/compiled.json"
+      },
+      {
+        "case": "tamper_memory-import_normal-lift.json",
+        "rejected": true,
+        "reason": "stale source/frontend/lift artifact: /workspace/scratch/07f10565586c/store-audit/final-tamper/memory-import/normal-lift.json"
+      },
+      {
+        "case": "tamper_memory-import_reset-lift.json",
+        "rejected": true,
+        "reason": "stale source/frontend/lift artifact: /workspace/scratch/07f10565586c/store-audit/final-tamper/memory-import/reset-lift.json"
+      },
+      {
+        "case": "mutated_actual_memory_machine",
+        "rejected": true,
+        "reason": "missing or mismatched checked import"
+      },
+      {
+        "case": "cyclic_dependency_record",
+        "rejected": true,
+        "reason": "stale, mismatched, or cyclic proof dependency"
+      },
+      {
+        "case": "mutated_checker_binary",
+        "rejected": true,
+        "reason": "stale, mismatched, or cyclic proof dependency"
+      },
+      {
+        "case": "saved_report_not_reimported",
+        "accepted_existing_sealed_handle": true
+      }
+    ]
+  },
+  "audit_script_sha256": {
+    "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/test_array_store_differential.py": "a0fcb14dbaa27fee300bff190d6fc60386d40d42b8eb6bc6532a40c6e676d531",
+    "/workspace/scratch/07f10565586c/store-audit/simulate_cpu.py": "cb3972452fb49589cee90330dc7c4e29f0f80c8524f56ac55f28a6576c235c36",
+    "/workspace/scratch/07f10565586c/store-audit/scalar_controls.py": "d310a193c6f30d08bad84ed7969080b43d107fb73b7240c5785886084b0b1f94",
+    "/workspace/scratch/07f10565586c/store-audit/replay_final_witnesses.py": "84e9c565f62c38a0fa9c9fce4827fe27be386f1506d0451e77672a717a521906",
+    "/workspace/scratch/07f10565586c/store-audit/verify_final_matrix.py": "eb05ad73df292f40c7e99890ad2a4bf3922125355ba0ed0fb19ac2b0566d34ec",
+    "/workspace/scratch/07f10565586c/store-audit/tamper.py": "dc809fb6038c0309228dc83e529aa59d393f278ad15bee7154731911e29c7908"
+  },
+  "scope_notes": [
+    "Global ungated_write retained at all3capacities; ungated_cell_write is additional, never a replacement.",
+    "63proof witnesses directly replayed against original documents/imported machine expressions in Python, separate from Rust solver replay. Reset replay recomputes reset state from witness inputs; stored impl_next context denotes normal transition and is not mistaken for reset.",
+    "Integer ISA/list-RAM simulation uses no generated contract/binding and covers final gate actual imports.",
+    "Array witness reconstruction uses explicit complete tables and independent tuple-store evaluator; exhaustive256assignments/formula.",
+    "Control fix changes search eligibility only; all-case enumeration, original SAT replay and aggregate budgets preserved. Unit tests cover last-case SAT, all-case UNSAT, work-minus1Unknown, zero/seven controls and malformed dead context.",
+    "Tests supplement trusted finite solver/compiler/lowering/simulation rule; not independent UNSAT certificates."
+  ]
+}

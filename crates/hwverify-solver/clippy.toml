@@ -1,2 +1,0 @@
-# hwverify is a standalone verifier CLI: Celox's simulator-library rules in the
-# workspace clippy.toml (no env reads, no eprintln, Fx hash maps) do not apply.

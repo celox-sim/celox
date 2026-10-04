@@ -1,0 +1,13 @@
+[package]
+name = "lydite-solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+lydite-ir.workspace = true
+
+[lints]
+workspace = true
