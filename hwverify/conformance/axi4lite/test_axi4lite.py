@@ -37,6 +37,7 @@ class ProtocolRules(unittest.TestCase):
         last = formal['trace'][-1]['state_after']
         self.assertEqual(last['axi_scope_bad']['value'], bool(independent['capacity_exceeded']))
         self.assertEqual(last['axi_environment_bad']['value'], bool(independent['environment_violations']))
+        self.assertEqual(last['axi_write_pair_pending']['value'], independent['write_pairing']['pending'])
         # Compare each rule, not just the overall pass/fail bit.
         for name, info in rules().items():
             if config['role'] == 'link' or info['owner'] == config['role']:
@@ -55,13 +56,146 @@ class ProtocolRules(unittest.TestCase):
             self.assertEqual(result['accepted_transfers']['b'], 1)
         # Continuous VALID, distinct payloads on successive accepted beats, full-capacity pop+push.
         rows = [reset, row(awvalid=True, awready=True, wvalid=True, wready=True, arvalid=True, arready=True),
-                *[row(awvalid=True, awready=True, awaddr=k, wvalid=True, wready=True, wdata=k, wstrb=k,
+                *[row(awvalid=True, awready=True, awaddr=4*k, wvalid=True, wready=True, wdata=k, wstrb=k,
                       bvalid=True, bready=True, arvalid=True, arready=True, araddr=k, rvalid=True, rready=True, rdata=k) for k in range(1, 6)],
                 row(bvalid=True, bready=True, rvalid=True, rready=True)]
         self.compare(rows, 'sampled_prefix_passed', config={**CONFIG, 'capacity': 1})
         # No READY fairness or arbitrary completion deadline: pending/stalled prefixes are legal.
         self.compare([reset, row(arvalid=True, arready=True)] + [row(rvalid=True, rdata=42)] * 12, 'sampled_prefix_passed')
         self.compare([reset] + [row(awvalid=True, awaddr=7)] * 12, 'sampled_prefix_passed')
+
+    def test_address_strobe_offsets_zero_sparse_and_roles(self):
+        for dw in (32, 64):
+            lanes = dw // 8; config = {**CONFIG, 'data_width': dw}
+            for offset in range(lanes):
+                allowed = ((1 << lanes) - 1) ^ ((1 << offset) - 1)
+                for mask in {0, allowed, 1 << offset, 1 << (lanes - 1)}:
+                    self.compare([row(rst=True), row(awvalid=True, awready=True, awaddr=0x40+offset, wvalid=True, wready=True, wstrb=mask)], 'sampled_prefix_passed', config=config)
+                if offset:
+                    rows = [row(rst=True), row(wvalid=True, wready=True, wstrb=1 << (offset-1)), row(awvalid=True, awready=True, awaddr=offset)]
+                    self.compare(rows, 'protocol_violation', ['write_address_strobe'], config)
+            illegal = [row(rst=True), row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=1)]
+            self.compare(illegal, 'protocol_violation', ['write_address_strobe'], {**config, 'role': 'manager'})
+            self.compare(illegal, 'environment_invalid', config={**config, 'role': 'subordinate'})
+        # Narrow address ports imply zero high address bits, not a wider offset.
+        self.compare([row(rst=True), row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=2)], 'sampled_prefix_passed', config={**CONFIG, 'address_width': 1})
+
+    def test_ordered_pairing_w_first_capacity_shift_and_reset(self):
+        aw = lambda address: row(awvalid=True, awready=True, awaddr=address)
+        w = lambda strobe: row(wvalid=True, wready=True, wstrb=strobe)
+        for first in ('aw', 'w'):
+            address = [aw(1), aw(0)]; data = [w(14), w(15)]
+            self.compare([row(rst=True)] + (address + data if first == 'aw' else data + address), 'sampled_prefix_passed')
+            bad = [w(15), w(14)]
+            self.compare([row(rst=True)] + (address + bad if first == 'aw' else bad + address), 'protocol_violation', ['write_address_strobe'])
+        self.compare([row(rst=True), aw(1), row(awvalid=True, awready=True, awaddr=0, wvalid=True, wready=True, wstrb=14), w(15)], 'sampled_prefix_passed')
+        # Fill every queue slot then drain, including 64-bit lane 7.
+        config = {**CONFIG, 'data_width': 64, 'capacity': 16}
+        addresses = [aw(n % 8) for n in range(16)]
+        strobes = [w(1 << (n % 8)) for n in range(16)]
+        for frames in (addresses + strobes, strobes + addresses):
+            self.compare([row(rst=True)] + frames, 'sampled_prefix_passed', config=config)
+        bad_tail = strobes[:-1] + [w(1)]
+        for frames in (addresses + bad_tail, bad_tail + addresses):
+            self.compare([row(rst=True)] + frames, 'protocol_violation', ['write_address_strobe'], config)
+        overflow = [row(rst=True), aw(1), row(awvalid=True, awready=True, wvalid=True, wready=True, wstrb=1)]
+        self.compare(overflow, 'protocol_violation', ['write_address_strobe'], {**CONFIG, 'capacity': 1})
+        pending = [row(rst=True), aw(1), row(rst=True), aw(0), w(1)]
+        self.assertEqual(check_trace(pending, CONFIG)['status'], 'sampled_prefix_passed')
+        # No completed pair: do not guess a missing address or strobe.
+        self.compare([row(rst=True), w(15)], 'sampled_prefix_passed')
+
+    def test_stalled_offers_checked_before_ready_and_pending_is_explicit(self):
+        for dw in (32, 64):
+            config = {**CONFIG, 'data_width': dw}; offset = dw // 8 - 1
+            for mask in (0, 1 << offset, 1):
+                aw = row(awvalid=True, awaddr=offset)
+                w = row(wvalid=True, wstrb=mask)
+                both = row(awvalid=True, awaddr=offset, wvalid=True, wstrb=mask)
+                traces = [
+                    [row(rst=True), {**aw, 'awready': True}, w],
+                    [row(rst=True), {**w, 'wready': True}, aw],
+                    [row(rst=True), both, both],
+                ]
+                for frames in traces:
+                    expected = 'protocol_violation' if mask == 1 else 'sampled_prefix_passed'
+                    report = self.compare(frames, expected, ['write_address_strobe'] if mask == 1 else [], config)
+                    if mask == 1:
+                        self.assertEqual(report['guarantee_violations'][0]['edge'], 1 if frames[1] == both else 2)
+                    else:
+                        self.assertEqual(report['write_pairing']['status'], 'known_offers_checked')
+            for frames in ([row(rst=True), aw], [row(rst=True), w]):
+                report = self.compare(frames, 'sampled_prefix_passed', config=config)
+                self.assertEqual(report['write_pairing']['status'], 'pending')
+                self.assertTrue(report['write_pairing']['pending'])
+            illegal = [row(rst=True), row(awvalid=True, awaddr=offset, wvalid=True, wstrb=1)]
+            self.compare(illegal, 'environment_invalid', config={**config, 'role': 'subordinate'})
+            self.compare(illegal, 'protocol_violation', ['write_address_strobe'], {**config, 'role': 'manager'})
+
+    def test_live_offers_do_not_skip_accepted_queue_positions(self):
+        # Current AW is transaction 1, but live W still belongs to accepted AW0.
+        frames = [row(rst=True), row(awvalid=True, awready=True, awaddr=0),
+                  row(awvalid=True, awaddr=1, wvalid=True, wready=True, wstrb=1)]
+        report = self.compare(frames, 'sampled_prefix_passed')
+        self.assertEqual(report['write_pairing']['status'], 'pending')
+        report = self.compare(frames + [row(awvalid=True, awaddr=1, wvalid=True, wstrb=1)], 'protocol_violation', ['write_address_strobe'])
+        self.assertEqual(report['guarantee_violations'][0]['edge'], 3)
+        # Mirror the index boundary: accepted W0 is zero; live W1 is illegal.
+        frames = [row(rst=True), row(wvalid=True, wready=True, wstrb=0),
+                  row(awvalid=True, awready=True, awaddr=1, wvalid=True, wstrb=1)]
+        self.compare(frames, 'sampled_prefix_passed')
+        report = self.compare(frames + [row(awvalid=True, awaddr=1, wvalid=True, wstrb=1)], 'protocol_violation', ['write_address_strobe'])
+        self.assertEqual(report['guarantee_violations'][0]['edge'], 3)
+        # READY may remain low forever; a stable legal known offer has no deadline.
+        stable = row(awvalid=True, awaddr=1, wvalid=True, wstrb=8)
+        self.compare([row(rst=True)] + [stable] * 20, 'sampled_prefix_passed')
+        # Changing the presumed pending transaction is independently a stability fault.
+        self.compare([row(rst=True), stable, {**stable, 'awaddr': 0}], 'protocol_violation', ['aw_payload_stable'])
+
+    def test_truncated_pair_queues_cannot_accuse_after_capacity_overflow(self):
+        # Full unbounded manager stream is (addr,strobe): (0,1),(0,1),(1,2).
+        # Capacity-1 truncation used to pair the second W with the third AW.
+        frames = [row(rst=True), row(awvalid=True, awready=True), row(awvalid=True, awready=True),
+                  row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=1),
+                  row(wvalid=True, wready=True, wstrb=1), row(wvalid=True, wready=True, wstrb=2)]
+        for role in ('manager', 'subordinate', 'link'):
+            config = {**CONFIG, 'capacity': 1, 'role': role}
+            report = self.compare(frames, 'scope_exceeded', config=config)
+            self.assertFalse(report['environment_violations'])
+            self.assertFalse(report['guarantee_violations'])
+            self.assertEqual(report['write_pairing']['status'], 'unknown_outside_legal_scope')
+            self.assertEqual(core(frames, config, 'environment')['status'], 'trace_no_failure')
+            # The same stream with sufficient storage establishes legal pairing.
+            self.compare(frames, 'sampled_prefix_passed', config={**config, 'capacity': 3})
+            # Saturated response-accounting counters likewise lose multiplicity.
+            transfer = row(awvalid=True, awready=True, wvalid=True, wready=True, arvalid=True, arready=True)
+            response = row(bvalid=True, bready=True, rvalid=True, rready=True)
+            counted = [row(rst=True), transfer, transfer, response, response]
+            bounded = self.compare(counted, 'scope_exceeded', config=config)
+            self.assertFalse(bounded['environment_violations'])
+            self.assertEqual(core(counted, config, 'environment')['status'], 'trace_no_failure')
+            self.compare(counted, 'sampled_prefix_passed', config={**config, 'capacity': 2})
+            same_edge = [row(rst=True), row(awvalid=True, awready=True, awaddr=1),
+                         row(awvalid=True, awready=True, wvalid=True, wready=True, wstrb=1)]
+            expected = 'environment_invalid' if role == 'subordinate' else 'protocol_violation'
+            required = [] if role == 'subordinate' else ['write_address_strobe']
+            report = self.compare(same_edge, expected, required, config)
+            self.assertEqual(report['write_pairing']['status'], 'violated')
+            self.assertTrue(report['capacity_exceeded'])
+            # A real earlier offered-payload fault remains recorded after overflow.
+            earlier = [row(rst=True), row(awvalid=True, awaddr=1, wvalid=True, wstrb=1),
+                       row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=1),
+                       row(awvalid=True, awready=True), row(awvalid=True, awready=True)]
+            full = check_trace(earlier, config)
+            self.assertEqual(full['write_pairing']['status'], 'violated')
+            self.assertTrue(full['capacity_exceeded'])
+            observed = full['environment_violations'] if role == 'subordinate' else full['guarantee_violations']
+            self.assertTrue(any(v == {'edge': 1, 'rule': 'write_address_strobe'} for v in observed))
+            objective = 'guarantees' if role == 'subordinate' else 'environment'
+            replayed = core(earlier, config, objective)
+            state = replayed['trace'][-1]['state_after']
+            self.assertTrue(state['axi_scope_bad']['value'])
+            self.assertTrue(state['axi_environment_bad' if role == 'subordinate' else 'axi_bad_write_address_strobe']['value'])
 
     def test_every_channel_valid_and_payload_stability(self):
         fields = {'aw': ('awaddr', 'awprot'), 'w': ('wdata', 'wstrb'), 'b': ('bresp',), 'ar': ('araddr', 'arprot'), 'r': ('rdata', 'rresp')}

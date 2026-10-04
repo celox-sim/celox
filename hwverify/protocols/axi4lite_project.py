@@ -169,6 +169,7 @@ def main():
             status, independent = simulate(project, inputs, args.out)
             if args.mode == 'replay' and status != 'reset_reachable_failure': raise ValueError('saved failure did not reproduce')
             summary = {'status': (independent['status'] if status == 'trace_no_failure' and independent['status'] != 'sampled_prefix_passed' else status), 'independent': independent, 'identity': project['identity'], 'unchecked': UNCHECKED}
+        summary['write_pairing'] = summary.get('independent', {}).get('write_pairing', {'status': 'not_established_by_bounded_search', 'scope': 'Known-pair safety only; counterpart arrival and completion are not established'})
         summary['structural'] = project['structural']
         if project['structural']['status'] == 'verified':
             summary['unchecked'] = ['synthesized-netlist/physical combinational paths'] + [item for item in UNCHECKED if item != 'input-to-output combinational paths']

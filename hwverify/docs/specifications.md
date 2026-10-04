@@ -694,6 +694,54 @@ remain recorded despite later counterpart violations. Native guarantee replay
 stops at its first failure; inspect a separate objective or the complete concrete
 trace oracle when examining later events.
 
+### Offered write address/strobe consistency
+
+`write_address_strobe` checks Arm IHI 0022H A3.2.2, A3.4.4 and B1.1.3 for the
+explicit 32/64-bit full-width Lite profile. A3.2.2 requires valid payload when
+VALID is asserted; A3.4.4 permits arbitrary strobes only when WVALID is low and
+requires consistency with the unaligned address. Therefore a known corresponding
+AW/W offer is checked before READY, not only at acceptance.
+
+Independent bounded queues retain accepted AW address offsets and W strobes.
+Each channel's oldest unmatched accepted entry precedes its current VALID offer.
+The checker compares those oldest known counterparts; if a queue is empty, its
+current VALID payload supplies that side. This covers accepted AW with stalled
+W, accepted W with stalled AW, and both stalled first offers. A live offer cannot
+skip earlier accepted entries. Queue advancement still requires handshakes, and
+existing VALID/payload stability checks protect stalled offer identity. No READY
+fairness or completion deadline is assumed.
+
+A mask is legal when no asserted lane is below `AWADDR modulo (data_width / 8)`.
+Aligned addresses permit any mask; zero and sparse masks are legal. The concrete
+oracle and source result expose `write_pairing`: unmatched known positions are
+`pending`, not validated; `known_offers_checked` covers only the sampled known
+counterparts, not future offers or eventual acceptance. Invalid environment or
+capacity makes correlation `unknown_outside_legal_scope`; detected strobe faults
+remain `violated`. Search without a concrete trace reports correlation as
+`not_established_by_bounded_search`. Native state `axi_write_pair_pending` exposes
+the raw last-sample missing-counterpart indicator, meaningful only on a legal,
+in-scope prefix. An idle trace says `no_pending_offers`, not transaction coverage.
+
+This is manager-owned safety: manager/link guarantees check it, while subordinate
+checks treat it as a counterpart requirement. The queues reset with the monitor;
+oldest-entry consumption and simultaneous append preserve ordering. Existing
+AW/W-to-B outstanding counts still define capacity independently. An unmatched
+queue cannot exceed its outstanding count on a legal prefix, so capacity remains
+a tool bound, not a strobe rule. Earlier failures remain sticky, including a
+strobe fault on the same edge as capacity overflow. After an earlier overflow,
+truncated pair queues and saturated response counters no longer establish
+transaction correspondence or multiplicity. New address/strobe and response-
+prerequisite accusations are therefore suppressed at their raw predicates,
+including counterpart/environment flags. Correlation is unknown outside scope;
+earlier definite faults remain recorded. Native trace replay uses one
+initial reset; the independent oracle additionally tests repeated reset epochs.
+
+This does not prove subordinate byte-write effects, memory contents, or response
+transaction origin. The conformance inventory retains separate unchecked entries
+for those claims. Its `next_evidence` fields describe phase-aware reset release,
+explicit optional-signal/default profiles, and independently bound response
+origins. None of those plans is an implemented compliance claim.
+
 ### AXI limits and validation
 
 The gate runs the existing Celox replay tests plus positive source scenarios,
@@ -826,8 +874,8 @@ check: it must not be mistaken for proof of temporal offer causality.
 
 The [machine-readable AXI conformance inventory](../protocols/axi4lite-conformance.json)
 records exact sections, profiles, tests and outstanding gaps. It is explicitly
-partial, pending an independent completeness audit. Address/WSTRB consistency
-needs ordered AW/W pairing even when W arrives first; response correspondence
-needs independent transaction-origin evidence, not response counters alone.
+partial, pending an independent completeness audit. Address/WSTRB consistency is checked for the earliest known corresponding
+offers, including stalled and W-first traffic; response correspondence still needs independent transaction-origin
+evidence, not response counters alone.
 Reset release, optional/default signal profiles and memory-versus-peripheral
 requirements remain visible gaps. No full AXI compliance claim is made.
