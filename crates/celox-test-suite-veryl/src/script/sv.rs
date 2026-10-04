@@ -189,37 +189,66 @@ fn reads(exprs: &[&Expr]) -> bool {
     found
 }
 
-/// The width reserved for values built by shifts of run-time amounts.
-const DYNAMIC_SHIFT_WIDTH: usize = 2048;
+/// The widest testbench value: Verilator multiplies signed values of at
+/// most 4096 bits (`VL_MULS_MAX_WORDS`).
+const MAX_VALUE_WIDTH: usize = 4096;
+
+/// The width reserved for values built by shifts of run-time amounts, so
+/// that twice it (plus a margin) stays within `MAX_VALUE_WIDTH`.
+const DYNAMIC_SHIFT_WIDTH: usize = (MAX_VALUE_WIDTH - 64) / 2;
 
 /// A width that holds every value the case computes: twice the widest
 /// signal or literal (so a product of two fits), plus constant shifts.
-fn value_width(case: &ScriptCase, design: &DesignInfo) -> usize {
+fn value_width(case: &ScriptCase, design: &DesignInfo) -> Result<usize, Unsupported> {
+    let literal = |e: &Expr| match e {
+        Expr::Literal(value) => value.payload.to_usize().map(|v| v.min(1 << 14)),
+        _ => None,
+    };
     let mut widest = design.max_width.max(64);
-    let mut shifts = 0usize;
     for stmt in &case.body {
         walk_stmt(stmt, &mut |e| match e {
             Expr::Literal(value) => {
                 widest = widest.max(value.payload.bits() as usize + 1);
                 widest = widest.max(value.mask.bits() as usize + 1);
             }
-            Expr::Op(Op::Shl | Op::Pow | Op::Cat | Op::Rep, operands) => {
-                for operand in operands {
-                    if let Expr::Literal(value) = operand {
-                        shifts += value.payload.to_usize().unwrap_or(0).min(1 << 16);
-                    }
-                }
+            // Constant shifts, concatenations and replications widen the
+            // widest value by their own amount.
+            Expr::Op(Op::Shl, operands) => match literal(&operands[1]) {
+                Some(amount) => widest = widest.max(design.max_width.max(64) + amount),
                 // A shift by a run-time amount can build a value much wider
                 // than any signal (a case may pack a sequence into one value).
-                if matches!(e, Expr::Op(Op::Shl, operands) if !matches!(operands[1], Expr::Literal(_)))
-                {
-                    widest = widest.max(DYNAMIC_SHIFT_WIDTH);
+                None => widest = widest.max(DYNAMIC_SHIFT_WIDTH),
+            },
+            // An unpacked array read whole is one wide value.
+            Expr::Get(path) if path.instances.is_empty() => {
+                if let Some((width, count)) = design.arrays.get(&path.name) {
+                    widest = widest.max(width * count);
+                }
+            }
+            Expr::Op(Op::Cat, operands) => {
+                let total: usize = operands
+                    .chunks(2)
+                    .filter_map(|pair| literal(&pair[0]))
+                    .sum();
+                widest = widest.max(total);
+            }
+            Expr::Op(Op::Rep, operands) => {
+                if let (Some(count), Some(width)) = (literal(&operands[0]), literal(&operands[1])) {
+                    widest = widest.max(count * width);
                 }
             }
             _ => {}
         });
     }
-    (2 * widest + shifts + 64).div_ceil(64) * 64
+    // Twice the widest value, so that a product of two still fits.
+    let width = (2 * widest + 64).div_ceil(64) * 64;
+    if width > MAX_VALUE_WIDTH {
+        return Err(Unsupported(format!(
+            "{} needs {width}-bit testbench values; the limit is {MAX_VALUE_WIDTH}",
+            case.name
+        )));
+    }
+    Ok(width)
 }
 
 impl Generator<'_> {
@@ -703,7 +732,7 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
             case.name
         )));
     }
-    let width = value_width(case, design);
+    let width = value_width(case, design)?;
     let mut generator = Generator {
         case,
         design,

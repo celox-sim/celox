@@ -204,7 +204,7 @@ assign empty = r_empty;
     (modify (set pop 0))
     (tick clk)
     (let expected_count (- 4 i))
-    (assert_eq count (trunc 32 expected_count) "count should be {} after popping {} items"))
+    (assert_eq count (trunc 32 expected_count) "count should be after popping items"))
   ; After all pops + 1 settle cycle, empty must be 1
   ; count is 0, but r_empty has 1-cycle delay (NBA)
   ; After the last pop tick, r_empty saw OLD count=1 → r_empty=0

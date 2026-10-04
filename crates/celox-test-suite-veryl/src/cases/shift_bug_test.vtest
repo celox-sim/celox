@@ -27,7 +27,7 @@ assign o = r;
   (assert_eq o 0 "should be 0 after reset")
   (modify (set rst 0))
   (tick clk)
-  (assert_eq o 0x3C "shift in if_reset: got {:x}"))
+  (assert_eq o 0x3C "shift in if_reset:"))
 
 (case test_shift_in_for_loop
   (source "test.veryl" #"
@@ -46,7 +46,7 @@ o = a << 4;
   (top Top)
   (modify (set a 0x12345678))
   (tick clk)
-  (assert_eq o 0x23456780 "shift in for: got {:x}"))
+  (assert_eq o 0x23456780 "shift in for:"))
 
 (case test_shift_ifreset_for
   (source "test.veryl" #"
@@ -77,7 +77,7 @@ assign o = r;
   (assert_eq o 0 "after reset")
   (modify (set rst 0))
   (tick clk)
-  (assert_eq o 0xAA "if_reset+for+shift: got {:x}"))
+  (assert_eq o 0xAA "if_reset+for+shift:"))
 
 (case test_right_shift_in_if_reset
   (source "test.veryl" #"
@@ -110,8 +110,8 @@ assign o_shl = r_shl;
   (tick clk)
   (modify (set rst 0))
   (tick clk)
-  (assert_eq o_shr 0x0ABC "right shift in if_reset: got {:x}")
-  (assert_eq o_shl 0xBCD0 "left shift in if_reset: got {:x}"))
+  (assert_eq o_shr 0x0ABC "right shift in if_reset:")
+  (assert_eq o_shl 0xBCD0 "left shift in if_reset:"))
 
 (case test_dynamic_shift_in_if_reset
   (source "test.veryl" #"
@@ -142,7 +142,7 @@ assign o = r;
   (assert_eq o 0 "after reset")
   (modify (set rst 0))
   (tick clk)
-  (assert_eq o 0x0FF0 "dynamic shift in if_reset: got {:x}"))
+  (assert_eq o 0x0FF0 "dynamic shift in if_reset:"))
 
 (case test_shift_to_array_by_loop_index
   (source "test.veryl" #"
@@ -191,4 +191,4 @@ o = a << 2;
   (top Top)
   (modify (set a 0x0F))
   (tick clk)
-  (assert_eq o 0x3C "8-bit shift with 32-bit const amount: got {:x}"))
+  (assert_eq o 0x3C "8-bit shift with 32-bit const amount:"))

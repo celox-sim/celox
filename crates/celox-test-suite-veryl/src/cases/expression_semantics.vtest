@@ -14,10 +14,8 @@ module Top (
 "#)
   (top Top)
   (modify (set a 0x8f))
-  (do
-    (assert_eq const_part 0x000f "{name}"))
-  (do
-    (assert_eq runtime_part 0x000f "{name}")))
+  (expand name (const_part runtime_part)
+    (assert_eq {name} 0x000f "{name}")))
 
 (case wildcard_predicates_remain_one_bit_in_ternaries_and_concats
   (source "test.veryl" #"
@@ -41,10 +39,8 @@ module Top (
     (set a 0x5a)
     (set b 0x5a))
   (tick clk)
-  (do
-    (assert_eq c 3 "{name}"))
-  (do
-    (assert_eq f 3 "{name}")))
+  (expand name (c f)
+    (assert_eq {name} 3 "{name}")))
 
 (case function_actuals_are_converted_at_the_formal_boundary
   (source "test.veryl" #"
@@ -66,10 +62,73 @@ module Top (
   (top Top)
   (modify (set actual 0xe1))
   (tick clk)
-  (do
-    (assert_eq c 0x21 "{name}"))
-  (do
-    (assert_eq f 0x21 "{name}")))
+  (expand name (c f)
+    (assert_eq {name} 0x21 "{name}")))
+
+(case unary_expression_context_signedness_matches_veryl
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    signed_value: input signed logic<8>,
+    signed_minus_value: input signed logic<8>,
+    signed_divisor: input signed logic<16>,
+    signed_small_divisor: input signed logic<8>,
+    unsigned_value: input logic<8>,
+
+    c_not_wide: output logic<16>,
+    c_not_lt: output logic,
+    c_not_div: output logic<16>,
+    c_unsigned_minus: output logic<16>,
+    c_signed_minus: output logic<16>,
+    c_unsigned_minus_lt: output logic,
+    c_unsigned_minus_div: output logic<8>,
+    f_not_wide: output logic<16>,
+    f_not_lt: output logic,
+    f_not_div: output logic<16>,
+    f_unsigned_minus: output logic<16>,
+    f_signed_minus: output logic<16>,
+    f_unsigned_minus_lt: output logic,
+    f_unsigned_minus_div: output logic<8>,
+) {
+    // Unary +, -, and bitwise-not preserve the operand's expression-context
+    // signedness. Assignment width reaches the unary operand before evaluation;
+    // the comparison and division below distinguish signedness at a
+    // self-determined operator boundary. This is separate from result type metadata.
+    assign c_not_wide = ~signed_value;
+    assign c_not_lt = (~signed_value) <: signed_divisor;
+    assign c_not_div = (~signed_value) / signed_divisor;
+    assign c_unsigned_minus = -unsigned_value;
+    assign c_signed_minus = -signed_minus_value;
+    assign c_unsigned_minus_lt = (-unsigned_value) <: signed_small_divisor;
+    assign c_unsigned_minus_div = (-unsigned_value) / signed_small_divisor;
+    always_ff (clk) {
+        f_not_wide = ~signed_value;
+        f_not_lt = (~signed_value) <: signed_divisor;
+        f_not_div = (~signed_value) / signed_divisor;
+        f_unsigned_minus = -unsigned_value;
+        f_signed_minus = -signed_minus_value;
+        f_unsigned_minus_lt = (-unsigned_value) <: signed_small_divisor;
+        f_unsigned_minus_div = (-unsigned_value) / signed_small_divisor;
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set signed_value 0)
+    (set signed_minus_value 1)
+    (set signed_divisor 0xffff)
+    ; -1 as signed logic<16>
+    (set signed_small_divisor 2)
+    (set unsigned_value 1))
+  (tick clk)
+  (expand prefix (c f)
+    (assert_eq {prefix}_not_wide 0xffff)
+    (assert_eq {prefix}_not_lt 0)
+    (assert_eq {prefix}_not_div 1)
+    (assert_eq {prefix}_unsigned_minus 0xffff)
+    (assert_eq {prefix}_signed_minus 0xffff)
+    (assert_eq {prefix}_unsigned_minus_lt 0)
+    (assert_eq {prefix}_unsigned_minus_div 127)))
 
 (case signed_type_cast_keeps_comparison_operands_signed
   ; Veryl simulator 0.20.2 loses the signed result of the same-width
@@ -92,10 +151,8 @@ module Top (
   (modify (set a 0))
   (tick clk)
   ; ~8'sh00 is signed 8'shff (-1), therefore it is less than +1.
-  (do
-    (assert_eq c_lt 1 "{name}"))
-  (do
-    (assert_eq f_lt 1 "{name}")))
+  (expand name (c_lt f_lt)
+    (assert_eq {name} 1 "{name}")))
 
 (case aggregate_results_consume_the_unary_parent_context
   (source "test.veryl" #"
@@ -119,14 +176,54 @@ module Top (
 "#)
   (top Top)
   (tick clk)
-  (do
-    (assert_eq c_concat 0xff "{name}"))
-  (do
-    (assert_eq c_struct 0xff "{name}"))
-  (do
-    (assert_eq f_concat 0xff "{name}"))
-  (do
-    (assert_eq f_struct 0xff "{name}")))
+  (expand name (c_concat c_struct f_concat f_struct)
+    (assert_eq {name} 0xff "{name}")))
+
+(case system_function_results_obey_ternary_width_contexts
+  ; IEEE 1800-2023 20.6.2 and 20.7: $bits/$size return signed integers. Both arms
+  ; are signed, so 11.8.1/11.8.2 require sign extension to 32 bits.
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    sel: input logic,
+    a: input logic<5>,
+    signed_arm: input signed logic<8>,
+    wide_arm: input logic<40>,
+    c_natural: output logic<32>,
+    c_wide: output logic<40>,
+    f_natural: output logic<32>,
+    f_wide: output logic<40>,
+    c_size_natural: output logic<32>,
+    c_size_wide: output logic<40>,
+    f_size_natural: output logic<32>,
+    f_size_wide: output logic<40>,
+) {
+    assign c_natural = if sel ? $bits(a) : signed_arm;
+    assign c_wide = if sel ? $bits(a) : wide_arm;
+    assign c_size_natural = if sel ? $size(a) : signed_arm;
+    assign c_size_wide = if sel ? $size(a) : wide_arm;
+    always_ff (clk) {
+        f_natural = if sel ? $bits(a) : signed_arm;
+        f_wide = if sel ? $bits(a) : wide_arm;
+        f_size_natural = if sel ? $size(a) : signed_arm;
+        f_size_wide = if sel ? $size(a) : wide_arm;
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set sel 0)
+    (set signed_arm 0xff)
+    (set wide_arm 0x3456789a))
+  (tick clk)
+  (expand prefix (c f c_size f_size)
+    (assert_eq {prefix}_natural 0xffffffff)
+    (assert_eq {prefix}_wide 0x3456789a))
+  (modify (set sel 1))
+  (tick clk)
+  (expand prefix (c f c_size f_size)
+    (assert_eq {prefix}_natural 5)
+    (assert_eq {prefix}_wide 5)))
 
 (case short_circuit_operators_skip_effectful_operands
   (source "test.veryl" #"
@@ -187,14 +284,8 @@ module Top (
   (assert_eq or_result 1)
   (assert_eq true_result 0)
   (assert_eq false_result 0)
-  (do
-    (assert_eq and_followup 0 "{name}"))
-  (do
-    (assert_eq or_followup 0 "{name}"))
-  (do
-    (assert_eq ternary_then_followup 0 "{name}"))
-  (do
-    (assert_eq ternary_else_followup 0 "{name}")))
+  (expand name (and_followup or_followup ternary_then_followup ternary_else_followup)
+    (assert_eq {name} 0 "{name}")))
 
 (case numeric_cast_preserves_four_state_sign_extension
   (four_state)
@@ -216,18 +307,14 @@ module Top (
   ; eight bits. Numeric `as 8` remains a four-state logic value.
   (modify (set a (fourstate 0x11 0x10)))
   (tick clk)
-  (do
-    (assert_eq c_num (fourstate 0xf1 0xf0) "{name} with X sign bit"))
-  (do
-    (assert_eq f_num (fourstate 0xf1 0xf0) "{name} with X sign bit"))
+  (expand name (c_num f_num)
+    (assert_eq {name} (fourstate 0xf1 0xf0) "{name} with X sign bit"))
   ; Z uses value=0/mask=1. Its sign extension therefore only extends
   ; the mask; it must not be silently converted to a two-state value.
   (modify (set a (fourstate 0x01 0x10)))
   (tick clk)
-  (do
-    (assert_eq c_num (fourstate 0x01 0xf0) "{name} with Z sign bit"))
-  (do
-    (assert_eq f_num (fourstate 0x01 0xf0) "{name} with Z sign bit")))
+  (expand name (c_num f_num)
+    (assert_eq {name} (fourstate 0x01 0xf0) "{name} with Z sign bit")))
 
 (case narrow_signed_comparison_sign_extends_both_operands
   (source "test.veryl" #"
@@ -254,14 +341,10 @@ module Top (
     (set b 0x1f))
     ; -1 in signed logic<5>
   (tick clk)
-  (do
-    (assert_eq c_lt 0 "{name}"))
-  (do
-    (assert_eq f_lt 0 "{name}"))
-  (do
-    (assert_eq c_gt 1 "{name}"))
-  (do
-    (assert_eq f_gt 1 "{name}")))
+  (expand name (c_lt f_lt)
+    (assert_eq {name} 0 "{name}"))
+  (expand name (c_gt f_gt)
+    (assert_eq {name} 1 "{name}")))
 
 (case cast_binary_semantics_match_between_comb_and_ff
   (source "test.veryl" #"
@@ -446,111 +529,3 @@ module Top (
   (expand (suffix expected) ((cast 0xfff9) (div 0xfffd) (rem 0xffff) (lt 1))
     (expand prefix (c_const c_runtime f_const f_runtime)
       (assert_eq {prefix}_{suffix} {expected} "{prefix}_{suffix}"))))
-
-(case unary_expression_context_signedness_matches_veryl
-  (source "test.veryl" #"
-module Top (
-    clk: input clock,
-    signed_value: input signed logic<8>,
-    signed_minus_value: input signed logic<8>,
-    signed_divisor: input signed logic<16>,
-    signed_small_divisor: input signed logic<8>,
-    unsigned_value: input logic<8>,
-
-    c_not_wide: output logic<16>,
-    c_not_lt: output logic,
-    c_not_div: output logic<16>,
-    c_unsigned_minus: output logic<16>,
-    c_signed_minus: output logic<16>,
-    c_unsigned_minus_lt: output logic,
-    c_unsigned_minus_div: output logic<8>,
-    f_not_wide: output logic<16>,
-    f_not_lt: output logic,
-    f_not_div: output logic<16>,
-    f_unsigned_minus: output logic<16>,
-    f_signed_minus: output logic<16>,
-    f_unsigned_minus_lt: output logic,
-    f_unsigned_minus_div: output logic<8>,
-) {
-    // Unary +, -, and bitwise-not preserve the operand's expression-context
-    // signedness. Assignment width reaches the unary operand before evaluation;
-    // the comparison and division below distinguish signedness at a
-    // self-determined operator boundary. This is separate from result type metadata.
-    assign c_not_wide = ~signed_value;
-    assign c_not_lt = (~signed_value) <: signed_divisor;
-    assign c_not_div = (~signed_value) / signed_divisor;
-    assign c_unsigned_minus = -unsigned_value;
-    assign c_signed_minus = -signed_minus_value;
-    assign c_unsigned_minus_lt = (-unsigned_value) <: signed_small_divisor;
-    assign c_unsigned_minus_div = (-unsigned_value) / signed_small_divisor;
-    always_ff (clk) {
-        f_not_wide = ~signed_value;
-        f_not_lt = (~signed_value) <: signed_divisor;
-        f_not_div = (~signed_value) / signed_divisor;
-        f_unsigned_minus = -unsigned_value;
-        f_signed_minus = -signed_minus_value;
-        f_unsigned_minus_lt = (-unsigned_value) <: signed_small_divisor;
-        f_unsigned_minus_div = (-unsigned_value) / signed_small_divisor;
-    }
-}
-"#)
-  (top Top)
-  (modify
-    (set signed_value 0)
-    (set signed_minus_value 1)
-    (set signed_divisor 0xffff) ; -1 as signed logic<16>
-    (set signed_small_divisor 2)
-    (set unsigned_value 1))
-  (tick clk)
-  (expand prefix (c f)
-    (assert_eq {prefix}_not_wide 0xffff)
-    (assert_eq {prefix}_not_lt 0)
-    (assert_eq {prefix}_not_div 1)
-    (assert_eq {prefix}_unsigned_minus 0xffff)
-    (assert_eq {prefix}_signed_minus 0xffff)
-    (assert_eq {prefix}_unsigned_minus_lt 0)
-    (assert_eq {prefix}_unsigned_minus_div 127)))
-
-(case system_function_results_obey_ternary_width_contexts
-  (source "test.veryl" #"
-module Top (
-    clk: input clock,
-    sel: input logic,
-    a: input logic<5>,
-    signed_arm: input signed logic<8>,
-    wide_arm: input logic<40>,
-    c_natural: output logic<32>,
-    c_wide: output logic<40>,
-    f_natural: output logic<32>,
-    f_wide: output logic<40>,
-    c_size_natural: output logic<32>,
-    c_size_wide: output logic<40>,
-    f_size_natural: output logic<32>,
-    f_size_wide: output logic<40>,
-) {
-    assign c_natural = if sel ? $bits(a) : signed_arm;
-    assign c_wide = if sel ? $bits(a) : wide_arm;
-    assign c_size_natural = if sel ? $size(a) : signed_arm;
-    assign c_size_wide = if sel ? $size(a) : wide_arm;
-    always_ff (clk) {
-        f_natural = if sel ? $bits(a) : signed_arm;
-        f_wide = if sel ? $bits(a) : wide_arm;
-        f_size_natural = if sel ? $size(a) : signed_arm;
-        f_size_wide = if sel ? $size(a) : wide_arm;
-    }
-}
-"#)
-  (top Top)
-  (modify
-    (set sel 0)
-    (set signed_arm 0xff)
-    (set wide_arm 0x3456_789a))
-  (tick clk)
-  (expand prefix (c f c_size f_size)
-    (assert_eq {prefix}_natural 0xffff_ffff)
-    (assert_eq {prefix}_wide 0x3456_789a))
-  (modify (set sel 1))
-  (tick clk)
-  (expand prefix (c f c_size f_size)
-    (assert_eq {prefix}_natural 5)
-    (assert_eq {prefix}_wide 5)))

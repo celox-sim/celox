@@ -50,7 +50,7 @@ impl EmittedSources {
         self.modules.get(module)
     }
 
-    /// The widest signal in any emitted module.
+    /// The widest signal (or array element) in any emitted module.
     pub fn max_width(&self) -> usize {
         self.max_width
     }
@@ -177,7 +177,7 @@ fn emit_sources(sources: &[(&str, &Path)], testbench: Option<&str>) -> EmittedSo
             let mut info = ModuleInfo::default();
             for variable in module.variables.values() {
                 let width = variable.r#type.total_width().unwrap_or(1);
-                max_width = max_width.max(width * variable.r#type.array.total().unwrap_or(1));
+                max_width = max_width.max(width);
                 if variable.path.0.len() == 1
                     && variable.r#type.array.dims() == 1
                     && let Some(count) = variable.r#type.array.total()

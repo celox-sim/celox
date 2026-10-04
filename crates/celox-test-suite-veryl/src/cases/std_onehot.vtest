@@ -24,5 +24,5 @@ o_zero,
     (let is_zero (trunc 8 (get o_zero)))
     (let expected_onehot (? (== (popcount val) 1) 1 0))
     (let expected_zero (? (== val 0) 1 0))
-    (assert (== is_onehot expected_onehot) "onehot({val:#010b}): expected={expected_onehot}, got={is_onehot}")
-    (assert (== is_zero expected_zero) "zero({val:#010b}): expected={expected_zero}, got={is_zero}")))
+    (assert (== is_onehot expected_onehot) "onehot")
+    (assert (== is_zero expected_zero) "zero")))

@@ -42,18 +42,10 @@ module Top (
   (assert_eq c_wide (fourstate expected_wide 0) "c_wide before clock")
   (tick clk)
   (let expected_narrow (& narrow_value (^ 0xff narrow_mask)))
-  (do
-    (assert_eq c_u8 (fourstate expected_narrow 0) "{name}"))
-  (do
-    (assert_eq c_i8 (fourstate expected_narrow 0) "{name}"))
-  (do
-    (assert_eq f_u8 (fourstate expected_narrow 0) "{name}"))
-  (do
-    (assert_eq f_i8 (fourstate expected_narrow 0) "{name}"))
-  (do
-    (assert_eq c_wide (fourstate expected_wide 0) "{name}"))
-  (do
-    (assert_eq f_wide (fourstate expected_wide 0) "{name}")))
+  (expand name (c_u8 c_i8 f_u8 f_i8)
+    (assert_eq {name} (fourstate expected_narrow 0) "{name}"))
+  (expand name (c_wide f_wide)
+    (assert_eq {name} (fourstate expected_wide 0) "{name}")))
 
 (case constant_type_cast_clears_unknown_bits
   (four_state)
@@ -78,14 +70,8 @@ module Top (
 "#)
   (top Top)
   (tick clk)
-  (do
-    (assert_eq c_compound (fourstate 0x84 0) "{name}"))
-  (do
-    (assert_eq c_variable (fourstate 0x84 0) "{name}"))
-  (do
-    (assert_eq f_compound (fourstate 0x84 0) "{name}"))
-  (do
-    (assert_eq f_variable (fourstate 0x84 0) "{name}")))
+  (expand name (c_compound c_variable f_compound f_variable)
+    (assert_eq {name} (fourstate 0x84 0) "{name}")))
 
 (case function_formal_type_clears_unknown_bits
   (four_state)
@@ -108,10 +94,8 @@ module Top (
   (top Top)
   (modify (set a (fourstate 0xa9 0x0c)))
   (tick clk)
-  (do
-    (assert_eq c (fourstate 0xa1 0) "{name}"))
-  (do
-    (assert_eq f (fourstate 0xa1 0) "{name}")))
+  (expand name (c f)
+    (assert_eq {name} (fourstate 0xa1 0) "{name}")))
 
 (case signed_four_state_function_formal_preserves_unknown_bits
   (four_state)
@@ -134,10 +118,8 @@ module Top (
   (top Top)
   (modify (set a (fourstate 0xa9 0x0c)))
   (tick clk)
-  (do
-    (assert_eq c (fourstate 0xa9 0x0c) "{name}"))
-  (do
-    (assert_eq f (fourstate 0xa9 0x0c) "{name}")))
+  (expand name (c f)
+    (assert_eq {name} (fourstate 0xa9 0x0c) "{name}")))
 
 (case implicit_assignment_to_bit_clears_unknowns_without_mutating_source
   ; Veryl 0.20.3 retains the X/Z mask when assigning logic to bit.
@@ -186,19 +168,11 @@ module Top (
     (set narrow (fourstate narrow_value narrow_mask))
     (set wide (fourstate wide_value wide_mask)))
   (tick clk)
-  (do
-    (assert_eq c_narrow_bit (fourstate expected_narrow 0) "{name}"))
-  (do
-    (assert_eq f_narrow_bit (fourstate expected_narrow 0) "{name}"))
-  (do
-    (assert_eq c_wide_bit (fourstate expected_wide 0) "{name}"))
-  (do
-    (assert_eq f_wide_bit (fourstate expected_wide 0) "{name}"))
-  (do
-    (assert_eq c_narrow_after (fourstate narrow_value narrow_mask) "{name}"))
-  (do
-    (assert_eq f_narrow_after (fourstate narrow_value narrow_mask) "{name}"))
-  (do
-    (assert_eq c_wide_after (fourstate wide_value wide_mask) "{name}"))
-  (do
-    (assert_eq f_wide_after (fourstate wide_value wide_mask) "{name}")))
+  (expand name (c_narrow_bit f_narrow_bit)
+    (assert_eq {name} (fourstate expected_narrow 0) "{name}"))
+  (expand name (c_wide_bit f_wide_bit)
+    (assert_eq {name} (fourstate expected_wide 0) "{name}"))
+  (expand name (c_narrow_after f_narrow_after)
+    (assert_eq {name} (fourstate narrow_value narrow_mask) "{name}"))
+  (expand name (c_wide_after f_wide_after)
+    (assert_eq {name} (fourstate wide_value wide_mask) "{name}")))

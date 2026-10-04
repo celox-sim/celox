@@ -129,8 +129,8 @@
       (set store_addr 0x80002004)
       (set load_addr 0x80002004)
       (set store_data 0x12345678))
-    (assert_eq mask 1 "head={head_value} store={store_value} load={load_value}")
-    (assert_eq byte0 0x78 "head={head_value} store={store_value} load={load_value}")))
+    (assert_eq mask 1)
+    (assert_eq byte0 0x78)))
 
 (case recovered_unrolled_multi_state_priority
   (source "test.veryl" #"
@@ -168,7 +168,7 @@
       (set bits input)
       (eval)
       (let expected_priority (? (|| (== enabled 0) (== input 0)) 0 (trunc 8 (- 7 (- 8 (bitlen (trunc 8 input)))))))
-      (assert_eq out_data expected_priority "data for en={enabled} bits={input:04b}"))))
+      (assert_eq out_data expected_priority "data for"))))
 
 (case recovered_unrolled_guard_uses_procedural_four_state_truth
   (four_state)

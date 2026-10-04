@@ -174,10 +174,8 @@
     (let high_value (? (!= (& value 0x80) 0) 0xff 0))
     (let high_mask (? (!= (& mask 0x80) 0) 0xff 0))
     (assert_eq high (fourstate high_value high_mask))
-    (do
-      (assert_eq low (fourstate value mask) "{name}"))
-    (do
-      (assert_eq returned (fourstate value mask) "{name}"))))
+    (expand name (low returned)
+      (assert_eq {name} (fourstate value mask) "{name}"))))
 
 (case test_ff_statement_output_copyout_freezes_all_inputs
   ; Celox opt-in FF function effects are rejected by the Veryl analyzer.

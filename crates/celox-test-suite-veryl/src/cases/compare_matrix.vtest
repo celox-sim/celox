@@ -306,7 +306,7 @@ inst t: TestConst::<IntElement> (out);
 }
 "#)
   (top Top)
-  (assert_eq out 0xffffffff "E::max_value should be ~0 = 0xFFFFFFFF"))
+  (assert_eq out 0xffffffff "E:max_value should be ~0 = 0xFFFFFFFF"))
 
 (case test_compare_matrix_stage1cm
   (source "test.veryl" #"

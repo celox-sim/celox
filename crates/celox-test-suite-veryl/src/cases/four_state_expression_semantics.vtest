@@ -87,48 +87,22 @@ module Top (
 }
 "#)
   (top Top)
-  (do
-    (let cond_value 1)
+  (expand (cond_value label) ((1 X) (0 Z))
     (modify
-      (set sel (fourstate cond_value 1))
+      (set sel (fourstate {cond_value} 1))
       (set a (fourstate 0xaa 0))
       (set b (fourstate 0xbb 0)))
     (tick clk)
     ; 0xaa and 0xbb differ only in bits 0 and 4. Equal bits remain
     ; known; differing bits become X in Celox's (value, mask) form.
-    (do
-      (assert_eq c (fourstate 0xbb 0x11) "{name}, cond={label}"))
-    (do
-      (assert_eq f (fourstate 0xbb 0x11) "{name}, cond={label}"))
+    (expand name (c f)
+      (assert_eq {name} (fourstate 0xbb 0x11) "{name}, cond={label}"))
     (modify
       (set a (fourstate 0xa5 0))
       (set b (fourstate 0xa5 0)))
     (tick clk)
-    (do
-      (assert_eq c (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))
-    (do
-      (assert_eq f (fourstate 0xa5 0) "{name}, identical branches, cond={label}")))
-  (do
-    (let cond_value 0)
-    (modify
-      (set sel (fourstate cond_value 1))
-      (set a (fourstate 0xaa 0))
-      (set b (fourstate 0xbb 0)))
-    (tick clk)
-    ; 0xaa and 0xbb differ only in bits 0 and 4. Equal bits remain
-    ; known; differing bits become X in Celox's (value, mask) form.
-    (do
-      (assert_eq c (fourstate 0xbb 0x11) "{name}, cond={label}"))
-    (do
-      (assert_eq f (fourstate 0xbb 0x11) "{name}, cond={label}"))
-    (modify
-      (set a (fourstate 0xa5 0))
-      (set b (fourstate 0xa5 0)))
-    (tick clk)
-    (do
-      (assert_eq c (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))
-    (do
-      (assert_eq f (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))))
+    (expand name (c f)
+      (assert_eq {name} (fourstate 0xa5 0) "{name}, identical branches, cond={label}"))))
 
 (case logical_not_known_one_dominates_unknown_bits
   (four_state)
@@ -155,60 +129,20 @@ module Top (
   (let narrow_known_one (<< 1 7))
   (let wide_unknown (<< 1 3))
   (let wide_known_one (<< 1 100))
-  (do
-    (let unknown_value 1)
-    (let unknown_value unknown_value)
+  (expand (unknown_value label) ((1 X) (0 Z))
+    (let unknown_value {unknown_value})
     (modify
       (set narrow (fourstate (| narrow_known_one (* narrow_unknown unknown_value)) narrow_unknown))
       (set wide (fourstate (| wide_known_one (* wide_unknown unknown_value)) wide_unknown)))
     (tick clk)
-    (do
-      (assert_eq c_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (do
-      (assert_eq c_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (do
-      (assert_eq f_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (do
-      (assert_eq f_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
+    (expand name (c_narrow c_wide f_narrow f_wide)
+      (assert_eq {name} (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
     (modify
       (set narrow (fourstate (* narrow_unknown unknown_value) narrow_unknown))
       (set wide (fourstate (* wide_unknown unknown_value) wide_unknown)))
     (tick clk)
-    (do
-      (assert_eq c_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
-    (do
-      (assert_eq c_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
-    (do
-      (assert_eq f_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
-    (do
-      (assert_eq f_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}")))
-  (do
-    (let unknown_value 0)
-    (let unknown_value unknown_value)
-    (modify
-      (set narrow (fourstate (| narrow_known_one (* narrow_unknown unknown_value)) narrow_unknown))
-      (set wide (fourstate (| wide_known_one (* wide_unknown unknown_value)) wide_unknown)))
-    (tick clk)
-    (do
-      (assert_eq c_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (do
-      (assert_eq c_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (do
-      (assert_eq f_narrow (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (do
-      (assert_eq f_wide (fourstate 0 0) "{name}, operand contains a known 1 and {label}"))
-    (modify
-      (set narrow (fourstate (* narrow_unknown unknown_value) narrow_unknown))
-      (set wide (fourstate (* wide_unknown unknown_value) wide_unknown)))
-    (tick clk)
-    (do
-      (assert_eq c_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
-    (do
-      (assert_eq c_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
-    (do
-      (assert_eq f_narrow (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))
-    (do
-      (assert_eq f_wide (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))))
+    (expand name (c_narrow c_wide f_narrow f_wide)
+      (assert_eq {name} (fourstate 1 1) "{name}, operand contains no known 1 and {label}"))))
 
 (case effectful_ternary_takes_known_true_branch_despite_unknown_bits
   ; Veryl 0.20.3 evaluates the false arm despite a known 1 in cond.
@@ -295,64 +229,20 @@ module Top (
   (let unknown (<< 1 2))
   (let known_one (<< 1 7))
   (let wide_known_one (<< 1 100))
-  (do
-    (let unknown_value 1)
+  (expand (unknown_value label) ((1 X) (0 Z))
     (modify
-      (set cond (fourstate (| known_one (* unknown unknown_value)) unknown))
-      (set wide_cond (fourstate (| wide_known_one (* unknown unknown_value)) unknown)))
+      (set cond (fourstate (| known_one (* unknown {unknown_value})) unknown))
+      (set wide_cond (fourstate (| wide_known_one (* unknown {unknown_value})) unknown)))
     (tick clk)
-    (do
-      (assert_eq if_result (fourstate 1 0) "{name}, known one plus {label}"))
-    (do
-      (assert_eq wide_if_result (fourstate 1 0) "{name}, known one plus {label}"))
-    (do
-      (assert_eq function_result (fourstate 1 0) "{name}, known one plus {label}"))
-    (do
-      (assert_eq function_side (fourstate 1 0) "{name}, known one plus {label}"))
+    (expand name (if_result wide_if_result function_result function_side)
+      (assert_eq {name} (fourstate 1 0) "{name}, known one plus {label}"))
     (assert_eq case_result (fourstate 0 0) "an unknown equality must not select a case arm ({label})")
     (modify
-      (set cond (fourstate (* unknown unknown_value) unknown))
-      (set wide_cond (fourstate (* unknown unknown_value) unknown)))
+      (set cond (fourstate (* unknown {unknown_value}) unknown))
+      (set wide_cond (fourstate (* unknown {unknown_value}) unknown)))
     (tick clk)
-    (do
-      (assert_eq if_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq wide_if_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq case_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq function_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq function_side (fourstate 0 0) "{name}, only {label}")))
-  (do
-    (let unknown_value 0)
-    (modify
-      (set cond (fourstate (| known_one (* unknown unknown_value)) unknown))
-      (set wide_cond (fourstate (| wide_known_one (* unknown unknown_value)) unknown)))
-    (tick clk)
-    (do
-      (assert_eq if_result (fourstate 1 0) "{name}, known one plus {label}"))
-    (do
-      (assert_eq wide_if_result (fourstate 1 0) "{name}, known one plus {label}"))
-    (do
-      (assert_eq function_result (fourstate 1 0) "{name}, known one plus {label}"))
-    (do
-      (assert_eq function_side (fourstate 1 0) "{name}, known one plus {label}"))
-    (assert_eq case_result (fourstate 0 0) "an unknown equality must not select a case arm ({label})")
-    (modify
-      (set cond (fourstate (* unknown unknown_value) unknown))
-      (set wide_cond (fourstate (* unknown unknown_value) unknown)))
-    (tick clk)
-    (do
-      (assert_eq if_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq wide_if_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq case_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq function_result (fourstate 0 0) "{name}, only {label}"))
-    (do
-      (assert_eq function_side (fourstate 0 0) "{name}, only {label}")))
+    (expand name (if_result wide_if_result case_result function_result function_side)
+      (assert_eq {name} (fourstate 0 0) "{name}, only {label}")))
   (modify
     (set cond (fourstate known_one 0))
     (set wide_cond (fourstate wide_known_one 0)))
@@ -388,34 +278,19 @@ module Top (
 "#)
   (top Top)
   (modify (set d 1))
-  (do
-    (let value 1)
+  (expand (value label) ((1 X) (0 Z))
     (modify
-      (set reset_high (fourstate value 1))
-      (set reset_low (fourstate value 1)))
+      (set reset_high (fourstate {value} 1))
+      (set reset_low (fourstate {value} 1)))
     (tick clk)
-    (do
-      (assert_eq q_high (fourstate 1 0) "{name}, reset={label}"))
-    (do
-      (assert_eq q_low (fourstate 1 0) "{name}, reset={label}")))
-  (do
-    (let value 0)
-    (modify
-      (set reset_high (fourstate value 1))
-      (set reset_low (fourstate value 1)))
-    (tick clk)
-    (do
-      (assert_eq q_high (fourstate 1 0) "{name}, reset={label}"))
-    (do
-      (assert_eq q_low (fourstate 1 0) "{name}, reset={label}")))
+    (expand name (q_high q_low)
+      (assert_eq {name} (fourstate 1 0) "{name}, reset={label}")))
   (modify
     (set reset_high (fourstate 1 0))
     (set reset_low (fourstate 0 0)))
   (tick clk)
-  (do
-    (assert_eq q_high (fourstate 0 0) "{name}, known active reset"))
-  (do
-    (assert_eq q_low (fourstate 0 0) "{name}, known active reset")))
+  (expand name (q_high q_low)
+    (assert_eq {name} (fourstate 0 0) "{name}, known active reset")))
 
 (case wide_ternary_condition_known_one_dominates_unknown_bits
   (four_state)
@@ -437,28 +312,14 @@ module Top (
   (top Top)
   (let known_one (<< 1 100))
   (let unknown_bit (<< 1 3))
-  (do
-    (let unknown_value unknown_bit)
+  (expand (unknown_value label) ((unknown_bit X) (0 Z))
     (modify
-      (set sel (fourstate (| known_one unknown_value) unknown_bit))
+      (set sel (fourstate (| known_one {unknown_value}) unknown_bit))
       (set a (fourstate 0xa5 0))
       (set b (fourstate 0x3c 0)))
     (tick clk)
-    (do
-      (assert_eq c (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))
-    (do
-      (assert_eq f (fourstate 0xa5 0) "{name}, lower unknown bit is {label}")))
-  (do
-    (let unknown_value 0)
-    (modify
-      (set sel (fourstate (| known_one unknown_value) unknown_bit))
-      (set a (fourstate 0xa5 0))
-      (set b (fourstate 0x3c 0)))
-    (tick clk)
-    (do
-      (assert_eq c (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))
-    (do
-      (assert_eq f (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))))
+    (expand name (c f)
+      (assert_eq {name} (fourstate 0xa5 0) "{name}, lower unknown bit is {label}"))))
 
 (case logical_unknown_truth_table_matches_comb_and_ff
   (four_state)

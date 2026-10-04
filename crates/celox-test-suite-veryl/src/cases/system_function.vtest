@@ -15,7 +15,7 @@ module Top (
   (for value (range 0 256)
     (let value (trunc 8 value))
     (modify (set d value))
-    (assert_eq (trunc 8 (get q)) (== (popcount value) 1) "value={value:#010b}")))
+    (assert_eq (trunc 8 (get q)) (== (popcount value) 1))))
 
 (case test_comb_function_body_onehot_system_function
   (source "test.veryl" #"
@@ -38,7 +38,7 @@ module Top (
   (for value (range 0 256)
     (let value (trunc 8 value))
     (modify (set d value))
-    (assert_eq (trunc 8 (get q)) (== (popcount value) 1) "value={value:#010b}")))
+    (assert_eq (trunc 8 (get q)) (== (popcount value) 1))))
 
 (case test_direct_comb_bits_system_function
   (source "test.veryl" #"
@@ -87,7 +87,7 @@ module Top (
     (let value (trunc 8 value))
     (modify (set d value))
     (let expected (? (== value 0) 0 (- 32 (- 32 (bitlen (trunc 32 (- value 1)))))))
-    (assert_eq (trunc 32 (get q)) expected "value={value}")))
+    (assert_eq (trunc 32 (get q)) expected)))
 
 (case test_comb_function_body_clog2_system_function
   (source "test.veryl" #"
@@ -111,7 +111,7 @@ module Top (
     (let value (trunc 8 value))
     (modify (set d value))
     (let expected (? (== value 0) 0 (- 32 (- 32 (bitlen (trunc 32 (- value 1)))))))
-    (assert_eq (trunc 32 (get q)) expected "value={value}")))
+    (assert_eq (trunc 32 (get q)) expected)))
 
 (case test_comb_function_body_bits_size_system_functions
   (source "test.veryl" #"
@@ -371,7 +371,7 @@ module Top (
     (modify (set d value))
     (tick clk)
     (let expected (? (== value 0) 0 (- 32 (- 32 (bitlen (trunc 32 (- value 1)))))))
-    (assert_eq (trunc 32 (get q)) expected "value={value}")))
+    (assert_eq (trunc 32 (get q)) expected)))
 
 (case test_ff_function_body_clog2_system_function
   (source "test.veryl" #"
@@ -397,7 +397,7 @@ module Top (
     (modify (set d value))
     (tick clk)
     (let expected (? (== value 0) 0 (- 32 (- 32 (bitlen (trunc 32 (- value 1)))))))
-    (assert_eq (trunc 32 (get q)) expected "value={value}")))
+    (assert_eq (trunc 32 (get q)) expected)))
 
 (case test_direct_ff_signed_system_function
   (source "test.veryl" #"
@@ -484,7 +484,7 @@ module Top (
     (let value (trunc 8 value))
     (modify (set d value))
     (tick clk)
-    (assert_eq (trunc 8 (get q)) (== (popcount value) 1) "value={value:#010b}")))
+    (assert_eq (trunc 8 (get q)) (== (popcount value) 1))))
 
 (case test_ff_function_body_onehot_system_function
   (source "test.veryl" #"
@@ -509,4 +509,4 @@ module Top (
     (let value (trunc 8 value))
     (modify (set d value))
     (tick clk)
-    (assert_eq (trunc 8 (get q)) (== (popcount value) 1) "value={value:#010b}")))
+    (assert_eq (trunc 8 (get q)) (== (popcount value) 1))))

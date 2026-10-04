@@ -66,7 +66,7 @@
   (let v_set2 (payload (get a)))
   (let m_set2 (xmask (get a)))
   (assert (== v_set2 100))
-  (assert (== m_set2 0) "Mask should be cleared by set()"))
+  (assert (== m_set2 0) "Mask should be cleared by set"))
 
 (case test_ff_struct_logic_to_bit_coercion_clears_mask
   (four_state)

@@ -170,7 +170,7 @@ assign o = a << amt;
       (set a one)
       (set amt shift))
     (let expected (<< one shift))
-    (assert_eq o expected "512-bit shl of 1 by {shift} failed")))
+    (assert_eq o expected "512-bit shl of 1 by failed")))
 
 (case test_512bit_shift_right
   (source "test.veryl" #"
@@ -190,7 +190,7 @@ assign o = a >> amt;
       (set a msb)
       (set amt shift))
     (let expected (>> msb shift))
-    (assert_eq o expected "512-bit shr of MSB by {shift} failed")))
+    (assert_eq o expected "512-bit shr of MSB by failed")))
 
 (case test_512bit_arithmetic_shift_right
   (source "test.veryl" #"
@@ -210,7 +210,7 @@ assign o = a >>> amt;
     (modify
       (set a all_ones)
       (set amt shift))
-    (assert_eq o all_ones "512-bit sar of -1 by {shift} should remain -1"))
+    (assert_eq o all_ones "512-bit sar of -1 by should remain -1"))
   ; MSB set, rest zero (minimum value): sar by 1 → sign extends
   ; 0x8000...0000 >>> 1 = 0xC000...0000
   (let min_val (<< 1 511))
@@ -312,7 +312,7 @@ assign o = a << amt;
       (set a one)
       (set amt shift))
     (let expected (& (<< one shift) mask))
-    (assert_eq o expected "1024-bit shl of 1 by {shift} failed")))
+    (assert_eq o expected "1024-bit shl of 1 by failed")))
 
 (case test_1024bit_shift_right
   (source "test.veryl" #"
@@ -332,7 +332,7 @@ assign o = a >> amt;
       (set a msb)
       (set amt shift))
     (let expected (>> msb shift))
-    (assert_eq o expected "1024-bit shr of MSB by {shift} failed")))
+    (assert_eq o expected "1024-bit shr of MSB by failed")))
 
 (case test_1024bit_sar_sign_extension
   (source "test.veryl" #"

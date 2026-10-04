@@ -79,13 +79,13 @@
     (set gate 1)
     (set fallback 37)
     (eval)
-    (assert_eq pop expected_pop "popcount({input:#x})")
-    (assert_eq clz expected_clz "clz({input:#x})")
-    (assert_eq ctz expected_ctz "ctz({input:#x})")
-    (assert_eq gated_clz expected_clz "gated clz({input:#x})")
+    (assert_eq pop expected_pop "popcount")
+    (assert_eq clz expected_clz "clz")
+    (assert_eq ctz expected_ctz "ctz")
+    (assert_eq gated_clz expected_clz "gated clz")
     (set gate 0)
     (eval)
-    (assert_eq gated_clz 37 "gated clz fallback({input:#x})")))
+    (assert_eq gated_clz 37 "gated clz fallback")))
 
 (case test_guarded_scan_preserves_independent_outputs
   (source "test.veryl" #"

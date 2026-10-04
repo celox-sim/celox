@@ -34,7 +34,7 @@
   (for (next_addr expected) (list (3 0x10) (1 0x13) (2 0x11) (0 0x12))
     (modify (set addr next_addr))
     (tick clk)
-    (assert_eq q expected "new addr input {next_addr}"))
+    (assert_eq q expected "new addr input"))
   (tick clk)
   (assert_eq q 0x10))
 
@@ -67,7 +67,7 @@
   (for (next_index expected) (list (3 0) (0 1) (1 0) (2 1))
     (modify (set index next_index))
     (tick clk)
-    (assert_eq q expected "new bit index {next_index}"))
+    (assert_eq q expected "new bit index"))
   (tick clk)
   (assert_eq q 0))
 
@@ -102,7 +102,7 @@
   (for (next_index expected) (list (2 0x11) (1 0x33) (3 0x22) (0 0x44))
     (modify (set index next_index))
     (tick clk)
-    (assert_eq q expected "new byte index {next_index}"))
+    (assert_eq q expected "new byte index"))
   (tick clk)
   (assert_eq q 0x11))
 

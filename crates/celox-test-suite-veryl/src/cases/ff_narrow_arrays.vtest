@@ -14,7 +14,7 @@
   (for value (list 0 0xff 0x55 0xaa 0x81 0x7e)
     (modify (set d value))
     (tick clk)
-    (assert_eq q value "input {value:#x}")))
+    (assert_eq q value "input")))
 
 (case ff_captures_padded_elements_and_unknown_masks
   (four_state)

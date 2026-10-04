@@ -25,7 +25,7 @@ o_bin,
     (modify (set i_bin val))
     (let gray_out (trunc 8 (get o_gray)))
     (let bin_out (trunc 8 (get o_bin)))
-    (assert (== bin_out val) "roundtrip failed: input={val}, gray={gray_out:#04x}, output={bin_out}")))
+    (assert (== bin_out val) "roundtrip failed")))
 
 (case test_gray_single_bit_change
   (source "test.veryl"

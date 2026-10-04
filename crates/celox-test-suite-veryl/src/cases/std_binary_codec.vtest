@@ -20,7 +20,7 @@ o_bin,
     (let onehot_val (<< 1 bit_pos))
     (modify (set i_unary onehot_val))
     (let bin_out (trunc 8 (get o_bin)))
-    (assert (== bin_out bit_pos) "encoder({onehot_val:#010b}): expected={bit_pos}, got={bin_out}")))
+    (assert (== bin_out bit_pos) "encoder")))
 
 (case test_binary_decoder
   (source "test.veryl"
@@ -42,7 +42,7 @@ o_unary,
     (modify (set i_bin val))
     (let unary_out (trunc 8 (get o_unary)))
     (let expected (<< 1 val))
-    (assert (== unary_out expected) "decoder({val}): expected={expected:#010b}, got={unary_out:#010b}")))
+    (assert (== unary_out expected) "decoder")))
 
 (case test_binary_codec_roundtrip
   (source "test.veryl"
@@ -71,7 +71,7 @@ o_unary,
     (let onehot_val (<< 1 bit_pos))
     (modify (set i_unary onehot_val))
     (let roundtrip (trunc 8 (get o_unary)))
-    (assert (== roundtrip onehot_val) "roundtrip failed for bit {bit_pos}: input={onehot_val:#010b}, output={roundtrip:#010b}")))
+    (assert (== roundtrip onehot_val) "roundtrip failed for bit")))
 
 (case test_binary_encoder_disabled
   (source "test.veryl"
