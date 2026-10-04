@@ -852,6 +852,8 @@ explicit aligned cells, one pending read response, and one outstanding AW/W pair
 The example has two cells;
 it is a memory model, not inferred semantics for an arbitrary peripheral.
 
+The source driver also supports [checked inductive strengthening](lemmas.md#source-bound-inductive-safety) through `induct`. The declared 32/64-bit memory examples now establish all six safety obligations for unbounded execution, with reset establishment, lifecycle-invariant preservation and each original target use checked separately. Bounded search and original-source replay remain available for failure discovery.
+
 The six independently checked documents are:
 
 - `requests`: accepted AW and W payloads enter their actual source holding slots

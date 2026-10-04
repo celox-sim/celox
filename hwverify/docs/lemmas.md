@@ -206,3 +206,123 @@ are not asserted reachable from reset. The displayed lowered query uses source
 aliases and may be truncated for size; it is explanatory output, never evidence
 accepted by the checker. Editing any source or associated model invalidates
 these statuses, including when the edit is unsaved.
+
+## Source-bound inductive safety
+
+The scalar specification bridge now supports explicit state-predicate
+strengthening through `hwverify_verify::induction::check_inductive_safety` and the
+source-contract driver's `induct` command. This proves reset-inductive safety for
+arbitrarily long execution, rather than extrapolating a successful bounded
+search. It makes no liveness, deadline, fairness, full AXI-compliance, synthesized
+timing or general peripheral claim. The ordinary search and original-source
+counterexample replay commands are unchanged.
+
+```sh
+python3 protocols/source_contract_project.py induct examples/source-contracts/memory-contract.json --obligation requests --out /fresh/memory-induction
+# Optional replacement proposals; an empty array runs without strengthening.
+python3 protocols/source_contract_project.py induct examples/source-contracts/memory-contract.json --obligation requests --candidates /path/candidates.json --out /fresh/explicit-induction
+python3 conformance/source-contracts/measure_induction.py --evidence /fresh/memory-induction --out /fresh/measurements --runs 3
+```
+
+Candidate files are arrays of objects like:
+
+```json
+[{
+  "name": "applied_owns_accepted_pair",
+  "predicate": ["or", ["not", "s.write_done"], ["and", "s.a_full", "s.d_full"]],
+  "depends_on": []
+}]
+```
+
+These are proposals, not assumptions. Expressions refer only to actual current
+implementation state (`s.<register>`); inputs, next-state aliases, arbitrary
+guards and serialized proof receipts are rejected. The existing typed
+`LemmaCandidate` lowerer checks each predicate. The caller cannot supply an
+initialization or transition relation: they come from the unchanged validated
+source model. The memory helper generates the same lifecycle predicate using
+the caller's actual signal bindings, not fixture-specific register names.
+
+For candidate `P`, reset expression `R`, transition `T`, and already established
+explicit dependencies `D`, the checker proves:
+
+1. Reset establishment: `reset => P(R)`.
+2. Preservation: `!reset && P && D => P(T)`.
+3. Original target uses: the conjunction of established predicates implies the
+   negation of each **unchanged** original safety violation predicate.
+
+Original target reset initialization is checked separately, with a concrete
+nonempty reset check. Each candidate is initialized independently. Its
+preservation can use itself as the explicitly reported induction hypothesis and
+only named, earlier established predicates. This temporal self-hypothesis is the
+ordinary induction rule; it is not a cyclic lemma dependency. Forward, self and
+cyclic dependency references are rejected before proof execution. Original
+specification invariants and guarantees cannot be used to establish a candidate,
+so the target cannot justify its own strengthening. Original mapped invariants
+remain in their original target checks and are themselves initialized and
+preserved there.
+
+Each initialization, preservation and target-use sequent is checked by the
+existing `ProofBundle` and closed with a fresh, opaque `SequentHandle`. Only after
+both candidate sequents finish does the invocation create its private
+established-invariant authority. SAT, Unknown, failed initialization or failed
+preservation provides no such authority and stops dependent proof use. Existing
+finite budgets and source validation remain unchanged; there is no external
+solver fallback. No saved report or numeric node identifier is accepted as a
+proof. The additional orchestration rule is scalar reset induction over these
+checked sequents, not a new arithmetic or memory solver rule.
+
+The output separates `initialization_checked`, `preservation_checked`, declared
+dependencies and original target uses. It includes the complete original model,
+fresh proof graphs and countermodels; the source driver additionally records
+source/configuration/proposal and executable hashes. `induction_counterexample`
+is an arbitrary one-step countermodel, **not** a reset-reachable bug. Continue to
+use `search`, `stimulus` and `replay` to establish a reachable source failure.
+`unknown` never means verified. An `inductive_safety_verified` result covers all
+scalar inputs with no added environment assumptions, including later reset
+edges which restart the established initial state.
+
+### Memory induction coverage
+
+The two-cell 32/64-bit source examples each have six separately checked
+obligations: requests, capacity, effects, completion, response and readback.
+Without strengthening, ten of twelve verify directly. Request-storage induction
+fails at each width on an unreachable state with `write_done=true` and empty
+AW/W holding slots. The proposed implication from applied write to ownership of
+both slots is freshly established from reset and preserved. It closes both
+remaining targets: **12/12 unbounded safety obligations**, with no ghost state or
+assumed correspondence. Actual accepted-payload storage and its transition
+relations already provide the needed history correspondence.
+
+A successful obligation executes seven queries: original reset establishment
+and feasibility, candidate initialization and preservation, and three original
+safety uses. Initial native measurements took 8–37 ms per obligation; the largest
+observed sequent-bundle totals were 7,720 clauses and 3,440,887 work units. These
+are example measurements, not a guarantee for all supported cell counts or
+source architectures. No induction query required a solver-limit increase. Three-run final 64-bit medians
+were 27.73 ms for strengthened requests (baseline: counterexample), 30.07 ms
+for effects and 35.18 ms for readback. The latter two already prove without
+strengthening; their baseline medians were 28.73 ms and 19.24 ms. The uniform
+lifecycle proposal adds checked work there and is not a performance optimization.
+
+The source gate retains all bounded/Celox controls and also checks fresh
+induction for each positive obligation, idle-payload-clearing variants, and
+actual reset, byte-effect, request, completion, response and readback mutants.
+Stalled-read overwrite controls include indistinguishable equal-data requests.
+Native adversarial tests reject false/uninitialized/unpreserved candidates,
+missing dependencies, target-to-candidate circular reasoning, forged reports,
+input/next-state predicates, source changes and insufficient strengthening.
+
+The trust-boundary regression suite also deliberately exhausts the unchanged
+200,000-variable budget with an oversized strengthening predicate. Its reset
+initialization succeeds, preservation returns `unknown` with no proof root, its
+dependent proposal is not attempted, and no target use is issued—even though the
+original target alone is valid. This is a deterministic encoding-budget control,
+not a timing-dependent test or a reduced test-only solver limit.
+
+Input-dependent reset controls prove a relation for both reset-input values and
+reject a candidate which holds for only one of them. A feasible reset valuation
+cannot substitute for universal reset establishment. The original typed
+reset/next expressions are also evaluated over all 2,048 six-edge patterns
+starting in reset, including 1,984 patterns with later resets. A reset mutation
+that breaks only one input valuation is rejected before candidate establishment.
+These controls do not change the bounded replay format's single-reset rule.
