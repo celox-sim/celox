@@ -602,7 +602,7 @@ pub fn parse_sv(
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
         celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-            64,
+            error.tracking_issue(),
             celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",
             error.to_string(),
@@ -670,7 +670,7 @@ pub fn parse_mixed(
             .map_err(|error| match error {
                 celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
                 celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-                    64,
+                    error.tracking_issue(),
                     celox_frontend_veryl::LoweringPhase::SimulatorParser,
                     "systemverilog analysis",
                     error.to_string(),

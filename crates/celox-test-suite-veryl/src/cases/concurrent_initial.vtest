@@ -1,0 +1,305 @@
+(group concurrent_initial (category control_flow))
+
+(case shared_clock
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    var observed: logic<8>;
+    initial {
+        clk.next(4);
+        $assert(observed == 8'd3);
+        $finish();
+    }
+    initial {
+        observed = 0;
+        for _i in 0..3 {
+            clk.next(1);
+            observed += 1;
+        }
+        clk.next(2);
+        $assert(1'd0, "finish must stop every process");
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case control_flow
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    var observed: logic<8>;
+    #[allow(multiple_assign)]
+    var bound: u32;
+    initial {
+        bound = 4;
+        clk.next(5);
+        $assert(observed == 8'd3);
+        $finish();
+    }
+    initial {
+        observed = 0;
+        for i in 0..bound {
+            if i == 3 { break; }
+            if i != 3 {
+                clk.next(1);
+                observed += 1;
+            }
+        }
+    }
+    initial {
+        clk.next(0);
+        clk.next(1);
+        bound = 0;
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case clock_periods
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    inst slow: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    var observed: logic;
+    initial {
+        slow.next(1);
+        $assert(observed == 1'd1);
+        $finish();
+    }
+    initial {
+        fast.next(3);
+        observed = 1'd1;
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case reset_only_clock
+  (source "test.veryl" #"#[test(ResetWorker)]
+module ResetWorker #(param P: u32 = 6) {
+    const PERIOD: u32 = P + 0;
+    inst clk: $tb::clock_gen #(period: PERIOD);
+    inst rst: $tb::reset_gen(clk);
+    var done: logic;
+    initial { done = 0; rst.assert(1); done = 1; }
+}
+#[test(Top)]
+module Top {
+    inst short: ResetWorker;
+    inst long: ResetWorker #(P: 12);
+    inst reset_only: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    inst rst: $tb::reset_gen(clk: reset_only);
+    var reset_done: logic;
+    initial { reset_done = 0; rst.assert(1); reset_done = 1; }
+    initial {
+        fast.next(4);
+        $assert(reset_done == 0, "reset-only clock must still wait at time 8");
+        $assert(short.done == 1 && long.done == 0, "instance-specific reset periods");
+        fast.next(3);
+        $assert(reset_done == 1 && long.done == 1, "all resets complete by time 14");
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case simultaneous_edges
+  (tags two_state_initialization)
+  (source "test.veryl" #"module CrossCoupled (
+    a: input '_ clock,
+    b: input '_ clock,
+    x: output logic<8>,
+    y: output logic<8>,
+) {
+    always_ff (a) { x = y + 8'd1; }
+    always_ff (b) { y = x + 8'd1; }
+}
+#[test(Top)]
+module Top {
+    inst a: $tb::clock_gen;
+    inst b: $tb::clock_gen;
+    var x: logic<8>;
+    var y: logic<8>;
+    inst dut: CrossCoupled (a, b, x, y);
+    initial {
+        a.next(2);
+        $assert(x == 8'd2);
+        $assert(y == 8'd2);
+        $finish();
+    }
+    initial { b.next(2); }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case reset
+  (source "test.veryl" #"module Counter (
+    clk: input clock,
+    rst: input reset,
+    count: output logic<8>,
+) {
+    always_ff {
+        if_reset { count = 0; }
+        else { count += 1; }
+    }
+}
+#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    var count: logic<8>;
+    inst dut: Counter (clk, rst, count);
+    initial {
+        clk.next(4);
+        $assert(count == 8'd2);
+        $finish();
+    }
+    initial { rst.assert(2); }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case reset_between_edges
+  (source "test.veryl" #"module Counter (
+    clk: input clock,
+    rst: input reset,
+    count: output logic<8>,
+) {
+    always_ff {
+        if_reset { count = 0; }
+        else { count += 1; }
+    }
+}
+#[test(Top)]
+module Top {
+    inst slow: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    inst rst: $tb::reset_gen (clk: slow);
+    var count: logic<8>;
+    inst dut: Counter (clk: slow, rst, count);
+    initial { slow.next(4); }
+    initial {
+        rst.assert(1);
+        fast.next(1);
+        // At time 12, the time-10 edge has incremented the register.
+        $assert(count == 8'd1, "before reassert: count=%d", count);
+        rst.assert(1);
+    }
+    initial {
+        fast.next(7);
+        // At time 14, reset must have acted without the time-20 clock edge.
+        $assert(count == 8'd0, "between edges: count=%d", count);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case hierarchy
+  (source "test.veryl" #"#[test(Helper)]
+module Helper {
+    inst clk: $tb::clock_gen;
+    var observed: logic<8>;
+    initial {
+        observed = 0;
+        for _i in 0..3 {
+            clk.next(1);
+            observed += 1;
+        }
+    }
+}
+#[test(Top)]
+module Top {
+    inst clk: $tb::clock_gen;
+    inst left: Helper;
+    inst right: Helper;
+    initial {
+        clk.next(4);
+        $assert(left.observed == 8'd3);
+        $assert(right.observed == 8'd3);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case mixed_edges
+  (tags two_state_initialization)
+  (source "test.veryl" #"module CrossCoupled (
+    a: input '_ clock,
+    b: input '_ clock,
+    x: output logic<8>,
+    y: output logic<8>,
+) {
+    always_ff (a) { x = y + 8'd1; }
+    always_ff (b) { y = x + 8'd1; }
+}
+#[test(Top)]
+module Top {
+    inst observer: $tb::clock_gen #(period: 2);
+    inst a: $tb::clock_gen #(period: 3);
+    inst b: $tb::clock_gen #(period: 6);
+    var x: logic<8>;
+    var y: logic<8>;
+    let inverted: '_ clock = ~b;
+    inst dut: CrossCoupled (a, b: inverted, x, y);
+    initial {
+        a.next(2);
+        $assert(x == 8'd1, "x=%d y=%d", x, y);
+        $assert(y == 8'd2, "x=%d y=%d", x, y);
+        $finish();
+    }
+    initial { b.next(1); }
+    initial {
+        observer.next(1);
+        // Time 2 precedes b's falling edge at time 3. This observation does
+        // not depend on the order of the two edges that coincide at time 3.
+        $assert(x == 8'd1 && y == 8'd0, "time 2: x=%d y=%d", x, y);
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case gated_drive
+  (tags two_state_initialization)
+  (source "test.veryl" #"module Counter (clk: input clock, count: output logic<8>) {
+    always_ff (clk) { count += 1; }
+}
+#[test(Top)]
+module Top {
+    inst slow: $tb::clock_gen #(period: 10);
+    inst fast: $tb::clock_gen #(period: 2);
+    inst observer: $tb::clock_gen #(period: 8);
+    var enable: logic;
+    let gated: clock = slow & enable;
+    var count: logic<8>;
+    inst dut: Counter (clk: gated, count);
+    initial { slow.next(3); }
+    initial {
+        enable = 0;
+        fast.next(1);
+        // At time 2, slow is high and no generator edge is scheduled.
+        enable = 1;
+        // A combinational read must not consume the derived clock transition.
+        $assert(gated == 1);
+        slow.next(1);
+    }
+    initial {
+        observer.next(1);
+        $assert(count == 1, "gated edge lost: %d", count);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))

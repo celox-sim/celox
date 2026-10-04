@@ -271,7 +271,7 @@ fn analyze(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
 ) -> (
-    Result<OptimizedSir, ParserError>,
+    Result<OptimizedSir, SimulatorError>,
     Vec<AnalyzerError>,
     Vec<FrontendDiagnostic>,
 ) {
@@ -294,7 +294,8 @@ fn analyze(
                         "Veryl project source discovery",
                         error.to_string(),
                         None,
-                    )),
+                    )
+                    .into()),
                     Vec::new(),
                     Vec::new(),
                 );
@@ -326,7 +327,17 @@ fn analyze(
     let mut parsers = Vec::new();
     let mut errors = vec![];
     for (code, path) in sources {
-        let parsed = Parser::parse(code, path).unwrap();
+        let parsed = match Parser::parse(code, path) {
+            Ok(parsed) => parsed,
+            // A syntax error stops analysis; later passes need every file.
+            Err(error) => {
+                return (
+                    Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }
+        };
         let source_project = source_projects.get(*path).unwrap_or(&project_name);
         errors.append(&mut analyzer.analyze_pass1(source_project, &parsed.veryl));
         parsers.push(parsed);
@@ -349,7 +360,7 @@ fn analyze(
         && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
     {
         errors.append(&mut context.drain_errors());
-        return (Err(error), errors, Vec::new());
+        return (Err(error.into()), errors, Vec::new());
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
@@ -488,10 +499,12 @@ fn analyze(
             )
         }
     };
-    let sir = sir.map(|(sir, mut elaborated_diagnostics)| {
-        frontend_diagnostics.append(&mut elaborated_diagnostics);
-        sir
-    });
+    let sir = sir
+        .map(|(sir, mut elaborated_diagnostics)| {
+            frontend_diagnostics.append(&mut elaborated_diagnostics);
+            sir
+        })
+        .map_err(SimulatorError::from);
     (sir, errors, frontend_diagnostics)
 }
 
@@ -701,7 +714,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     }
     match sir {
         Ok(program) => Ok((program, warnings)),
-        Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+        Err(error) => Err(error.with_warnings(warnings)),
     }
 }
 
@@ -779,7 +792,7 @@ fn compile_to_sir_with_layout_mode(
     }
     match sir {
         Ok(p) => Ok((p, warnings)),
-        Err(e) => Err(SimulatorError::from(e).with_warnings(warnings)),
+        Err(e) => Err(e.with_warnings(warnings)),
     }
 }
 
@@ -1003,7 +1016,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     }
     match sir {
         Ok(program) => Ok((program, warnings)),
-        Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+        Err(error) => Err(error.with_warnings(warnings)),
     }
 }
 

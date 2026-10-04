@@ -1,0 +1,195 @@
+(group std_ram (category standard_library))
+
+(case test_ram_write_read
+  (source "test.veryl"
+    (std "ram/ram.veryl")
+    #"
+module Top (
+clk  : input  clock,
+rst  : input  reset,
+i_wea : input  logic,
+i_adra: input  logic<2>,
+i_da  : input  logic<8>,
+i_adrb: input  logic<2>,
+o_qb  : output logic<8>,
+) {
+inst u_ram: ram #(
+WORD_SIZE    : 4,
+ADDRESS_WIDTH: 2,
+DATA_WIDTH   : 8,
+BUFFER_OUT   : 0,
+USE_RESET    : 0,
+) (
+i_clk : clk,
+i_rst : rst,
+i_clr : 1'b0,
+i_mea : 1'b1,
+i_wea,
+i_adra,
+i_da,
+i_meb : 1'b1,
+i_adrb,
+o_qb,
+);
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_wea 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Write 0xAA to address 0
+  (modify
+    (set i_wea 1)
+    (set i_adra 0)
+    (set i_da 0xAA))
+  (tick clk)
+  ; Write 0xBB to address 1
+  (modify
+    (set i_adra 1)
+    (set i_da 0xBB))
+  (tick clk)
+  ; Write 0xCC to address 2
+  (modify
+    (set i_adra 2)
+    (set i_da 0xCC))
+  (tick clk)
+  ; Stop writing
+  (modify (set i_wea 0))
+  ; Read back: BUFFER_OUT=false means combinational read on port B
+  ; Address 0
+  (modify (set i_adrb 0))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0xAA "addr 0 should be 0xAA")
+  ; Address 1
+  (modify (set i_adrb 1))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0xBB "addr 1 should be 0xBB")
+  ; Address 2
+  (modify (set i_adrb 2))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0xCC "addr 2 should be 0xCC"))
+
+(case test_ram_overwrite
+  (source "test.veryl"
+    (std "ram/ram.veryl")
+    #"
+module Top (
+clk  : input  clock,
+rst  : input  reset,
+i_wea : input  logic,
+i_adra: input  logic<2>,
+i_da  : input  logic<8>,
+i_adrb: input  logic<2>,
+o_qb  : output logic<8>,
+) {
+inst u_ram: ram #(
+WORD_SIZE    : 4,
+ADDRESS_WIDTH: 2,
+DATA_WIDTH   : 8,
+BUFFER_OUT   : 0,
+USE_RESET    : 0,
+) (
+i_clk : clk,
+i_rst : rst,
+i_clr : 1'b0,
+i_mea : 1'b1,
+i_wea,
+i_adra,
+i_da,
+i_meb : 1'b1,
+i_adrb,
+o_qb,
+);
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_wea 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Write 0x11 to address 0
+  (modify
+    (set i_wea 1)
+    (set i_adra 0)
+    (set i_da 0x11))
+  (tick clk)
+  ; Overwrite address 0 with 0x22
+  (modify (set i_da 0x22))
+  (tick clk)
+  ; Read address 0 -- should be 0x22
+  (modify
+    (set i_wea 0)
+    (set i_adrb 0))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0x22 "overwritten value should be 0x22"))
+
+(case test_ram_reset_and_clear
+  (source "test.veryl"
+    (std "ram/ram.veryl")
+    #"
+module Top (
+clk   : input  clock,
+rst   : input  reset,
+i_wea : input  logic,
+i_adra: input  logic<2>,
+i_da  : input  logic<8>,
+i_clr : input  logic,
+i_adrb: input  logic<2>,
+o_qb  : output logic<8>,
+) {
+inst u_ram: ram #(
+WORD_SIZE    : 4,
+ADDRESS_WIDTH: 2,
+DATA_WIDTH   : 8,
+BUFFER_OUT   : 0,
+USE_RESET    : 1,
+) (
+i_clk : clk,
+i_rst : rst,
+i_clr,
+i_mea : 1'b1,
+i_wea,
+i_adra,
+i_da,
+i_meb : 1'b1,
+i_adrb,
+o_qb,
+);
+}
+"#)
+  (top Top)
+  ; Reset (USE_RESET=true: reset clears RAM to 0)
+  (modify
+    (set rst 0)
+    (set i_wea 0)
+    (set i_clr 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; After reset, all addresses should read 0
+  (modify (set i_adrb 0))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0 "addr 0 should be 0 after reset")
+  ; Write 0xFF to address 0
+  (modify
+    (set i_wea 1)
+    (set i_adra 0)
+    (set i_da 0xFF))
+  (tick clk)
+  (modify (set i_wea 0))
+  ; Verify written
+  (modify (set i_adrb 0))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0xFF)
+  ; Clear via i_clr
+  (modify (set i_clr 1))
+  (tick clk)
+  (modify (set i_clr 0))
+  ; After clear, should read 0
+  (modify (set i_adrb 0))
+  (eval)
+  (assert_eq (trunc 8 (get o_qb)) 0 "addr 0 should be 0 after clear"))

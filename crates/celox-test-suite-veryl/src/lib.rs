@@ -4,6 +4,7 @@
 mod backend;
 mod cases;
 mod scalar;
+pub mod script;
 
 #[cfg(feature = "emit")]
 pub mod emit;
@@ -127,7 +128,11 @@ pub struct TestCase {
     pub category: Category,
     pub expectation: Expectation,
     pub tags: &'static [TestTag],
-    run: fn(&mut Factory<'_>),
+    body: Body,
+}
+
+enum Body {
+    Script(&'static script::ScriptCase),
 }
 
 impl TestCase {
@@ -143,14 +148,107 @@ impl TestCase {
     /// Panics on a failed assertion or adapter error. A factory may be invoked
     /// more than once when a case exercises several designs.
     pub fn run(&self, factory: &mut Factory<'_>) {
-        (self.run)(factory);
+        match &self.body {
+            Body::Script(case) => run_script(case, factory),
+        }
     }
+
+    /// The case's script in the [`script`] language, which an adapter can
+    /// run without the Rust driver (for example as a generated testbench).
+    pub fn script(&self) -> &'static script::ScriptCase {
+        match &self.body {
+            Body::Script(case) => case,
+        }
+    }
+}
+
+impl script::ScriptCase {
+    /// The design this case compiles.
+    pub fn design(&self) -> Design {
+        Design {
+            sources: self
+                .sources
+                .iter()
+                .map(|(path, parts)| Source {
+                    text: parts
+                        .iter()
+                        .map(|part| match part {
+                            script::ast::SourcePart::Text(text) => text.clone(),
+                            script::ast::SourcePart::Std(path) => std_source(path),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    path: path.clone(),
+                })
+                .collect(),
+            top: self.top.clone(),
+            four_state: self.four_state,
+        }
+    }
+}
+
+/// The text of a Veryl standard library file such as `fifo/fifo.veryl`.
+fn std_source(path: &str) -> String {
+    use std::path::{Path, PathBuf};
+    veryl_std::expand().expect("failed to expand veryl-std sources");
+    let rel: PathBuf = path.split('/').collect();
+    let paths = veryl_std::paths(Path::new("")).expect("failed to resolve veryl-std sources");
+    let src = paths
+        .iter()
+        .find(|candidate| candidate.src.ends_with(&rel))
+        .unwrap_or_else(|| panic!("veryl-std source not found: {path}"));
+    std::fs::read_to_string(&src.src)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", src.src.display()))
+}
+
+fn run_script(case: &script::ScriptCase, factory: &mut Factory<'_>) {
+    let compiled = factory(&case.design());
+    if case.expectation == Expectation::CompilationError {
+        match compiled {
+            Err(error) if error.is::<CompilationRejected>() => {}
+            Err(error) => panic!(
+                "compile {}: expected language rejection, got adapter failure: {error}",
+                case.name
+            ),
+            Ok(_) => panic!("invalid design was accepted: {}", case.name),
+        }
+        return;
+    }
+    let backend = compiled.unwrap_or_else(|error| panic!("compile {}: {error}", case.name));
+    let mut sim = Simulator::new(backend);
+    script::interp::run(case, &mut sim);
 }
 
 /// All cases in deterministic declaration order. Filter by category or name in the
 /// host test runner; nothing is silently skipped by the suite itself.
 pub fn cases() -> impl Iterator<Item = &'static TestCase> {
-    cases::GROUPS.iter().flat_map(|group| group.iter())
+    static CASES: std::sync::OnceLock<Vec<&'static TestCase>> = std::sync::OnceLock::new();
+    CASES
+        .get_or_init(|| {
+            cases::GROUPS
+                .iter()
+                .flat_map(|group| script_cases(group.file, group.text))
+                .collect()
+        })
+        .iter()
+        .copied()
+}
+
+fn script_cases(file: &str, text: &str) -> Vec<&'static TestCase> {
+    let (_, parsed) = script::ast::group(text).unwrap_or_else(|error| panic!("{file}:{error}"));
+    parsed
+        .into_iter()
+        .map(|case| -> &'static TestCase {
+            let case: &'static script::ScriptCase = Box::leak(Box::new(case));
+            Box::leak(Box::new(TestCase {
+                name: &case.name,
+                category: case.category,
+                expectation: case.expectation,
+                tags: &case.tags,
+                body: Body::Script(case),
+            }))
+        })
+        .collect()
 }
 
 /// Look up a case by its full stable name.

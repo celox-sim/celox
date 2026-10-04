@@ -254,6 +254,27 @@ pub enum ParserError {
         source_location: Option<SourceLocation>,
     },
 
+    /// A violated invariant of the analyzer IR or of Celox itself. Valid
+    /// source cannot produce this error; it indicates a compiler bug.
+    #[error("Internal compiler error: {feature} ({detail})")]
+    Internal {
+        feature: &'static str,
+        detail: String,
+        source_location: Option<SourceLocation>,
+    },
+
+    #[error("External module `{name}` was not supplied")]
+    MissingExternalModule {
+        name: String,
+        source_location: Option<SourceLocation>,
+    },
+
+    #[error("Invalid $readmemh input: {detail}")]
+    MemoryFile {
+        detail: String,
+        source_location: Option<SourceLocation>,
+    },
+
     #[error("Invalid argument binding for `{argument}` in call to function `{function}`: {detail}")]
     InvalidFunctionArgumentBinding {
         function: String,
@@ -381,6 +402,25 @@ impl ParserError {
         }
     }
 
+    pub fn internal(
+        feature: &'static str,
+        detail: impl Into<String>,
+        token: Option<&TokenRange>,
+    ) -> Self {
+        ParserError::Internal {
+            feature,
+            detail: detail.into(),
+            source_location: token.map(SourceLocation::from_token),
+        }
+    }
+
+    pub fn memory_file(detail: impl Into<String>, token: Option<&TokenRange>) -> Self {
+        ParserError::MemoryFile {
+            detail: detail.into(),
+            source_location: token.map(SourceLocation::from_token),
+        }
+    }
+
     pub fn unresolved_width(
         module: &veryl_analyzer::ir::Module,
         var: &veryl_analyzer::ir::Variable,
@@ -421,6 +461,9 @@ impl miette::Diagnostic for ParserError {
                 }
             ))),
             ParserError::IllegalContext { .. } => Some(Box::new("illegal_context")),
+            ParserError::Internal { .. } => Some(Box::new("internal")),
+            ParserError::MissingExternalModule { .. } => Some(Box::new("missing_external_module")),
+            ParserError::MemoryFile { .. } => Some(Box::new("memory_file")),
             ParserError::InvalidFunctionArgumentBinding { .. } => {
                 Some(Box::new("invalid_function_argument_binding"))
             }
@@ -449,6 +492,15 @@ impl miette::Diagnostic for ParserError {
             | ParserError::IllegalContext {
                 source_location, ..
             }
+            | ParserError::Internal {
+                source_location, ..
+            }
+            | ParserError::MissingExternalModule {
+                source_location, ..
+            }
+            | ParserError::MemoryFile {
+                source_location, ..
+            }
             | ParserError::InvalidFunctionArgumentBinding {
                 source_location, ..
             }
@@ -469,6 +521,15 @@ impl miette::Diagnostic for ParserError {
                 source_location, ..
             }
             | ParserError::IllegalContext {
+                source_location, ..
+            }
+            | ParserError::Internal {
+                source_location, ..
+            }
+            | ParserError::MissingExternalModule {
+                source_location, ..
+            }
+            | ParserError::MemoryFile {
                 source_location, ..
             }
             | ParserError::InvalidFunctionArgumentBinding {

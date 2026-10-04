@@ -1,0 +1,1258 @@
+(group basic (category combinational))
+
+(case test_simple_assignment
+  (source "test.veryl" #"
+module Top (a: input logic<32>, b: output logic<32>) {
+assign b = a;
+}
+"#)
+  (top Top)
+  (modify (set a 0xDEADBEEF))
+  (assert_eq b 0xDEADBEEF))
+
+(case test_dependency_chain
+  (source "test.veryl" #"
+module Top (a: input logic<32>, b: output logic<32>) {
+var c: logic<32>;
+assign c = b;
+assign b = a;
+}
+"#)
+  (top Top)
+  (modify (set a 0x12345678))
+  (assert_eq c 0x12345678))
+
+(case test_mixed_selects_execution
+  (source "test.veryl" #"
+module Top (a: input logic<5>, b: output logic<8>) {
+assign b[0]      = 1'b1;
+assign b[2:1]    = 2'b10;
+assign b[7:3]    = a;
+}
+"#)
+  (top Top)
+  (modify (set a 0b10101))
+  (assert_eq b 0xAD))
+
+(case test_overlapping_override
+  (source "test.veryl" #"
+module Top (x: input logic<8>, y: input logic<4>, o: output logic<8>) {
+var a: logic<8>;
+always_comb{
+a = x;
+a[3:0] = y;
+}
+assign o = a;
+}
+"#)
+  (top Top)
+  (modify
+    (set x 0xFF)
+    (set y 0x0))
+  (assert_eq o 0xF0))
+
+(case test_comb_override_dependency
+  (source "test.veryl" #"
+module Top (sel: input logic, val: input logic<8>, o: output logic<8>) {
+var tmp: logic<8>;
+always_comb {
+tmp = 8'h11;
+if sel {
+tmp = val;
+}
+o = tmp;
+}
+}
+"#)
+  (top Top)
+  ; sel = 0 -> o = 0x11
+  (modify (set sel 0))
+  (assert_eq o 0x11)
+  ; sel = 1, val = 0xEE -> o = 0xEE
+  (modify
+    (set sel 1)
+    (set val 0xEE))
+  (assert_eq o 0xEE))
+
+(case test_always_comb_read_before_write_uses_previous_value
+  (source "test.veryl" #"
+module Top (
+    a: input logic,
+    c: output logic,
+) {
+    var b: logic;
+
+    always_comb {
+        c = b;
+        b = a;
+    }
+}
+"#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq c 0)
+  ; This may differ from synthesis-oriented intuition, but it follows the
+  ; LRM procedural ordering for always_comb: `c = b` observes the value of
+  ; `b` from before this block execution, even though `b = a` follows it.
+  (modify (set a 1))
+  (assert_eq c 0)
+  (modify (set a 0))
+  (assert_eq c 1))
+
+(case test_comb_function_call_early_return
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        if x == 8'd0 {
+            return x + 8'd1;
+        }
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0))
+  (assert_eq q 1)
+  (modify (set d 5))
+  (assert_eq q 7))
+
+(case test_comb_function_call_return_indexed_local_temp
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic {
+        var tmp: logic<8>;
+        tmp = x;
+        return tmp[0];
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0b1010))
+  (assert_eq q 0)
+  (modify (set d 0b1011))
+  (assert_eq q 1))
+
+(case test_comb_function_call_partial_write_local_temp
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp[7:4] = x[3:0];
+        tmp[3:0] = x[7:4];
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0xAB))
+  (assert_eq q 0xBA))
+
+(case test_comb_function_call_local_and_return_width_coercion
+  (source "test.veryl" #"
+module Top (
+    sel: input logic,
+    q0 : output logic<8>,
+    q1 : output logic<8>,
+) {
+    function f (
+        x: input logic,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 1'b1;
+        if x {
+            return 1'b1;
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q0 = f(1'b0);
+        q1 = f(sel);
+    }
+}
+"#)
+  (top Top)
+  (modify (set sel 0))
+  (assert_eq q0 1)
+  (assert_eq q1 1)
+  (modify (set sel 1))
+  (assert_eq q1 1))
+
+(case test_comb_function_call_constant_folded_if_return
+  (source "test.veryl" #"
+module Top (
+    q: output logic<8>,
+) {
+    function f () -> logic<8> {
+        if 1'b1 {
+            return 8'd3;
+        }
+    }
+
+    always_comb {
+        q = f();
+    }
+}
+"#)
+  (top Top)
+  (assert_eq q 3))
+
+(case test_comb_function_call_return_inside_for
+  (source "test.veryl" #"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        for i in 0..4 {
+            if x[i] {
+                return 8'd9;
+            }
+        }
+        return 8'd1;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0b0000))
+  (assert_eq q 1)
+  (modify (set d 0b0100))
+  (assert_eq q 9))
+
+(case test_comb_function_call_break_inside_for
+  (source "test.veryl" #"
+module Top (
+    d: input logic<4>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<4>,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        tmp = 8'd0;
+        for i in 0..4 {
+            if x[i] {
+                tmp = i + 8'd1;
+                break;
+            }
+        }
+        return tmp;
+    }
+
+    always_comb {
+        q = f(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0b0000))
+  (assert_eq q 0)
+  (modify (set d 0b1010))
+  (assert_eq q 2))
+
+(case test_comb_function_call_nested_helper
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return x + 8'd1;
+    }
+
+    function g (
+        x: input logic<8>,
+    ) -> logic<8> {
+        return f(x) + 8'd1;
+    }
+
+    always_comb {
+        q = g(d);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 8))
+  (assert_eq q 10))
+
+(case test_comb_function_call_statement_with_output_argument
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) {
+        y = x + 8'd2;
+    }
+
+    var tmp: logic<8>;
+    always_comb {
+        f(d, tmp);
+        q = tmp;
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 12))
+
+(case test_comb_function_call_expression_with_output_argument
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_return = f(d, q_output);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q_return 12)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_expression_output_is_visible_to_later_operand
+  (tags evaluation_order)
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    var tmp: logic<8>;
+    always_comb {
+        q = f(d, tmp) + tmp;
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 23))
+
+(case test_comb_function_call_expression_with_constant_input_keeps_output_write
+  (source "test.veryl" #"
+module Top (
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_return = f(8'd10, q_output) + 8'd1;
+    }
+}
+"#)
+  (top Top)
+  (assert_eq q_return 13)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_expression_output_survives_system_function_wrapper
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_return = $unsigned(f(d, q_output));
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q_return 12)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_with_output_argument_in_display_argument
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        $display("ret=%0d", f(d, q_output));
+        q = q_output;
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 11)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_with_output_argument_in_index_expression
+  (source "test.veryl" #"
+module Top (
+    data: input logic<4>,
+    sel: input logic<2>,
+    q: output logic,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<2>,
+        y: output logic<8>,
+    ) -> logic<2> {
+        y = 8'd10 + x;
+        return x;
+    }
+
+    always_comb {
+        q = data[f(sel, q_output)];
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set data 0b1010)
+    (set sel 1))
+  (assert_eq q 1)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_with_output_argument_in_destination_index
+  (source "test.veryl" #"
+module Top (
+    sel: input logic<2>,
+    q: output logic<4>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<2>,
+        y: output logic<8>,
+    ) -> logic<2> {
+        y = 8'd10 + x;
+        return x;
+    }
+
+    var data: logic<4>;
+    always_comb {
+        data = 4'b0000;
+        data[f(sel, q_output)] = 1'b1;
+        q = data;
+    }
+}
+"#)
+  (top Top)
+  (modify (set sel 2))
+  (assert_eq q 4)
+  (assert_eq q_output 12))
+
+(case test_comb_function_call_expression_output_is_guarded_by_ternary
+  (source "test.veryl" #"
+module Top (
+    sel: input logic,
+    d: input logic<8>,
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_output = d;
+        q_return = if sel ? f(d, q_output) : 8'd7;
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set sel 0)
+    (set d 10))
+  (assert_eq q_return 7)
+  (assert_eq q_output 10)
+  (modify (set sel 1))
+  (assert_eq q_return 12)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_expression_output_respects_short_circuit
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    and_result: output logic,
+    or_result: output logic,
+    and_output: output logic<8>,
+    or_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b1;
+    }
+
+    always_comb {
+        and_output = 8'd0;
+        or_output = 8'd0;
+        and_result = 1'b0 && f(d, and_output);
+        or_result = 1'b1 || f(d, or_output);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq and_result 0)
+  (assert_eq or_result 1)
+  (assert_eq and_output 0)
+  (assert_eq or_output 0))
+
+(case test_comb_function_call_with_output_argument_in_if_condition
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return x != 8'd0;
+    }
+
+    always_comb {
+        if f(d, q_output) {
+            q = 1'b1;
+        } else {
+            q = 1'b0;
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 1)
+  (assert_eq q_output 11)
+  (modify (set d 0))
+  (assert_eq q 0)
+  (assert_eq q_output 1))
+
+(case test_comb_function_call_with_output_argument_in_case_target
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<2> {
+        y = x + 8'd1;
+        return x[1:0];
+    }
+
+    always_comb {
+        case f(d, q_output) {
+            2'd0: q = 8'd10;
+            2'd1: q = 8'd11;
+            default: q = 8'd12;
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 5))
+  (assert_eq q 11)
+  (assert_eq q_output 6)
+  (modify (set d 6))
+  (assert_eq q 12)
+  (assert_eq q_output 7))
+
+(case test_comb_function_call_with_output_argument_in_loop_condition
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return x != 8'd0;
+    }
+
+    always_comb {
+        q = 8'd0;
+        for i in 0..2 {
+            if f(d + i, q_output) {
+                q = q + 8'd1;
+            }
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 3))
+  (assert_eq q 2)
+  (assert_eq q_output 5))
+
+(case test_comb_nested_function_output_call_in_function_condition
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function inner (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return x != 8'd0;
+    }
+
+    function outer (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        if inner(x, y) {
+            return x + 8'd2;
+        }
+        return 8'd0;
+    }
+
+    always_comb {
+        q = outer(d, q_output);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 12)
+  (assert_eq q_output 11))
+
+(case test_comb_case_target_output_call_is_evaluated_once
+  ; Veryl simulator 0.20.2 re-evaluates the effectful case target for
+  ; each arm, so the second comparison observes the first writeback.
+  (source "test.veryl" #"
+module Top (
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x;
+    }
+
+    var tmp: logic<8>;
+    always_comb {
+        tmp = 8'd0;
+        case f(tmp, tmp) {
+            8'd9: q = 8'd9;
+            8'd0: q = 8'd10;
+            default: q = 8'd12;
+        }
+        q_output = tmp;
+    }
+}
+"#)
+  (top Top)
+  (assert_eq q 10)
+  (assert_eq q_output 1))
+
+(case test_comb_loop_bound_output_call_writes_back_once
+  ; Veryl simulator 0.20.2 accepts this program but drops the output
+  ; argument writeback from the runtime loop-bound expression.
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x;
+    }
+
+    always_comb {
+        q = 8'd0;
+        q_output = 8'd0;
+        for i in f(d, q_output)..4 {
+            q = q + 8'd1;
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 1))
+  (assert_eq q 3)
+  (assert_eq q_output 2))
+
+(case test_comb_value_system_function_statement_applies_argument_outputs
+  ; Veryl simulator 0.20.2 rejects value-returning system functions in
+  ; statement position even though the analyzer accepts the source.
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        $unsigned(f(d, q_output));
+        q = q_output;
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 11)
+  (assert_eq q_output 11))
+
+(case test_comb_value_system_function_after_dynamic_break_stays_inactive
+  ; Veryl simulator 0.20.2 rejects value-returning system functions in
+  ; statement position even though the analyzer accepts the source.
+  (source "test.veryl" #"
+module Top (
+    stop: input logic,
+    d: input logic<8>,
+    count: input logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        for i in 0..count {
+            if stop && i == 0 {
+                break;
+            }
+            $unsigned(f(d, q_output));
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set stop 1)
+    (set d 10)
+    (set count 2))
+  (assert_eq q_output 0)
+  (modify (set stop 0))
+  (assert_eq q_output 11))
+
+(case test_comb_effectful_if_condition_after_dynamic_break_stays_inactive
+  (source "test.veryl" #"
+module Top (
+    stop: input logic,
+    d: input logic<8>,
+    count: input logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b1;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        for i in 0..count {
+            if stop && i == 0 {
+                break;
+            }
+            if f(d + i, q_output) {
+                break;
+            }
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set stop 1)
+    (set d 10)
+    (set count 2))
+  (assert_eq q_output 0)
+  (modify (set stop 0))
+  (assert_eq q_output 11))
+
+(case test_statement_call_inputs_follow_output_writeback_order
+  (tags evaluation_order)
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    tmp: output logic<8>,
+) {
+    function inner (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    function outer (
+        first: input logic<8>,
+        second: input logic<8>,
+        result: output logic<8>,
+    ) {
+        result = first + second;
+    }
+
+    always_comb {
+        tmp = 8'd0;
+        outer(inner(d, tmp), tmp, q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 23)
+  (assert_eq tmp 11))
+
+(case test_comb_effectful_case_after_dynamic_break_stays_inactive
+  ; Veryl simulator 0.20.2 drops the case-target output writeback when
+  ; the case contains only a default arm with break.
+  (source "test.veryl" #"
+module Top (
+    stop: input logic,
+    d: input logic<8>,
+    count: input logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b1;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        for i in 0..count {
+            if stop && i == 0 {
+                break;
+            }
+            case f(d + i, q_output) {
+                default: break;
+            }
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set stop 1)
+    (set d 10)
+    (set count 2))
+  (assert_eq q_output 0)
+  (modify (set stop 0))
+  (assert_eq q_output 11))
+
+(case test_comb_function_condition_output_is_guarded_after_early_return
+  ; Veryl simulator 0.20.2 does not preserve this nested early-return
+  ; behavior when the later condition contains an output call.
+  (source "test.veryl" #"
+module Top (
+    sel: input logic,
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function inner (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b1;
+    }
+
+    function outer (
+        sel: input logic,
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        if sel {
+            return 8'd0;
+        }
+        if inner(x, y) {
+            return x + 8'd2;
+        }
+        return 8'd1;
+    }
+
+    always_comb {
+        q_output = 8'd7;
+        q = outer(sel, d, q_output);
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set sel 1)
+    (set d 10))
+  (assert_eq q 0)
+  ; The outer output formal is still copied back with its default value,
+  ; but the skipped inner call must not overwrite it with d + 1.
+  (assert_eq q_output 0)
+  (modify (set sel 0))
+  (assert_eq q 12)
+  (assert_eq q_output 11))
+
+(case test_comb_function_call_statement_ignores_return_value
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd2;
+        return x + 8'd99;
+    }
+
+    always_comb {
+        f(d, q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 12))
+
+(case test_comb_returning_output_function_reads_current_caller_store
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    function f (
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = tmp;
+        return 8'd0;
+    }
+
+    always_comb {
+        tmp = d;
+        f(q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 42))
+  (assert_eq q 42))
+
+(case test_comb_returning_output_function_allows_nested_output_call
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) {
+        y = x + 8'd3;
+    }
+
+    function g (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        f(x, y);
+        return 8'd0;
+    }
+
+    always_comb {
+        g(d, q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 13))
+
+(case test_comb_function_call_statement_preserves_return_control_flow
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return 8'd0;
+        y = x + 8'd2;
+    }
+
+    always_comb {
+        f(d, q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 11))
+
+(case test_comb_function_call_statement_preserves_conditional_return_control_flow
+  (source "test.veryl" #"
+module Top (
+    sel: input logic,
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        choose_early: input logic,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        if choose_early {
+            return 8'd0;
+        }
+        y = x + 8'd2;
+        return 8'd0;
+    }
+
+    always_comb {
+        f(d, sel, q);
+    }
+}
+"#)
+  (top Top)
+  (modify
+    (set d 10)
+    (set sel 1))
+  (assert_eq q 11)
+  (modify (set sel 0))
+  (assert_eq q 12))
+
+(case test_comb_nested_function_call_statement_with_output_argument
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) {
+        y = x + 8'd1;
+    }
+
+    function g (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) {
+        f(x, y);
+    }
+
+    var tmp: logic<8>;
+    always_comb {
+        g(d, tmp);
+        q = tmp;
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 11))
+
+(case test_comb_function_call_output_reads_current_caller_store
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    var tmp: logic<8>;
+
+    function f (
+        y: output logic<8>,
+    ) {
+        y = tmp;
+    }
+
+    always_comb {
+        tmp = d;
+        f(q);
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 42))
+  (assert_eq q 42))
+
+(case test_comb_function_call_statement_with_output_argument_in_loop
+  (source "test.veryl" #"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) {
+        y = x + 8'd1;
+    }
+
+    always_comb {
+        q = 8'd0;
+        for i in 0..4 {
+            f(d + i, q);
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 10))
+  (assert_eq q 14))
+
+(case test_comb_function_call_output_bit_select_preserves_unwritten_loop_bits
+  (source "test.veryl" #"
+module Top (
+    d: input logic<4>,
+    q: output logic<4>,
+) {
+    function set_bit (
+        x: input logic,
+        y: output logic,
+    ) {
+        y = x;
+    }
+
+    always_comb {
+        q = d;
+        for i in 0..2 {
+            set_bit(1'b0, q[i]);
+        }
+    }
+}
+"#)
+  (top Top)
+  (modify (set d 0b1011))
+  (assert_eq q 0b1000))
+
+(case test_always_comb_blocking_assignment_chain
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o: output logic<8>) {
+var x: logic<8>;
+always_comb {
+x = a;
+x = x + 8'd1;
+x = x << 1;
+o = x;
+}
+}
+"#)
+  (top Top)
+  (modify (set a 10))
+  ; (10 + 1) << 1 = 22
+  (assert_eq o 22))

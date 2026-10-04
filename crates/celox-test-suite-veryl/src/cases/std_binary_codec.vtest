@@ -1,0 +1,102 @@
+(group std_binary_codec (category standard_library))
+
+(case test_binary_encoder
+  (source "test.veryl"
+    (std "binary_enc_dec/binary_encoder.veryl")
+    #"
+module Top (
+i_unary: input  logic<8>,
+o_bin  : output logic<3>,
+) {
+inst u: binary_encoder #(UNARY_WIDTH: 8) (
+i_en   : 1'b1,
+i_unary,
+o_bin,
+);
+}
+"#)
+  (top Top)
+  (for bit_pos (range 0 8)
+    (let onehot_val (<< 1 bit_pos))
+    (modify (set i_unary onehot_val))
+    (let bin_out (trunc 8 (get o_bin)))
+    (assert (== bin_out bit_pos) "encoder")))
+
+(case test_binary_decoder
+  (source "test.veryl"
+    (std "binary_enc_dec/binary_decoder.veryl")
+    #"
+module Top (
+i_bin  : input  logic<3>,
+o_unary: output logic<8>,
+) {
+inst u: binary_decoder #(BIN_WIDTH: 3) (
+i_en: 1'b1,
+i_bin,
+o_unary,
+);
+}
+"#)
+  (top Top)
+  (for val (range 0 8)
+    (modify (set i_bin val))
+    (let unary_out (trunc 8 (get o_unary)))
+    (let expected (<< 1 val))
+    (assert (== unary_out expected) "decoder")))
+
+(case test_binary_codec_roundtrip
+  (source "test.veryl"
+    (std "binary_enc_dec/binary_encoder.veryl")
+    (std "binary_enc_dec/binary_decoder.veryl")
+    #"
+module Top (
+i_unary: input  logic<8>,
+o_unary: output logic<8>,
+o_bin  : output logic<3>,
+) {
+inst u_enc: binary_encoder #(UNARY_WIDTH: 8) (
+i_en   : 1'b1,
+i_unary,
+o_bin,
+);
+inst u_dec: binary_decoder #(BIN_WIDTH: 3) (
+i_en   : 1'b1,
+i_bin  : o_bin,
+o_unary,
+);
+}
+"#)
+  (top Top)
+  (for bit_pos (range 0 8)
+    (let onehot_val (<< 1 bit_pos))
+    (modify (set i_unary onehot_val))
+    (let roundtrip (trunc 8 (get o_unary)))
+    (assert (== roundtrip onehot_val) "roundtrip failed for bit")))
+
+(case test_binary_encoder_disabled
+  (source "test.veryl"
+    (std "binary_enc_dec/binary_encoder.veryl")
+    #"
+module Top (
+i_en   : input  logic,
+i_unary: input  logic<8>,
+o_bin  : output logic<3>,
+) {
+inst u: binary_encoder #(UNARY_WIDTH: 8) (
+i_en,
+i_unary,
+o_bin,
+);
+}
+"#)
+  (top Top)
+  ; Disabled: should encode bit 0 (because masked input becomes {0...0, 1'b1})
+  (modify
+    (set i_en 0)
+    (set i_unary 0b10000000))
+  (let bin_disabled (trunc 8 (get o_bin)))
+  (assert (== bin_disabled 0) "disabled encoder should output 0")
+  ; Enabled: should encode bit 7
+  (modify (set i_en 1))
+  (let bin_enabled (trunc 8 (get o_bin)))
+  (assert (== bin_enabled 7) "enabled encoder should output 7 for bit 7"))

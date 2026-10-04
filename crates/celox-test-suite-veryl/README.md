@@ -1,8 +1,9 @@
 # celox-test-suite-veryl
 
-A reusable corpus of 695 Veryl language tests for compiler and simulator
-implementations. Sources, input sequences, and assertions live together in this
-crate. The default dependency graph contains numeric support and Veryl standard
+A reusable corpus of 704 Veryl language tests for compiler and simulator
+implementations. Each case's sources, input sequence, and assertions live
+together in a script file (`src/cases/*.vtest`), independent of any host
+language. The default dependency graph contains numeric support and Veryl standard
 library sources, with no Celox, parser, or simulator dependency.
 
 ## Use from another project
@@ -197,15 +198,43 @@ cargo run -p celox-test-suite-veryl --features verilator --bin verify-verilator 
   --exclude-stronger-than-sv --jobs 8
 ```
 
-`src/cases/` contains the canonical cases, grouped by their original topics.
-Add cases to a group's private `cases!` declaration with optional `@setup`, a
-`@build Design::new(...)`, and ordinary Rust assertions using the shared driver.
-For an invalid design, put `@expect reject;` before `@build` and omit simulation
-assertions. `TestCase::expectation` lets consumers select these separately.
-For additional SV expectations, put `@tags [EvaluationOrder];` (or multiple
-`TestTag` variants) before `@setup`/`@build`. Review the actual assertions and
-specification basis rather than inferring a tag from a failure or test name.
-For a new group, add it to `GROUPS` in `src/cases/mod.rs`. Keep implementation
+## Writing cases
+
+`src/cases/` contains the canonical cases, one script file per group, grouped
+by their original topics. The language is documented in the `script` module;
+in short:
+
+```text
+(group operators (category operators))
+
+(case test_pow_operator_constant_exponent
+  (source "test.veryl" #"
+module Top (a: input logic<8>, o: output logic<8>) {
+    assign o = a ** 3;
+}
+"#)
+  (top Top)
+  (for (value expected) (list (2 8) (3 27))
+    (modify (set a value))
+    (assert_eq o expected)))
+```
+
+Clauses come first: one or more `(source PATH PART...)` (a part is text or a
+Veryl standard library file, `(std "fifo/fifo.veryl")`), `(top NAME)`, and
+optionally `(four_state)`, `(expect reject)` and `(tags TAG...)`. Statements
+then drive the design: `set`, `eval`, `modify`, `tick`, `assert_eq`, `assert`,
+`let`, `set!`, `for`, `if`, `do`, and `expand` (a template that repeats
+statements with signal names substituted, so that every signal reference stays
+static). Script values are integers of unbounded width, so an expectation never
+depends on the simulator's width or X rules; arithmetic on unknown bits is an
+error.
+
+For an invalid design, write `(expect reject)` and no statements.
+`TestCase::expectation` lets consumers select these separately. For additional
+SV expectations, add `(tags evaluation_order)` (or other `TestTag` names).
+Review the actual assertions and specification basis rather than inferring a
+tag from a failure or test name. For a new group, add it to `GROUPS` in
+`src/cases/mod.rs`. Keep implementation
 specific optimization, diagnostics, tracing, runtime-event, and API tests in
 the implementing project. Celox retains its original test names, backend matrix,
 and known exclusions in `crates/celox/tests`; those tests now call this corpus.
@@ -224,7 +253,12 @@ pinned revision, oracle rationale, adaptations, and license attribution.
 
 The optional `verilator` and `icarus` features provide reusable process adapters
 and CLI runners. Both compile Veryl to SystemVerilog and run the **shared
-assertions against the external simulator**, or verify compilation rejection. No expected outputs are recorded
+assertions against the external simulator**, or verify compilation rejection.
+Each script becomes a self-checking SystemVerilog testbench
+(`script::sv::testbench`) that drives the design, ticks its clocks and checks
+every assertion inside the simulator; a failed assertion prints an
+`@suite assert` line and ends the run with `$fatal`. Cases that run the design's
+own native testbench use the process adapters. No expected outputs are recorded
 from Celox. Compiler diagnostics are not suppressed and emitted SV is not
 rewritten to fit a simulator.
 

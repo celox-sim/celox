@@ -45,3 +45,49 @@ test("playground starts and accepts bigint literals", async ({ page }) => {
 		.toBe(true);
 	browserErrors.assertEmpty();
 });
+
+test("every bundled example has no TypeScript diagnostics", async ({
+	page,
+}) => {
+	test.setTimeout(120_000);
+	const browserErrors = await openPlayground(page);
+
+	const examples = await page
+		.locator("#examples option")
+		.evaluateAll((options) =>
+			options
+				.map((option) => (option as HTMLOptionElement).value)
+				.filter(Boolean),
+		);
+	expect(examples.length).toBeGreaterThan(0);
+
+	for (const example of examples) {
+		await test.step(example, async () => {
+			const testFile = `test/${example}.test.ts`;
+			await page.evaluate((name) => {
+				const api = window.__CELOX_PLAYGROUND_TEST_API__;
+				if (!api) throw new Error("Missing playground test API");
+				api.loadExample(name);
+			}, example);
+
+			// DUT types are injected after the Veryl source compiles, so poll
+			// until the diagnostics settle to an empty list.
+			await expect
+				.poll(
+					() =>
+						page.evaluate(async (path) => {
+							const api = window.__CELOX_PLAYGROUND_TEST_API__;
+							if (!api) throw new Error("Missing playground test API");
+							const diagnostics = await api.getTypeScriptDiagnostics(path);
+							return diagnostics.map(
+								(marker) => `TS${marker.code ?? "?"}: ${marker.message}`,
+							);
+						}, testFile),
+					{ timeout: 30_000 },
+				)
+				.toEqual([]);
+		});
+	}
+
+	browserErrors.assertEmpty();
+});

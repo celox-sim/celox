@@ -13,6 +13,21 @@ pub struct Icarus {
 
 impl Icarus {
     pub fn build(design: &Design, directory: &Path) -> Result<Self> {
+        Self::build_inner(design, directory, None)
+    }
+
+    /// Build a script case as a generated testbench; run it with
+    /// `run_testbench`. A failed assertion prints an `@suite assert` line to
+    /// `protocol.log`.
+    pub fn build_script(case: &crate::script::ScriptCase, directory: &Path) -> Result<Self> {
+        Self::build_inner(&case.design(), directory, Some(case))
+    }
+
+    fn build_inner(
+        design: &Design,
+        directory: &Path,
+        script: Option<&crate::script::ScriptCase>,
+    ) -> Result<Self> {
         fs::create_dir_all(directory)?;
         let directory = fs::canonicalize(directory)?;
         let sources: Vec<_> = design
@@ -32,7 +47,7 @@ impl Icarus {
         .map_err(|error| {
             crate::verification::EmissionError(crate::verification::panic_message(error.as_ref()))
         })?;
-        let testbench = emitted.is_testbench();
+        let mut testbench = emitted.is_testbench();
         let edges = emitted
             .event_edges(&design.top)
             .cloned()
@@ -42,6 +57,19 @@ impl Icarus {
             let path = directory.join(format!("source_{index}.sv"));
             write_if_changed(&path, source.as_bytes())?;
             paths.push(path);
+        }
+        let mut top = design.top.clone();
+        // A rejection needs only the design.
+        if let Some(case) =
+            script.filter(|case| case.expectation != crate::Expectation::CompilationError)
+        {
+            let info = crate::script::sv::DesignInfo::from_emitted(&emitted, &design.top)
+                .ok_or("top module not found")?;
+            let path = directory.join("testbench.sv");
+            write_if_changed(&path, crate::script::sv::testbench(case, &info)?.as_bytes())?;
+            paths.push(path);
+            top = crate::script::sv::TESTBENCH_TOP.to_string();
+            testbench = true;
         }
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
@@ -58,7 +86,7 @@ impl Icarus {
                 "-DCELOX_SUITE_ICARUS",
                 "-s",
             ])
-            .arg(&design.top)
+            .arg(&top)
             .arg("-o")
             .arg(directory.join("model.vvp"))
             .args(&paths)

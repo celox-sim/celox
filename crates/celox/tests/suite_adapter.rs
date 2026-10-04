@@ -24,7 +24,7 @@ fn negative_suite_cases_accept_only_source_diagnostics() {
             source_location: None,
         }),
         SimulatorError::from(ParserError::Unsupported {
-            issue: 64,
+            issue: 88,
             phase: celox::LoweringPhase::SimulatorParser,
             feature: "systemverilog analysis",
             detail: "Unsupported SystemVerilog construct: indexed part-select".into(),

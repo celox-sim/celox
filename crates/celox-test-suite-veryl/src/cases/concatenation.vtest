@@ -1,0 +1,63 @@
+(group concatenation (category operators))
+
+(case test_lhs_concatenation_execution
+  (source "test.veryl" #"
+module Top (val_in: input logic<16>) {
+var a: logic<8>;
+var b: logic<8>;
+assign {a, b} = val_in;
+}
+"#)
+  (top Top)
+  (modify (set val_in 0x1234))
+  (assert_eq a 0x12)
+  (assert_eq b 0x34))
+
+(case test_rhs_concatenation_execution
+  (source "test.veryl" #"
+module Top (
+a: input logic<8>,
+b: input logic<8>,
+o: output logic<16>
+) {
+always_comb {
+o = {a, b};
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0x12)
+    (set b 0x34))
+  (assert_eq o 0x1234))
+
+(case test_rhs_mixed_concatenation_execution
+  (source "test.veryl" #"
+module Top (
+a: input logic<4>,
+b: input logic<4>,
+o: output logic<12>
+) {
+always_comb {
+o = {a, 4'hF, b};
+}
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xA)
+    (set b 0xC))
+  (assert_eq o 0xAFC))
+
+(case test_replication_concatenation_execution
+  (source "test.veryl" #"
+module Top (
+a: input logic<2>,
+o: output logic<8>
+) {
+assign o = {a repeat 4};
+}
+"#)
+  (top Top)
+  (modify (set a 2))
+  (assert_eq o 0xAA))

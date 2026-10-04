@@ -3144,3 +3144,44 @@ fn test_for_loop_constant_bound_preserves_signedness() {
         TestResult::Pass
     );
 }
+
+// A `$finish` executed by the design ends the testbench run
+// (IEEE 1800-2023 20.2), so the failing assertion is never reached.
+#[test]
+fn test_design_finish_ends_testbench() {
+    let code = r#"
+        module FinishAtThree (
+            clk: input  clock    ,
+            rst: input  reset    ,
+            cnt: output logic<32>,
+        ) {
+            always_ff {
+                if_reset {
+                    cnt = 0;
+                } else {
+                    if cnt == 32'd3 {
+                        $finish();
+                    }
+                    cnt += 1;
+                }
+            }
+        }
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var cnt: logic<32>;
+            inst dut: FinishAtThree (clk, rst, cnt);
+            initial {
+                rst.assert();
+                clk.next  (10);
+                $assert   (cnt == 32'd99);
+                $finish   ();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}

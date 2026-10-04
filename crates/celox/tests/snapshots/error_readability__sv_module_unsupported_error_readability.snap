@@ -1,8 +1,0 @@
----
-source: crates/celox/tests/error_readability.rs
-expression: err
----
-unsupported_simulator_parser
-
-  × Unsupported in simulator parser: systemverilog module instantiation [tracking issue #64] (module "delay" was not
-  │ supplied)

@@ -321,8 +321,6 @@ describe("FourStateDemo", () => {
     it("starts every unpacked array element as X", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
-        sim.evalComb();
-
         expect(sim.fourState("array_snapshot").mask).toBe(0xffn);
 
         sim.dispose();
@@ -1525,7 +1523,6 @@ async function run() {
 			return {
 				dut,
 				warnings: [] as readonly string[],
-				evalComb,
 				tick(
 					eventOrCount?: { name: string; id: number } | number,
 					count?: number,
@@ -1552,6 +1549,7 @@ async function run() {
 							`Unknown port '${portName}'. Available: ${Object.keys(layout).join(", ")}`,
 						);
 					}
+					if (dirty && sig.direction !== "input") evalComb();
 					let value = 0n;
 					for (let i = sig.byte_size - 1; i >= 0; i--)
 						value = (value << 8n) | BigInt(view.getUint8(sig.offset + i));
@@ -1926,6 +1924,10 @@ async function run() {
 						throw new Error(
 							`Unknown port '${portName}'. Available: ${Object.keys(layout).join(", ")}`,
 						);
+					if (simDirty && sig.direction !== "input") {
+						(combInst.exports.run as Function)();
+						simDirty = false;
+					}
 					let value = 0n;
 					for (let i = sig.byte_size - 1; i >= 0; i--)
 						value = (value << 8n) | BigInt(view.getUint8(sig.offset + i));

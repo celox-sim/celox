@@ -1,0 +1,1162 @@
+(group compare_matrix (category regression))
+
+(case test_generic_module_instantiation
+  (source "test.veryl" #"
+proto package DataType {
+type data;
+}
+module GenericPass::<E: DataType> (
+i: input  E::data,
+o: output E::data,
+) {
+assign o = i;
+}
+package Byte for DataType {
+type data = logic<8>;
+}
+package Word for DataType {
+type data = logic<16>;
+}
+module BytePass (
+i: input  logic<8>,
+o: output logic<8>,
+) {
+inst inner: GenericPass::<Byte> (i, o);
+}
+module WordPass (
+i: input  logic<16>,
+o: output logic<16>,
+) {
+inst inner: GenericPass::<Word> (i, o);
+}
+module Top (
+a: input  logic<8>,
+b: output logic<8>,
+c: input  logic<16>,
+d: output logic<16>,
+) {
+inst bp: BytePass (i: a, o: b);
+inst wp: WordPass (i: c, o: d);
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0xAB)
+    (set c 0x1234))
+  (assert_eq b 0xAB)
+  (assert_eq d 0x1234)
+  (modify
+    (set a 0xFF)
+    (set c 0xFFFF))
+  (assert_eq b 0xFF)
+  (assert_eq d 0xFFFF))
+
+(case test_proto_function_basic
+  (source "test.veryl" #"
+proto package Element {
+type data;
+function gt(
+a: input data,
+b: input data,
+) -> logic;
+}
+package IntElement for Element {
+type data = logic<8>;
+function gt(
+a: input data,
+b: input data,
+) -> logic {
+return a >: b;
+}
+}
+module GenericCompare::<E: Element> (
+a: input  E::data,
+b: input  E::data,
+r: output logic,
+) {
+always_comb {
+r = E::gt(a, b);
+}
+}
+module Top (
+a: input  logic<8>,
+b: input  logic<8>,
+r: output logic,
+) {
+inst inner: GenericCompare::<IntElement> (a, b, r);
+}
+"#)
+  (top Top)
+  (modify
+    (set a 10)
+    (set b 5))
+  (assert_eq r 1)
+  ; 10 > 5
+  (modify
+    (set a 3)
+    (set b 7))
+  (assert_eq r 0))
+  ; 3 > 7 is false
+
+(case test_proto_const_max_value
+  (source "test.veryl" #"
+proto package Element {
+    type data;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    const max_value: data;
+}
+
+module CompareMatrixStage1CM::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    var matrix: logic [P, P];
+
+    always_comb {
+        for y in 0..P {
+            for x in 0..P {
+                if y >: x {
+                    matrix[y][x] = E::ge(in_data[y], in_data[x]);
+                } else if y <: x {
+                    matrix[y][x] = E::gt(in_data[y] ,in_data[x]);
+                } else {
+                    matrix[y][x] = 0;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for y in 0..P {
+            out_score[y] = 0;
+            for x in 0..P {
+                out_score[y] += matrix[y][x];
+            }
+        }
+    }
+}
+
+module CompareMatrixSelector::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output E::data        [P],
+
+) {
+    always_comb {
+        for j in 0..P {
+            out_data[j] = E::max_value;
+            for i in 0..P {
+                if in_scores[i] == j {
+                    out_data[j] = in_data[i];
+                }
+            }
+        }
+    }
+}
+
+module CompareMatrixStage1::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data : input  E::data [P],
+    out_data: output E::data [P],
+) {
+    var scores: logic<$clog2(P)> [P];
+
+    inst stage1: CompareMatrixStage1CM::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data,
+        out_score: scores ,
+    );
+
+    inst selector: CompareMatrixSelector::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data ,
+        in_scores: scores  ,
+        out_data : out_data,
+    );
+}
+
+module CompareMatrixMerger::<E: Element> #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input E::data [A]    ,
+    in_b    : input E::data [B]    ,
+    out_data: output E::data [A + B],
+) {
+    var scores_a: logic<$clog2(A + B)> [A];
+    var scores_b: logic<$clog2(A + B)> [B];
+
+    always_comb {
+        for i in 0..A {
+            scores_a[i] = i;
+            for j in 0..B {
+                if E::gt(in_a[i],in_b[j]) {
+                    scores_a[i] += 1;
+                }
+            }
+        }
+
+        for i in 0..B {
+            scores_b[i] = i;
+            for j in 0..A {
+                if E::ge(in_b[i],in_a[j]) {
+                    scores_b[i] += 1;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for k in 0..(A + B) {
+            out_data[k] = E::max_value;
+            for i in 0..A {
+                if scores_a[i] == k {
+                    out_data[k] = in_a[i];
+                }
+            }
+            for i in 0..B {
+                if scores_b[i] == k {
+                    out_data[k] = in_b[i];
+                }
+            }
+        }
+    }
+}
+
+package IntElement::<W: u32 = 32> for Element {
+    type data = logic<W>;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >: b;
+    }
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >= b;
+    }
+    const max_value: data = ~0;
+}
+
+module CompareMatrixStage1CMInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    inst inner: CompareMatrixStage1CM::<IntElement> #(P: P) (in_data, out_score);
+}
+
+module CompareMatrixSelectorInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output logic<32>        [P],
+) {
+    inst inner: CompareMatrixSelector::<IntElement> #(P: P) (in_data, in_scores, out_data);
+}
+
+module CompareMatrixStage1Int32 #(
+    param P: u32 = 32,
+) (
+    in_data : input  logic<32> [P],
+    out_data: output logic<32> [P],
+) {
+    inst inner: CompareMatrixStage1::<IntElement> #(P: P) (in_data, out_data);
+}
+
+module CompareMatrixMergerInt32 #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input  logic<32> [A],
+    in_b    : input  logic<32> [B],
+    out_data: output logic<32> [A + B],
+) {
+    inst inner: CompareMatrixMerger::<IntElement> #(A: A, B: B) (in_a, in_b, out_data);
+}
+
+
+module TestConst::<E: Element> (
+out: output E::data,
+) {
+assign out = E::max_value;
+}
+module Top (
+out: output logic<32>,
+) {
+inst t: TestConst::<IntElement> (out);
+}
+"#)
+  (top Top)
+  (assert_eq out 0xffffffff "E:max_value should be ~0 = 0xFFFFFFFF"))
+
+(case test_compare_matrix_stage1cm
+  (source "test.veryl" #"
+proto package Element {
+    type data;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    const max_value: data;
+}
+
+module CompareMatrixStage1CM::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    var matrix: logic [P, P];
+
+    always_comb {
+        for y in 0..P {
+            for x in 0..P {
+                if y >: x {
+                    matrix[y][x] = E::ge(in_data[y], in_data[x]);
+                } else if y <: x {
+                    matrix[y][x] = E::gt(in_data[y] ,in_data[x]);
+                } else {
+                    matrix[y][x] = 0;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for y in 0..P {
+            out_score[y] = 0;
+            for x in 0..P {
+                out_score[y] += matrix[y][x];
+            }
+        }
+    }
+}
+
+module CompareMatrixSelector::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output E::data        [P],
+
+) {
+    always_comb {
+        for j in 0..P {
+            out_data[j] = E::max_value;
+            for i in 0..P {
+                if in_scores[i] == j {
+                    out_data[j] = in_data[i];
+                }
+            }
+        }
+    }
+}
+
+module CompareMatrixStage1::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data : input  E::data [P],
+    out_data: output E::data [P],
+) {
+    var scores: logic<$clog2(P)> [P];
+
+    inst stage1: CompareMatrixStage1CM::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data,
+        out_score: scores ,
+    );
+
+    inst selector: CompareMatrixSelector::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data ,
+        in_scores: scores  ,
+        out_data : out_data,
+    );
+}
+
+module CompareMatrixMerger::<E: Element> #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input E::data [A]    ,
+    in_b    : input E::data [B]    ,
+    out_data: output E::data [A + B],
+) {
+    var scores_a: logic<$clog2(A + B)> [A];
+    var scores_b: logic<$clog2(A + B)> [B];
+
+    always_comb {
+        for i in 0..A {
+            scores_a[i] = i;
+            for j in 0..B {
+                if E::gt(in_a[i],in_b[j]) {
+                    scores_a[i] += 1;
+                }
+            }
+        }
+
+        for i in 0..B {
+            scores_b[i] = i;
+            for j in 0..A {
+                if E::ge(in_b[i],in_a[j]) {
+                    scores_b[i] += 1;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for k in 0..(A + B) {
+            out_data[k] = E::max_value;
+            for i in 0..A {
+                if scores_a[i] == k {
+                    out_data[k] = in_a[i];
+                }
+            }
+            for i in 0..B {
+                if scores_b[i] == k {
+                    out_data[k] = in_b[i];
+                }
+            }
+        }
+    }
+}
+
+package IntElement::<W: u32 = 32> for Element {
+    type data = logic<W>;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >: b;
+    }
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >= b;
+    }
+    const max_value: data = ~0;
+}
+
+module CompareMatrixStage1CMInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    inst inner: CompareMatrixStage1CM::<IntElement> #(P: P) (in_data, out_score);
+}
+
+module CompareMatrixSelectorInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output logic<32>        [P],
+) {
+    inst inner: CompareMatrixSelector::<IntElement> #(P: P) (in_data, in_scores, out_data);
+}
+
+module CompareMatrixStage1Int32 #(
+    param P: u32 = 32,
+) (
+    in_data : input  logic<32> [P],
+    out_data: output logic<32> [P],
+) {
+    inst inner: CompareMatrixStage1::<IntElement> #(P: P) (in_data, out_data);
+}
+
+module CompareMatrixMergerInt32 #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input  logic<32> [A],
+    in_b    : input  logic<32> [B],
+    out_data: output logic<32> [A + B],
+) {
+    inst inner: CompareMatrixMerger::<IntElement> #(A: A, B: B) (in_a, in_b, out_data);
+}
+
+
+module Top (
+in_data  : input  logic<32>        [4],
+out_score: output logic<2>         [4],
+) {
+inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
+}
+"#)
+  (top Top)
+  ; Input: [10, 40, 20, 30] -> scores: 10->0, 40->3, 20->1, 30->2
+  (modify (set in_data (cat 32 30 32 20 32 40 32 10)))
+  (assert_eq (slice (get out_score) 1 0) 0) ; 10 is smallest -> score 0
+  (assert_eq (slice (get out_score) 3 2) 3) ; 40 is largest -> score 3
+  (assert_eq (slice (get out_score) 5 4) 1) ; 20 -> score 1
+  (assert_eq (slice (get out_score) 7 6) 2)) ; 30 -> score 2
+
+(case test_compare_matrix_selector
+  (source "test.veryl" #"
+proto package Element {
+    type data;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    const max_value: data;
+}
+
+module CompareMatrixStage1CM::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    var matrix: logic [P, P];
+
+    always_comb {
+        for y in 0..P {
+            for x in 0..P {
+                if y >: x {
+                    matrix[y][x] = E::ge(in_data[y], in_data[x]);
+                } else if y <: x {
+                    matrix[y][x] = E::gt(in_data[y] ,in_data[x]);
+                } else {
+                    matrix[y][x] = 0;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for y in 0..P {
+            out_score[y] = 0;
+            for x in 0..P {
+                out_score[y] += matrix[y][x];
+            }
+        }
+    }
+}
+
+module CompareMatrixSelector::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output E::data        [P],
+
+) {
+    always_comb {
+        for j in 0..P {
+            out_data[j] = E::max_value;
+            for i in 0..P {
+                if in_scores[i] == j {
+                    out_data[j] = in_data[i];
+                }
+            }
+        }
+    }
+}
+
+module CompareMatrixStage1::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data : input  E::data [P],
+    out_data: output E::data [P],
+) {
+    var scores: logic<$clog2(P)> [P];
+
+    inst stage1: CompareMatrixStage1CM::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data,
+        out_score: scores ,
+    );
+
+    inst selector: CompareMatrixSelector::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data ,
+        in_scores: scores  ,
+        out_data : out_data,
+    );
+}
+
+module CompareMatrixMerger::<E: Element> #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input E::data [A]    ,
+    in_b    : input E::data [B]    ,
+    out_data: output E::data [A + B],
+) {
+    var scores_a: logic<$clog2(A + B)> [A];
+    var scores_b: logic<$clog2(A + B)> [B];
+
+    always_comb {
+        for i in 0..A {
+            scores_a[i] = i;
+            for j in 0..B {
+                if E::gt(in_a[i],in_b[j]) {
+                    scores_a[i] += 1;
+                }
+            }
+        }
+
+        for i in 0..B {
+            scores_b[i] = i;
+            for j in 0..A {
+                if E::ge(in_b[i],in_a[j]) {
+                    scores_b[i] += 1;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for k in 0..(A + B) {
+            out_data[k] = E::max_value;
+            for i in 0..A {
+                if scores_a[i] == k {
+                    out_data[k] = in_a[i];
+                }
+            }
+            for i in 0..B {
+                if scores_b[i] == k {
+                    out_data[k] = in_b[i];
+                }
+            }
+        }
+    }
+}
+
+package IntElement::<W: u32 = 32> for Element {
+    type data = logic<W>;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >: b;
+    }
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >= b;
+    }
+    const max_value: data = ~0;
+}
+
+module CompareMatrixStage1CMInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    inst inner: CompareMatrixStage1CM::<IntElement> #(P: P) (in_data, out_score);
+}
+
+module CompareMatrixSelectorInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output logic<32>        [P],
+) {
+    inst inner: CompareMatrixSelector::<IntElement> #(P: P) (in_data, in_scores, out_data);
+}
+
+module CompareMatrixStage1Int32 #(
+    param P: u32 = 32,
+) (
+    in_data : input  logic<32> [P],
+    out_data: output logic<32> [P],
+) {
+    inst inner: CompareMatrixStage1::<IntElement> #(P: P) (in_data, out_data);
+}
+
+module CompareMatrixMergerInt32 #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input  logic<32> [A],
+    in_b    : input  logic<32> [B],
+    out_data: output logic<32> [A + B],
+) {
+    inst inner: CompareMatrixMerger::<IntElement> #(A: A, B: B) (in_a, in_b, out_data);
+}
+
+
+module Top #(
+param P: u32 = 4,
+) (
+in_data  : input  logic<32>         [P],
+in_scores: input  logic<$clog2(P)> [P],
+out_data : output logic<32>        [P],
+) {
+inst sel: CompareMatrixSelectorInt32 #(P: P) (in_data, in_scores, out_data);
+}
+"#)
+  (top Top)
+  ; Data: [10, 40, 20, 30], Scores: [0, 3, 1, 2]
+  ; Output should place each value at its score index
+  (modify
+    (set in_data (cat 32 30 32 20 32 40 32 10))
+    (set in_scores (cat 2 2 2 1 2 3 2 0)))
+  (for (slot value) (list (0 10) (1 20) (2 30) (3 40))
+    (assert_eq (slice (get out_data) (+ (* slot 32) 31) (* slot 32)) value)))
+
+(case test_compare_matrix_stage1_sort
+  (source "test.veryl" #"
+proto package Element {
+    type data;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    const max_value: data;
+}
+
+module CompareMatrixStage1CM::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    var matrix: logic [P, P];
+
+    always_comb {
+        for y in 0..P {
+            for x in 0..P {
+                if y >: x {
+                    matrix[y][x] = E::ge(in_data[y], in_data[x]);
+                } else if y <: x {
+                    matrix[y][x] = E::gt(in_data[y] ,in_data[x]);
+                } else {
+                    matrix[y][x] = 0;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for y in 0..P {
+            out_score[y] = 0;
+            for x in 0..P {
+                out_score[y] += matrix[y][x];
+            }
+        }
+    }
+}
+
+module CompareMatrixSelector::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output E::data        [P],
+
+) {
+    always_comb {
+        for j in 0..P {
+            out_data[j] = E::max_value;
+            for i in 0..P {
+                if in_scores[i] == j {
+                    out_data[j] = in_data[i];
+                }
+            }
+        }
+    }
+}
+
+module CompareMatrixStage1::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data : input  E::data [P],
+    out_data: output E::data [P],
+) {
+    var scores: logic<$clog2(P)> [P];
+
+    inst stage1: CompareMatrixStage1CM::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data,
+        out_score: scores ,
+    );
+
+    inst selector: CompareMatrixSelector::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data ,
+        in_scores: scores  ,
+        out_data : out_data,
+    );
+}
+
+module CompareMatrixMerger::<E: Element> #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input E::data [A]    ,
+    in_b    : input E::data [B]    ,
+    out_data: output E::data [A + B],
+) {
+    var scores_a: logic<$clog2(A + B)> [A];
+    var scores_b: logic<$clog2(A + B)> [B];
+
+    always_comb {
+        for i in 0..A {
+            scores_a[i] = i;
+            for j in 0..B {
+                if E::gt(in_a[i],in_b[j]) {
+                    scores_a[i] += 1;
+                }
+            }
+        }
+
+        for i in 0..B {
+            scores_b[i] = i;
+            for j in 0..A {
+                if E::ge(in_b[i],in_a[j]) {
+                    scores_b[i] += 1;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for k in 0..(A + B) {
+            out_data[k] = E::max_value;
+            for i in 0..A {
+                if scores_a[i] == k {
+                    out_data[k] = in_a[i];
+                }
+            }
+            for i in 0..B {
+                if scores_b[i] == k {
+                    out_data[k] = in_b[i];
+                }
+            }
+        }
+    }
+}
+
+package IntElement::<W: u32 = 32> for Element {
+    type data = logic<W>;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >: b;
+    }
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >= b;
+    }
+    const max_value: data = ~0;
+}
+
+module CompareMatrixStage1CMInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    inst inner: CompareMatrixStage1CM::<IntElement> #(P: P) (in_data, out_score);
+}
+
+module CompareMatrixSelectorInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output logic<32>        [P],
+) {
+    inst inner: CompareMatrixSelector::<IntElement> #(P: P) (in_data, in_scores, out_data);
+}
+
+module CompareMatrixStage1Int32 #(
+    param P: u32 = 32,
+) (
+    in_data : input  logic<32> [P],
+    out_data: output logic<32> [P],
+) {
+    inst inner: CompareMatrixStage1::<IntElement> #(P: P) (in_data, out_data);
+}
+
+module CompareMatrixMergerInt32 #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input  logic<32> [A],
+    in_b    : input  logic<32> [B],
+    out_data: output logic<32> [A + B],
+) {
+    inst inner: CompareMatrixMerger::<IntElement> #(A: A, B: B) (in_a, in_b, out_data);
+}
+
+
+module Top #(
+param P: u32 = 4,
+) (
+in_data : input  logic<32> [P],
+out_data: output logic<32> [P],
+) {
+inst sorter: CompareMatrixStage1Int32 #(P: P) (in_data, out_data);
+}
+"#)
+  (top Top)
+  ; Input: [10, 40, 20, 30] -> sorted ascending: [10, 20, 30, 40]
+  (modify (set in_data (cat 32 30 32 20 32 40 32 10)))
+  (for (slot value) (list (0 10) (1 20) (2 30) (3 40))
+    (assert_eq (slice (get out_data) (+ (* slot 32) 31) (* slot 32)) value)))
+
+(case test_compare_matrix_merger
+  (source "test.veryl" #"
+proto package Element {
+    type data;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic ;
+    const max_value: data;
+}
+
+module CompareMatrixStage1CM::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    var matrix: logic [P, P];
+
+    always_comb {
+        for y in 0..P {
+            for x in 0..P {
+                if y >: x {
+                    matrix[y][x] = E::ge(in_data[y], in_data[x]);
+                } else if y <: x {
+                    matrix[y][x] = E::gt(in_data[y] ,in_data[x]);
+                } else {
+                    matrix[y][x] = 0;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for y in 0..P {
+            out_score[y] = 0;
+            for x in 0..P {
+                out_score[y] += matrix[y][x];
+            }
+        }
+    }
+}
+
+module CompareMatrixSelector::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data  : input  E::data         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output E::data        [P],
+
+) {
+    always_comb {
+        for j in 0..P {
+            out_data[j] = E::max_value;
+            for i in 0..P {
+                if in_scores[i] == j {
+                    out_data[j] = in_data[i];
+                }
+            }
+        }
+    }
+}
+
+module CompareMatrixStage1::<E: Element> #(
+    param P: u32 = 32,
+) (
+    in_data : input  E::data [P],
+    out_data: output E::data [P],
+) {
+    var scores: logic<$clog2(P)> [P];
+
+    inst stage1: CompareMatrixStage1CM::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data,
+        out_score: scores ,
+    );
+
+    inst selector: CompareMatrixSelector::<E> #(
+        P: P,
+    ) (
+        in_data  : in_data ,
+        in_scores: scores  ,
+        out_data : out_data,
+    );
+}
+
+module CompareMatrixMerger::<E: Element> #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input E::data [A]    ,
+    in_b    : input E::data [B]    ,
+    out_data: output E::data [A + B],
+) {
+    var scores_a: logic<$clog2(A + B)> [A];
+    var scores_b: logic<$clog2(A + B)> [B];
+
+    always_comb {
+        for i in 0..A {
+            scores_a[i] = i;
+            for j in 0..B {
+                if E::gt(in_a[i],in_b[j]) {
+                    scores_a[i] += 1;
+                }
+            }
+        }
+
+        for i in 0..B {
+            scores_b[i] = i;
+            for j in 0..A {
+                if E::ge(in_b[i],in_a[j]) {
+                    scores_b[i] += 1;
+                }
+            }
+        }
+    }
+
+    always_comb {
+        for k in 0..(A + B) {
+            out_data[k] = E::max_value;
+            for i in 0..A {
+                if scores_a[i] == k {
+                    out_data[k] = in_a[i];
+                }
+            }
+            for i in 0..B {
+                if scores_b[i] == k {
+                    out_data[k] = in_b[i];
+                }
+            }
+        }
+    }
+}
+
+package IntElement::<W: u32 = 32> for Element {
+    type data = logic<W>;
+    function gt(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >: b;
+    }
+    function ge(
+        a: input data,
+        b: input data,
+    ) -> logic {
+        return a >= b;
+    }
+    const max_value: data = ~0;
+}
+
+module CompareMatrixStage1CMInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>        [P],
+    out_score: output logic<$clog2(P)> [P],
+) {
+    inst inner: CompareMatrixStage1CM::<IntElement> #(P: P) (in_data, out_score);
+}
+
+module CompareMatrixSelectorInt32 #(
+    param P: u32 = 32,
+) (
+    in_data  : input  logic<32>         [P],
+    in_scores: input  logic<$clog2(P)> [P],
+    out_data : output logic<32>        [P],
+) {
+    inst inner: CompareMatrixSelector::<IntElement> #(P: P) (in_data, in_scores, out_data);
+}
+
+module CompareMatrixStage1Int32 #(
+    param P: u32 = 32,
+) (
+    in_data : input  logic<32> [P],
+    out_data: output logic<32> [P],
+) {
+    inst inner: CompareMatrixStage1::<IntElement> #(P: P) (in_data, out_data);
+}
+
+module CompareMatrixMergerInt32 #(
+    param A: u32 = 32,
+    param B: u32 = 10,
+) (
+    in_a    : input  logic<32> [A],
+    in_b    : input  logic<32> [B],
+    out_data: output logic<32> [A + B],
+) {
+    inst inner: CompareMatrixMerger::<IntElement> #(A: A, B: B) (in_a, in_b, out_data);
+}
+
+
+module Top #(
+param A: u32 = 3,
+param B: u32 = 2,
+) (
+in_a    : input  logic<32> [A],
+in_b    : input  logic<32> [B],
+out_data: output logic<32> [A + B],
+) {
+inst merger: CompareMatrixMergerInt32 #(A: A, B: B) (in_a, in_b, out_data);
+}
+"#)
+  (top Top)
+  ; Sorted ascending inputs: A=[10, 30, 50], B=[20, 40]
+  ; Merged sorted ascending: [10, 20, 30, 40, 50]
+  (modify
+    (set in_a (cat 32 50 32 30 32 10))
+    (set in_b (cat 32 40 32 20)))
+  (for (slot value) (list (0 10) (1 20) (2 30) (3 40) (4 50))
+    (assert_eq (slice (get out_data) (+ (* slot 32) 31) (* slot 32)) value)))

@@ -666,6 +666,8 @@ export interface HierarchyNode {
 	moduleName: string;
 	/** Index of this instance under its name (instance array element index). */
 	index?: number;
+	/** Whether the name takes an index, even for a single instance. */
+	indexed?: boolean;
 	signals: Record<
 		string,
 		SignalLayout & { typeKind: string; arrayDims?: number[] }
@@ -678,6 +680,7 @@ export interface HierarchyNode {
 interface RawHierarchyNode {
 	module_name: string;
 	index?: number;
+	indexed?: boolean;
 	signals: Record<string, RawSignalLayout>;
 	children: Record<string, RawHierarchyNode[]>;
 }
@@ -750,6 +753,7 @@ function convertHierarchyNode(
 	return {
 		moduleName: raw.module_name,
 		index: raw.index,
+		indexed: raw.indexed,
 		signals,
 		forDut,
 		ports,

@@ -1,0 +1,160 @@
+(group std_lfsr (category standard_library))
+
+(case test_lfsr_enable_hold
+  (source "test.veryl"
+    (std "lfsr/lfsr_galois.veryl")
+    #"
+module Top (
+    clk     : input  clock,
+    rst     : input  reset,
+    i_en    : input  logic,
+    i_set   : input  logic,
+    i_setval: input  logic<8>,
+    o_val   : output logic<8>,
+) {
+    inst u: lfsr_galois #(SIZE: 8) (
+        i_clk   : clk,
+        i_en,
+        i_set,
+        i_setval,
+        o_val,
+    );
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_en 0)
+    (set i_set 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Seed with 0x42
+  (modify
+    (set i_en 1)
+    (set i_set 1)
+    (set i_setval 0x42))
+  (tick clk)
+  ; Shift a few times
+  (modify (set i_set 0))
+  (tick clk 5)
+  (let val_before (trunc 8 (get o_val)))
+  ; Disable: value should hold
+  (modify (set i_en 0))
+  (for _ (range 0 5)
+    (tick clk)
+    (assert_eq (trunc 8 (get o_val)) val_before "LFSR should hold when disabled")))
+
+(case test_lfsr_basic_shift
+  (source "test.veryl"
+    (std "lfsr/lfsr_galois.veryl")
+    #"
+module Top (
+    clk     : input  clock,
+    rst     : input  reset,
+    i_en    : input  logic,
+    i_set   : input  logic,
+    i_setval: input  logic<8>,
+    o_val   : output logic<8>,
+) {
+    inst u: lfsr_galois #(SIZE: 8) (
+        i_clk   : clk,
+        i_en,
+        i_set,
+        i_setval,
+        o_val,
+    );
+}
+"#)
+  (top Top)
+  ; Reset (for Top module convention, LFSR itself ignores reset)
+  (modify
+    (set rst 0)
+    (set i_en 0)
+    (set i_set 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Seed LFSR with 1
+  (modify
+    (set i_en 1)
+    (set i_set 1)
+    (set i_setval 1))
+  (tick clk)
+  ; Disable set, enable shifting
+  (modify (set i_set 0))
+  ; Ten values: never 0 (a maximal LFSR never reaches 0), and not all the same.
+  (let first 0)
+  (let varied 0)
+  (for i (range 0 10)
+    (tick clk)
+    (let val (trunc 8 (get o_val)))
+    (assert (!= val 0) "LFSR output should never be 0")
+    (if (== i 0)
+      (set! first val)
+      (if (!= val first) (set! varied 1))))
+  (assert varied "LFSR should produce varying outputs"))
+
+(case test_lfsr_deterministic_cycle
+  (source "test.veryl"
+    (std "lfsr/lfsr_galois.veryl")
+    #"
+module Top (
+    clk     : input  clock,
+    rst     : input  reset,
+    i_en    : input  logic,
+    i_set   : input  logic,
+    i_setval: input  logic<8>,
+    o_val   : output logic<8>,
+) {
+    inst u: lfsr_galois #(SIZE: 8) (
+        i_clk   : clk,
+        i_en,
+        i_set,
+        i_setval,
+        o_val,
+    );
+}
+"#)
+  (top Top)
+  ; Reset
+  (modify
+    (set rst 0)
+    (set i_en 0)
+    (set i_set 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; Seed with 1
+  (modify
+    (set i_en 1)
+    (set i_set 1)
+    (set i_setval 1))
+  (tick clk)
+  (modify (set i_set 0))
+  ; Collect values until the first seeded state repeats. Value i is kept
+  ; in bits 8i+7..8i of `values`.
+  (tick clk)
+  (let first (trunc 8 (get o_val)))
+  (let values first)
+  (let count 1)
+  (let repeated 0)
+  (for step (range 0 511)
+    (if (! repeated)
+      (do
+        (tick clk)
+        (let val (trunc 8 (get o_val)))
+        (if (== val first)
+          (set! repeated 1)
+          (do
+            (set! values (| values (<< val (* count 8))))
+            (set! count (+ count 1)))))))
+  (assert repeated "LFSR should repeat within 512 ticks")
+  ; LFSR should produce non-zero values
+  (for i (range 0 count)
+    (assert (!= (slice values (+ (* i 8) 7) (* i 8)) 0) "LFSR output should never be 0"))
+  (assert (== count 255) "8-bit maximal LFSR should visit all non-zero states")
+  ; Verify the cycle actually repeats for one more full period.
+  (for i (range 1 (+ count 1))
+    (tick clk)
+    (assert_eq (trunc 8 (get o_val))
+      (? (== i count) first (slice values (+ (* i 8) 7) (* i 8)))
+      "cycle should repeat")))
