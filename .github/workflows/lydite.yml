@@ -8,20 +8,18 @@ on:
   push:
     branches: [master, develop]
     paths:
-      - "crates/lydite-*/**"
+      - "crates/lydite*/**"
       - "lydite/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
       - ".github/workflows/lydite.yml"
   pull_request:
     paths:
-      - "crates/lydite-*/**"
+      - "crates/lydite*/**"
       - "lydite/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
       - ".github/workflows/lydite.yml"
+  # Dependency and toolchain updates are covered by ci.yml's lydite unit
+  # tests; run the full gates weekly to catch slower drift.
+  schedule:
+    - cron: "41 3 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -82,19 +80,18 @@ jobs:
         timeout-minutes: 5
         run: xvfb-run -a npm test --prefix editor/vscode
 
-  # The conformance gates build a pinned Celox revision (0.8.2) with its
-  # recorded toolchain, independently of the in-tree simulator.
+  # The conformance gates build a pinned Celox revision (0.8.2),
+  # independently of the in-tree simulator.
   celox-replay:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      RUSTUP_TOOLCHAIN: 1.98.1
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
       - name: Reproduce source violations and AXI4-Lite protocol regressions with pinned Celox
         run: ./conformance/axi4lite/run_ci.sh "$RUNNER_TEMP/celox-replay"
       - name: Upload complete replay evidence
@@ -109,16 +106,13 @@ jobs:
   veryl-fv:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      RUSTUP_TOOLCHAIN: 1.98.1
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-          python3 --version
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
       - name: Extract, lower and verify the pinned Veryl corpus
         run: ./conformance/veryl/run_ci.sh "$RUNNER_TEMP/veryl-conformance"
       - name: Upload complete conformance evidence
@@ -133,16 +127,13 @@ jobs:
   veryl-proof-corpus:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      RUSTUP_TOOLCHAIN: 1.98.1
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-          python3 --version
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
       - name: Run all 665 original Rust cases with proof-backed reads
         run: ./conformance/veryl-proof/run_ci.sh "$RUNNER_TEMP/veryl-proof"
       - name: Verify symbolic Veryl pipeline against ISA and reject RTL mutants

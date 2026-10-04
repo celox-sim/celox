@@ -31,7 +31,6 @@ PY
 rustc --version | tee "$OUT/rustc-version.txt"
 cargo --version | tee "$OUT/cargo-version.txt"
 python3 --version | tee "$OUT/python-version.txt"
-rustc --version | grep -q '^rustc 1\.98\.1 '
 cd "$HERE"
 python3 prepare.py
 cp work/provenance.json "$OUT/provenance.json"

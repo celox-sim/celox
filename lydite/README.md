@@ -4,7 +4,7 @@ Rustで実装したハードウェア状態対応チェッカー。仕様と実�
 
 ## はじめに
 
-Rust 1.98.1、Python 3.12を使用します。既定のsolver経路にはZ3が必要です。有限Bool/BV経路は `LYDITE_SOLVER=finite` で選択し、外部solverへfallbackしません。
+リポジトリの Rust ツールチェーン（`rust-toolchain.toml`）と Python 3.12 を使用します。既定のsolver経路にはZ3が必要です。有限Bool/BV経路は `LYDITE_SOLVER=finite` で選択し、外部solverへfallbackしません。
 
 ```sh
 cargo build --release --locked

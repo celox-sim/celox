@@ -32,9 +32,6 @@ PY
 rustc --version | tee "$OUT/rustc-version.txt"
 cargo --version | tee "$OUT/cargo-version.txt"
 python3 --version | tee "$OUT/python-version.txt"
-if ! rustc --version | grep -q '^rustc 1\.98\.1 '; then
-    echo 'Install Rust 1.98.1 or invoke this script with its toolchain on PATH' >&2; exit 2
-fi
 REV=124a1315096d21b85d9d0d84fd7139363a181cad
 if test -z "${CELOX_SUITE_ROOT:-}"; then
     UPSTREAM=$(mktemp -d "${TMPDIR:-/tmp}/lydite-veryl-upstream.XXXXXXXX")

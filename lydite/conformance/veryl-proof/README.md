@@ -15,13 +15,11 @@ all possible stimuli. The independent narrow `../veryl` job is retained.
 
 ## Reproduce
 
-Requirements: Rust1.98.1 (with rustfmt), Python3.12, Git, access to the pinned public
+Requirements: the repository Rust toolchain (with rustfmt), Python3.12, Git, access to the pinned public
 Celox source and ordinary crates.io dependencies. No Python packages or external
 SMT solver are required.
 
 ```sh
-rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-rustup override set 1.98.1
 ./conformance/veryl-proof/run_ci.sh /tmp/veryl-proof-evidence
 ```
 

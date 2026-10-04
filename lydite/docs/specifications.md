@@ -449,7 +449,7 @@ The gate uses Celox `124a1315096d21b85d9d0d84fd7139363a181cad` (0.8.2), Veryl
 suite cases are changed. The adapter has a separate locked workspace retaining
 upstream package versions. Its host-runtime dependencies must be available; a
 missing simulator or build/runtime error fails CI rather than skipping replay.
-Run `./conformance/celox-replay/run_ci.sh /tmp/fresh-celox-replay` with Rust 1.98.1.
+Run `./conformance/celox-replay/run_ci.sh /tmp/fresh-celox-replay` with the repository Rust toolchain.
 
 Fixtures exercise an enabled counter's wrong update and a single-outstanding
 request's dropped/deadline failures. Every saved failure is replayed on both the
@@ -466,7 +466,7 @@ by CI.
 The fixture gate and external projects use the same public CLI,
 [project.py](../conformance/celox-replay/project.py). No fixture name, source layout,
 or physical port naming convention is required. First build the pinned tools
-from the lydite repository (Rust 1.98.1):
+from `lydite/`:
 
 ```sh
 python3 conformance/veryl-proof/prepare.py

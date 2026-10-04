@@ -38,13 +38,11 @@ separate predicates. Repeated assertions are conjoined, never overwritten.
 
 ## Run exactly what CI runs
 
-Prerequisites: Rust **1.98.1** with rustfmt, Python **3.12**, Git, a C compiler,
+Prerequisites: the repository Rust toolchain with rustfmt, Python **3.12**, Git, a C compiler,
 and network access to the pinned public Git repository and locked Cargo crates.
 No Python packages, simulator, or Z3 installation is required.
 
 ```sh
-rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-rustup override set 1.98.1
 ./conformance/veryl/run_ci.sh /absolute/path/to/new-evidence-directory
 ```
 

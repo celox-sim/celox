@@ -1,6 +1,6 @@
 # Usage and development
 
-Run commands from the repository root. Use Rust 1.98.1 and Python 3.12, with
+Run commands from `lydite/`. Use the repository Rust toolchain and Python 3.12, with
 locked Cargo dependencies. Z3 5.1.0 is the recorded compatibility-test version;
 set `Z3_BIN` for tests using the external-solver route. See the
 [trust boundary](trust.md) before interpreting a successful result.
