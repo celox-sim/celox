@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "case": "response_deadline",
+  "goal": "response_deadline",
+  "identity": {
+    "celox_revision": "124a1315096d21b85d9d0d84fd7139363a181cad",
+    "source_sha256": "6c09947a5e26c5723903de081f6f15a3793c59c3ffbce74dca440bf4d3843b6c",
+    "specification_sha256": "00f525a84db174fc937a233c3751c00fb6292a3b406f07dd11b27cc0c41a9848",
+    "bindings_sha256": "7796761b8d360a37f40d4e9f29e3f15ec799ec7e576f0ed806dc2f9d2732ccea",
+    "document_sha256": "f6e063647814d607e6bb54b100a29f516fb0209275bbe394ddc65e6b5aab52dc",
+    "dependency_patches_sha256": "4ba8abd9b14edc12c8ceca52b9fccfbe6bcdccf9bc996410e118150cbc843491"
+  },
+  "inputs": [
+    {
+      "request": false,
+      "rst": true,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": true,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    },
+    {
+      "request": false,
+      "rst": false,
+      "stall": false
+    }
+  ]
+}

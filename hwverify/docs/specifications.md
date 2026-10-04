@@ -388,3 +388,75 @@ so a passing response row alone does not override other failures in that result.
 Failed or Unknown implementation bindings also produce a blocking implementation-level
 editor diagnostic naming the outstanding obligations, even when every response
 obligation passes.
+
+## Reset-reachable failures and source RTL replay
+
+`hwverify-replay` adds bounded **failure** search and strict concrete replay for
+native v3 relational implementations. It is separate from both inductive checking
+and the positive acceptance cover above. Initial scope is scalar Bool/BV≤64,
+one synchronous positive-edge clock, canonical reset at edge 0 followed by
+1–32 nonreset edges, and direct top-level state/input bindings. Native v4, arrays,
+multiple clocks, asynchronous/typed reset ports, and four-state replay are not
+supported by this first source-replay route; existing checkers are unchanged.
+
+Build with `cargo build --release --locked -p hwverify-rs`. The executable accepts
+one JSON request on stdin; use `source` for native v3 text or `document` for its
+canonical JSON. For example, a request has `version: 1`, `mode: "search"`,
+`goal: "safety"`, `depth: 4`, and `source: "..."`. Goals are:
+
+- `safety`: the original reset, operation-exclusion, relational-step, invariant,
+  and stutter failure predicates shared with the inductive v3 binding checker.
+  Response input assumptions do not restrict this safety search.
+- `response_deadline`: a separate monitor for the sole declared response. It
+  starts on qualifying acceptance, permits same-edge completion, and fails if
+  completion is absent through the Bth subsequent nonreset edge. It maintains
+  its own outstanding-request bit and age, never trusting DUT `pending` or rank.
+  An assumption violation cancels the affected interval's guarantee, not later
+  qualifying requests. The monitor does not add request-to-acceptance, payload,
+  overlap, or unsolicited-completion guarantees; those are separate properties.
+
+Search statuses are `reset_reachable_failure`, `bounded_no_failure`, and `unknown`.
+Only the first carries an original-transition-and-property-validated witness.
+`bounded_no_failure` means no violation of the selected goal within the bound,
+not an unbounded proof. SAT states are compared against a fresh execution of the
+original reset/next expressions; supplied intermediate states are never inputs.
+The witness includes its complete canonical model and goal. `mode: "replay"`
+rechecks a supplied `witness` and rejects stale models, corrupt frames, wrong reset
+indexing, positive-cover records, and induction countermodels. `check_stimulus`
+executes explicit `inputs` against a selected goal and reports a concrete
+`trace_no_failure` or actual failure; it makes no universal claim.
+
+The [Celox replay gate](../conformance/celox-replay/run_ci.sh) performs the full
+source workflow. It compiles handwritten Veryl with the existing pinned frontend,
+lifts DUT reset/next expressions without importing expected values, searches for
+an actual failure, and drives only the resulting external inputs into an actual
+Celox native simulator. Inputs settle first; acceptance/completion are sampled
+before exactly one clock event; sequential state is sampled afterward. Celox's
+post-edge combinational settle is never substituted for the pre-edge sample.
+Reset must establish all selected state independently of power-on values.
+
+The simulator subprocess receives **no expected outputs or property oracle**.
+The independently authored native specification supplies the property, and the
+original transition replay supplies the trace to compare. A simulator/model
+mismatch is `simulator_divergence`, not a reproduced property failure. Celox and
+the lifter share frontend dependencies, so agreement is not an independent proof
+of frontend correctness. The source/property/binding/model hashes, pinned Celox
+revision and dependency patch identity are checked before saved stimuli run.
+Regressions retain stimuli and identities rather than simulator-generated goldens.
+
+The gate uses Celox `124a1315096d21b85d9d0d84fd7139363a181cad` (0.8.2), Veryl
+0.21.0, and the existing named frontend patches. No upstream files or original
+suite cases are changed. The adapter has a separate locked workspace retaining
+upstream package versions. Its host-runtime dependencies must be available; a
+missing simulator or build/runtime error fails CI rather than skipping replay.
+Run `./conformance/celox-replay/run_ci.sh /tmp/fresh-celox-replay` with Rust 1.98.1.
+
+Fixtures exercise an enabled counter's wrong update and a single-outstanding
+request's dropped/deadline failures. Every saved failure is replayed on both the
+mutant and correct source under identical stimuli. An unreachable-only fault
+retains its induction countermodel but has no bounded reset failure and passes
+concrete reset traces. Failure controls also reject internal-state writes,
+malformed/stale witnesses, bad sampling/reset indices, and simulation divergence.
+The mandatory `celox-replay` CI job uploads fresh evidence; `--record` is an
+explicit developer action for changing reviewed regressions and is never used
+by CI.

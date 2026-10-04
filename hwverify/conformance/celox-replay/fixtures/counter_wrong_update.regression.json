@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "case": "counter_wrong_update",
+  "goal": "safety",
+  "identity": {
+    "celox_revision": "124a1315096d21b85d9d0d84fd7139363a181cad",
+    "source_sha256": "17333471fb05b6d98983be8e6785568f693ccfbf04963af58255dc046c6b071e",
+    "specification_sha256": "32d9e552d0f579a5204f7458b6549352b61b648b9f5cc2bed4441f5765133869",
+    "bindings_sha256": "e0e4adfe2bc63e8bf3c9b7f1d4f9849e209e86dc3843da2d365076f13fbf8ae9",
+    "document_sha256": "db39e920b3579b63578c26960745619a3d4c684e59cc3187f636f95da5ef715d",
+    "dependency_patches_sha256": "4ba8abd9b14edc12c8ceca52b9fccfbe6bcdccf9bc996410e118150cbc843491"
+  },
+  "inputs": [
+    {
+      "en": false,
+      "rst": true
+    },
+    {
+      "en": false,
+      "rst": false
+    },
+    {
+      "en": false,
+      "rst": false
+    },
+    {
+      "en": true,
+      "rst": false
+    }
+  ]
+}

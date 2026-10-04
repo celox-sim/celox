@@ -21,11 +21,16 @@ fn both(a: Term, b: Term) -> Term {
 fn disjoin(a: Term, b: Term) -> Term {
     node(Sort::Bool, "or", vec![a, b])
 }
-pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Value>> {
-    let Some(implementation) = spec.implementation() else {
-        return Ok(None);
-    };
-    let before = q.reports.len();
+/// Original safety predicates shared by induction and bounded reset replay.
+pub(crate) struct SafetyModel {
+    pub reset: Term,
+    pub reset_good: Term,
+    pub invariant: Term,
+    pub context: Env,
+    pub checks: Vec<(String, Term, Option<String>)>,
+}
+pub(crate) fn safety_model(spec: &Specification) -> Res<SafetyModel> {
+    let implementation = spec.implementation().ok_or("missing implementation")?;
     let product = &spec.compositions()[&implementation.composition];
     let machine = &implementation.machine;
     let reset_sub = pairs(&machine.state, &machine.reset);
@@ -86,6 +91,59 @@ pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Val
     }
     let reset = spec.inputs()[&implementation.reset_input].clone();
     let reset_good = both(initial, reset_invariant);
+    let active = both(not(reset.clone()), invariant.clone());
+    let mut checks = vec![];
+    let selectors = implementation
+        .operations
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut overlap = boolv(false);
+    for (index, a) in selectors.iter().enumerate() {
+        for b in selectors.iter().skip(index + 1) {
+            overlap = disjoin(overlap, both(a.clone(), b.clone()));
+        }
+    }
+    checks.push((
+        "binding_operation_exclusive".into(),
+        both(active.clone(), overlap),
+        None,
+    ));
+    for (index, (operation, selector)) in implementation.operations.iter().enumerate() {
+        let good = both(relations[operation].clone(), next_invariant.clone());
+        checks.push((
+            format!("binding_operation_{index}"),
+            both(active.clone(), both(selector.clone(), not(good))),
+            Some(operation.clone()),
+        ));
+    }
+    let any = selectors.into_iter().fold(boolv(false), disjoin);
+    checks.push((
+        "binding_no_operation_stutters".into(),
+        both(active, both(not(any), not(stutter))),
+        None,
+    ));
+    Ok(SafetyModel {
+        reset,
+        reset_good,
+        invariant,
+        context,
+        checks,
+    })
+}
+pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Value>> {
+    let Some(implementation) = spec.implementation() else {
+        return Ok(None);
+    };
+    let before = q.reports.len();
+    let product = &spec.compositions()[&implementation.composition];
+    let SafetyModel {
+        reset,
+        reset_good,
+        invariant,
+        context,
+        checks,
+    } = safety_model(spec)?;
     q.query(
         "binding_reset_nonempty",
         both(reset.clone(), reset_good.clone()),
@@ -106,41 +164,12 @@ pub(crate) fn obligations(spec: &Specification, q: &mut Check) -> Res<Option<Val
         spec.inputs(),
         q,
     )?;
-    let active = both(not(reset), invariant);
-    let selectors = implementation
-        .operations
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut overlap = boolv(false);
-    for (index, a) in selectors.iter().enumerate() {
-        for b in selectors.iter().skip(index + 1) {
-            overlap = disjoin(overlap, both(a.clone(), b.clone()));
+    for (name, bad, operation) in checks {
+        q.query(&name, bad, false, &context)?;
+        if let Some(operation) = operation {
+            q.reports.last_mut().unwrap()["operation"] = json!(operation);
         }
     }
-    q.query(
-        "binding_operation_exclusive",
-        both(active.clone(), overlap),
-        false,
-        &context,
-    )?;
-    for (index, (operation, selector)) in implementation.operations.iter().enumerate() {
-        let good = both(relations[operation].clone(), next_invariant.clone());
-        q.query(
-            &format!("binding_operation_{index}"),
-            both(active.clone(), both(selector.clone(), not(good))),
-            false,
-            &context,
-        )?;
-        q.reports.last_mut().unwrap()["operation"] = json!(operation);
-    }
-    let any = selectors.into_iter().fold(boolv(false), disjoin);
-    q.query(
-        "binding_no_operation_stutters",
-        both(active, both(not(any), not(stutter))),
-        false,
-        &context,
-    )?;
     let progress_limitation = if implementation.responses.is_empty() {
         "No liveness, fairness, progress, deadlock freedom, or implementation total-correctness claim"
     } else {

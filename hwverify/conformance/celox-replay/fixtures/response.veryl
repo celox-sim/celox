@@ -1,0 +1,16 @@
+module Response (
+    clk: input clock, rst_n: input bit, request: input bit, stall: input bit,
+    count: output bit<4>, busy: output bit, ticks: output bit<2>,
+    accept: output bit, complete: output bit,
+) {
+    assign accept = request && !busy;
+    assign complete = busy && ticks == 0 && !stall;
+    always_ff (clk) {
+        if !rst_n { count = 0; busy = 0; ticks = 0; }
+        else if !stall {
+            if complete { count = count + 4'd1; }
+            busy = (busy || accept) && !complete;
+            if accept { ticks = 1; } else if busy { ticks = ticks - 2'd1; }
+        }
+    }
+}
