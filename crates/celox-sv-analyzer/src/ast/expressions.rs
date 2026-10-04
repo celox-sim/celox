@@ -66,8 +66,8 @@ fn expr_from_expression_with_types_raw(
     }
 }
 
-/// `x inside {a, [lo:hi], ...}` is true when `x` matches any item: a value by
-/// wildcard equality, a range by an inclusive bounds check.
+/// `x inside {a, [lo:hi], ...}`: kept as an `Inside` expression, so that its
+/// operands and its matching rules stay visible to later stages.
 fn expr_from_inside_expression(
     inside: &sv_parser::InsideExpression,
     syntax_tree: &SyntaxTree,
@@ -75,12 +75,7 @@ fn expr_from_inside_expression(
 ) -> Option<Expr> {
     let operand =
         expr_from_expression_with_types_raw(&inside.nodes.0, syntax_tree, packed_dimensions)?;
-    let compare = |left: Expr, op: BinaryOp, right: Expr| Expr::Binary {
-        left: Box::new(left),
-        op,
-        right: Box::new(right),
-    };
-    inside
+    let items = inside
         .nodes
         .2
         .nodes
@@ -91,25 +86,26 @@ fn expr_from_inside_expression(
         .into_iter()
         .map(|item| match &item.nodes.0 {
             sv_parser::ValueRange::Expression(value) => {
-                let value =
-                    expr_from_expression_with_types_raw(value, syntax_tree, packed_dimensions)?;
-                Some(case_item_condition(operand.clone(), value, true))
+                expr_from_expression_with_types_raw(value, syntax_tree, packed_dimensions)
+                    .map(InsideItem::Value)
             }
             sv_parser::ValueRange::Binary(range) => {
                 let (low, _, high) = &range.nodes.0.nodes.1;
-                let low = expr_from_expression_with_types_raw(low, syntax_tree, packed_dimensions)?;
-                let high =
-                    expr_from_expression_with_types_raw(high, syntax_tree, packed_dimensions)?;
-                Some(compare(
-                    compare(operand.clone(), BinaryOp::Ge, low),
-                    BinaryOp::LogicAnd,
-                    compare(operand.clone(), BinaryOp::Le, high),
-                ))
+                Some(InsideItem::Range {
+                    low: expr_from_expression_with_types_raw(low, syntax_tree, packed_dimensions)?,
+                    high: expr_from_expression_with_types_raw(
+                        high,
+                        syntax_tree,
+                        packed_dimensions,
+                    )?,
+                })
             }
         })
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .reduce(|left, right| compare(left, BinaryOp::LogicOr, right))
+        .collect::<Option<Vec<_>>>()?;
+    (!items.is_empty()).then(|| Expr::Inside {
+        expr: Box::new(operand),
+        items,
+    })
 }
 
 pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
@@ -177,6 +173,13 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
             condition: Box::new(guard_zero_divisions(*condition)),
             then_expr: Box::new(guard_zero_divisions(*then_expr)),
             else_expr: Box::new(guard_zero_divisions(*else_expr)),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(guard_zero_divisions(*expr)),
+            items: items
+                .into_iter()
+                .map(|item| item.map(&mut |operand| guard_zero_divisions(operand)))
+                .collect(),
         },
         Expr::Call { name, args } => Expr::Call {
             name,

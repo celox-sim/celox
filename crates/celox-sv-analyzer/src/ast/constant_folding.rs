@@ -178,6 +178,15 @@ pub(super) fn simplify_constant_mux_conditions(
                 },
             }
         }
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+            items: items
+                .into_iter()
+                .map(|item| {
+                    item.map(&mut |operand| simplify_constant_mux_conditions(operand, const_env))
+                })
+                .collect(),
+        },
         Expr::Call { name, args } => Expr::Call {
             name,
             args: args

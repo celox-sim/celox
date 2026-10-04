@@ -206,6 +206,7 @@ pub(super) fn expr_signedness_with_return_types(
                 function_return_types,
             )?,
         ),
+        Expr::Inside { .. } => Some(false),
         Expr::Call { name, args } => typecheck::bit_vector_function_return_type(name, args.len())
             .map(|(_, signed)| signed)
             .or_else(|| functions.get(name).map(|function| function.return_signed))
@@ -344,6 +345,29 @@ pub(super) fn expand_expr_calls(
                 depth,
                 apply_return_type,
             )),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                expression_signedness,
+                depth,
+                apply_return_type,
+            )),
+            items: items
+                .into_iter()
+                .map(|item| {
+                    item.map(&mut |operand| {
+                        expand_expr_calls(
+                            operand,
+                            functions,
+                            expression_signedness,
+                            depth,
+                            apply_return_type,
+                        )
+                    })
+                })
+                .collect(),
         },
         Expr::Call { name, args } => {
             let args = args
@@ -486,6 +510,13 @@ pub(super) fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) ->
             condition: Box::new(substitute_expr_idents(*condition, env)),
             then_expr: Box::new(substitute_expr_idents(*then_expr, env)),
             else_expr: Box::new(substitute_expr_idents(*else_expr, env)),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(substitute_expr_idents(*expr, env)),
+            items: items
+                .into_iter()
+                .map(|item| item.map(&mut |operand| substitute_expr_idents(operand, env)))
+                .collect(),
         },
         Expr::Call { name, args } => Expr::Call {
             name,

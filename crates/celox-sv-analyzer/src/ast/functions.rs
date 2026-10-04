@@ -1626,26 +1626,6 @@ pub(super) fn case_keyword_is_wildcard(keyword: &sv_parser::CaseKeyword) -> bool
 }
 
 pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bool) -> Expr {
-    if wildcard
-        && let Expr::Literal(literal) = &item_expr
-        && let Some(pattern) = typecheck::parse_integral_literal(literal)
-        && pattern.mask != num_bigint::BigUint::default()
-    {
-        // The wildcard bits of a constant pattern are known up front. Force
-        // them to one on both sides instead of relying on unknown-bit
-        // comparison, which a two-state simulation does not carry.
-        let wildcard_bits = format!("{}'h{:x}", pattern.width, pattern.mask);
-        let pattern_bits = format!("{}'h{:x}", pattern.width, &pattern.value | &pattern.mask);
-        return Expr::Binary {
-            left: Box::new(Expr::Binary {
-                left: Box::new(case_expr),
-                op: BinaryOp::BitOr,
-                right: Box::new(Expr::Literal(wildcard_bits)),
-            }),
-            op: BinaryOp::EqCase,
-            right: Box::new(Expr::Literal(pattern_bits)),
-        };
-    }
     Expr::Binary {
         left: Box::new(case_expr),
         op: if wildcard {

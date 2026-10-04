@@ -963,6 +963,13 @@ fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
                 || expr_references_ident_name(else_expr, name)
         }
         ir::Expr::Literal(_) => false,
+        ir::Expr::Inside { expr, items } => {
+            expr_references_ident_name(expr, name)
+                || items
+                    .iter()
+                    .flat_map(ir::InsideItem::exprs)
+                    .any(|operand| expr_references_ident_name(operand, name))
+        }
     }
 }
 
@@ -990,6 +997,13 @@ fn expr_contains_literal(expr: &ir::Expr, needle: &str) -> bool {
                 || expr_contains_literal(else_expr, needle)
         }
         ir::Expr::Ident(_) => false,
+        ir::Expr::Inside { expr, items } => {
+            expr_contains_literal(expr, needle)
+                || items
+                    .iter()
+                    .flat_map(ir::InsideItem::exprs)
+                    .any(|operand| expr_contains_literal(operand, needle))
+        }
     }
 }
 
@@ -3211,6 +3225,13 @@ fn expr_contains_call(expr: &ir::Expr) -> bool {
                 || expr_contains_call(else_expr)
         }
         ir::Expr::Call { .. } => true,
+        ir::Expr::Inside { expr, items } => {
+            expr_contains_call(expr)
+                || items
+                    .iter()
+                    .flat_map(ir::InsideItem::exprs)
+                    .any(expr_contains_call)
+        }
     }
 }
 

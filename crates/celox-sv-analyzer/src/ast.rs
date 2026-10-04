@@ -1345,6 +1345,41 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// `expr inside { items }`: true when `expr` matches any item.
+    Inside {
+        expr: Box<Expr>,
+        items: Vec<InsideItem>,
+    },
+}
+
+/// One item of an `inside` set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsideItem {
+    /// A value matched with wildcard equality (`==?`).
+    Value(Expr),
+    /// An inclusive range `[low:high]`.
+    Range { low: Expr, high: Expr },
+}
+
+impl InsideItem {
+    /// The operand expressions of the item.
+    fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            InsideItem::Value(value) => vec![value],
+            InsideItem::Range { low, high } => vec![low, high],
+        }
+    }
+
+    /// Rebuild the item with `f` applied to each operand.
+    fn map(self, f: &mut impl FnMut(Expr) -> Expr) -> InsideItem {
+        match self {
+            InsideItem::Value(value) => InsideItem::Value(f(value)),
+            InsideItem::Range { low, high } => InsideItem::Range {
+                low: f(low),
+                high: f(high),
+            },
+        }
+    }
 }
 
 /// Enum member constants collected from module-level `typedef enum`

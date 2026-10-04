@@ -738,6 +738,53 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// `expr inside { items }`: true when `expr` matches any item.
+    Inside {
+        expr: Box<Expr>,
+        items: Vec<InsideItem>,
+    },
+}
+
+/// One item of an `inside` set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsideItem {
+    /// A value matched with wildcard equality (`==?`).
+    Value(Expr),
+    /// An inclusive range `[low:high]`.
+    Range { low: Expr, high: Expr },
+}
+
+impl InsideItem {
+    /// The operand expressions of the item.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            InsideItem::Value(value) => vec![value],
+            InsideItem::Range { low, high } => vec![low, high],
+        }
+    }
+
+    /// Rebuild the item with `f` applied to each operand.
+    pub fn map(&self, f: &mut impl FnMut(&Expr) -> Expr) -> InsideItem {
+        match self {
+            InsideItem::Value(value) => InsideItem::Value(f(value)),
+            InsideItem::Range { low, high } => InsideItem::Range {
+                low: f(low),
+                high: f(high),
+            },
+        }
+    }
+}
+
+impl From<ast::InsideItem> for InsideItem {
+    fn from(item: ast::InsideItem) -> Self {
+        match item {
+            ast::InsideItem::Value(value) => InsideItem::Value(value.into()),
+            ast::InsideItem::Range { low, high } => InsideItem::Range {
+                low: low.into(),
+                high: high.into(),
+            },
+        }
+    }
 }
 
 impl From<ast::ConstExpr> for ConstExpr {
@@ -954,6 +1001,10 @@ impl From<ast::Expr> for Expr {
             ast::Expr::Call { name, args } => Expr::Call {
                 name,
                 args: args.into_iter().map(Into::into).collect(),
+            },
+            ast::Expr::Inside { expr, items } => Expr::Inside {
+                expr: Box::new((*expr).into()),
+                items: items.into_iter().map(Into::into).collect(),
             },
         }
     }

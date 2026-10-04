@@ -412,6 +412,17 @@ fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDime
                 packed_dimensions,
             )),
         },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(simplify_single_bit_concat_selects(*expr, packed_dimensions)),
+            items: items
+                .into_iter()
+                .map(|item| {
+                    item.map(&mut |operand| {
+                        simplify_single_bit_concat_selects(operand, packed_dimensions)
+                    })
+                })
+                .collect(),
+        },
         Expr::Call { name, args } => Expr::Call {
             name,
             args: args
@@ -492,6 +503,7 @@ pub(super) fn expr_static_width(
                 )
             }
         }
+        Expr::Inside { .. } => Some(1),
         Expr::Mux {
             then_expr,
             else_expr,
@@ -1038,6 +1050,10 @@ fn check_tracked_value_budget(
                 stack.push(expr);
             }
             Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => stack.extend(parts),
+            Expr::Inside { expr, items } => {
+                stack.push(expr);
+                stack.extend(items.iter().flat_map(InsideItem::exprs));
+            }
             Expr::Call { args, .. } => stack.extend(args),
             Expr::Binary { left, right, .. } => stack.extend([&**left, &**right]),
             Expr::Mux {
@@ -1201,6 +1217,13 @@ pub(super) fn expr_contains_comb_previous_value(expr: &Expr) -> bool {
                 || expr_contains_comb_previous_value(then_expr)
                 || expr_contains_comb_previous_value(else_expr)
         }
+        Expr::Inside { expr, items } => {
+            expr_contains_comb_previous_value(expr)
+                || items
+                    .iter()
+                    .flat_map(InsideItem::exprs)
+                    .any(expr_contains_comb_previous_value)
+        }
         Expr::Call { args, .. } => args.iter().any(expr_contains_comb_previous_value),
     }
 }
@@ -1311,6 +1334,22 @@ fn substitute_expr_lvalue(
                 value,
                 packed_dimensions,
             )),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(substitute_expr_lvalue(
+                *expr,
+                target,
+                value,
+                packed_dimensions,
+            )),
+            items: items
+                .into_iter()
+                .map(|item| {
+                    item.map(&mut |operand| {
+                        substitute_expr_lvalue(operand, target, value, packed_dimensions)
+                    })
+                })
+                .collect(),
         },
         Expr::Call { name, args } => Expr::Call {
             name,
@@ -1551,6 +1590,13 @@ pub(super) fn expr_references_overlapping_lvalue(
             expr_references_overlapping_lvalue(condition, target, const_env)
                 || expr_references_overlapping_lvalue(then_expr, target, const_env)
                 || expr_references_overlapping_lvalue(else_expr, target, const_env)
+        }
+        Expr::Inside { expr, items } => {
+            expr_references_overlapping_lvalue(expr, target, const_env)
+                || items
+                    .iter()
+                    .flat_map(InsideItem::exprs)
+                    .any(|operand| expr_references_overlapping_lvalue(operand, target, const_env))
         }
         Expr::Call { args, .. } => args
             .iter()

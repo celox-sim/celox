@@ -1220,6 +1220,31 @@ pub(crate) fn attach_instance_glue(
     Ok(())
 }
 
+/// `expr inside { items }` as the comparisons the language defines: a value
+/// matches by wildcard equality, a range by an inclusive bounds check.
+fn inside_as_comparisons(expr: &sv::ir::Expr, items: &[sv::ir::InsideItem]) -> sv::ir::Expr {
+    let compare =
+        |left: sv::ir::Expr, op: sv::ir::BinaryOp, right: sv::ir::Expr| sv::ir::Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+    items
+        .iter()
+        .map(|item| match item {
+            sv::ir::InsideItem::Value(value) => {
+                compare(expr.clone(), sv::ir::BinaryOp::EqWildcard, value.clone())
+            }
+            sv::ir::InsideItem::Range { low, high } => compare(
+                compare(expr.clone(), sv::ir::BinaryOp::Ge, low.clone()),
+                sv::ir::BinaryOp::LogicAnd,
+                compare(expr.clone(), sv::ir::BinaryOp::Le, high.clone()),
+            ),
+        })
+        .reduce(|left, right| compare(left, sv::ir::BinaryOp::LogicOr, right))
+        .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string()))
+}
+
 fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
     match expr {
         sv::ir::Expr::Mux {
@@ -1311,6 +1336,13 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             condition: Box::new(expr_for_state_mode(condition, four_state)),
             then_expr: Box::new(expr_for_state_mode(then_expr, four_state)),
             else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+        },
+        sv::ir::Expr::Inside { expr, items } => sv::ir::Expr::Inside {
+            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            items: items
+                .iter()
+                .map(|item| item.map(&mut |operand| expr_for_state_mode(operand, four_state)))
+                .collect(),
         },
         sv::ir::Expr::Call { name, args } => sv::ir::Expr::Call {
             name: name.clone(),
@@ -1853,6 +1885,27 @@ fn lower_glue_parent_expr(
             lsb,
             signed,
         } => {
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+            ) {
+                return lower_glue_parent_expr(
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    context_width,
+                    context_signed,
+                );
+            }
             if let Some((id, element_width, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
@@ -2368,6 +2421,16 @@ fn lower_glue_parent_expr(
                 source_ids,
             ))
         }
+        sv::ir::Expr::Inside { expr, items } => lower_glue_parent_expr(
+            &inside_as_comparisons(expr, items),
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            arena,
+            context_width,
+            context_signed,
+        ),
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {
@@ -2646,13 +2709,24 @@ fn lower_comb_process(
         }
         let allow_dynamic_array_write = process.kind() == sv::ir::CombProcessKind::AlwaysComb;
         let previous_array = if allow_dynamic_array_write {
-            if let Some((id, _, _, _)) = dynamic_array_element_lvalue(
+            if let Some(id) = dynamic_array_element_lvalue(
                 assignment.lhs_value(),
                 variables,
                 name_to_id,
                 constants,
                 parameter_types,
-            ) {
+            )
+            .map(|(id, _, _, _)| id)
+            .or_else(|| {
+                dynamic_packed_write(
+                    assignment.lhs_value(),
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                )
+                .map(|write| write.id)
+            }) {
                 let width = variables
                     .get(&id)
                     .map(|variable| variable.width)
@@ -2842,6 +2916,13 @@ fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
                 || expr_references_ident(then_expr, name)
                 || expr_references_ident(else_expr, name)
         }
+        sv::ir::Expr::Inside { expr, items } => {
+            expr_references_ident(expr, name)
+                || items
+                    .iter()
+                    .flat_map(sv::ir::InsideItem::exprs)
+                    .any(|operand| expr_references_ident(operand, name))
+        }
         sv::ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_references_ident(arg, name)),
     }
 }
@@ -2983,6 +3064,183 @@ fn lower_dynamic_array_write_expr(
     ))
 }
 
+/// A write to a packed vector whose selected position is a runtime value.
+struct DynamicPackedWrite {
+    id: SourceVarId,
+    /// Width of the whole vector.
+    vector_width: usize,
+    /// Number of bits written.
+    select_width: usize,
+    /// Where the selected bits sit; see [`RuntimePosition`].
+    up: sv::ir::Expr,
+    down: sv::ir::Expr,
+}
+
+fn dynamic_packed_write(
+    lvalue: &sv::ir::LValue,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<DynamicPackedWrite> {
+    let sv::ir::LValue::Select {
+        name,
+        msb,
+        lsb,
+        array_slice_width: None,
+        ..
+    } = lvalue
+    else {
+        return None;
+    };
+    let id = *name_to_id.get(name)?;
+    let variable = variables.get(&id)?;
+    let position = runtime_select_position(
+        name,
+        msb,
+        lsb,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+    )?;
+    (variable.array_dims.is_empty() && position.width <= variable.width).then_some(
+        DynamicPackedWrite {
+            id,
+            vector_width: variable.width,
+            select_width: position.width,
+            up: position.up,
+            down: position.down,
+        },
+    )
+}
+
+/// Lower `v[start +: W] = rhs` with a runtime `start` as a read-modify-write of
+/// the whole vector: `(old & ~(mask << low)) | (rhs << low)`. Bits that would
+/// land outside the vector are dropped by the shift.
+fn lower_dynamic_packed_write_expr(
+    lvalue: &sv::ir::LValue,
+    rhs: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    previous: Option<&PreviousArrayValue>,
+) -> Option<(
+    LogicPathTarget<SourceVarId>,
+    celox_slt::NodeId,
+    HashSet<VarAtomBase<SourceVarId>>,
+    HashSet<VarAtomBase<SourceVarId>>,
+)> {
+    let write = dynamic_packed_write(lvalue, variables, name_to_id, constants, parameter_types)?;
+    let variable = variables.get(&write.id)?;
+    let rhs_signed = sv_expr_is_signed_with_parameters(rhs, variables, name_to_id, parameter_types);
+    let (rhs_node, mut sources) = if let sv::ir::Expr::Literal(literal) = rhs
+        && let Some(fill) = unbased_fill_literal(literal)
+    {
+        (
+            lower_unbased_fill_literal_slt(arena, fill, write.select_width)?,
+            HashSet::default(),
+        )
+    } else {
+        lower_expr_with_context(
+            rhs,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            arena,
+            Some(write.select_width),
+            Some(rhs_signed),
+        )?
+    };
+    let rhs_node = coerce_node_width(arena, rhs_node, Some(write.select_width), rhs_signed).ok()?;
+    let rhs_node = coerce_node_width(arena, rhs_node, Some(write.vector_width), false).ok()?;
+    let (up, up_sources) = lower_expr_with_context(
+        &write.up,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        arena,
+        None,
+        Some(false),
+    )?;
+    let (down, down_sources) = lower_expr_with_context(
+        &write.down,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        arena,
+        None,
+        Some(false),
+    )?;
+    sources.extend(up_sources);
+    sources.extend(down_sources);
+    let (old, previous_sources) = if let Some(previous) = previous {
+        sources.extend(previous.sources.iter().copied());
+        sources.extend(previous.address_sources.iter().copied());
+        (previous.expr, previous.previous_sources.clone())
+    } else {
+        let previous_sources = [VarAtomBase::new(
+            write.id,
+            0,
+            write.vector_width.checked_sub(1)?,
+        )]
+        .into_iter()
+        .collect();
+        let old = arena
+            .alloc(SLTNode::Input {
+                variable: write.id,
+                signed: variable.signed,
+                index: Vec::new(),
+                access: BitAccess::new(0, write.vector_width - 1),
+            })
+            .ok()?;
+        (old, previous_sources)
+    };
+    let select_mask = (BigUint::from(1u8) << write.select_width) - BigUint::from(1u8);
+    let mask = arena
+        .alloc(SLTNode::Constant(
+            select_mask,
+            BigUint::default(),
+            write.vector_width,
+            false,
+        ))
+        .ok()?;
+    let mut place = |value| -> Option<celox_slt::NodeId> {
+        let raised = arena
+            .alloc(SLTNode::Binary(value, BinaryOp::Shl, up))
+            .ok()?;
+        arena
+            .alloc(SLTNode::Binary(raised, BinaryOp::Shr, down))
+            .ok()
+    };
+    let shifted_mask = place(mask)?;
+    let shifted_rhs = place(rhs_node)?;
+    let keep_mask = arena
+        .alloc(SLTNode::Unary(UnaryOp::BitNot, shifted_mask))
+        .ok()?;
+    let kept = arena
+        .alloc(SLTNode::Binary(old, BinaryOp::And, keep_mask))
+        .ok()?;
+    let updated = arena
+        .alloc(SLTNode::Binary(kept, BinaryOp::Or, shifted_rhs))
+        .ok()?;
+    Some((
+        LogicPathTarget::Var(VarAtomBase::new(
+            write.id,
+            0,
+            write.vector_width.checked_sub(1)?,
+        )),
+        updated,
+        sources,
+        previous_sources,
+    ))
+}
+
 fn replace_slt_slice<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     current: NodeId,
@@ -3079,8 +3337,8 @@ fn lower_assignment(
     previous_array: Option<&PreviousArrayValue>,
 ) -> Result<LogicPath<SourceVarId>, sv::AnalyzerError> {
     let rhs = expr_for_state_mode(assignment.rhs(), four_state);
-    if allow_dynamic_array_write
-        && let Some((target, expr, sources, previous_sources)) = lower_dynamic_array_write_expr(
+    let dynamic_write = if allow_dynamic_array_write {
+        lower_dynamic_array_write_expr(
             assignment.lhs_value(),
             &rhs,
             variables,
@@ -3090,7 +3348,22 @@ fn lower_assignment(
             arena,
             previous_array,
         )
-    {
+        .or_else(|| {
+            lower_dynamic_packed_write_expr(
+                assignment.lhs_value(),
+                &rhs,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                previous_array,
+            )
+        })
+    } else {
+        None
+    };
+    if let Some((target, expr, sources, previous_sources)) = dynamic_write {
         let target_width = target
             .var()
             .map(|target| target.access.msb - target.access.lsb + 1)
@@ -3399,6 +3672,27 @@ fn lower_expr_with_context(
             lsb,
             signed,
         } => {
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+            ) {
+                return lower_expr_with_context(
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    context_width,
+                    context_signed,
+                );
+            }
             if let Some((id, element_width, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
@@ -3851,6 +4145,16 @@ fn lower_expr_with_context(
                 sources,
             ))
         }
+        sv::ir::Expr::Inside { expr, items } => lower_expr_with_context(
+            &inside_as_comparisons(expr, items),
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            arena,
+            context_width,
+            context_signed,
+        ),
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {
@@ -4065,6 +4369,170 @@ fn packed_expr_select_offsets(
         }
     }
     Some((usize::try_from(msb).ok()?, usize::try_from(lsb).ok()?))
+}
+
+/// Width of a packed select whose bounds depend on a runtime value. `None`
+/// when both bounds are constants.
+fn runtime_select_width(
+    msb: &sv::ir::ConstExpr,
+    lsb: &sv::ir::ConstExpr,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<usize> {
+    let constant = |bound: &sv::ir::ConstExpr| {
+        sv::typecheck::eval_const_expr_with_types(bound, constants, parameter_types)
+    };
+    if constant(msb).is_some() && constant(lsb).is_some() {
+        return None;
+    }
+    // The width is the same for every value of the runtime operands.
+    let mut sample = constants.clone();
+    for name in name_to_id.keys() {
+        sample.entry(name.clone()).or_insert(0);
+    }
+    let sampled = |bound: &sv::ir::ConstExpr| {
+        sv::typecheck::eval_const_expr_with_types(bound, &sample, parameter_types)
+    };
+    usize::try_from(sampled(msb)?.abs_diff(sampled(lsb)?))
+        .ok()?
+        .checked_add(1)
+}
+
+/// How far a runtime-positioned select sits from bit 0 of its vector.
+///
+/// The lowest selected bit lies at position `low` (it is negative when the
+/// select hangs over the bottom of the vector). `up` is `low` when it is
+/// non-negative and zero otherwise; `down` is `-low` when it is negative and
+/// zero otherwise. A write places a value with `(value << up) >> down`; a read
+/// brings the selected bits back to bit 0 with `(value << down) >> up`.
+struct RuntimePosition {
+    width: usize,
+    up: sv::ir::Expr,
+    down: sv::ir::Expr,
+}
+
+/// The select width and runtime position of the `lsb` index for a packed
+/// select of `name` whose bounds depend on a runtime value. A variable keeps
+/// its declared range; a parameter is a zero-based vector.
+fn runtime_select_position(
+    name: &str,
+    msb: &sv::ir::ConstExpr,
+    lsb: &sv::ir::ConstExpr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<RuntimePosition> {
+    let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
+        Some(variable) => {
+            let [range] = variable.packed_ranges.as_slice() else {
+                return None;
+            };
+            if !variable.array_dims.is_empty() {
+                return None;
+            }
+            *range
+        }
+        None => {
+            constants.get(name)?;
+            let (width, _) = parameter_types.get(name).copied()?;
+            (i128::try_from(width).ok()?.checked_sub(1)?, 0)
+        }
+    };
+    if right < 0 {
+        return None;
+    }
+    let width = runtime_select_width(msb, lsb, name_to_id, constants, parameter_types)?;
+    let index = expr_from_const_expr(lsb)?;
+    // An index such as `i - 1` wraps when it should be negative. Widen it with
+    // its sign so that "hangs over the bottom" can be tested as a comparison.
+    let index_is_wide =
+        sv_expr_natural_width(&index, variables, name_to_id, constants, parameter_types)
+            .is_some_and(|width| width >= 32);
+    let index = sv::ir::Expr::Resize {
+        expr: Box::new(index),
+        width: 64,
+        signed: index_is_wide,
+    };
+    let descending = left >= right;
+    let boundary = || sv::ir::Expr::Literal(right.to_string());
+    let zero = || sv::ir::Expr::Literal("0".to_string());
+    let binary = |left, op, right| sv::ir::Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    let select = |condition, then_expr, else_expr| sv::ir::Expr::Mux {
+        condition: Box::new(condition),
+        then_expr: Box::new(then_expr),
+        else_expr: Box::new(else_expr),
+    };
+    // `above` is the index's distance past the declared bit 0; it is
+    // negative when the select hangs over the bottom of the vector.
+    let (hangs_over, above, below) = if descending {
+        (
+            binary(index.clone(), sv::ir::BinaryOp::Lt, boundary()),
+            binary(index.clone(), sv::ir::BinaryOp::Sub, boundary()),
+            binary(boundary(), sv::ir::BinaryOp::Sub, index),
+        )
+    } else {
+        (
+            binary(index.clone(), sv::ir::BinaryOp::Gt, boundary()),
+            binary(boundary(), sv::ir::BinaryOp::Sub, index.clone()),
+            binary(index, sv::ir::BinaryOp::Sub, boundary()),
+        )
+    };
+    Some(RuntimePosition {
+        width,
+        up: select(hangs_over.clone(), zero(), above),
+        down: select(hangs_over, below, zero()),
+    })
+}
+
+/// Rewrite `v[msb:lsb]` of a packed vector, whose bounds depend on a runtime
+/// value, as `(v >> low)[width-1:0]`, where `low` is the bit position of the
+/// `lsb` index. Positions past the top of the vector read as zero.
+fn runtime_select_as_shift(
+    expr: &sv::ir::Expr,
+    msb: &sv::ir::ConstExpr,
+    lsb: &sv::ir::ConstExpr,
+    signed: bool,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<sv::ir::Expr> {
+    let sv::ir::Expr::Ident(name) = expr else {
+        return None;
+    };
+    let position = runtime_select_position(
+        name,
+        msb,
+        lsb,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+    )?;
+    let shift = |value: sv::ir::Expr, op, amount: sv::ir::Expr| sv::ir::Expr::Binary {
+        left: Box::new(value),
+        op,
+        right: Box::new(amount),
+    };
+    // Bring the selection down to bit 0: right by `up`, or left by `down`
+    // when it hangs over the bottom.
+    let moved = shift(
+        shift(expr.clone(), sv::ir::BinaryOp::Shl, position.down),
+        sv::ir::BinaryOp::Shr,
+        position.up,
+    );
+    Some(sv::ir::Expr::Select {
+        expr: Box::new(moved),
+        msb: sv::ir::ConstExpr::Literal((position.width - 1).to_string()),
+        lsb: sv::ir::ConstExpr::Literal("0".to_string()),
+        signed,
+    })
 }
 
 fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
@@ -4738,6 +5206,13 @@ fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
         sv::ir::Expr::Binary { left, right, .. } => {
             expr_uses_ident_as_condition(left, name) || expr_uses_ident_as_condition(right, name)
         }
+        sv::ir::Expr::Inside { expr, items } => {
+            expr_uses_ident_as_condition(expr, name)
+                || items
+                    .iter()
+                    .flat_map(sv::ir::InsideItem::exprs)
+                    .any(|operand| expr_uses_ident_as_condition(operand, name))
+        }
         sv::ir::Expr::Call { args, .. } => args
             .iter()
             .any(|arg| expr_uses_ident_as_condition(arg, name)),
@@ -4838,6 +5313,8 @@ fn ff_targets(
         let lvalue = assignment.assignment().lhs_value();
         let dynamic =
             dynamic_array_element_lvalue(lvalue, variables, name_to_id, constants, parameter_types);
+        let packed =
+            dynamic_packed_write(lvalue, variables, name_to_id, constants, parameter_types);
         let target = lvalue_atom(lvalue, variables, name_to_id, constants, parameter_types)
             .or_else(|| {
                 dynamic.as_ref().and_then(|(id, _, _, _)| {
@@ -4845,6 +5322,15 @@ fn ff_targets(
                         .get(id)
                         .and_then(|variable| variable.width.checked_sub(1))
                         .map(|msb| VarAtomBase::new(*id, 0, msb))
+                })
+            })
+            .or_else(|| {
+                // A runtime-positioned packed write updates the whole vector.
+                packed.as_ref().and_then(|write| {
+                    write
+                        .vector_width
+                        .checked_sub(1)
+                        .map(|msb| VarAtomBase::new(write.id, 0, msb))
                 })
             })?;
         if !targets.contains(&target) {
@@ -4936,6 +5422,8 @@ fn emit_ff_assignment_stores(
                 constants,
                 parameter_types,
             );
+            let packed =
+                dynamic_packed_write(lvalue, variables, name_to_id, constants, parameter_types);
             let target = lvalue_atom(lvalue, variables, name_to_id, constants, parameter_types)
                 .or_else(|| {
                     dynamic.as_ref().and_then(|(id, _, _, _)| {
@@ -4944,14 +5432,23 @@ fn emit_ff_assignment_stores(
                             .and_then(|variable| variable.width.checked_sub(1))
                             .map(|msb| VarAtomBase::new(*id, 0, msb))
                     })
+                })
+                .or_else(|| {
+                    packed.as_ref().and_then(|write| {
+                        write
+                            .vector_width
+                            .checked_sub(1)
+                            .map(|msb| VarAtomBase::new(write.id, 0, msb))
+                    })
                 })?;
             if target.id != target_id {
                 continue;
             }
-            let target_width = dynamic.as_ref().map_or_else(
-                || target.access.msb - target.access.lsb + 1,
-                |(_, _, _, access)| access.msb - access.lsb + 1,
-            );
+            let target_width = match (&dynamic, &packed) {
+                (Some((_, _, _, access)), _) => access.msb - access.lsb + 1,
+                (None, Some(write)) => write.select_width,
+                (None, None) => target.access.msb - target.access.lsb + 1,
+            };
             let rhs_expr = expr_for_state_mode(assignment.assignment().rhs(), four_state);
             let rhs = match &rhs_expr {
                 sv::ir::Expr::Literal(literal) => match unbased_fill_literal(literal) {
@@ -5225,8 +5722,21 @@ fn emit_ff_assignment_stores(
                 ));
                 continue;
             }
-            let assigned =
-                replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?;
+            let assigned = match &packed {
+                Some(write) => replace_sir_slice_at_runtime_position(
+                    builder,
+                    value,
+                    rhs,
+                    write,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                )?,
+                None => {
+                    replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?
+                }
+            };
             value = match assignment.condition() {
                 Some(condition) => {
                     let condition = lower_procedural_condition(
@@ -5307,6 +5817,72 @@ fn lower_procedural_condition(
     let truth = builder.alloc_bit(1, false);
     builder.emit(SIRInstruction::Unary(truth, UnaryOp::Or, two_state));
     Some(truth)
+}
+
+/// `(current & ~(mask << low)) | (replacement << low)`: write `replacement`
+/// into `current` at the runtime bit position `write.low`. Bits that would land
+/// outside the vector are dropped by the shift.
+fn replace_sir_slice_at_runtime_position(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    current: celox_sir::RegisterId,
+    replacement: celox_sir::RegisterId,
+    write: &DynamicPackedWrite,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<celox_sir::RegisterId> {
+    let width = write.vector_width;
+    let mut amount = |expr: &sv::ir::Expr| {
+        lower_expr_to_sir_with_context(
+            builder,
+            expr,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            None,
+            Some(false),
+        )
+    };
+    let up = amount(&write.up)?;
+    let down = amount(&write.down)?;
+    let replacement = resize_sir_register(builder, replacement, width, false)?;
+    let mask = builder.alloc_bit(width, false);
+    builder.emit(SIRInstruction::Imm(
+        mask,
+        SIRValue::new((BigUint::from(1u8) << write.select_width) - BigUint::from(1u8)),
+    ));
+    let shift = |builder: &mut SIRBuilder<RegionedVarAddr>, value| {
+        let raised = builder.alloc_logic(width);
+        builder.emit(SIRInstruction::Binary(raised, value, BinaryOp::Shl, up));
+        let shifted = builder.alloc_logic(width);
+        builder.emit(SIRInstruction::Binary(shifted, raised, BinaryOp::Shr, down));
+        shifted
+    };
+    let shifted_mask = shift(builder, mask);
+    let shifted_replacement = shift(builder, replacement);
+    let keep_mask = builder.alloc_logic(width);
+    builder.emit(SIRInstruction::Unary(
+        keep_mask,
+        UnaryOp::BitNot,
+        shifted_mask,
+    ));
+    let kept = builder.alloc_logic(width);
+    builder.emit(SIRInstruction::Binary(
+        kept,
+        current,
+        BinaryOp::And,
+        keep_mask,
+    ));
+    let result = builder.alloc_logic(width);
+    builder.emit(SIRInstruction::Binary(
+        result,
+        kept,
+        BinaryOp::Or,
+        shifted_replacement,
+    ));
+    Some(result)
 }
 
 fn replace_sir_slice(
@@ -5427,6 +6003,7 @@ fn sv_glue_expr_is_signed(
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
+        sv::ir::Expr::Inside { .. } => false,
         sv::ir::Expr::Call { name, args } => {
             sv::typecheck::bit_vector_function_return_type(name, args.len())
                 .is_some_and(|(_, signed)| signed)
@@ -5485,6 +6062,7 @@ fn sv_expr_is_signed_with_parameters(
         }
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
+        sv::ir::Expr::Inside { .. } => false,
         sv::ir::Expr::Call { name, args } => {
             sv::typecheck::bit_vector_function_return_type(name, args.len())
                 .is_some_and(|(_, signed)| signed)
@@ -5696,6 +6274,11 @@ fn sv_expr_natural_width(
             ) {
                 return Some(access.msb - access.lsb + 1);
             }
+            if let Some(width) =
+                runtime_select_width(msb, lsb, name_to_id, constants, parameter_types)
+            {
+                return Some(width);
+            }
             let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
             let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
@@ -5786,6 +6369,7 @@ fn sv_expr_natural_width(
                     parameter_types,
                 )?),
         ),
+        sv::ir::Expr::Inside { .. } => Some(1),
         sv::ir::Expr::Call { name, args } => {
             sv::typecheck::bit_vector_function_return_type(name, args.len()).map(|(width, _)| width)
         }
@@ -5805,6 +6389,15 @@ fn sv_comparison_operand_width(
             sv_expr_natural_width(right, variables, name_to_id, constants, parameter_types)?,
         ),
     )
+}
+
+/// The parsed literal of a `==?` pattern, when it has wildcard (`x`/`z`/`?`) bits.
+fn wildcard_literal(pattern: &sv::ir::Expr) -> Option<sv::typecheck::IntegralLiteral> {
+    let sv::ir::Expr::Literal(literal) = pattern else {
+        return None;
+    };
+    sv::typecheck::parse_integral_literal(literal)
+        .filter(|literal| literal.mask != BigUint::default())
 }
 
 fn lower_expr_to_sir_with_context(
@@ -5883,6 +6476,27 @@ fn lower_expr_to_sir_with_context(
             lsb,
             signed,
         } => {
+            if let Some(rewritten) = runtime_select_as_shift(
+                expr,
+                msb,
+                lsb,
+                *signed,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+            ) {
+                return lower_expr_to_sir_with_context(
+                    builder,
+                    &rewritten,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    context_width,
+                    context_signed,
+                );
+            }
             if let Some((id, element_width, access)) = dynamic_array_element_subselection(
                 expr,
                 msb,
@@ -6023,6 +6637,65 @@ fn lower_expr_to_sir_with_context(
                 builder.alloc_logic(width)
             };
             builder.emit(SIRInstruction::Unary(reg, unary_op_from_sv(*op)?, inner));
+            Some(reg)
+        }
+        sv::ir::Expr::Binary { left, op, right }
+            if matches!(
+                op,
+                sv::ir::BinaryOp::EqWildcard | sv::ir::BinaryOp::NeWildcard
+            ) && wildcard_literal(right).is_some() =>
+        {
+            // The wildcard bits of a literal pattern are known up front. Force
+            // them to one on both sides and compare the rest, which needs no
+            // unknown-bit state and is exact for any left operand.
+            let pattern = wildcard_literal(right)?;
+            let left = lower_expr_to_sir_with_context(
+                builder,
+                left,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                sv_comparison_operand_width(
+                    left,
+                    right,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                ),
+                Some(false),
+            )?;
+            let width = builder.register(&left).width().max(pattern.width);
+            let left = resize_sir_register(builder, left, width, false)?;
+            let imm = |builder: &mut SIRBuilder<RegionedVarAddr>, bits: BigUint| {
+                let reg = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Imm(
+                    reg,
+                    SIRValue::new_four_state(bits, BigUint::default()),
+                ));
+                reg
+            };
+            let wildcard = imm(builder, pattern.mask.clone());
+            let expected = imm(builder, &pattern.value | &pattern.mask);
+            let forced = builder.alloc_logic(width);
+            builder.emit(SIRInstruction::Binary(
+                forced,
+                left,
+                celox_design::BinaryOp::Or,
+                wildcard,
+            ));
+            let reg = builder.alloc_logic(1);
+            builder.emit(SIRInstruction::Binary(
+                reg,
+                forced,
+                if matches!(op, sv::ir::BinaryOp::EqWildcard) {
+                    celox_design::BinaryOp::Eq
+                } else {
+                    celox_design::BinaryOp::Ne
+                },
+                expected,
+            ));
             Some(reg)
         }
         sv::ir::Expr::Binary { left, op, right } => {
@@ -6299,6 +6972,16 @@ fn lower_expr_to_sir_with_context(
             builder.emit(SIRInstruction::Mux(reg, condition, then_expr, else_expr));
             Some(reg)
         }
+        sv::ir::Expr::Inside { expr, items } => lower_expr_to_sir_with_context(
+            builder,
+            &inside_as_comparisons(expr, items),
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            context_width,
+            context_signed,
+        ),
         sv::ir::Expr::Call { name, args }
             if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() =>
         {

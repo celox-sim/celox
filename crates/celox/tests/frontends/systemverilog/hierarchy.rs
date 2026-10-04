@@ -438,18 +438,11 @@ fn simulates_veryl_generated_gray_codec_sv_smoke() {
 
 #[test]
 fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
-    for (name, sv, expected) in [
-        (
-            "Fifo.sv",
-            include_str!("../../../testdata/verilator/Fifo.sv"),
-            "non-integer module parameter override `TYPE`",
-        ),
-        (
-            "LinearSec.sv",
-            include_str!("../../../testdata/verilator/LinearSec.sv"),
-            "combinational assignment target `codeword_corrected`",
-        ),
-    ] {
+    for (name, sv, expected) in [(
+        "Fifo.sv",
+        include_str!("../../../testdata/verilator/Fifo.sv"),
+        "non-integer module parameter override `TYPE`",
+    )] {
         let error = Simulator::from_sv_sources(vec![(sv, Path::new(name))], "Top")
             .build_native()
             .expect_err("unlowered SystemVerilog must be rejected");

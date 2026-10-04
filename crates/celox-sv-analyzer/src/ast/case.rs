@@ -193,6 +193,14 @@ pub(super) fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimension
                             })
                             .is_some_and(|right| right != 0)))
         }
+        Expr::Inside { expr, items } => {
+            expr_is_two_state(expr, packed_dimensions)
+                && items.iter().all(|item| {
+                    item.exprs()
+                        .into_iter()
+                        .all(|operand| expr_is_two_state(operand, packed_dimensions))
+                })
+        }
         Expr::Mux {
             condition,
             then_expr,
