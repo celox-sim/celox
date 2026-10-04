@@ -768,10 +768,8 @@ monacoTypeScript.javascriptDefaults.setCompilerOptions(
 	monacoTestbenchCompilerOptions,
 );
 monacoTypeScript.typescriptDefaults.setDiagnosticsOptions({
-	diagnosticsOptions: {
-		noSemanticValidation: false,
-		noSyntaxValidation: false,
-	},
+	noSemanticValidation: false,
+	noSyntaxValidation: false,
 });
 
 const editor = monaco.editor.create(document.getElementById("editor")!, {

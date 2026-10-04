@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json",
     "test:watch": "vitest",
     "bench": "vitest bench"
   },
