@@ -19,6 +19,7 @@ pub mod symbol;
 pub mod syntax;
 pub mod typecheck;
 
+pub use ast::packages::PackageSource;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
 
@@ -140,3 +141,23 @@ pub fn source_module_interfaces(
 
 #[cfg(test)]
 mod tests;
+
+/// The packages declared in a source, rewritten so that their items can be
+/// inlined into the modules that use them.
+pub fn source_packages(code: &str, path: &Path) -> Result<Vec<PackageSource>, AnalyzerError> {
+    let syntax_tree = syntax::parse_source(code, path)?;
+    ast::packages::source_packages(code, &syntax_tree)
+}
+
+/// The source of `module_name` with the packages it uses inlined, or `None`
+/// when it uses no package. Source positions before the module's `endmodule`
+/// are unchanged.
+pub fn inline_module_packages(
+    code: &str,
+    path: &Path,
+    module_name: &str,
+    packages: &HashMap<String, PackageSource>,
+) -> Result<Option<String>, AnalyzerError> {
+    let syntax_tree = syntax::parse_source(code, path)?;
+    ast::packages::inline_packages(code, &syntax_tree, module_name, packages)
+}

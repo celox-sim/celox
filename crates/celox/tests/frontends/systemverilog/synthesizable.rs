@@ -224,6 +224,48 @@ sv_backends! {
         }
     }
 
+    fn packages_provide_types_parameters_functions_and_enums(sim) {
+        @setup {
+            let source = r#"
+                package base_pkg;
+                    localparam int BASE = 5;
+                endpackage
+                package math_pkg;
+                    import base_pkg::*;
+                    parameter int WIDTH = 8;
+                    localparam int OFFSET = BASE + 1;
+                    typedef logic [WIDTH-1:0] word_t;
+                    typedef enum logic [1:0] { IDLE, RUN, DONE } state_t;
+                    function automatic word_t bump(input word_t x);
+                        return x + OFFSET;
+                    endfunction
+                endpackage
+                module Top import math_pkg::*; (
+                    input word_t a, input logic [1:0] code,
+                    output word_t bumped, output logic running, output logic done,
+                    output logic [math_pkg::WIDTH-1:0] scoped);
+                    state_t state;
+                    always_comb begin
+                        state = state_t'(code);
+                        running = (state == RUN);
+                        done = (code == math_pkg::DONE);
+                    end
+                    assign bumped = bump(a);
+                    assign scoped = a ^ math_pkg::OFFSET;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("packages.sv"))], "Top");
+        let (a, code) = (sim.signal("a"), sim.signal("code"));
+        for (value, state) in [(0u8, 0u8), (10, 1), (250, 2), (255, 3)] {
+            sim.modify(|io| { io.set(a, value); io.set(code, state); }).unwrap();
+            assert_eq!(sim.get(sim.signal("bumped")), value.wrapping_add(6).into(), "a={value}");
+            assert_eq!(sim.get(sim.signal("running")), u8::from(state == 1).into());
+            assert_eq!(sim.get(sim.signal("done")), u8::from(state == 2).into());
+            assert_eq!(sim.get(sim.signal("scoped")), (value ^ 6).into());
+        }
+    }
+
     fn block_locals_and_dependent_assignments_accumulate(sim) {
         @setup {
             let source = r#"

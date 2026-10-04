@@ -5598,13 +5598,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "package-dependent systemverilog module",
-            r#"
-            package p; parameter W = 8; endpackage
-            module Top(output logic [7:0] y); import p::*; logic [W-1:0] value; assign y = value; endmodule
-        "#,
-        ),
-        (
             "unknown or duplicate systemverilog child port connection",
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule

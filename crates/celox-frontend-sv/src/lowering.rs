@@ -105,6 +105,8 @@ struct AnalyzedSvModule {
     /// The positional interface of every module in all sources, used to bind
     /// positional port and parameter connections.
     interfaces: std::sync::Arc<sv::ModuleInterfaces>,
+    /// The packages declared in all sources, inlined into the modules that use them.
+    packages: std::sync::Arc<HashMap<String, sv::PackageSource>>,
 }
 
 #[derive(Clone)]
@@ -161,6 +163,13 @@ fn analyze_sources(
         interfaces.extend(sv::source_module_interfaces(code, path)?);
     }
     let interfaces = std::sync::Arc::new(interfaces);
+    let mut packages = HashMap::default();
+    for (code, path) in sources {
+        for package in sv::source_packages(code, path)? {
+            packages.insert(package.name.clone(), package);
+        }
+    }
+    let packages = std::sync::Arc::new(packages);
     for (code, path) in sources {
         let implicit_net_permissions = sv::source_module_implicit_net_permissions(code, path)?;
         for module_name in sv::source_module_names(code, path)? {
@@ -179,6 +188,7 @@ fn analyze_sources(
                     source_code: (*code).to_string(),
                     source_path: (*path).to_path_buf(),
                     interfaces: interfaces.clone(),
+                    packages: packages.clone(),
                 },
             );
         }
@@ -794,8 +804,15 @@ fn specialize_module(
     four_state: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
-    let ir = sv::analyze_source_module_with_parameter_expr_overrides(
+    // A module that uses packages is analyzed with their items inlined.
+    let inlined = sv::inline_module_packages(
         &module.source_code,
+        &module.source_path,
+        &module.name,
+        &module.packages,
+    )?;
+    let ir = sv::analyze_source_module_with_parameter_expr_overrides(
+        inlined.as_deref().unwrap_or(&module.source_code),
         &module.source_path,
         &module.name,
         &overrides,

@@ -34,6 +34,7 @@ mod functions;
 mod generate;
 mod inlining;
 mod instances;
+pub mod packages;
 mod packed_structs;
 mod parameters;
 mod selects;
