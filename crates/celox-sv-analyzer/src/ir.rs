@@ -282,11 +282,16 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
+    type_text: Option<String>,
 }
 
 impl ParameterOverride {
-    pub(crate) fn new(name: String, value: Option<ConstExpr>) -> Self {
-        Self { name, value }
+    pub(crate) fn new(name: String, value: Option<ConstExpr>, type_text: Option<String>) -> Self {
+        Self {
+            name,
+            value,
+            type_text,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -295,6 +300,11 @@ impl ParameterOverride {
 
     pub fn value(&self) -> Option<&ConstExpr> {
         self.value.as_ref()
+    }
+
+    /// The source text of the data type bound to a `parameter type`.
+    pub fn type_text(&self) -> Option<&str> {
+        self.type_text.as_deref()
     }
 }
 

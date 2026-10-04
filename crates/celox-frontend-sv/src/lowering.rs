@@ -121,6 +121,8 @@ pub(crate) struct LoweredSvInstance {
 pub(crate) struct LoweredSvParameterOverride {
     pub name: String,
     pub value: Option<sv::ir::ConstExpr>,
+    /// The data type bound to a `parameter type`, as source text.
+    pub type_text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -645,6 +647,7 @@ pub fn schedule_sources(
             .map(|(name, value)| LoweredSvParameterOverride {
                 name: name.clone(),
                 value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
+                type_text: None,
             })
             .collect(),
     };
@@ -804,15 +807,28 @@ fn specialize_module(
     four_state: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
+    // A `parameter type` is bound by rewriting its default in the module source.
+    let type_overrides: Vec<(String, String)> = key
+        .parameter_overrides
+        .iter()
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.type_text.clone()?)))
+        .collect();
+    let typed = sv::apply_module_type_parameters(
+        &module.source_code,
+        &module.source_path,
+        &module.name,
+        &type_overrides,
+    )?;
+    let typed_code = typed.as_deref().unwrap_or(&module.source_code);
     // A module that uses packages is analyzed with their items inlined.
     let inlined = sv::inline_module_packages(
-        &module.source_code,
+        typed_code,
         &module.source_path,
         &module.name,
         &module.packages,
     )?;
     let ir = sv::analyze_source_module_with_parameter_expr_overrides(
-        inlined.as_deref().unwrap_or(&module.source_code),
+        inlined.as_deref().unwrap_or(typed_code),
         &module.source_path,
         &module.name,
         &overrides,
@@ -1105,6 +1121,7 @@ fn lower_parameter_overrides(
             LoweredSvParameterOverride {
                 name: parameter.name().to_string(),
                 value,
+                type_text: parameter.type_text().map(str::to_string),
             }
         })
         .collect()

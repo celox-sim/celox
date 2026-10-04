@@ -75,6 +75,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                             ir::ParameterOverride::new(
                                 parameter.name().to_string(),
                                 parameter.value().cloned().map(Into::into),
+                                parameter.type_text().map(str::to_string),
                             )
                         })
                         .collect(),

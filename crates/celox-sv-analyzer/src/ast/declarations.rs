@@ -162,13 +162,16 @@ pub(super) fn module_interface_from_node(
                 return;
             }
             for child in RefNode::ParameterPortDeclaration(declaration) {
-                if let RefNode::ParamAssignment(assignment) = child
-                    && let Some(name) = identifier_text(
+                match child {
+                    RefNode::ParamAssignment(assignment) => parameters.extend(identifier_text(
                         RefNode::ParameterIdentifier(&assignment.nodes.0),
                         syntax_tree,
-                    )
-                {
-                    parameters.push(name);
+                    )),
+                    RefNode::TypeAssignment(assignment) => parameters.extend(identifier_text(
+                        RefNode::TypeIdentifier(&assignment.nodes.0),
+                        syntax_tree,
+                    )),
+                    _ => {}
                 }
             }
         };

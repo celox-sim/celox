@@ -437,28 +437,15 @@ fn simulates_veryl_generated_gray_codec_sv_smoke() {
 }
 
 #[test]
-fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
-    for (name, sv, expected) in [(
-        "Fifo.sv",
-        include_str!("../../../testdata/verilator/Fifo.sv"),
-        "non-integer module parameter override `TYPE`",
-    )] {
-        let error = Simulator::from_sv_sources(vec![(sv, Path::new(name))], "Top")
-            .build_native()
-            .expect_err("unlowered SystemVerilog must be rejected");
-        assert!(
-            format!("{error:?}").contains(expected),
-            "unexpected error for {name}: {error:?}"
-        );
-    }
-}
-
-#[test]
 fn builds_veryl_generated_verilator_sv_smoke() {
     for (name, sv) in [
         (
             "Countones.sv",
             include_str!("../../../testdata/verilator/Countones.sv"),
+        ),
+        (
+            "Fifo.sv",
+            include_str!("../../../testdata/verilator/Fifo.sv"),
         ),
         (
             "EdgeDetector.sv",

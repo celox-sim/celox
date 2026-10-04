@@ -286,3 +286,66 @@ pub fn inline_packages(
     }
     Ok(None)
 }
+
+/// `code` with the `parameter type` defaults of `module_name` replaced by the
+/// data types an instantiation binds them to, or `None` when `overrides` names
+/// no type parameter of the module.
+pub fn apply_type_parameter_overrides(
+    code: &str,
+    syntax_tree: &SyntaxTree,
+    module_name: &str,
+    overrides: &[(String, String)],
+) -> Result<Option<String>, AnalyzerError> {
+    for node in syntax_tree {
+        let RefNode::ModuleDeclarationAnsi(module) = node else {
+            continue;
+        };
+        if module_name_from_node(RefNode::ModuleDeclarationAnsi(module), syntax_tree)?
+            != module_name
+        {
+            continue;
+        }
+        let mut edits = Vec::new();
+        for child in RefNode::ModuleDeclarationAnsi(module) {
+            let RefNode::TypeAssignment(assignment) = child else {
+                continue;
+            };
+            let Some(name) =
+                identifier_text(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
+            else {
+                continue;
+            };
+            let Some((_, bound)) = overrides.iter().find(|(parameter, _)| *parameter == name)
+            else {
+                continue;
+            };
+            match &assignment.nodes.1 {
+                Some((_, default)) => {
+                    if let Some((start, end)) = node_span(RefNode::DataType(default)) {
+                        edits.push(edit(start, end, bound, None));
+                    }
+                }
+                None => {
+                    if let Some((_, end)) = node_span(RefNode::TypeIdentifier(&assignment.nodes.0))
+                    {
+                        edits.push(edit(end, end, &format!(" = {bound}"), None));
+                    }
+                }
+            }
+        }
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        let Some((start, end)) = node_span(RefNode::ModuleDeclarationAnsi(module)) else {
+            return Ok(None);
+        };
+        let module_text = apply_edits(code, (start, end), edits, &HashMap::default());
+        return Ok(Some(format!(
+            "{}{}{}",
+            &code[..start],
+            module_text,
+            &code[end..]
+        )));
+    }
+    Ok(None)
+}

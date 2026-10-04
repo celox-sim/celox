@@ -161,3 +161,16 @@ pub fn inline_module_packages(
     let syntax_tree = syntax::parse_source(code, path)?;
     ast::packages::inline_packages(code, &syntax_tree, module_name, packages)
 }
+
+/// The source of `module_name` with each `parameter type` in `overrides`
+/// (`(name, data type text)`) bound to its data type, or `None` when it has no
+/// such parameter.
+pub fn apply_module_type_parameters(
+    code: &str,
+    path: &Path,
+    module_name: &str,
+    overrides: &[(String, String)],
+) -> Result<Option<String>, AnalyzerError> {
+    let syntax_tree = syntax::parse_source(code, path)?;
+    ast::packages::apply_type_parameter_overrides(code, &syntax_tree, module_name, overrides)
+}

@@ -439,6 +439,52 @@ sv_backends! {
         }
     }
 
+    fn type_parameters_are_bound_by_instantiations(sim) {
+        @setup {
+            let source = r#"
+                module Inc #(parameter type T = logic [7:0])(input T a, output T y);
+                    assign y = a + 1;
+                endmodule
+                module Shift #(parameter type T = logic [7:0], parameter int N = 2)(
+                    input T a, output T y);
+                    assign y = a << N;
+                endmodule
+                module Mid #(parameter type U = logic [7:0])(input U a, output U y);
+                    Inc #(.T(U)) inner(.a(a), .y(y));
+                endmodule
+                module Neg #(parameter type T = logic [7:0])(input T a, output logic neg);
+                    assign neg = (a < 0);
+                endmodule
+                module Top(input logic [11:0] a, output logic [7:0] y8, output logic [3:0] y4,
+                           output logic [3:0] named, output logic [3:0] forwarded,
+                           output logic [11:0] shifted, output logic signed_neg, output logic unsigned_neg);
+                    typedef logic [3:0] nibble_t;
+                    Inc default_width(.a(a[7:0]), .y(y8));
+                    Inc #(.T(logic [3:0])) literal(.a(a[3:0]), .y(y4));
+                    Inc #(.T(nibble_t)) by_name(.a(a[3:0]), .y(named));
+                    Mid #(.U(logic [3:0])) through(.a(a[3:0]), .y(forwarded));
+                    Shift #(logic [11:0], 3) positional(a, shifted);
+                    Neg #(.T(logic signed [7:0])) signed_neg_u(.a(a[7:0]), .neg(signed_neg));
+                    Neg unsigned_neg_u(.a(a[7:0]), .neg(unsigned_neg));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("type_parameters.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u16, 5, 15, 200, 255, 1000] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            let low = value as u8;
+            let bumped = u16::from(low) + 1;
+            assert_eq!(sim.get(sim.signal("y8")), low.wrapping_add(1).into(), "a={value}");
+            assert_eq!(sim.get(sim.signal("y4")), (bumped & 0xf).into());
+            assert_eq!(sim.get(sim.signal("named")), (bumped & 0xf).into());
+            assert_eq!(sim.get(sim.signal("forwarded")), (bumped & 0xf).into());
+            assert_eq!(sim.get(sim.signal("shifted")), ((value << 3) & 0xfff).into());
+            assert_eq!(sim.get(sim.signal("signed_neg")), u8::from(low >= 128).into());
+            assert_eq!(sim.get(sim.signal("unsigned_neg")), 0u8.into());
+        }
+    }
+
     fn block_locals_and_dependent_assignments_accumulate(sim) {
         @setup {
             let source = r#"

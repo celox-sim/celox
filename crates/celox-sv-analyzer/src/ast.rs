@@ -921,11 +921,25 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
+    /// The source text of a data type, for a `parameter type` override.
+    type_text: Option<String>,
 }
 
 impl ParameterOverride {
     fn new(name: String, value: Option<ConstExpr>) -> Self {
-        Self { name, value }
+        Self {
+            name,
+            value,
+            type_text: None,
+        }
+    }
+
+    fn type_override(name: String, type_text: String) -> Self {
+        Self {
+            name,
+            value: None,
+            type_text: Some(type_text),
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -934,6 +948,10 @@ impl ParameterOverride {
 
     pub fn value(&self) -> Option<&ConstExpr> {
         self.value.as_ref()
+    }
+
+    pub fn type_text(&self) -> Option<&str> {
+        self.type_text.as_deref()
     }
 }
 

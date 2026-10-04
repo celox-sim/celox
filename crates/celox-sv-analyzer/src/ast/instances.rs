@@ -113,6 +113,7 @@ fn instances_from_module_instantiation(
         instantiation.nodes.1.as_ref(),
         syntax_tree,
         interface,
+        packed_dimensions,
     )?;
     for override_ in &mut parameter_overrides {
         if let Some(value) = override_.value.take() {
@@ -184,6 +185,7 @@ fn parameter_overrides_from_value_assignment(
     assignment: Option<&sv_parser::ParameterValueAssignment>,
     syntax_tree: &SyntaxTree,
     interface: Option<&ModuleInterface>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<ParameterOverride>, AnalyzerError> {
     let Some(assignment) = assignment else {
         return Ok(Vec::new());
@@ -206,11 +208,12 @@ fn parameter_overrides_from_value_assignment(
                 let name = parameters.get(position).ok_or_else(|| {
                     AnalyzerError::Unsupported("ordered parameter assignment".to_string())
                 })?;
-                let value = const_expr_from_param_expression(&assignment.nodes.0, syntax_tree)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported("parameter override expression".to_string())
-                    })?;
-                overrides.push(ParameterOverride::new(name.clone(), Some(value)));
+                overrides.push(parameter_override(
+                    name.clone(),
+                    &assignment.nodes.0,
+                    syntax_tree,
+                    packed_dimensions,
+                )?);
             }
             return Ok(overrides);
         }
@@ -228,19 +231,17 @@ fn parameter_overrides_from_value_assignment(
                 "duplicate parameter override `{name}`"
             )));
         }
-        let value = match assignment.nodes.2.nodes.1.as_ref() {
-            Some(expr) => Some(
-                const_expr_from_param_expression(expr, syntax_tree).ok_or_else(|| {
-                    AnalyzerError::Unsupported("parameter override expression".to_string())
-                })?,
-            ),
-            None => {
-                return Err(AnalyzerError::Unsupported(format!(
-                    "empty parameter override `{name}`"
-                )));
-            }
+        let Some(expr) = assignment.nodes.2.nodes.1.as_ref() else {
+            return Err(AnalyzerError::Unsupported(format!(
+                "empty parameter override `{name}`"
+            )));
         };
-        overrides.push(ParameterOverride::new(name, value));
+        overrides.push(parameter_override(
+            name,
+            expr,
+            syntax_tree,
+            packed_dimensions,
+        )?);
     }
     Ok(overrides)
 }
@@ -358,4 +359,75 @@ pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
 pub(super) fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
     let locate = identifier_locate(node)?;
     syntax_tree.get_str(&locate).map(str::to_string)
+}
+
+/// The source text a node spans, from its first to its last token.
+pub(super) fn node_source_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
+    let mut range: Option<(usize, usize)> = None;
+    for child in node {
+        if let RefNode::Locate(locate) = child {
+            let (start, end) = (locate.offset, locate.offset + locate.len);
+            range = Some(match range {
+                None => (start, end),
+                Some((low, high)) => (low.min(start), high.max(end)),
+            });
+        }
+    }
+    let (start, end) = range?;
+    syntax_tree
+        .get_str(&sv_parser::Locate {
+            offset: start,
+            line: 0,
+            len: end - start,
+        })
+        .map(|text| text.trim().to_string())
+}
+
+/// One `.name(expr)` binding: a `parameter type` when `expr` is a data type or
+/// the name of a type, a value otherwise.
+fn parameter_override(
+    name: String,
+    expr: &sv_parser::ParamExpression,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Result<ParameterOverride, AnalyzerError> {
+    if let sv_parser::ParamExpression::DataType(data_type) = expr {
+        let text = node_source_text(RefNode::DataType(data_type), syntax_tree)
+            .ok_or_else(|| AnalyzerError::Unsupported("parameter type override".to_string()))?;
+        return Ok(ParameterOverride::type_override(name, text));
+    }
+    let value = const_expr_from_param_expression(expr, syntax_tree)
+        .ok_or_else(|| AnalyzerError::Unsupported("parameter override expression".to_string()))?;
+    // A bare name that denotes a type (a typedef, or the instantiating
+    // module's own `parameter type`) is passed on as that type.
+    if let ConstExpr::Ident(type_name) = &value
+        && let Some(r#type) = packed_dimensions.type_aliases.get(type_name)
+    {
+        let text = type_source_text(r#type, &packed_dimensions.const_env).ok_or_else(|| {
+            AnalyzerError::Unsupported(format!("parameter type override `{name}`"))
+        })?;
+        return Ok(ParameterOverride::type_override(name, text));
+    }
+    Ok(ParameterOverride::new(name, Some(value)))
+}
+
+/// Source text for a plain (possibly signed) packed vector type.
+fn type_source_text(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<String> {
+    if !r#type.unpacked_ranges().is_empty() || !r#type.members.is_empty() {
+        return None;
+    }
+    let mut text = match r#type.kind() {
+        TypeKind::Bit => "bit",
+        _ => "logic",
+    }
+    .to_string();
+    if r#type.is_signed() {
+        text.push_str(" signed");
+    }
+    for range in r#type.packed_ranges() {
+        let left = eval_ast_const_expr(range.left(), const_env)?;
+        let right = eval_ast_const_expr(range.right(), const_env)?;
+        text.push_str(&format!(" [{left}:{right}]"));
+    }
+    Some(text)
 }
