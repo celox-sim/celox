@@ -1393,3 +1393,29 @@ fn test_ff_array_literal_width_overflow_is_illegal_context() {
         }
     });
 }
+
+#[test]
+fn test_syntax_error_is_returned_instead_of_panicking() {
+    let code = r#"
+        module Top (a: input logic<8>, q: output logic<8>) {
+            always_comb {
+                for i: u32 in 0..8 {
+                    q[i] = a[i];
+                }
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("a syntax error must be reported");
+    assert!(
+        matches!(err.kind(), SimulatorErrorKind::Syntax(_)),
+        "expected a syntax error, got: {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("for declaration doesn't need type specifier"),
+        "{err}"
+    );
+}
