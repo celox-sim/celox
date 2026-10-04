@@ -96,8 +96,9 @@ fn rejects_block_local_declarations_inside_always_comb() {
         endmodule
         "#,
     );
+    // The local `t` would be hoisted onto the output port `t`.
     assert!(
-        error.contains("block-local declaration inside always_comb"),
+        error.contains("duplicate port or signal name `t`"),
         "unexpected error: {error}"
     );
 }
@@ -3771,26 +3772,6 @@ fn skips_unreachable_duplicate_items_in_complete_two_state_cases() {
 }
 
 #[test]
-fn rejects_incomplete_cases_for_potentially_invalid_two_state_selects() {
-    let error = cranelift_build_error(
-        r#"
-        module Top(input bit [1:0] a, input bit [2:0] i, output logic y);
-            always_comb begin
-                case (a[i])
-                    1'b0: y = 1'b0;
-                    1'b1: y = 1'b1;
-                endcase
-            end
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("latch inference inside always_comb"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn regroups_comb_targets_after_dynamic_index_substitution() {
     let error = cranelift_build_error(
         r#"
@@ -5132,31 +5113,17 @@ fn reads_bit_selects_of_scalar_array_elements() {
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
-            "ordered port connection",
-            r#"
-            module Child(input logic a); endmodule
-            module Top(input logic a); Child child(a); endmodule
-        "#,
-        ),
-        (
-            "ordered parameter assignment",
-            r#"
-            module Child #(parameter W = 1) (); endmodule
-            module Top(); Child #(8) child(); endmodule
-        "#,
-        ),
-        (
-            "parameter override expression",
-            r#"
-            module Child #(parameter W = 1) (output logic [W-1:0] y); assign y = '0; endmodule
-            module Top(output logic [7:0] y); Child #(.W(2 ** 3)) child(.y(y)); endmodule
-        "#,
-        ),
-        (
             "module instance array",
             r#"
-            module Child(); endmodule
-            module Top(); Child child[1:0](); endmodule
+            module Child(input logic [3:0] a); endmodule
+            module Top(input logic [6:0] a); Child child[1:0](.a(a)); endmodule
+        "#,
+        ),
+        (
+            "with a negative index",
+            r#"
+            module Child(input logic a); endmodule
+            module Top(input logic [1:0] a); Child child[0:-1](.a(a)); endmodule
         "#,
         ),
         (
@@ -5187,12 +5154,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "net declaration assignment",
-            r#"
-            module Top(input logic a, output logic y); wire n = a; assign y = n; endmodule
-        "#,
-        ),
-        (
             "blocking assignment inside always_ff",
             r#"
             module Top(input logic clk, d, output logic q);
@@ -5204,14 +5165,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "combinational expression",
             r#"
             module Top(input logic a, output logic y); assign y = unknown(a); endmodule
-        "#,
-        ),
-        (
-            "always_ff assignment lowering",
-            r#"
-            module Top(input logic clk, input logic i, d, output logic [1:0] q);
-                always_ff @(posedge clk) q[i] <= d;
-            endmodule
         "#,
         ),
         (
@@ -5230,23 +5183,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(input logic a); endmodule
             module Top(input logic [3:0] x);
-                Child child(.a(x ** 2));
-            endmodule
-        "#,
-        ),
-        (
-            "loop-generate initializer",
-            r#"
-            module Top(output wire y);
-                for (genvar i = 2 ** 0; i < 2; i++) assign y = 1'b1;
-            endmodule
-        "#,
-        ),
-        (
-            "loop-generate condition",
-            r#"
-            module Top(output wire y);
-                for (genvar i = 0; i < 2 ** 1; i++) assign y = 1'b1;
+                Child child(.a({<<{x}}));
             endmodule
         "#,
         ),
@@ -5272,7 +5209,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, e, output logic [3:0] q);
                 always_ff @(posedge clk) begin
-                    if (a ** b) q <= d;
+                    if ({<<{a}}) q <= d;
                     else q <= e;
                 end
             endmodule
@@ -5283,7 +5220,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, output logic [3:0] q);
                 always_ff @(posedge clk) begin
-                    case (a ** b)
+                    case ({<<{a}})
                         0: q <= d;
                         default: q <= '0;
                     endcase
@@ -5295,7 +5232,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "always_ff assignment lowering",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
-                always_ff @(posedge clk) q <= a ** b;
+                always_ff @(posedge clk) q <= {<<{a}};
             endmodule
         "#,
         ),
@@ -5334,20 +5271,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "dependent repeated assignment inside always_comb",
-            r#"
-            module Top(input logic a, output logic y);
-                always_comb begin y = a; y = y + 1'b1; end
-            endmodule
-        "#,
-        ),
-        (
-            "always and always_latch processes",
-            r#"
-            module Top(input logic a, output logic y); always @* y = a; endmodule
-        "#,
-        ),
-        (
             "always and always_latch processes",
             r#"
             module Top(input logic a, output logic y); always_latch y = a; endmodule
@@ -5376,27 +5299,10 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "indexed part-select",
-            r#"
-            module Top(input logic [15:0] a, input logic [3:0] index,
-                       output logic [7:0] y);
-                assign y = a[index +: 8];
-            endmodule
-        "#,
-        ),
-        (
             "non-zero-based multidimensional packed range",
             r#"
             module Top(input logic [2:1][7:0] a, output logic [7:0] y);
                 assign y = a[1];
-            endmodule
-        "#,
-        ),
-        (
-            "casez, casex, or pattern case inside always_ff",
-            r#"
-            module Top(input logic clk, input logic [1:0] a, output logic y);
-                always_ff @(posedge clk) casez (a) 2'b1?: y <= 1'b1; default: y <= 0; endcase
             endmodule
         "#,
         ),
@@ -5471,34 +5377,10 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "block-local declaration inside always_comb",
-            r#"
-            module Top(input logic a, output logic y);
-                always_comb begin logic tmp; tmp = a; y = tmp; end
-            endmodule
-        "#,
-        ),
-        (
             "continuous assignment expression",
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
                 assign y = {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
-            "cast expression",
-            r#"
-            module Top(output logic [7:0] y);
-                assign y = 8'(16'h1234);
-            endmodule
-        "#,
-        ),
-        (
-            "cast expression",
-            r#"
-            module Top(input logic [7:0] value, output logic [7:0] y);
-                assign y = signed'(value);
             endmodule
         "#,
         ),
@@ -5538,22 +5420,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "combinational expression",
-            r#"
-            module Top(input logic a, output logic y);
-                function automatic logic choose(input logic x);
-                    if (x) return 1'b1;
-                endfunction
-                assign y = choose(a);
-            endmodule
-        "#,
-        ),
-        (
             "unsupported function conditional predicate",
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
-                    if (value ** 2) return 1'b1;
+                    if ({<<{value}}) return 1'b1;
                     else return 1'b0;
                 endfunction
                 assign y = choose(a);
@@ -5566,7 +5437,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic [3:0] a, output logic [3:0] y);
                 function automatic logic [3:0] square(input logic [3:0] value);
                     logic [3:0] tmp;
-                    tmp = value ** 2;
+                    tmp = {<<{value}};
                     return tmp;
                 endfunction
                 assign y = square(a);
@@ -5578,7 +5449,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
-                    case (value ** 2)
+                    case ({<<{value}})
                         1: return 1'b1;
                         default: return 1'b0;
                     endcase
@@ -5596,21 +5467,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     input logic [3:0] item
                 );
                     case (value)
-                        item ** 2: return 1'b1;
+                        {<<{item}}: return 1'b1;
                         default: return 1'b0;
                     endcase
                 endfunction
                 assign y = choose(a, b);
-            endmodule
-        "#,
-        ),
-        (
-            "conditional-generate condition",
-            r#"
-            module Top #(
-                parameter logic [3:0] P = 4'hf
-            ) (input logic clk, d, output logic q);
-                if (P ** 2) always_ff @(posedge clk) q <= d;
             endmodule
         "#,
         ),
@@ -5690,34 +5551,11 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "output or inout function argument",
-            r#"
-            module Top(input logic a, output logic y, side);
-                function automatic logic f(output logic out, input logic value);
-                    out = value;
-                    return value;
-                endfunction
-                assign y = f(side, a);
-            endmodule
-        "#,
-        ),
-        (
             "reduction operator in parameter expression",
             r#"
             module Top #(parameter logic [3:0] P = 4'hf, parameter FLAG = &P)
                        (output logic y);
                 assign y = FLAG;
-            endmodule
-        "#,
-        ),
-        (
-            "casez or casex inside function",
-            r#"
-            module Top(input logic [1:0] a, output logic y);
-                function automatic logic f(input logic [1:0] x);
-                    casez (x) 2'b1?: return 1'b1; default: return 1'b0; endcase
-                endfunction
-                assign y = f(a);
             endmodule
         "#,
         ),
@@ -5755,13 +5593,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "package-dependent systemverilog module",
-            r#"
-            package p; parameter W = 8; endpackage
-            module Top(output logic [7:0] y); import p::*; logic [W-1:0] value; assign y = value; endmodule
-        "#,
-        ),
-        (
             "unknown or duplicate systemverilog child port connection",
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule
@@ -5782,7 +5613,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic clk, a, b, output logic q);
                 always_ff @(posedge clk)
                     case (a)
-                        (b ** 2): q <= 1'b1;
+                        ({<<{b}}): q <= 1'b1;
                         default: q <= 1'b0;
                     endcase
             endmodule
@@ -5799,24 +5630,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return x;
                 endfunction
                 assign y = f();
-            endmodule
-        "#,
-        ),
-        (
-            "unknown conditional-generate condition",
-            r#"
-            module Top(output logic y);
-                if (2 ** 3) assign y = 1'b1;
-                else assign y = 1'b0;
-            endmodule
-        "#,
-        ),
-        (
-            "unresolved explicit packed width",
-            r#"
-            module Top #(parameter W = 2 ** 3)
-                      (input logic [W-1:0] a, output logic [W-1:0] y);
-                assign y = a;
             endmodule
         "#,
         ),
@@ -5871,7 +5684,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "always_comb assignment expression",
             r#"
             module Top(input logic [3:0] a, b, output logic [7:0] y);
-                always_comb y = a ** b;
+                always_comb y = {<<{a}};
             endmodule
         "#,
         ),
@@ -5958,14 +5771,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
             module Top(output logic y);
                 Child #(.NO_SUCH()) child(.y(y));
-            endmodule
-        "#,
-        ),
-        (
-            "unsupported packed range",
-            r#"
-            module Top(output logic [2 ** 3 - 1:0] y);
-                assign y = '1;
             endmodule
         "#,
         ),
@@ -7654,19 +7459,6 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
     assert_eq!(sim.get(x), 1u8.into());
     sim.modify(|io| io.set(index, 1u8)).unwrap();
     assert_eq!(sim.get(x), 2u8.into());
-}
-
-#[test]
-fn rejects_indexed_part_selects_in_comb_write_groups() {
-    for select in ["index +: 2", "index -: 2"] {
-        let source = format!(
-            "module Top(input int index, input logic replace, output logic [7:0] value); \
-             always_comb begin value = '0; value[{select}] = 2'b11; \
-             if (replace) value = '1; end endmodule"
-        );
-        let error = cranelift_build_error(&source);
-        assert!(error.contains("indexed part-select"), "{error}");
-    }
 }
 
 sv_backends! {

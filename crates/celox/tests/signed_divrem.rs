@@ -4,7 +4,6 @@ mod test_utils;
 
 all_backends! {
     fn signed_divrem_i8(sim) {
-        @ignore_on(sv);
         @case "signed_divrem::signed_divrem_i8";
     }
 

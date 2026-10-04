@@ -21,7 +21,6 @@ all_backends! {
     }
 
     fn test_as_cast_in_concat(sim) {
-        @ignore_on(sv);
         @case "concat_operators::test_as_cast_in_concat";
     }
 

@@ -922,8 +922,8 @@ fn preserves_enum_base_types_during_constant_substitution() {
 }
 
 #[test]
-fn rejects_casez_nested_under_comb_conditionals() {
-    let error = analyze_source(
+fn accepts_casez_nested_under_comb_conditionals() {
+    analyze_source(
         r#"
             module Top(input logic en, sel, output logic y);
                 always_comb begin
@@ -936,12 +936,7 @@ fn rejects_casez_nested_under_comb_conditionals() {
         "#,
         Path::new("nested_casez.sv"),
     )
-    .expect_err("nested casez must be rejected")
-    .to_string();
-    assert!(
-        error.contains("casez or casex inside always_comb"),
-        "unexpected error: {error}"
-    );
+    .expect("casez nested under a conditional must analyze");
 }
 
 fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
@@ -968,6 +963,13 @@ fn expr_references_ident_name(expr: &ir::Expr, name: &str) -> bool {
                 || expr_references_ident_name(else_expr, name)
         }
         ir::Expr::Literal(_) => false,
+        ir::Expr::Inside { expr, items } => {
+            expr_references_ident_name(expr, name)
+                || items
+                    .iter()
+                    .flat_map(ir::InsideItem::exprs)
+                    .any(|operand| expr_references_ident_name(operand, name))
+        }
     }
 }
 
@@ -995,6 +997,13 @@ fn expr_contains_literal(expr: &ir::Expr, needle: &str) -> bool {
                 || expr_contains_literal(else_expr, needle)
         }
         ir::Expr::Ident(_) => false,
+        ir::Expr::Inside { expr, items } => {
+            expr_contains_literal(expr, needle)
+                || items
+                    .iter()
+                    .flat_map(ir::InsideItem::exprs)
+                    .any(|operand| expr_contains_literal(operand, needle))
+        }
     }
 }
 
@@ -2195,6 +2204,73 @@ fn caps_aggregate_nested_static_loop_expansion() {
 }
 
 #[test]
+fn unrolled_bit_writes_do_not_grow_tracked_value_exponentially() {
+    // Each bit write used to reference the previously tracked value twice
+    // (upper and lower slice), so N writes built an O(2^N) expression tree.
+    let start = std::time::Instant::now();
+    analyze_source(
+        r#"
+            module Top(input logic [15:0] a, output logic [15:0] y);
+                always_comb begin
+                    y = 16'd0;
+                    for (int i = 0; i < 16; i++)
+                        y[i] = a[i];
+                end
+            endmodule
+        "#,
+        Path::new("unrolled_bit_writes.sv"),
+    )
+    .expect("a loop of constant-index bit writes must analyze");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "analysis took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn guarded_partial_writes_keep_tracked_value_linear() {
+    // Each guarded lane write used to reference the tracked value three times.
+    let mut source = String::from(
+        "module Top(input logic en, input logic [4:0] sel, input logic [5:0] v, \
+         input logic [95:0] base, output logic [95:0] lanes);\n\
+         always_comb begin lanes = base; if (en) begin\n",
+    );
+    for lane in 0..16 {
+        source.push_str(&format!(
+            "if (sel == 5'd{lane}) lanes[{} +: 6] = v;\n",
+            lane * 6
+        ));
+    }
+    source.push_str("end end endmodule\n");
+    let start = std::time::Instant::now();
+    analyze_source(&source, Path::new("guarded_lane_writes.sv"))
+        .expect("guarded lane writes must analyze");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "analysis took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn accepts_runtime_casts_and_signedness_system_functions() {
+    for (name, body) in [
+        ("size cast", "assign o = 16'(a);"),
+        ("narrowing size cast", "assign o = 16'(4'(a));"),
+        ("signing cast", "assign o = signed'(a);"),
+        ("int cast", "assign o = int'(a);"),
+        ("$signed", "assign o = $signed(a);"),
+        ("$unsigned in always_comb", "always_comb o = $unsigned(a);"),
+    ] {
+        let source =
+            format!("module Top(input logic [7:0] a, output logic [31:0] o); {body} endmodule");
+        analyze_source(&source, Path::new("runtime_cast.sv"))
+            .unwrap_or_else(|error| panic!("{name} must analyze: {error}"));
+    }
+}
+
+#[test]
 fn restricts_enum_alias_types_to_the_declared_base() {
     let ir = analyze_source(
         r#"
@@ -2710,10 +2786,13 @@ fn preserves_signedness_for_compound_unpacked_array_lvalues() {
             _ => None,
         })
         .expect("compound assignment should lower to an arithmetic shift");
-    assert!(matches!(
+    // The earlier write is substituted into the compound assignment, so the
+    // shifted operand is the signed input itself.
+    assert_eq!(
         compound.as_ref(),
-        ir::Expr::Select { signed: true, .. }
-    ));
+        &ir::Expr::Ident("input_value".to_string())
+    );
+    assert!(ir.modules()[0].ports()[0].r#type().is_signed());
 }
 
 #[test]
@@ -3146,6 +3225,13 @@ fn expr_contains_call(expr: &ir::Expr) -> bool {
                 || expr_contains_call(else_expr)
         }
         ir::Expr::Call { .. } => true,
+        ir::Expr::Inside { expr, items } => {
+            expr_contains_call(expr)
+                || items
+                    .iter()
+                    .flat_map(ir::InsideItem::exprs)
+                    .any(expr_contains_call)
+        }
     }
 }
 
@@ -3856,13 +3942,22 @@ fn analyzes_veryl_emitted_benchmark_sv() {
 }
 
 #[test]
-fn rejects_unlowered_constructs_in_veryl_emitted_sources() {
+fn rejects_unlowered_constructs() {
     let error = analyze_source(
+        "module Top(output logic y); initial y = 1'b0; endmodule",
+        Path::new("initial.sv"),
+    )
+    .expect_err("unlowered constructs must not be silently ignored");
+    assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
+}
+
+#[test]
+fn analyzes_veryl_emitted_fifo_with_runtime_casts() {
+    analyze_source(
         include_str!("../testdata/verilator/Fifo.sv"),
         Path::new("Fifo.sv"),
     )
-    .expect_err("unlowered constructs must not be silently ignored");
-    assert!(matches!(error, AnalyzerError::Unsupported(_)));
+    .expect("Veryl-emitted FIFO uses only supported constructs");
 }
 
 #[test]

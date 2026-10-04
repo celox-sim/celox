@@ -226,6 +226,8 @@ pub struct Instance {
     condition: Option<ConstExpr>,
     port_names: Vec<String>,
     port_connections: Vec<PortConnection>,
+    /// The declared `[left:right]` bounds of an instance array.
+    array_range: Option<(i128, i128)>,
 }
 
 impl Instance {
@@ -237,6 +239,7 @@ impl Instance {
         condition: Option<ConstExpr>,
         port_names: Vec<String>,
         port_connections: Vec<PortConnection>,
+        array_range: Option<(i128, i128)>,
     ) -> Self {
         Self {
             module_name,
@@ -246,7 +249,19 @@ impl Instance {
             condition,
             port_names,
             port_connections,
+            array_range,
         }
+    }
+
+    /// The number of elements of an instance array, if this is one.
+    pub fn array_len(&self) -> Option<usize> {
+        self.array_range
+            .and_then(|(left, right)| usize::try_from(left.abs_diff(right)).ok()?.checked_add(1))
+    }
+
+    /// The declared `[left:right]` bounds of an instance array, if this is one.
+    pub fn array_range(&self) -> Option<(i128, i128)> {
+        self.array_range
     }
 
     pub fn module_name(&self) -> &str {
@@ -282,11 +297,16 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
+    type_text: Option<String>,
 }
 
 impl ParameterOverride {
-    pub(crate) fn new(name: String, value: Option<ConstExpr>) -> Self {
-        Self { name, value }
+    pub(crate) fn new(name: String, value: Option<ConstExpr>, type_text: Option<String>) -> Self {
+        Self {
+            name,
+            value,
+            type_text,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -295,6 +315,11 @@ impl ParameterOverride {
 
     pub fn value(&self) -> Option<&ConstExpr> {
         self.value.as_ref()
+    }
+
+    /// The source text of the data type bound to a `parameter type`.
+    pub fn type_text(&self) -> Option<&str> {
+        self.type_text.as_deref()
     }
 }
 
@@ -525,6 +550,7 @@ pub enum BinaryOp {
     Mul,
     Div,
     Mod,
+    Pow,
     Shl,
     Shr,
     Sar,
@@ -738,6 +764,53 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// `expr inside { items }`: true when `expr` matches any item.
+    Inside {
+        expr: Box<Expr>,
+        items: Vec<InsideItem>,
+    },
+}
+
+/// One item of an `inside` set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsideItem {
+    /// A value matched with wildcard equality (`==?`).
+    Value(Expr),
+    /// An inclusive range `[low:high]`.
+    Range { low: Expr, high: Expr },
+}
+
+impl InsideItem {
+    /// The operand expressions of the item.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            InsideItem::Value(value) => vec![value],
+            InsideItem::Range { low, high } => vec![low, high],
+        }
+    }
+
+    /// Rebuild the item with `f` applied to each operand.
+    pub fn map(&self, f: &mut impl FnMut(&Expr) -> Expr) -> InsideItem {
+        match self {
+            InsideItem::Value(value) => InsideItem::Value(f(value)),
+            InsideItem::Range { low, high } => InsideItem::Range {
+                low: f(low),
+                high: f(high),
+            },
+        }
+    }
+}
+
+impl From<ast::InsideItem> for InsideItem {
+    fn from(item: ast::InsideItem) -> Self {
+        match item {
+            ast::InsideItem::Value(value) => InsideItem::Value(value.into()),
+            ast::InsideItem::Range { low, high } => InsideItem::Range {
+                low: low.into(),
+                high: high.into(),
+            },
+        }
+    }
 }
 
 impl From<ast::ConstExpr> for ConstExpr {
@@ -955,6 +1028,10 @@ impl From<ast::Expr> for Expr {
                 name,
                 args: args.into_iter().map(Into::into).collect(),
             },
+            ast::Expr::Inside { expr, items } => Expr::Inside {
+                expr: Box::new((*expr).into()),
+                items: items.into_iter().map(Into::into).collect(),
+            },
         }
     }
 }
@@ -997,6 +1074,7 @@ impl From<ast::BinaryOp> for BinaryOp {
             ast::BinaryOp::Mul => BinaryOp::Mul,
             ast::BinaryOp::Div => BinaryOp::Div,
             ast::BinaryOp::Mod => BinaryOp::Mod,
+            ast::BinaryOp::Pow => BinaryOp::Pow,
             ast::BinaryOp::Shl => BinaryOp::Shl,
             ast::BinaryOp::Shr => BinaryOp::Shr,
             ast::BinaryOp::Sar => BinaryOp::Sar,
@@ -1027,6 +1105,7 @@ impl From<BinaryOp> for ast::BinaryOp {
             BinaryOp::Mul => ast::BinaryOp::Mul,
             BinaryOp::Div => ast::BinaryOp::Div,
             BinaryOp::Mod => ast::BinaryOp::Mod,
+            BinaryOp::Pow => ast::BinaryOp::Pow,
             BinaryOp::Shl => ast::BinaryOp::Shl,
             BinaryOp::Shr => ast::BinaryOp::Shr,
             BinaryOp::Sar => ast::BinaryOp::Sar,

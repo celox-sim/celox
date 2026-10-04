@@ -1,0 +1,36 @@
+// Several modules in one file share a single sidecar.
+module Leaf (
+    clk   : input  '_ clock,
+    i_data: input  logic<8>,
+    o_data: output logic<8>,
+) {
+    assign o_data = i_data;
+}
+
+module Pair (
+    clk    : input  '_ clock,
+    rst    : input  '_ reset,
+    flag   : input  bit,
+    top_in : input  logic<8>,
+    top_out: output logic<8>[2],
+) {
+    for i in 0..2 :g {
+        inst u_leaf: Leaf (
+            clk              ,
+            i_data: top_in   ,
+            o_data: top_out[i],
+        );
+    }
+}
+
+module Single (
+    clk    : input  '_ clock,
+    top_in : input  logic<8>,
+    top_out: output logic<8>,
+) {
+    inst u_leaf: Leaf (
+        clk            ,
+        i_data: top_in ,
+        o_data: top_out,
+    );
+}

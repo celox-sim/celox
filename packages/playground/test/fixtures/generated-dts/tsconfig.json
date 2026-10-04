@@ -1,0 +1,14 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noEmit": true,
+		"allowArbitraryExtensions": true,
+		"rootDirs": ["src", ".celox/src"],
+		"types": []
+	},
+	"include": ["src", ".celox/src"]
+}

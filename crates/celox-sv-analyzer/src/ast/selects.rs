@@ -157,6 +157,23 @@ pub(super) fn lvalue_from_select(
     }
 
     if let Some(range) = &select.nodes.2 {
+        if let Some((msb, lsb)) = dynamic_indexed_bounds(
+            &name,
+            &range.nodes.1,
+            indices.is_empty(),
+            syntax_tree,
+            packed_dimensions,
+        ) {
+            return Some(LValue::Select {
+                name,
+                msb,
+                lsb,
+                signed: false,
+                array_slice_width: None,
+                array_slice_reversed: false,
+                is_2state: false,
+            });
+        }
         let (mut msb, mut lsb) = part_select_bounds(
             &range.nodes.1,
             syntax_tree,
@@ -456,6 +473,25 @@ pub(super) fn expr_select_from_select(
         .map(|bit_select| bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions))
         .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
+        // A start index that is only known at run time keeps symbolic bounds in
+        // declared index coordinates, like any other select; the frontend
+        // lowers them.
+        if let Expr::Ident(name) = &base
+            && let Some((msb, lsb)) = dynamic_indexed_bounds(
+                name,
+                &range.nodes.1,
+                indices.is_empty(),
+                syntax_tree,
+                packed_dimensions,
+            )
+        {
+            return Some(Expr::Select {
+                expr: Box::new(base),
+                msb,
+                lsb,
+                signed: false,
+            });
+        }
         let name = if let Expr::Ident(name) = &base {
             Some(name.as_str())
         } else {
@@ -574,6 +610,89 @@ pub(super) fn expr_select_from_select(
     }
 
     None
+}
+
+/// The runtime start index, constant width, `+:` direction and the declared
+/// packed range of a dynamic indexed part-select of `name`.
+struct DynamicIndexed {
+    start: ConstExpr,
+    width: usize,
+    plus: bool,
+    ascending: bool,
+}
+
+fn dynamic_indexed_shape(
+    name: &str,
+    range: &sv_parser::PartSelectRange,
+    no_leading_indices: bool,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Option<DynamicIndexed>> {
+    let sv_parser::PartSelectRange::IndexedRange(range) = range else {
+        return None;
+    };
+    let start = indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?;
+    if eval_ast_const_expr(&start, &dimensions.const_env).is_some() {
+        return None;
+    }
+    let shape = || {
+        let width = indexed_select_base(
+            RefNode::ConstantExpression(&range.nodes.2),
+            syntax_tree,
+            dimensions,
+        )?;
+        let width = usize::try_from(eval_ast_const_expr(&width, &dimensions.const_env)?).ok()?;
+        if width == 0 || !no_leading_indices {
+            return None;
+        }
+        let variable = dimensions.get(name)?;
+        if !variable.unpacked.is_empty() || variable.packed.len() != 1 {
+            return None;
+        }
+        let dimension = &variable.packed[0];
+        let left = eval_ast_const_expr(&dimension.left, &dimensions.const_env)?;
+        let right = eval_ast_const_expr(&dimension.right, &dimensions.const_env)?;
+        Some(DynamicIndexed {
+            start,
+            width,
+            plus: syntax_tree.get_str(&range.nodes.1.nodes.0)? == "+:",
+            ascending: left < right,
+        })
+    };
+    Some(shape())
+}
+
+fn const_sub(left: ConstExpr, right: ConstExpr) -> ConstExpr {
+    ConstExpr::Binary {
+        left: Box::new(left),
+        op: BinaryOp::Sub,
+        right: Box::new(right),
+    }
+}
+
+/// Symbolic `(msb, lsb)` of a dynamic indexed part-select used as a write
+/// target, in declared index coordinates.
+fn dynamic_indexed_bounds(
+    name: &str,
+    range: &sv_parser::PartSelectRange,
+    no_leading_indices: bool,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    let shape = dynamic_indexed_shape(name, range, no_leading_indices, syntax_tree, dimensions)??;
+    let tail = const_expr_from_i128(shape.width as i128 - 1);
+    let add = |left: ConstExpr, right: ConstExpr| ConstExpr::Binary {
+        left: Box::new(left),
+        op: BinaryOp::Add,
+        right: Box::new(right),
+    };
+    // Index range of the selection, most-significant end first.
+    Some(match (shape.ascending, shape.plus) {
+        (false, true) => (add(shape.start.clone(), tail), shape.start),
+        (false, false) => (shape.start.clone(), const_sub(shape.start, tail)),
+        (true, true) => (shape.start.clone(), add(shape.start, tail)),
+        (true, false) => (const_sub(shape.start.clone(), tail), shape.start),
+    })
 }
 
 fn flatten_variable_select(

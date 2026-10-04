@@ -15,7 +15,6 @@ all_backends! {
     }
 
     fn test_wide_context_shift_left(sim) {
-        @ignore_on(sv);
         @case "wide_context_width::test_wide_context_shift_left";
     }
 
@@ -24,7 +23,6 @@ all_backends! {
     }
 
     fn test_wide_runtime_shift_width_behavior(sim) {
-        @ignore_on(sv);
         @case "wide_context_width::test_wide_runtime_shift_width_behavior";
     }
 
@@ -33,7 +31,6 @@ all_backends! {
     }
 
     fn test_wide_context_multiplication_boundary(sim) {
-        @ignore_on(sv);
         @case "wide_context_width::test_wide_context_multiplication_boundary";
     }
 

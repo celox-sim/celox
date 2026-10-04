@@ -3,10 +3,13 @@
 [![npm version](https://img.shields.io/npm/v/%40celox-sim%2Fcelox.svg)](https://www.npmjs.com/package/@celox-sim/celox)
 [![crates.io](https://img.shields.io/crates/v/celox.svg)](https://crates.io/crates/celox)
 
-**A compiler-based RTL simulator for [Veryl](https://veryl-lang.org/).**
+**A compiler-based RTL simulator for [Veryl](https://veryl-lang.org/) and a
+synthesizable subset of SystemVerilog.**
 
 Celox compiles an elaborated Veryl design into executable simulation kernels and
-exposes the design through a type-safe TypeScript API. It is both a practical
+exposes the design through a type-safe TypeScript API. The same kernels can be
+built from synthesizable SystemVerilog through the Rust API (see
+[SystemVerilog support](https://celox-sim.github.io/celox/guide/systemverilog)). It is both a practical
 way to test RTL with Vitest and an open testbed for exploring how RTL simulators
 should be structured.
 
@@ -180,10 +183,13 @@ and [SIR reference](https://celox-sim.github.io/celox/internals/ir-reference).
 
 ## Project scope
 
-Celox is under active development. Its current focus is synchronous RTL written
-in Veryl and tested at the design level. It is not a general SystemVerilog
-simulator, a gate-level timing simulator, or an implementation of detailed
-delta-cycle event semantics.
+Celox is under active development. Its focus is synchronous RTL written in
+Veryl or in the synthesizable subset of SystemVerilog, tested at the design
+level. The [SystemVerilog guide](https://celox-sim.github.io/celox/guide/systemverilog)
+lists what the subset covers and what it leaves out. Celox is not a general
+SystemVerilog simulator: it does not run behavioral or verification code
+(`initial`, delays, assertions, classes), and it is not a gate-level timing
+simulator or an implementation of detailed delta-cycle event semantics.
 
 That narrower scope is intentional: it keeps the simulator small enough to make
 architectural changes, compare execution strategies, and test new compiler and

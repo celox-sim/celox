@@ -59,8 +59,162 @@ fn expr_from_expression_with_types_raw(
         sv_parser::Expression::ConditionalExpression(expr) => {
             expr_from_conditional_expression(expr, syntax_tree, packed_dimensions)
         }
+        sv_parser::Expression::InsideExpression(inside) => {
+            expr_from_inside_expression(inside, syntax_tree, packed_dimensions)
+        }
         _ => None,
     }
+}
+
+/// Lower the right-hand side of an assignment to `lhs`. An assignment pattern
+/// (`'{a, b}`, `'{x: a, default: b}`) takes its shape from the target.
+pub(super) fn expr_from_expression_for_lvalue(
+    expr: &sv_parser::Expression,
+    lhs: &LValue,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    if let sv_parser::Expression::Primary(primary) = expr
+        && let sv_parser::Primary::AssignmentPatternExpression(pattern) = &**primary
+    {
+        return expr_from_assignment_pattern(&pattern.nodes.1, lhs, syntax_tree, packed_dimensions);
+    }
+    expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+}
+
+/// An assignment pattern for a packed structure (its members in declaration
+/// order, the first being the most significant) or a `default` fill.
+fn expr_from_assignment_pattern(
+    pattern: &sv_parser::AssignmentPattern,
+    lhs: &LValue,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let LValue::Ident(name) = lhs else {
+        return None;
+    };
+    let members = &packed_dimensions.get(name)?.members;
+    let lower = |expr: &sv_parser::Expression| {
+        expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+    };
+    // The expression assigned to each member, in declaration order.
+    let values: Vec<&sv_parser::Expression> = match pattern {
+        sv_parser::AssignmentPattern::List(list) => {
+            let values = list.nodes.0.nodes.1.contents();
+            if members.is_empty() || values.len() != members.len() {
+                return None;
+            }
+            values
+        }
+        sv_parser::AssignmentPattern::Structure(structure) => {
+            let items = structure.nodes.0.nodes.1.contents();
+            let mut default = None;
+            let mut named: Vec<(String, &sv_parser::Expression)> = Vec::new();
+            for (key, _, value) in items {
+                match key {
+                    sv_parser::StructurePatternKey::MemberIdentifier(member) => named.push((
+                        identifier_text(RefNode::MemberIdentifier(member), syntax_tree)?,
+                        value,
+                    )),
+                    sv_parser::StructurePatternKey::AssignmentPatternKey(key) => {
+                        let sv_parser::AssignmentPatternKey::Default(_) = &**key else {
+                            return None;
+                        };
+                        default = Some(value);
+                    }
+                }
+            }
+            if members.is_empty() {
+                // `'{default: v}` fills a vector.
+                return match (named.is_empty(), default) {
+                    (true, Some(value)) => lower(value),
+                    _ => None,
+                };
+            }
+            if named
+                .iter()
+                .any(|(name, _)| !members.iter().any(|member| member.name() == name))
+            {
+                return None;
+            }
+            members
+                .iter()
+                .map(|member| {
+                    named
+                        .iter()
+                        .find(|(name, _)| name == member.name())
+                        .map(|(_, value)| *value)
+                        .or(default)
+                })
+                .collect::<Option<Vec<_>>>()?
+        }
+        _ => return None,
+    };
+    let parts = members
+        .iter()
+        .zip(values)
+        .map(|(member, value)| {
+            let width = expr_type_from_type(member.r#type(), &packed_dimensions.const_env)?.width;
+            let value = lower(value)?;
+            let signed = expr_signedness(
+                &value,
+                &packed_dimensions.expression_signedness,
+                &packed_dimensions.functions,
+            )
+            .unwrap_or(false);
+            Some(Expr::Resize {
+                expr: Box::new(value),
+                width,
+                signed,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(match <[Expr; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => Expr::Concat(parts),
+    })
+}
+
+/// `x inside {a, [lo:hi], ...}`: kept as an `Inside` expression, so that its
+/// operands and its matching rules stay visible to later stages.
+fn expr_from_inside_expression(
+    inside: &sv_parser::InsideExpression,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let operand =
+        expr_from_expression_with_types_raw(&inside.nodes.0, syntax_tree, packed_dimensions)?;
+    let items = inside
+        .nodes
+        .2
+        .nodes
+        .1
+        .nodes
+        .0
+        .contents()
+        .into_iter()
+        .map(|item| match &item.nodes.0 {
+            sv_parser::ValueRange::Expression(value) => {
+                expr_from_expression_with_types_raw(value, syntax_tree, packed_dimensions)
+                    .map(InsideItem::Value)
+            }
+            sv_parser::ValueRange::Binary(range) => {
+                let (low, _, high) = &range.nodes.0.nodes.1;
+                Some(InsideItem::Range {
+                    low: expr_from_expression_with_types_raw(low, syntax_tree, packed_dimensions)?,
+                    high: expr_from_expression_with_types_raw(
+                        high,
+                        syntax_tree,
+                        packed_dimensions,
+                    )?,
+                })
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!items.is_empty()).then(|| Expr::Inside {
+        expr: Box::new(operand),
+        items,
+    })
 }
 
 pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
@@ -128,6 +282,13 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
             condition: Box::new(guard_zero_divisions(*condition)),
             then_expr: Box::new(guard_zero_divisions(*then_expr)),
             else_expr: Box::new(guard_zero_divisions(*else_expr)),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(guard_zero_divisions(*expr)),
+            items: items
+                .into_iter()
+                .map(|item| item.map(&mut |operand| guard_zero_divisions(operand)))
+                .collect(),
         },
         Expr::Call { name, args } => Expr::Call {
             name,
@@ -233,17 +394,7 @@ fn expr_from_primary_with_types(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            cast_zero_type(
-                cast,
-                syntax_tree,
-                &packed_dimensions.const_env,
-                &packed_dimensions.type_aliases,
-            )
-            .map(|r#type| Expr::Resize {
-                expr: Box::new(expr),
-                width: r#type.width,
-                signed: r#type.signed,
-            })
+            runtime_cast_expr(cast, expr, syntax_tree, packed_dimensions)
         }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
@@ -292,15 +443,14 @@ pub(super) fn expr_from_function_subroutine_call(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
-    if packed_dimensions.constant_indexed_base
-        && let Some(ty) = dimensions::size_system_function_call_type(
-            call,
-            syntax_tree,
-            &packed_dimensions.const_env,
-            &packed_dimensions.type_aliases,
-            Some(packed_dimensions),
-        )
-    {
+    // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
+    if let Some(ty) = dimensions::size_system_function_call_type(
+        call,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        &packed_dimensions.type_aliases,
+        Some(packed_dimensions),
+    ) {
         return Some(Expr::Literal(ty.width.to_string()));
     }
     if let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 {
@@ -309,6 +459,37 @@ pub(super) fn expr_from_function_subroutine_call(
         };
         let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
         let args = call.nodes.1.nodes.1.0.contents();
+        if matches!(name, "$signed" | "$unsigned")
+            && args.len() == 1
+            && call.nodes.1.nodes.1.1.is_none()
+        {
+            // Reinterpret the operand's signedness without changing its width.
+            let arg =
+                expr_from_expression_with_types(args[0].as_ref()?, syntax_tree, packed_dimensions)?;
+            let width = expr_static_width(&arg, packed_dimensions)?;
+            return Some(Expr::Resize {
+                expr: Box::new(arg),
+                width,
+                signed: name == "$signed",
+            });
+        }
+        // `$clog2` of a constant is a constant.
+        if name == "$clog2"
+            && args.len() == 1
+            && let Some(argument) = args[0].as_ref()
+            && let Some(argument) =
+                expr_from_expression_with_types(argument, syntax_tree, packed_dimensions)
+                    .and_then(expr_to_const)
+            && let Some(value) = eval_ast_const_expr(
+                &ConstExpr::Function {
+                    name: name.to_string(),
+                    args: vec![argument],
+                },
+                &packed_dimensions.const_env,
+            )
+        {
+            return Some(Expr::Literal(value.to_string()));
+        }
         let constant_clog2 =
             packed_dimensions.constant_indexed_base && name == "$clog2" && args.len() == 1;
         if (!constant_clog2

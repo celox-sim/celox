@@ -30,6 +30,39 @@ use num_traits::{ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::hash::Hash;
 
+/// The `(value, wildcard mask, width)` of a `==?` pattern that is a constant,
+/// looking through the two-state conversion and zero extension a frontend wraps
+/// around operands. `None` when the pattern has no wildcard bits.
+fn wildcard_pattern<A: Hash + Eq + Clone>(
+    node: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> Option<(BigUint, BigUint, usize)> {
+    fn constant_bits<A: Hash + Eq + Clone>(
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> Option<(BigUint, BigUint, usize)> {
+        match arena.get(node) {
+            SLTNode::Unary(UnaryOp::ToTwoState | UnaryOp::Ident, inner) => {
+                constant_bits(*inner, arena)
+            }
+            SLTNode::Constant(value, mask, width, _) => Some((value.clone(), mask.clone(), *width)),
+            SLTNode::Concat(parts) => {
+                // Parts are listed most-significant first.
+                let (mut value, mut mask, mut offset) = (BigUint::zero(), BigUint::zero(), 0usize);
+                for (part, _) in parts.iter().rev() {
+                    let (part_value, part_mask, part_width) = constant_bits(*part, arena)?;
+                    value |= part_value << offset;
+                    mask |= part_mask << offset;
+                    offset += part_width;
+                }
+                Some((value, mask, offset))
+            }
+            _ => None,
+        }
+    }
+    constant_bits(node, arena).filter(|(_, mask, _)| !mask.is_zero())
+}
+
 #[derive(Clone)]
 enum SLTBitOrigin<A: Hash + Eq + Clone> {
     Node(NodeId),
@@ -531,6 +564,40 @@ impl SLTToSIRLowerer {
                     SIRValue::new_four_state(val.clone(), mask.clone()),
                 ));
                 reg
+            }
+            SLTNode::Binary(lhs, op, rhs)
+                if !self.four_state
+                    && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard)
+                    && wildcard_pattern(*rhs, arena).is_some() =>
+            {
+                // Without unknown-bit state the wildcard positions of a constant
+                // pattern are still known: force them to one on both sides and
+                // compare the rest. This matches `==?` for any left operand.
+                let (value, mask, pattern_width) =
+                    wildcard_pattern(*rhs, arena).expect("guarded above");
+                let l = self.lower_inner(builder, *lhs, arena, cache, env, allow_cache);
+                let operand_width = builder.register(&l).width().max(pattern_width);
+                let l = self.cast_reg_width_ext(builder, l, operand_width, false);
+                let wildcard = builder.alloc_bit(operand_width, false);
+                builder.emit(SIRInstruction::Imm(
+                    wildcard,
+                    SIRValue::new_four_state(mask.clone(), BigUint::zero()),
+                ));
+                let pattern = builder.alloc_bit(operand_width, false);
+                builder.emit(SIRInstruction::Imm(
+                    pattern,
+                    SIRValue::new_four_state(&value | &mask, BigUint::zero()),
+                ));
+                let forced = builder.alloc_logic(operand_width);
+                builder.emit(SIRInstruction::Binary(forced, l, BinaryOp::Or, wildcard));
+                let dest = builder.alloc_logic(self.get_width(node, arena));
+                let compare = if matches!(op, BinaryOp::EqWildcard) {
+                    BinaryOp::Eq
+                } else {
+                    BinaryOp::Ne
+                };
+                builder.emit(SIRInstruction::Binary(dest, forced, compare, pattern));
+                dest
             }
             SLTNode::Binary(lhs, op, rhs) => {
                 let mut l = self.lower_inner(builder, *lhs, arena, cache, env, allow_cache);

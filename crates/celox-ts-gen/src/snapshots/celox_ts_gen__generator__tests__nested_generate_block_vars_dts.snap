@@ -1,0 +1,19 @@
+---
+source: crates/celox-ts-gen/src/generator.rs
+expression: top.dts_content
+---
+import type { FourStateSignalValue, ModuleDefinition } from "@celox-sim/celox";
+
+export interface NestedPorts {
+  get d(): bigint;
+  set d(value: FourStateSignalValue);
+  readonly q: bigint;
+  blk: {
+    get "blk2.deep"(): bigint;
+    set "blk2.deep"(value: FourStateSignalValue);
+    get inner(): bigint;
+    set inner(value: FourStateSignalValue);
+  };
+}
+
+export declare const Nested: ModuleDefinition<NestedPorts>;

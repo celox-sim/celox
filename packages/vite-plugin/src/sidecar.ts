@@ -40,9 +40,7 @@ export function generateSidecars(
 
 		if (modules.length === 0) continue;
 
-		// Combine dtsContent from all modules in this file
-		// Each module's dtsContent already contains the import and interface
-		const content = modules.map((m) => m.dtsContent).join("\n");
+		const content = combineDtsContents(modules.map((m) => m.dtsContent));
 
 		mkdirSync(dirname(sidecarPath), { recursive: true });
 		writeFileSync(sidecarPath, content, "utf-8");
@@ -75,4 +73,30 @@ function sidecarPathFor(verylPath: string): string {
 	const base = verylPath.slice(dir.length + 1); // "Adder.veryl"
 	const stem = base.replace(/\.veryl$/, "");
 	return join(dir, `${stem}.d.veryl.ts`);
+}
+
+const RUNTIME_TYPE_IMPORT_RE =
+	/^import type \{([^}]*)\} from "@celox-sim\/celox";\n*/gm;
+
+/**
+ * Combine the per-module declarations of one source file into a single
+ * sidecar. Each module's `dtsContent` carries its own runtime type import, so
+ * the imports are merged into one declaration to avoid duplicate identifiers.
+ */
+export function combineDtsContents(contents: readonly string[]): string {
+	const names = new Set<string>();
+	const bodies = contents.map((content) =>
+		content.replace(RUNTIME_TYPE_IMPORT_RE, (_, specifiers: string) => {
+			for (const name of specifiers.split(",")) {
+				const trimmed = name.trim();
+				if (trimmed) names.add(trimmed);
+			}
+			return "";
+		}),
+	);
+	const header =
+		names.size > 0
+			? `import type { ${[...names].sort().join(", ")} } from "@celox-sim/celox";\n\n`
+			: "";
+	return header + bodies.join("\n");
 }

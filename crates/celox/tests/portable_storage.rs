@@ -16,8 +16,6 @@ all_backends! {
     }
 
     fn packed_scatter_last_lane_does_not_touch_adjacent_storage(sim) {
-        // Preserve the original SV frontend exclusion for this design.
-        @ignore_on(sv);
         @case "packed_scatter_store::packed_scatter_last_lane_does_not_touch_adjacent_storage";
     }
 }

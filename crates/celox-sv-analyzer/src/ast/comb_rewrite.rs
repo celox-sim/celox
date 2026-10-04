@@ -4,6 +4,11 @@ use super::*;
 
 const COMB_PREVIOUS_VALUE: &str = "\0celox_comb_previous_value";
 
+/// Upper bound on the size of a tracked `always_comb` value. Tracking a value
+/// across many partial writes can multiply its size on every write; stopping
+/// with a diagnostic is preferable to exhausting memory.
+const MAX_TRACKED_COMB_VALUE_NODES: usize = 300_000;
+
 /// Substitute the value established by earlier writes to `target` into reads
 /// that occur before the merged write is emitted. This handles procedural
 /// sequences such as `x = 0; y = x; if (c) x = 1;` without making `y` observe
@@ -158,12 +163,11 @@ pub(super) fn substitute_intermediate_comb_value_reads(
                         initialized |= covers_target;
                         updated
                     }
-                    Some(condition) => Expr::Mux {
-                        condition: Box::new(condition.clone()),
-                        then_expr: Box::new(updated),
-                        else_expr: Box::new(established),
-                    },
+                    Some(condition) => {
+                        merge_conditional(condition, updated, established, packed_dimensions)
+                    }
                 };
+                check_tracked_value_budget(&established, whole_established.as_ref())?;
             }
             continue;
         }
@@ -189,11 +193,9 @@ pub(super) fn substitute_intermediate_comb_value_reads(
         {
             whole_established = Some(match write.condition() {
                 None => updated,
-                Some(condition) => Expr::Mux {
-                    condition: Box::new(condition.clone()),
-                    then_expr: Box::new(updated),
-                    else_expr: Box::new(current_whole),
-                },
+                Some(condition) => {
+                    merge_conditional(condition, updated, current_whole, packed_dimensions)
+                }
             });
         }
         if let Some(chain_start) = write.exhaustive_fallback_start {
@@ -226,6 +228,7 @@ pub(super) fn substitute_intermediate_comb_value_reads(
                 );
             }
         }
+        check_tracked_value_budget(&established, whole_established.as_ref())?;
         prior_target_writes.push((index, tracked_write));
         if let Some(assignment) = original_target_assignment {
             guarded_assignment.assignment = assignment;
@@ -309,6 +312,14 @@ fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDime
                 (Some(msb), Some(lsb)) => Some((msb, lsb)),
                 _ => None,
             };
+            if !signed
+                && let Some((msb, lsb)) = bounds
+                && let (Ok(msb), Ok(lsb)) = (usize::try_from(msb), usize::try_from(lsb))
+                && msb >= lsb
+                && let Some(narrowed) = narrow_bit_select(&expr, msb, lsb, packed_dimensions)
+            {
+                return narrowed;
+            }
             if let (Some((msb, lsb)), Expr::Concat(parts)) = (bounds, &expr)
                 && let (Ok(msb), Ok(lsb)) = (usize::try_from(msb), usize::try_from(lsb))
                 && msb >= lsb
@@ -401,6 +412,17 @@ fn simplify_single_bit_concat_selects(expr: Expr, packed_dimensions: &PackedDime
                 packed_dimensions,
             )),
         },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(simplify_single_bit_concat_selects(*expr, packed_dimensions)),
+            items: items
+                .into_iter()
+                .map(|item| {
+                    item.map(&mut |operand| {
+                        simplify_single_bit_concat_selects(operand, packed_dimensions)
+                    })
+                })
+                .collect(),
+        },
         Expr::Call { name, args } => Expr::Call {
             name,
             args: args
@@ -481,6 +503,7 @@ pub(super) fn expr_static_width(
                 )
             }
         }
+        Expr::Inside { .. } => Some(1),
         Expr::Mux {
             then_expr,
             else_expr,
@@ -756,6 +779,7 @@ pub(super) fn selected_value_after_write(
                     target_lsb,
                     target_msb,
                     overlap_first.checked_sub(target_step)?,
+                    packed_dimensions,
                 )?);
             }
             parts.push(selected_value_read(
@@ -764,6 +788,7 @@ pub(super) fn selected_value_after_write(
                 write_lsb,
                 overlap_first,
                 overlap_last,
+                packed_dimensions,
             )?);
             if overlap_last != target_lsb {
                 parts.push(selected_value_read(
@@ -772,6 +797,7 @@ pub(super) fn selected_value_after_write(
                     target_lsb,
                     overlap_last.checked_add(target_step)?,
                     target_lsb,
+                    packed_dimensions,
                 )?);
             }
             let value = if parts.len() == 1 {
@@ -865,15 +891,12 @@ fn dynamic_selected_value_after_write(
             op: BinaryOp::EqCase,
             right: Box::new(const_expr_to_expr(const_expr_from_i128(candidate_lsb))),
         };
-        result = Expr::Mux {
-            condition: Box::new(Expr::Binary {
-                left: Box::new(matches_msb),
-                op: BinaryOp::LogicAnd,
-                right: Box::new(matches_lsb),
-            }),
-            then_expr: Box::new(updated),
-            else_expr: Box::new(result),
+        let condition = Expr::Binary {
+            left: Box::new(matches_msb),
+            op: BinaryOp::LogicAnd,
+            right: Box::new(matches_lsb),
         };
+        result = merge_conditional(&condition, updated, result, packed_dimensions);
         matched = true;
     }
     matched.then_some((result, false))
@@ -907,13 +930,265 @@ fn selected_value_read(
     value_lsb: i128,
     first_coordinate: i128,
     last_coordinate: i128,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
+    let msb = selected_target_bit(value_msb, value_lsb, first_coordinate)?;
+    let lsb = selected_target_bit(value_msb, value_lsb, last_coordinate)?;
+    if let (Ok(msb), Ok(lsb)) = (usize::try_from(msb), usize::try_from(lsb))
+        && msb >= lsb
+        && let Some(narrowed) = narrow_bit_select(value, msb, lsb, packed_dimensions)
+    {
+        return Some(narrowed);
+    }
     Some(Expr::Select {
         expr: Box::new(value.clone()),
-        msb: const_expr_from_i128(selected_target_bit(value_msb, value_lsb, first_coordinate)?),
-        lsb: const_expr_from_i128(selected_target_bit(value_msb, value_lsb, last_coordinate)?),
+        msb: const_expr_from_i128(msb),
+        lsb: const_expr_from_i128(lsb),
         signed: false,
     })
+}
+
+/// Build `condition ? then : else` for two values of the same static width,
+/// splitting at the piece boundaries of either side so that unchanged pieces
+/// are shared instead of wrapped in a `Mux`.
+///
+/// A conditional partial write produces `cond ? {hi(v), new, lo(v)} : v`,
+/// which references `v` three times. Emitting `{hi(v), cond ? new : mid(v),
+/// lo(v)}` keeps one copy of `v` and the tracked value grows linearly.
+fn merge_conditional(
+    condition: &Expr,
+    then_expr: Expr,
+    else_expr: Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Expr {
+    let plain = |then_expr: Expr, else_expr: Expr| Expr::Mux {
+        condition: Box::new(condition.clone()),
+        then_expr: Box::new(then_expr),
+        else_expr: Box::new(else_expr),
+    };
+    if strip_noop_resize(then_expr.clone(), packed_dimensions)
+        == strip_noop_resize(else_expr.clone(), packed_dimensions)
+    {
+        return then_expr;
+    }
+    let width = match (
+        expr_static_width(&then_expr, packed_dimensions),
+        expr_static_width(&else_expr, packed_dimensions),
+    ) {
+        (Some(then_width), Some(else_width)) if then_width == else_width && then_width > 0 => {
+            then_width
+        }
+        _ => return plain(then_expr, else_expr),
+    };
+    let cuts = (|| {
+        let mut cuts = std::collections::BTreeSet::new();
+        for side in [&then_expr, &else_expr] {
+            let Expr::Concat(parts) = side else {
+                continue;
+            };
+            let mut offset = 0usize;
+            for part in parts.iter().rev() {
+                offset += expr_static_width(part, packed_dimensions)?;
+                if offset < width {
+                    cuts.insert(offset);
+                }
+            }
+        }
+        Some(cuts)
+    })();
+    let Some(cuts) = cuts else {
+        return plain(then_expr, else_expr);
+    };
+    if cuts.is_empty() {
+        return plain(then_expr, else_expr);
+    }
+    let select = |expr: &Expr, msb: usize, lsb: usize| {
+        narrow_bit_select(expr, msb, lsb, packed_dimensions).unwrap_or_else(|| Expr::Select {
+            expr: Box::new(expr.clone()),
+            msb: const_expr_from_i128(msb as i128),
+            lsb: const_expr_from_i128(lsb as i128),
+            signed: false,
+        })
+    };
+    let mut pieces = Vec::new();
+    let mut low = 0usize;
+    for high_exclusive in cuts.into_iter().chain(std::iter::once(width)) {
+        let (msb, lsb) = (high_exclusive - 1, low);
+        let then_piece = strip_noop_resize(select(&then_expr, msb, lsb), packed_dimensions);
+        let else_piece = strip_noop_resize(select(&else_expr, msb, lsb), packed_dimensions);
+        let piece = if then_piece == else_piece {
+            then_piece
+        } else {
+            plain(then_piece, else_piece)
+        };
+        match piece {
+            Expr::Concat(inner) => pieces.extend(inner.into_iter().rev()),
+            piece => pieces.push(piece),
+        }
+        low = high_exclusive;
+    }
+    pieces.reverse();
+    Expr::Concat(pieces)
+}
+
+fn check_tracked_value_budget(
+    established: &Expr,
+    whole_established: Option<&Expr>,
+) -> Result<(), AnalyzerError> {
+    let mut remaining = MAX_TRACKED_COMB_VALUE_NODES;
+    let mut stack = vec![established];
+    stack.extend(whole_established);
+    while let Some(expr) = stack.pop() {
+        remaining = remaining.checked_sub(1).ok_or_else(|| {
+            AnalyzerError::Unsupported(
+                "always_comb value tracking exceeded the expression size limit".to_string(),
+            )
+        })?;
+        match expr {
+            Expr::Ident(_) | Expr::Literal(_) => {}
+            Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                stack.push(expr);
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => stack.extend(parts),
+            Expr::Inside { expr, items } => {
+                stack.push(expr);
+                stack.extend(items.iter().flat_map(InsideItem::exprs));
+            }
+            Expr::Call { args, .. } => stack.extend(args),
+            Expr::Binary { left, right, .. } => stack.extend([&**left, &**right]),
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => stack.extend([&**condition, &**then_expr, &**else_expr]),
+        }
+    }
+    Ok(())
+}
+
+/// Drop `Resize` wrappers that do not change the width, so that equal values
+/// built through different paths compare equal.
+fn strip_noop_resize(mut expr: Expr, packed_dimensions: &PackedDimensions) -> Expr {
+    while let Expr::Resize {
+        expr: inner, width, ..
+    } = &expr
+        && expr_static_width(inner, packed_dimensions) == Some(*width)
+    {
+        let Expr::Resize { expr: inner, .. } = expr else {
+            unreachable!();
+        };
+        expr = *inner;
+    }
+    expr
+}
+
+/// Select `[msb:lsb]` of `value`, pushing the selection through concatenations
+/// and conditional merges so only the bits actually read are retained.
+///
+/// Successive partial writes build `{value[hi:k+1], new, value[k-1:0]}`, which
+/// references the previous value twice. Without narrowing, the tracked value
+/// doubles in size on every write, so an unrolled loop of N bit writes costs
+/// O(2^N).
+fn narrow_bit_select(
+    value: &Expr,
+    msb: usize,
+    lsb: usize,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let select = |expr: &Expr, msb: usize, lsb: usize| {
+        narrow_bit_select(expr, msb, lsb, packed_dimensions).unwrap_or_else(|| Expr::Select {
+            expr: Box::new(expr.clone()),
+            msb: const_expr_from_i128(msb as i128),
+            lsb: const_expr_from_i128(lsb as i128),
+            signed: false,
+        })
+    };
+    match value {
+        Expr::Concat(parts) => {
+            let widths = parts
+                .iter()
+                .map(|part| expr_static_width(part, packed_dimensions))
+                .collect::<Option<Vec<_>>>()?;
+            let total = widths
+                .iter()
+                .try_fold(0usize, |sum, width| sum.checked_add(*width))?;
+            if msb >= total {
+                return None;
+            }
+            let mut pieces = Vec::new();
+            let mut offset = 0usize;
+            for (part, width) in parts.iter().zip(&widths).rev() {
+                let end = offset + width;
+                if *width != 0 && offset <= msb && end > lsb {
+                    let low = lsb.max(offset);
+                    let high = msb.min(end - 1);
+                    let piece = if low == offset && high == end - 1 {
+                        part.clone()
+                    } else {
+                        select(part, high - offset, low - offset)
+                    };
+                    match piece {
+                        Expr::Concat(inner) => pieces.extend(inner.into_iter().rev()),
+                        piece => pieces.push(piece),
+                    }
+                }
+                offset = end;
+            }
+            pieces.reverse();
+            if pieces.len() == 1 {
+                Some(Expr::Resize {
+                    expr: Box::new(pieces.pop()?),
+                    width: msb - lsb + 1,
+                    signed: false,
+                })
+            } else {
+                Some(Expr::Concat(pieces))
+            }
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let covers = |arm: &Expr| {
+                expr_static_width(arm, packed_dimensions).is_some_and(|width| width > msb)
+            };
+            if !covers(then_expr) || !covers(else_expr) {
+                return None;
+            }
+            Some(merge_conditional(
+                condition,
+                select(then_expr, msb, lsb),
+                select(else_expr, msb, lsb),
+                packed_dimensions,
+            ))
+        }
+        // Bits below the operand width are unchanged by a resize.
+        Expr::Resize { expr, .. } => {
+            let inner = expr_static_width(expr, packed_dimensions)?;
+            (msb < inner).then(|| select(expr, msb, lsb))
+        }
+        Expr::Select {
+            expr,
+            msb: inner_msb,
+            lsb: inner_lsb,
+            ..
+        } => {
+            let inner_msb = usize::try_from(eval_ast_const_expr(
+                inner_msb,
+                &packed_dimensions.const_env,
+            )?)
+            .ok()?;
+            let inner_lsb = usize::try_from(eval_ast_const_expr(
+                inner_lsb,
+                &packed_dimensions.const_env,
+            )?)
+            .ok()?;
+            let width = inner_msb.checked_sub(inner_lsb)?.checked_add(1)?;
+            (msb < width).then(|| select(expr, inner_lsb + msb, inner_lsb + lsb))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn comb_previous_value_placeholder() -> Expr {
@@ -941,6 +1216,13 @@ pub(super) fn expr_contains_comb_previous_value(expr: &Expr) -> bool {
             expr_contains_comb_previous_value(condition)
                 || expr_contains_comb_previous_value(then_expr)
                 || expr_contains_comb_previous_value(else_expr)
+        }
+        Expr::Inside { expr, items } => {
+            expr_contains_comb_previous_value(expr)
+                || items
+                    .iter()
+                    .flat_map(InsideItem::exprs)
+                    .any(expr_contains_comb_previous_value)
         }
         Expr::Call { args, .. } => args.iter().any(expr_contains_comb_previous_value),
     }
@@ -1052,6 +1334,22 @@ fn substitute_expr_lvalue(
                 value,
                 packed_dimensions,
             )),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(substitute_expr_lvalue(
+                *expr,
+                target,
+                value,
+                packed_dimensions,
+            )),
+            items: items
+                .into_iter()
+                .map(|item| {
+                    item.map(&mut |operand| {
+                        substitute_expr_lvalue(operand, target, value, packed_dimensions)
+                    })
+                })
+                .collect(),
         },
         Expr::Call { name, args } => Expr::Call {
             name,
@@ -1292,6 +1590,13 @@ pub(super) fn expr_references_overlapping_lvalue(
             expr_references_overlapping_lvalue(condition, target, const_env)
                 || expr_references_overlapping_lvalue(then_expr, target, const_env)
                 || expr_references_overlapping_lvalue(else_expr, target, const_env)
+        }
+        Expr::Inside { expr, items } => {
+            expr_references_overlapping_lvalue(expr, target, const_env)
+                || items
+                    .iter()
+                    .flat_map(InsideItem::exprs)
+                    .any(|operand| expr_references_overlapping_lvalue(operand, target, const_env))
         }
         Expr::Call { args, .. } => args
             .iter()

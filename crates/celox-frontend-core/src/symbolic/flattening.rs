@@ -255,7 +255,10 @@ pub fn flatten_module(
         for (idx, gb) in gbs.iter().enumerate() {
             let mut glue_cache = HashMap::default();
             let mut child_path = path.0.clone();
-            child_path.push((child_instance_name.clone(), idx));
+            child_path.push((
+                child_instance_name.clone(),
+                module.instance_index(child_instance_name, idx),
+            ));
             let child_id = instance_ids[&InstancePath(child_path)];
             comb_blocks.extend(convert_glue_block(
                 gb,

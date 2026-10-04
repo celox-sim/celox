@@ -145,12 +145,10 @@ fn ff_read_array_uses_previous_index(sim) {
 }
 
 fn ff_read_bit_select_uses_previous_index(sim) {
-    @ignore_on(sv);
     @case "ff_event_snapshot::ff_read_bit_select_uses_previous_index";
 }
 
 fn ff_read_part_select_uses_previous_index(sim) {
-    @ignore_on(sv);
     @case "ff_event_snapshot::ff_read_part_select_uses_previous_index";
 }
 }
