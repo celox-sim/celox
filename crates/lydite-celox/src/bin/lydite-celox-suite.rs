@@ -1,7 +1,7 @@
 //! Executes the reusable suite cases, backed exclusively by proved reads.
 //! No AST assertion transformation, simulator, or expected-value extraction.
-use celox_test_suite_veryl::{
-    Backend, BigUint, CompilationRejected, Design, Result, SignalPath, cases,
+use celox_test_suite::{
+    Backend, BigUint, CompilationRejected, Design, Result, SignalPath, veryl::cases,
 };
 use serde_json::{Value, json};
 use std::{
@@ -110,7 +110,7 @@ impl Backend for ProofBackend {
             ))
         })();
         if let Err(error) = &result {
-            let error: &celox_test_suite_veryl::Error = error;
+            let error: &celox_test_suite::Error = error;
             self.sticky.lock().unwrap().push(error.to_string());
         }
         result
@@ -171,7 +171,7 @@ fn main() {
                     "case": c.name,
                     "expectation": format!("{:?}", c.expectation),
                     "category": format!("{:?}", c.category),
-                    "source": {"file": format!("src/cases/{group}.vtest"), "line": script.pos.line},
+                    "source": {"file": format!("src/veryl/cases/{group}.vtest"), "line": script.pos.line},
                     "script": format!("{script:?}"),
                 })
             })

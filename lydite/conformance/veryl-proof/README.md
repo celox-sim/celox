@@ -1,7 +1,7 @@
 # Proof-backed Veryl corpus conformance
 
 This job executes **every case of the in-tree reusable suite**
-(`crates/celox-test-suite-veryl`) with reads backed by finite proofs, compiled by
+(the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
 **675 actual passes / 696** and 21 recorded exceptions. The raw test executable

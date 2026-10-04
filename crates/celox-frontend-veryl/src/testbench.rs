@@ -20,7 +20,7 @@ use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    FrontendLookup, InstancePath, LoweringPhase, ParserError, SourceAddr, VariableInfo,
+    FrontendLookup, InstancePath, ParserError, SourceAddr, VariableInfo,
     VerylComponentEventBinding, VerylComponentInputBinding, VerylIdMap, VerylTestbenchSource,
     bitaccess::eval_constexpr,
     context_width::{
@@ -3193,9 +3193,7 @@ fn validate_testbench_expression(
                         Some(token),
                     ))
                 } else {
-                    Err(ParserError::unsupported(
-                        67,
-                        LoweringPhase::SimulatorParser,
+                    Err(ParserError::internal(
                         "unresolved factor in testbench expression",
                         format!("{factor:?}"),
                         Some(token),

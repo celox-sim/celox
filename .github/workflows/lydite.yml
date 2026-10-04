@@ -12,7 +12,7 @@ on:
       - "lydite/**"
       - ".github/workflows/lydite.yml"
       # The proof-backed suite gate tests the in-tree frontend and suite.
-      - "crates/celox-test-suite-veryl/**"
+      - "crates/celox-test-suite*/**"
       - "crates/celox-frontend-veryl/**"
       - "crates/celox-frontend-core/**"
       - "crates/celox-sir/**"
@@ -23,7 +23,7 @@ on:
       - "lydite/**"
       - ".github/workflows/lydite.yml"
       # The proof-backed suite gate tests the in-tree frontend and suite.
-      - "crates/celox-test-suite-veryl/**"
+      - "crates/celox-test-suite*/**"
       - "crates/celox-frontend-veryl/**"
       - "crates/celox-frontend-core/**"
       - "crates/celox-sir/**"

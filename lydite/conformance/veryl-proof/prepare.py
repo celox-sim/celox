@@ -4,7 +4,7 @@ import hashlib,json,pathlib,shutil,subprocess
 ROOT=pathlib.Path(__file__).resolve().parent
 REPO=ROOT.parents[2]
 WORK=ROOT/'work'
-SUITE=REPO/'crates/celox-test-suite-veryl'
+SUITE=REPO/'crates/celox-test-suite'
 
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def git(*args):return subprocess.check_output(['git',*args],cwd=REPO,text=True)

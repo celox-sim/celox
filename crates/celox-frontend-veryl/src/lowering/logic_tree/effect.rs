@@ -137,16 +137,17 @@ fn collect_system_function_effect(
         }
         SystemFunctionKind::Bits(_)
         | SystemFunctionKind::Size(..)
-        | SystemFunctionKind::Readmemh(_, _)
-        | SystemFunctionKind::Finish => return Ok(BoundaryMap::default()),
+        | SystemFunctionKind::Readmemh(_, _) => return Ok(BoundaryMap::default()),
         SystemFunctionKind::Display(_)
         | SystemFunctionKind::Write(_)
-        | SystemFunctionKind::Assert { .. } => {}
+        | SystemFunctionKind::Assert { .. }
+        | SystemFunctionKind::Finish => {}
     }
 
     let (kind, cond, args) = match &call.kind {
         SystemFunctionKind::Display(args) => (RuntimeEventKind::Display, None, args.as_slice()),
         SystemFunctionKind::Write(args) => (RuntimeEventKind::Write, None, args.as_slice()),
+        SystemFunctionKind::Finish => (RuntimeEventKind::Finish, None, [].as_slice()),
         SystemFunctionKind::Assert { kind, cond, args } => {
             let event_kind = match kind {
                 veryl_analyzer::ir::AssertKind::Fatal => RuntimeEventKind::AssertFatal,
@@ -205,7 +206,11 @@ fn collect_system_function_effect(
     }
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
-        (RuntimeEventKind::Display | RuntimeEventKind::Write, active, None) => active,
+        (
+            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            active,
+            None,
+        ) => active,
         (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, None, explicit) => {
             explicit
         }
@@ -220,8 +225,12 @@ fn collect_system_function_effect(
         (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, Some(active), None) => {
             Some(active)
         }
-        (RuntimeEventKind::Display | RuntimeEventKind::Write, _, Some(_)) => {
-            unreachable!("display/write has no explicit guard")
+        (
+            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            _,
+            Some(_),
+        ) => {
+            unreachable!("display/write/finish has no explicit guard")
         }
     }
     .map(|node| -> Result<NodeId, ParserError> {
@@ -237,7 +246,10 @@ fn collect_system_function_effect(
         .map(|_| SLTForEffect::Event {
             site_id,
             guard,
-            emit_on_true: matches!(kind, RuntimeEventKind::Display | RuntimeEventKind::Write),
+            emit_on_true: matches!(
+                kind,
+                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+            ),
             args: observer_args.clone(),
             fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
                 .then_some(1_000_000 + site_id as i64),
@@ -365,9 +377,7 @@ fn collect_function_call_effects(
     collector: &mut CombEffectCollector,
 ) -> Result<(), ParserError> {
     let Some(function) = module.functions.get(&call.id) else {
-        return Err(ParserError::unsupported(
-            62,
-            LoweringPhase::CombLowering,
+        return Err(ParserError::internal(
             "function call",
             format!("unknown function id: {:?}", call.id),
             Some(&call.comptime.token),
@@ -379,9 +389,7 @@ fn collect_function_call_effects(
     } else {
         function.get_function(&[])
     }) else {
-        return Err(ParserError::unsupported(
-            62,
-            LoweringPhase::CombLowering,
+        return Err(ParserError::internal(
             "function call specialization",
             format!("{call}"),
             Some(&call.comptime.token),
@@ -566,7 +574,8 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
         Statement::SystemFunctionCall(call) => match &call.kind {
             SystemFunctionKind::Display(_)
             | SystemFunctionKind::Write(_)
-            | SystemFunctionKind::Assert { .. } => true,
+            | SystemFunctionKind::Assert { .. }
+            | SystemFunctionKind::Finish => true,
             SystemFunctionKind::Clog2(input)
             | SystemFunctionKind::Onehot(input)
             | SystemFunctionKind::Signed(input)
@@ -575,8 +584,7 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
             }
             SystemFunctionKind::Bits(_)
             | SystemFunctionKind::Size(..)
-            | SystemFunctionKind::Readmemh(_, _)
-            | SystemFunctionKind::Finish => false,
+            | SystemFunctionKind::Readmemh(_, _) => false,
         },
         Statement::If(if_stmt) => {
             expression_contains_runtime_effect(module, &if_stmt.cond)
@@ -1928,9 +1936,7 @@ fn collect_function_body_effects(
         collector: &mut CombEffectCollector,
     ) -> Result<FunctionControlState, ParserError> {
         let Some(loop_width) = for_stmt.var_type.total_width() else {
-            return Err(ParserError::unsupported(
-                65,
-                LoweringPhase::CombLowering,
+            return Err(ParserError::internal(
                 "for loop variable width",
                 format!("{:?}", for_stmt.var_name),
                 Some(&for_stmt.token),
@@ -2298,7 +2304,6 @@ fn collect_function_body_effects(
                     state.boundaries,
                     call,
                     arena,
-                    LoweringPhase::CombLowering,
                 )?;
                 apply_function_guard(
                     module,
@@ -2612,7 +2617,6 @@ pub(super) fn collect_comb_effects_statements(
                     BoundaryMap::default(),
                     call,
                     arena,
-                    LoweringPhase::CombLowering,
                 )?;
                 store = next_store;
             }

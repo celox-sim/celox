@@ -102,11 +102,23 @@ mod host {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RuntimeEvent {
-        Display { message: String },
-        Write { message: String },
-        AssertContinue { message: String },
-        AssertFatal { message: String },
-        Missed { count: u64 },
+        Display {
+            message: String,
+        },
+        Write {
+            message: String,
+        },
+        AssertContinue {
+            message: String,
+        },
+        AssertFatal {
+            message: String,
+        },
+        /// The design executed `$finish`. The host decides whether to stop.
+        Finish,
+        Missed {
+            count: u64,
+        },
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -291,7 +303,9 @@ mod host {
     ) -> String {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
-                RuntimeEventKind::Display | RuntimeEventKind::Write => 'd',
+                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish => {
+                    'd'
+                }
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
                         return "assertion failed".to_string();
@@ -367,6 +381,7 @@ mod host {
                     RuntimeEventKind::Write => RuntimeEvent::Write { message },
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
+                    RuntimeEventKind::Finish => RuntimeEvent::Finish,
                 })
             }
         }

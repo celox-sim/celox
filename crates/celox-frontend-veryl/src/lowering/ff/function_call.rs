@@ -1,6 +1,6 @@
 use super::{Domain, FfParser};
 use crate::{
-    HashMap, HashSet, LoweringPhase, ParserError,
+    HashMap, HashSet, ParserError,
     bitaccess::{
         build_dynamic_partial_assign_expr, build_partial_assign_expr, get_access_width,
         is_static_access,
@@ -20,6 +20,7 @@ use veryl_analyzer::ir::{
     SystemFunctionKind, Type, TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
 };
 use veryl_analyzer::symbol::Affiliation;
+use veryl_analyzer::value::Value;
 use veryl_parser::token_range::TokenRange;
 
 #[derive(Clone)]
@@ -260,7 +261,7 @@ impl<'a> FfParser<'a> {
         })
     }
 
-    fn expression_has_runtime_effect_inner(
+    pub(super) fn expression_has_runtime_effect_inner(
         &self,
         expr: &Expression,
         visiting: &mut HashSet<VarId>,
@@ -352,7 +353,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn function_call_has_runtime_effect(
+    pub(super) fn function_call_has_runtime_effect(
         &self,
         call: &veryl_analyzer::ir::FunctionCall,
         visiting: &mut HashSet<VarId>,
@@ -397,7 +398,10 @@ impl<'a> FfParser<'a> {
                 .is_some_and(|(_, expr)| self.expression_has_runtime_effect_inner(expr, visiting))
     }
 
-    fn assignment_destination_needs_eager_evaluation(&self, dst: &AssignDestination) -> bool {
+    pub(super) fn assignment_destination_needs_eager_evaluation(
+        &self,
+        dst: &AssignDestination,
+    ) -> bool {
         dst.index
             .0
             .iter()
@@ -719,7 +723,11 @@ impl<'a> FfParser<'a> {
         )
     }
 
-    fn coerce_function_input_expression(&self, expr: Expression, formal_id: VarId) -> Expression {
+    pub(super) fn coerce_function_input_expression(
+        &self,
+        expr: Expression,
+        formal_id: VarId,
+    ) -> Expression {
         let formal = &self.module.variables[&formal_id];
         if formal.r#type.array.is_empty() {
             Self::coerce_function_expression_to_type(expr, &formal.r#type)
@@ -798,9 +806,7 @@ impl<'a> FfParser<'a> {
         state: &HashMap<VarId, Expression>,
     ) -> Result<HashMap<VarId, Expression>, ParserError> {
         let Some(function) = self.module.functions.get(&call.id) else {
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call",
                 format!("unknown function id: {:?}", call.id),
                 Some(&call.comptime.token),
@@ -875,9 +881,7 @@ impl<'a> FfParser<'a> {
                     let emits_nonlocal_runtime_write =
                         self.function_call_emits_nonlocal_runtime_write(&call);
                     let Some(function) = self.module.functions.get(&call.id) else {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
+                        return Err(ParserError::internal(
                             "function call",
                             format!("unknown function id: {:?}", call.id),
                             Some(&call.comptime.token),
@@ -1299,28 +1303,22 @@ impl<'a> FfParser<'a> {
                 }
                 Statement::Null => {}
                 Statement::For(statement) => {
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "for loop in function body",
+                    return Err(ParserError::internal(
+                        "for loop in function body (calls needing it are lowered inline)",
                         "for loop".to_string(),
                         Some(&statement.token),
                     ));
                 }
                 Statement::IfReset(statement) => {
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
+                    return Err(ParserError::illegal_context(
+                        "statement in function body",
                         format!("{statement}"),
                         Some(&statement.token),
                     ));
                 }
                 Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
+                    return Err(ParserError::illegal_context(
+                        "statement in function body",
                         format!("{statement}"),
                         None,
                     ));
@@ -1366,25 +1364,19 @@ impl<'a> FfParser<'a> {
                 Ok(next)
             }
             Statement::Null => Ok(state.clone()),
-            Statement::For(statement) => Err(ParserError::unsupported(
-                66,
-                LoweringPhase::FfLowering,
-                "for loop before runtime effect in function body",
+            Statement::For(statement) => Err(ParserError::internal(
+                "for loop before runtime effect in function body (calls needing it are lowered inline)",
                 "for loop".to_string(),
                 Some(&statement.token),
             )),
-            Statement::IfReset(statement) => Err(ParserError::unsupported(
-                66,
-                LoweringPhase::FfLowering,
-                "if_reset before runtime effect in function body",
+            Statement::IfReset(statement) => Err(ParserError::illegal_context(
+                "if_reset in function body",
                 format!("{statement}"),
                 Some(&statement.token),
             )),
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "statement before runtime effect in function body",
+                Err(ParserError::illegal_context(
+                    "statement in function body",
                     format!("{statement}"),
                     None,
                 ))
@@ -1398,45 +1390,243 @@ impl<'a> FfParser<'a> {
         rhs: &Expression,
         state: &HashMap<VarId, Expression>,
     ) -> Result<HashMap<VarId, Expression>, ParserError> {
-        if assign.dst.len() != 1 {
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
-                "function body assignment shape",
-                format!("{}", Statement::Assign(assign.clone())),
-                Some(&assign.token),
-            ));
-        }
-        let dst = self.substitute_assignment_destination(&assign.dst[0], state);
         let rhs = self.substitute_function_expr(rhs, state);
-        let rhs = self.coerce_function_state_assignment(rhs, &dst)?;
+        self.assign_function_state(&assign.dst, rhs, state)
+    }
+
+    /// Apply `dsts = rhs` to a symbolic function state.
+    ///
+    /// `rhs` must already be resolved against `state`; destination selects are
+    /// resolved here against the same pre-assignment state. Concatenated
+    /// destinations receive consecutive slices of `rhs`, the last destination
+    /// taking the least-significant bits.
+    fn assign_function_state(
+        &self,
+        dsts: &[AssignDestination],
+        rhs: Expression,
+        state: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        self.assign_function_state_with_selects(dsts, rhs, state, state)
+    }
+
+    /// Like [`Self::assign_function_state`], but resolves destination selects
+    /// against `select_state` instead of the state being updated.
+    fn assign_function_state_with_selects(
+        &self,
+        dsts: &[AssignDestination],
+        rhs: Expression,
+        select_state: &HashMap<VarId, Expression>,
+        state: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        let dsts: Vec<_> = dsts
+            .iter()
+            .map(|dst| self.substitute_assignment_destination(dst, select_state))
+            .collect();
         let mut next = state.clone();
-        let is_whole_var =
-            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-        if is_whole_var {
-            next.insert(dst.id, rhs);
-        } else if is_static_access(&dst.index, &dst.select) {
-            let old_value = self.state_value_expr(dst.id, state);
-            next.insert(
-                dst.id,
-                build_partial_assign_expr(self.module, &dst, rhs, old_value)?,
+        if let [dst] = dsts.as_slice() {
+            let rhs = self.coerce_function_state_assignment(rhs, dst)?;
+            self.store_function_state(dst, rhs, &mut next)?;
+            return Ok(next);
+        }
+
+        let widths = dsts
+            .iter()
+            .map(|dst| get_access_width(self.module, dst.id, &dst.index, &dst.select))
+            .collect::<Result<Vec<_>, _>>()?;
+        let total_width: usize = widths.iter().sum();
+        let is_2state = rhs.comptime().r#type.is_2state();
+        let rhs = Self::coerce_function_expression_to_type(
+            rhs,
+            &Self::unsigned_packed_type(total_width, is_2state),
+        );
+        let mut offset = 0usize;
+        for (dst, &width) in dsts.iter().zip(&widths).rev() {
+            let token = TokenRange::default();
+            let shifted = if offset == 0 {
+                rhs.clone()
+            } else {
+                Expression::Binary(
+                    Box::new(rhs.clone()),
+                    Op::LogicShiftR,
+                    Box::new(Expression::create_value(
+                        Value::new(offset as u64, 64, false),
+                        token,
+                    )),
+                    Box::new(Comptime::create_unknown(token)),
+                )
+            };
+            let part = Self::coerce_function_expression_to_type(
+                shifted,
+                &Self::unsigned_packed_type(width, is_2state),
             );
-        } else if self.module.variables[&dst.id].affiliation != Affiliation::Function {
-            let old_value = self.state_value_expr(dst.id, state);
-            next.insert(
-                dst.id,
-                build_dynamic_partial_assign_expr(self.module, &dst, rhs, old_value)?,
-            );
-        } else {
-            return Err(ParserError::unsupported(
-                66,
-                LoweringPhase::FfLowering,
-                "dynamic assignment before runtime effect in function body",
-                format!("{}", Statement::Assign(assign.clone())),
-                Some(&assign.token),
-            ));
+            let part = self.coerce_function_state_assignment(part, dst)?;
+            self.store_function_state(dst, part, &mut next)?;
+            offset += width;
         }
         Ok(next)
+    }
+
+    fn unsigned_packed_type(width: usize, is_2state: bool) -> Type {
+        let mut ty = Type::new(if is_2state {
+            TypeKind::Bit
+        } else {
+            TypeKind::Logic
+        });
+        ty.set_concrete_width(Shape::new(vec![Some(width)]));
+        ty
+    }
+
+    /// Store an already coerced value into one resolved destination.
+    fn store_function_state(
+        &self,
+        dst: &AssignDestination,
+        rhs: Expression,
+        state: &mut HashMap<VarId, Expression>,
+    ) -> Result<(), ParserError> {
+        let is_whole_var =
+            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+        let value = if is_whole_var {
+            rhs
+        } else {
+            let old_value = self.state_value_expr(dst.id, state);
+            if is_static_access(&dst.index, &dst.select) {
+                build_partial_assign_expr(self.module, dst, rhs, old_value)?
+            } else {
+                let merged =
+                    build_dynamic_partial_assign_expr(self.module, dst, rhs, old_value.clone())?;
+                self.guard_dynamic_element_write(dst, merged, old_value)?
+            }
+        };
+        state.insert(dst.id, value);
+        Ok(())
+    }
+
+    /// Keep the old value when a dynamic unpacked-array or packed-dimension
+    /// index is out of range. A flat bit offset alone would otherwise let an
+    /// oversized inner index spill into a neighbouring element.
+    fn guard_dynamic_element_write(
+        &self,
+        dst: &AssignDestination,
+        merged: Expression,
+        old_value: Expression,
+    ) -> Result<Expression, ParserError> {
+        Ok(
+            match self.dynamic_index_in_range(dst.id, &dst.index, &dst.select)? {
+                Some(condition) => Expression::Ternary(
+                    Box::new(condition),
+                    Box::new(merged),
+                    Box::new(old_value),
+                    Box::new(self.function_state_comptime(dst.id)),
+                ),
+                None => merged,
+            },
+        )
+    }
+
+    /// The condition under which every runtime index of a select addresses an
+    /// existing element, or `None` when no index can be out of range.
+    fn dynamic_index_in_range(
+        &self,
+        var_id: VarId,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Result<Option<Expression>, ParserError> {
+        let geometry = crate::bitaccess::select_geometry(self.module, var_id, index, select)?;
+        let token = TokenRange::default();
+        let mut condition: Option<Expression> = None;
+        for (dimension, index) in index
+            .0
+            .iter()
+            .chain(select.0.iter())
+            .take(geometry.dimension_count)
+            .enumerate()
+        {
+            if index.comptime().is_const {
+                continue;
+            }
+            let outer = if dimension == 0 {
+                geometry.total_width
+            } else {
+                geometry.strides[dimension - 1]
+            };
+            let size = outer / geometry.strides[dimension].max(1);
+            let index_width = index.comptime().r#type.total_width().unwrap_or(usize::MAX);
+            let always_in_range = !index.comptime().r#type.signed
+                && index_width < usize::BITS as usize
+                && (1usize << index_width) <= size;
+            if always_in_range {
+                continue;
+            }
+            let in_range = Expression::Binary(
+                Box::new(index.clone()),
+                Op::Less,
+                Box::new(Expression::create_value(
+                    Value::new(size as u64, 64, false),
+                    token,
+                )),
+                Box::new(Comptime::create_unknown(token)),
+            );
+            condition = Some(match condition {
+                Some(previous) => Expression::Binary(
+                    Box::new(previous),
+                    Op::LogicAnd,
+                    Box::new(in_range),
+                    Box::new(Comptime::create_unknown(token)),
+                ),
+                None => in_range,
+            });
+        }
+        Ok(condition)
+    }
+
+    /// Select `index`/`select` from the symbolic whole value of `var_id`.
+    ///
+    /// An out-of-range runtime index reads X in a four-state variable and 0 in
+    /// a two-state one (IEEE 1800-2023 7.4.6).
+    fn select_from_state_value(
+        &self,
+        var_id: VarId,
+        index: &VarIndex,
+        select: &VarSelect,
+        whole: Expression,
+    ) -> Result<Expression, ParserError> {
+        let (offset, geometry) =
+            crate::bitaccess::select_offset_expr(self.module, var_id, index, select)?;
+        let token = TokenRange::default();
+        let shifted = Expression::Binary(
+            Box::new(whole),
+            Op::LogicShiftR,
+            Box::new(offset),
+            Box::new(Comptime::create_unknown(token)),
+        );
+        let variable = &self.module.variables[&var_id];
+        let mut ty =
+            Self::unsigned_packed_type(geometry.selected_width, variable.r#type.is_2state());
+        // Selecting only unpacked array elements preserves the packed
+        // element's signedness. Packed selections are always unsigned.
+        ty.signed = variable.r#type.signed && select.0.is_empty() && select.1.is_none();
+        let selected = Self::coerce_function_expression_to_type(shifted, &ty);
+        let Some(condition) = self.dynamic_index_in_range(var_id, index, select)? else {
+            return Ok(selected);
+        };
+        let out_of_range = if variable.r#type.is_2state() {
+            Value::new(0, geometry.selected_width, ty.signed)
+        } else {
+            Value::new_x(geometry.selected_width, ty.signed)
+        };
+        let mut comptime = Comptime::create_unknown(token);
+        comptime.r#type = ty.clone();
+        comptime.expr_context.width = geometry.selected_width;
+        comptime.expr_context.signed = ty.signed;
+        Ok(Expression::Ternary(
+            Box::new(condition),
+            Box::new(selected),
+            Box::new(Self::coerce_function_expression_to_type(
+                Expression::create_value(out_of_range, token),
+                &ty,
+            )),
+            Box::new(comptime),
+        ))
     }
 
     fn apply_case_to_function_state(
@@ -1570,7 +1760,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn coerce_register_to_variable_type<A>(
+    pub(super) fn coerce_register_to_variable_type<A>(
         &self,
         reg: RegisterId,
         var_id: VarId,
@@ -1589,7 +1779,7 @@ impl<'a> FfParser<'a> {
         ))
     }
 
-    fn coerce_function_output_to_actual<A>(
+    pub(super) fn coerce_function_output_to_actual<A>(
         &self,
         reg: RegisterId,
         formal_id: VarId,
@@ -2195,10 +2385,8 @@ impl<'a> FfParser<'a> {
                         .iter()
                         .any(|dst| self.assignment_destination_needs_eager_evaluation(dst))
                     {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "effectful assignment destination in function body",
+                        return Err(ParserError::internal(
+                            "effectful assignment destination in function body (calls needing it are lowered inline)",
                             format!("{statement}"),
                             Some(&assign.token),
                         ));
@@ -2470,10 +2658,8 @@ impl<'a> FfParser<'a> {
                     active = Self::function_path_or(live_paths, default_live);
                 }
                 Statement::For(statement) => {
-                    return Err(ParserError::unsupported(
-                        66,
-                        LoweringPhase::FfLowering,
-                        "control flow around runtime effect in function body",
+                    return Err(ParserError::internal(
+                        "for loop in function body (calls needing it are lowered inline)",
                         "for loop".to_string(),
                         Some(&statement.token),
                     ));
@@ -2485,27 +2671,21 @@ impl<'a> FfParser<'a> {
                         .flatten()
                         .any(|dst| self.assignment_destination_needs_eager_evaluation(dst))
                     {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "effectful function call output destination in function body",
+                        return Err(ParserError::internal(
+                            "effectful function call output destination in function body (calls needing it are lowered inline)",
                             format!("{statement}"),
                             Some(&call.comptime.token),
                         ));
                     }
                     if self.function_call_has_runtime_effect(call, &mut HashSet::default()) {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "nested runtime effect in function body",
+                        return Err(ParserError::internal(
+                            "nested runtime effect in function body (calls needing it are lowered inline)",
                             format!("{statement}"),
                             Some(&call.comptime.token),
                         ));
                     }
                     let Some(function) = self.module.functions.get(&call.id) else {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
+                        return Err(ParserError::internal(
                             "function call",
                             format!("unknown function id: {:?}", call.id),
                             Some(&call.comptime.token),
@@ -2554,19 +2734,15 @@ impl<'a> FfParser<'a> {
                     state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::IfReset(statement) => {
-                    return Err(ParserError::unsupported(
-                        66,
-                        LoweringPhase::FfLowering,
-                        "control flow around runtime effect in function body",
+                    return Err(ParserError::illegal_context(
+                        "if_reset in function body",
                         format!("{statement}"),
                         Some(&statement.token),
                     ));
                 }
                 Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                    return Err(ParserError::unsupported(
-                        66,
-                        LoweringPhase::FfLowering,
-                        "runtime effect in function body",
+                    return Err(ParserError::illegal_context(
+                        "statement in function body",
                         format!("{statement}"),
                         None,
                     ));
@@ -2763,9 +2939,7 @@ impl<'a> FfParser<'a> {
             };
             let formal = &self.module.variables[arg_id];
             if !self.actual_matches_formal_shape(formal, arg_expr) {
-                return Err(ParserError::unsupported(
-                    43,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "function call argument shape",
                     format!(
                         "actual expression shape does not match unpacked array formal `{}`",
@@ -2802,9 +2976,7 @@ impl<'a> FfParser<'a> {
         state: &HashMap<VarId, Expression>,
     ) -> Result<HashMap<VarId, Expression>, ParserError> {
         let Some(function) = self.module.functions.get(&call.id) else {
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call",
                 format!("unknown function id: {:?}", call.id),
                 Some(&call.comptime.token),
@@ -2816,16 +2988,16 @@ impl<'a> FfParser<'a> {
         } else {
             function.get_function(&[])
         }) else {
-            return Err(ParserError::unsupported(
-                62,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call specialization",
                 format!("{call}"),
                 Some(&call.comptime.token),
             ));
         };
 
-        let function_body = crate::lowering::function_return::implicit_return_body(&function_body);
+        let mut function_body =
+            crate::lowering::function_return::implicit_return_body(&function_body).into_owned();
+        crate::lowering::function_return::refresh_expression_tokens(&mut function_body);
         self.validate_function_call_bindings(call, &function_body)?;
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
@@ -2882,45 +3054,19 @@ impl<'a> FfParser<'a> {
                 continue;
             }
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-                return Err(ParserError::unsupported(
-                    61,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::internal(
                     "function call missing argument",
                     format!("{call}"),
                     Some(&call.comptime.token),
                 ));
             };
 
-            if dsts.len() != 1 {
-                return Err(ParserError::unsupported(
-                    60,
-                    LoweringPhase::FfLowering,
-                    "function body call output assignment shape",
-                    format!("{call}"),
-                    Some(&call.comptime.token),
-                ));
-            }
-
-            let dst = &dsts[0];
-            let is_whole_var =
-                dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-
-            let expr = function_state
-                .as_ref()
-                .and_then(|state| state.get(arg_id))
-                .cloned()
-                .ok_or_else(|| {
-                    ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "function return expression",
-                        format!("function target var id: {arg_id:?}"),
-                        Some(&call.comptime.token),
-                    )
-                })?;
+            let expr = match function_state.as_ref() {
+                Some(function_state) => self.state_value_expr(*arg_id, function_state),
+                None => self.state_value_expr(*arg_id, &HashMap::default()),
+            };
             let expr = self.substitute_function_expr(&expr, state);
-            let expr = self.coerce_function_state_assignment(expr, dst)?;
-            output_values.push((dst, is_whole_var, expr));
+            output_values.push((dsts, expr));
         }
 
         let mut next = state.clone();
@@ -2931,26 +3077,8 @@ impl<'a> FfParser<'a> {
                 }
             }
         }
-        for (dst, is_whole_var, expr) in output_values {
-            if is_whole_var {
-                next.insert(dst.id, expr);
-            } else if is_static_access(&dst.index, &dst.select) {
-                let old_value = self.state_value_expr(dst.id, &next);
-                let merged = build_partial_assign_expr(self.module, dst, expr, old_value)?;
-                next.insert(dst.id, merged);
-            } else if self.module.variables[&dst.id].affiliation != Affiliation::Function {
-                let old_value = self.state_value_expr(dst.id, &next);
-                let merged = build_dynamic_partial_assign_expr(self.module, dst, expr, old_value)?;
-                next.insert(dst.id, merged);
-            } else {
-                return Err(ParserError::unsupported(
-                    60,
-                    LoweringPhase::FfLowering,
-                    "function body call output non-whole assignment (dynamic index)",
-                    format!("{call}"),
-                    Some(&call.comptime.token),
-                ));
-            }
+        for (dsts, expr) in output_values {
+            next = self.assign_function_state_with_selects(dsts, expr, state, &next)?;
         }
 
         Ok(next)
@@ -3580,6 +3708,81 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
+    /// Whether the unpacked-array actual at `arg_index` could observe a write
+    /// made later in the call (by a later actual, an output copy-out, or the
+    /// callee). The symbolic lowering reads array actuals lazily through
+    /// views, which cannot represent such a call.
+    pub(super) fn unpacked_input_aliases_later_effect(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        function_body: &veryl_analyzer::ir::FunctionBody,
+        ordered_arg_paths: &[veryl_analyzer::ir::VarPath],
+        arg_index: usize,
+    ) -> bool {
+        let Some(actual) = function_call_arg(&call.inputs, &ordered_arg_paths[arg_index]) else {
+            return false;
+        };
+        let output_ids: HashSet<VarId> = call
+            .outputs
+            .values()
+            .flat_map(|destinations| destinations.iter().map(|dst| dst.id))
+            .collect();
+        let mut dependencies = HashSet::default();
+        self.collect_expression_read_variables(actual, &mut dependencies, false);
+        let callee_writes_dependency = self.statements_write_any(
+            &function_body.statements,
+            &dependencies,
+            &mut HashSet::default(),
+        );
+        let mut array_variables = HashSet::default();
+        self.collect_expression_read_variables(actual, &mut array_variables, true);
+        let aliases_later_write = ordered_arg_paths
+            .iter()
+            .skip(arg_index + 1)
+            .filter_map(|path| function_call_arg(&call.inputs, path))
+            .any(|expr| self.expression_writes_any(expr, &array_variables));
+        let aliases_output_write = !dependencies.is_disjoint(&output_ids)
+            || call
+                .outputs
+                .values()
+                .flatten()
+                .any(|dst| self.assignment_destination_writes_any(dst, &dependencies));
+        let callee_writes_array = self.statements_write_any(
+            &function_body.statements,
+            &array_variables,
+            &mut HashSet::default(),
+        );
+        let cannot_snapshot_before_callee_write =
+            callee_writes_dependency && !matches!(actual, Expression::ArrayLiteral(_, _));
+        aliases_later_write
+            || aliases_output_write
+            || callee_writes_array
+            || cannot_snapshot_before_callee_write
+    }
+
+    /// Whether any unpacked-array actual of `call` aliases a later effect.
+    pub(super) fn call_has_unpacked_input_alias(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        function_body: &veryl_analyzer::ir::FunctionBody,
+        ordered_arg_paths: &[veryl_analyzer::ir::VarPath],
+    ) -> bool {
+        ordered_arg_paths
+            .iter()
+            .enumerate()
+            .any(|(arg_index, arg_path)| {
+                function_body.arg_map.get(arg_path).is_some_and(|arg_id| {
+                    !self.module.variables[arg_id].r#type.array.is_empty()
+                        && self.unpacked_input_aliases_later_effect(
+                            call,
+                            function_body,
+                            ordered_arg_paths,
+                            arg_index,
+                        )
+                })
+            })
+    }
+
     fn materialize_function_inputs<A>(
         &mut self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -3625,34 +3828,14 @@ impl<'a> FfParser<'a> {
                 &mut HashSet::default(),
             );
             if !formal.r#type.array.is_empty() {
-                let mut array_variables = HashSet::default();
-                self.collect_expression_read_variables(actual, &mut array_variables, true);
-                let aliases_later_write = ordered_arg_paths
-                    .iter()
-                    .skip(arg_index + 1)
-                    .filter_map(|path| function_call_arg(&call.inputs, path))
-                    .any(|expr| self.expression_writes_any(expr, &array_variables));
-                let aliases_output_write = !dependencies.is_disjoint(&output_ids)
-                    || call
-                        .outputs
-                        .values()
-                        .flatten()
-                        .any(|dst| self.assignment_destination_writes_any(dst, &dependencies));
-                let callee_writes_array = self.statements_write_any(
-                    &function_body.statements,
-                    &array_variables,
-                    &mut HashSet::default(),
-                );
-                let cannot_snapshot_before_callee_write =
-                    callee_writes_dependency && !matches!(actual, Expression::ArrayLiteral(_, _));
-                if aliases_later_write
-                    || aliases_output_write
-                    || callee_writes_array
-                    || cannot_snapshot_before_callee_write
-                {
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
+                if self.unpacked_input_aliases_later_effect(
+                    call,
+                    function_body,
+                    ordered_arg_paths,
+                    arg_index,
+                ) {
+                    // Such calls are lowered inline, which snapshots inputs.
+                    return Err(ParserError::internal(
                         "unpacked function argument aliases later effect",
                         format!("{actual}"),
                         Some(&call.comptime.token),
@@ -3725,6 +3908,15 @@ impl<'a> FfParser<'a> {
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
     ) -> Expression {
+        self.substitute_function_expr_inner(expr, defs, &mut HashSet::default())
+    }
+
+    fn substitute_function_expr_inner(
+        &self,
+        expr: &Expression,
+        defs: &HashMap<VarId, Expression>,
+        expanding: &mut HashSet<VarId>,
+    ) -> Expression {
         if self
             .get_bound_function_expression_value(expr.token_range())
             .is_some()
@@ -3738,11 +3930,37 @@ impl<'a> FfParser<'a> {
                         return expr.clone();
                     }
                     let is_whole = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
-                    if is_whole && let Some(bound) = defs.get(var_id) {
+                    if let Some(bound) = defs.get(var_id)
+                        && expanding.insert(*var_id)
+                    {
                         // State entries already hold the value captured at assignment.
                         // Re-expanding against later definitions would reread variables
                         // that were still unassigned then, such as mutable locals or formals.
-                        return bound.clone();
+                        let whole = bound.clone();
+                        expanding.remove(var_id);
+                        if is_whole {
+                            return whole;
+                        }
+                        // A partial read of a variable with symbolic state
+                        // selects from that state; its storage is stale.
+                        let mut index = index.clone();
+                        for expr in &mut index.0 {
+                            *expr = self.substitute_function_expr_inner(expr, defs, expanding);
+                        }
+                        let mut select = select.clone();
+                        for expr in &mut select.0 {
+                            *expr = self.substitute_function_expr_inner(expr, defs, expanding);
+                        }
+                        if let Some((_, expr)) = &mut select.1 {
+                            *expr = self.substitute_function_expr_inner(expr, defs, expanding);
+                        }
+                        // Select validation errors are reported when the
+                        // original access is lowered, so keep it unchanged.
+                        if let Ok(selected) =
+                            self.select_from_state_value(*var_id, &index, &select, whole)
+                        {
+                            return selected;
+                        }
                     }
                     if !defs.contains_key(var_id)
                         && self.module.variables[var_id].affiliation != Affiliation::Function
@@ -3761,7 +3979,8 @@ impl<'a> FfParser<'a> {
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
                     for input_expr in call.inputs.values_mut() {
-                        *input_expr = self.substitute_function_expr(input_expr, defs);
+                        *input_expr =
+                            self.substitute_function_expr_inner(input_expr, defs, expanding);
                     }
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
@@ -3776,7 +3995,8 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Onehot(input)
                         | SystemFunctionKind::Signed(input)
                         | SystemFunctionKind::Unsigned(input) => {
-                            input.0 = self.substitute_function_expr(&input.0, defs);
+                            input.0 =
+                                self.substitute_function_expr_inner(&input.0, defs, expanding);
                         }
                         _ => {}
                     }
@@ -3785,20 +4005,20 @@ impl<'a> FfParser<'a> {
                 _ => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => Expression::Binary(
-                Box::new(self.substitute_function_expr(lhs, defs)),
+                Box::new(self.substitute_function_expr_inner(lhs, defs, expanding)),
                 *op,
-                Box::new(self.substitute_function_expr(rhs, defs)),
+                Box::new(self.substitute_function_expr_inner(rhs, defs, expanding)),
                 comptime.clone(),
             ),
             Expression::Unary(op, inner, comptime) => Expression::Unary(
                 *op,
-                Box::new(self.substitute_function_expr(inner, defs)),
+                Box::new(self.substitute_function_expr_inner(inner, defs, expanding)),
                 comptime.clone(),
             ),
             Expression::Ternary(cond, then_expr, else_expr, comptime) => Expression::Ternary(
-                Box::new(self.substitute_function_expr(cond, defs)),
-                Box::new(self.substitute_function_expr(then_expr, defs)),
-                Box::new(self.substitute_function_expr(else_expr, defs)),
+                Box::new(self.substitute_function_expr_inner(cond, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(then_expr, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(else_expr, defs, expanding)),
                 comptime.clone(),
             ),
             Expression::Concatenation(parts, comptime) => Expression::Concatenation(
@@ -3806,8 +4026,9 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|(x, rep)| {
                         (
-                            self.substitute_function_expr(x, defs),
-                            rep.as_ref().map(|r| self.substitute_function_expr(r, defs)),
+                            self.substitute_function_expr_inner(x, defs, expanding),
+                            rep.as_ref()
+                                .map(|r| self.substitute_function_expr_inner(r, defs, expanding)),
                         )
                     })
                     .collect(),
@@ -3818,12 +4039,13 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            Box::new(self.substitute_function_expr(x, defs)),
-                            rep.as_ref()
-                                .map(|r| Box::new(self.substitute_function_expr(r, defs))),
+                            Box::new(self.substitute_function_expr_inner(x, defs, expanding)),
+                            rep.as_ref().map(|r| {
+                                Box::new(self.substitute_function_expr_inner(r, defs, expanding))
+                            }),
                         ),
                         ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(Box::new(
-                            self.substitute_function_expr(x, defs),
+                            self.substitute_function_expr_inner(x, defs, expanding),
                         )),
                     })
                     .collect(),
@@ -3833,7 +4055,12 @@ impl<'a> FfParser<'a> {
                 ty.clone(),
                 fields
                     .iter()
-                    .map(|(name, x)| (*name, self.substitute_function_expr(x, defs)))
+                    .map(|(name, x)| {
+                        (
+                            *name,
+                            self.substitute_function_expr_inner(x, defs, expanding),
+                        )
+                    })
                     .collect(),
                 comptime.clone(),
             ),
@@ -3852,19 +4079,28 @@ impl<'a> FfParser<'a> {
             mut then_state: HashMap<VarId, Expression>,
             else_state: HashMap<VarId, Expression>,
         ) -> HashMap<VarId, Expression> {
+            // A variable written on only one side keeps its uninitialized
+            // value on the other.
             let mut merged = HashMap::default();
+            let else_only: Vec<_> = else_state
+                .keys()
+                .filter(|id| !then_state.contains_key(id))
+                .copied()
+                .collect();
+            for id in else_only {
+                then_state.insert(id, parser.state_value_expr(id, &HashMap::default()));
+            }
             for (id, then_expr) in then_state.drain() {
-                if let Some(else_expr) = else_state.get(&id) {
-                    merged.insert(
-                        id,
-                        Expression::Ternary(
-                            Box::new(FfParser::normalize_function_control_condition(cond.clone())),
-                            Box::new(then_expr),
-                            Box::new(else_expr.clone()),
-                            Box::new(parser.function_state_merge_comptime(id)),
-                        ),
-                    );
-                }
+                let else_expr = parser.state_value_expr(id, &else_state);
+                merged.insert(
+                    id,
+                    Expression::Ternary(
+                        Box::new(FfParser::normalize_function_control_condition(cond.clone())),
+                        Box::new(then_expr),
+                        Box::new(else_expr),
+                        Box::new(parser.function_state_merge_comptime(id)),
+                    ),
+                );
             }
             merged
         }
@@ -3877,47 +4113,8 @@ impl<'a> FfParser<'a> {
         ) -> Result<HashMap<VarId, Expression>, ParserError> {
             match stmt {
                 Statement::Assign(assign) => {
-                    if assign.dst.len() != 1 {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
-                            "function body assignment shape",
-                            format!("{stmt}"),
-                            Some(&assign.token),
-                        ));
-                    }
-
-                    let dst = &assign.dst[0];
-                    let is_whole_var =
-                        dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-
-                    let mut next = state.clone();
-                    let rhs = substitute(&assign.expr, &next);
-                    let rhs = parser.coerce_function_state_assignment(rhs, dst)?;
-
-                    if is_whole_var {
-                        next.insert(dst.id, rhs);
-                    } else if is_static_access(&dst.index, &dst.select) {
-                        let old_value = next.get(&dst.id).cloned().unwrap_or_else(|| {
-                            Expression::Term(Box::new(Factor::Variable(
-                                dst.id,
-                                VarIndex::default(),
-                                VarSelect::default(),
-                                dst.comptime.clone(),
-                            )))
-                        });
-                        let merged = build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
-                        next.insert(dst.id, merged);
-                    } else {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
-                            "function body non-whole assignment (dynamic index)",
-                            format!("{stmt}"),
-                            Some(&assign.token),
-                        ));
-                    }
-                    Ok(next)
+                    let rhs = substitute(&assign.expr, state);
+                    parser.assign_function_state(&assign.dst, rhs, state)
                 }
                 Statement::If(if_stmt) => {
                     let mut condition_state = state.clone();
@@ -3944,10 +4141,8 @@ impl<'a> FfParser<'a> {
                     build_state_from_case(parser, case_stmt, 0, state, substitute)
                 }
                 Statement::Null => Ok(state.clone()),
-                Statement::IfReset(ir) => Err(ParserError::unsupported(
-                    43,
-                    LoweringPhase::FfLowering,
-                    "function body control flow",
+                Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                    "statement in function body",
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
@@ -3958,18 +4153,14 @@ impl<'a> FfParser<'a> {
                 Statement::FunctionCall(call) => {
                     parser.apply_statement_function_call_to_state(call, state)
                 }
-                Statement::For(f) => Err(ParserError::unsupported(
-                    43,
-                    LoweringPhase::FfLowering,
-                    "for loop in function body",
+                Statement::For(f) => Err(ParserError::internal(
+                    "for loop in function body (calls needing it are lowered inline)",
                     format!("{stmt}"),
                     Some(&f.token),
                 )),
                 Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                    Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
+                    Err(ParserError::illegal_context(
+                        "statement in function body",
                         format!("{stmt}"),
                         None,
                     ))
@@ -4015,15 +4206,7 @@ impl<'a> FfParser<'a> {
         let state = build_state_from_statements(self, &body.statements, defs, &|expr, defs| {
             self.substitute_function_expr(expr, defs)
         })?;
-        state.get(&target_id).cloned().ok_or_else(|| {
-            ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
-                "function return expression",
-                format!("function target var id: {:?}", target_id),
-                None,
-            )
-        })
+        Ok(self.state_value_expr(target_id, &state))
     }
 
     pub(super) fn extract_function_return_expr(
@@ -4040,7 +4223,9 @@ impl<'a> FfParser<'a> {
             substitute: &impl Fn(&Expression, &HashMap<VarId, Expression>) -> Expression,
         ) -> Result<Option<Expression>, ParserError> {
             if statements.is_empty() {
-                return Ok(None);
+                // Falling off the end returns the return variable's current
+                // value, which is its uninitialized value if never assigned.
+                return Ok(Some(parser.state_value_expr(ret_id, defs)));
             }
 
             let stmt = &statements[0];
@@ -4048,58 +4233,22 @@ impl<'a> FfParser<'a> {
 
             match stmt {
                 Statement::Assign(assign) => {
-                    if assign.dst.len() != 1 {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
-                            "function body assignment shape",
-                            format!("{stmt}"),
-                            Some(&assign.token),
-                        ));
+                    if let [dst] = assign.dst.as_slice()
+                        && dst.id == ret_id
+                        && dst.index.0.is_empty()
+                        && dst.select.0.is_empty()
+                        && dst.select.1.is_none()
+                    {
+                        // Assignment to the return variable corresponds to
+                        // `return` and terminates this path.
+                        let rhs = substitute(&assign.expr, defs);
+                        return Ok(Some(parser.coerce_function_state_assignment(rhs, dst)?));
                     }
-
-                    let dst = &assign.dst[0];
-                    let is_whole_var =
-                        dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-
+                    // A partial write to the return variable does not
+                    // terminate the path; later writes may fill other bits.
                     let rhs = substitute(&assign.expr, defs);
-                    let rhs = parser.coerce_function_state_assignment(rhs, dst)?;
-
-                    if is_whole_var {
-                        if dst.id == ret_id {
-                            // Assignment to return variable corresponds to `return` and terminates
-                            // this path.
-                            return Ok(Some(rhs));
-                        }
-
-                        let mut next_defs = defs.clone();
-                        next_defs.insert(dst.id, rhs);
-                        resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
-                    } else if is_static_access(&dst.index, &dst.select) {
-                        let old_value = defs.get(&dst.id).cloned().unwrap_or_else(|| {
-                            Expression::Term(Box::new(Factor::Variable(
-                                dst.id,
-                                VarIndex::default(),
-                                VarSelect::default(),
-                                dst.comptime.clone(),
-                            )))
-                        });
-                        let merged = build_partial_assign_expr(parser.module, dst, rhs, old_value)?;
-
-                        // Partial write to return var does NOT terminate the path —
-                        // additional writes may fill in other bits.
-                        let mut next_defs = defs.clone();
-                        next_defs.insert(dst.id, merged);
-                        resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
-                    } else {
-                        Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
-                            "function body non-whole assignment (dynamic index)",
-                            format!("{stmt}"),
-                            Some(&assign.token),
-                        ))
-                    }
+                    let next_defs = parser.assign_function_state(&assign.dst, rhs, defs)?;
+                    resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
                 Statement::If(if_stmt) => {
                     let mut condition_defs = defs.clone();
@@ -4143,10 +4292,8 @@ impl<'a> FfParser<'a> {
                     resolve_return_expr_case(parser, case_stmt, rest, ret_id, defs, substitute)
                 }
                 Statement::Null => resolve_return_expr(parser, rest, ret_id, defs, substitute),
-                Statement::IfReset(ir) => Err(ParserError::unsupported(
-                    43,
-                    LoweringPhase::FfLowering,
-                    "function body control flow",
+                Statement::IfReset(ir) => Err(ParserError::illegal_context(
+                    "statement in function body",
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
@@ -4158,18 +4305,14 @@ impl<'a> FfParser<'a> {
                     let next_defs = parser.apply_statement_function_call_to_state(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
-                Statement::For(f) => Err(ParserError::unsupported(
-                    43,
-                    LoweringPhase::FfLowering,
-                    "for loop in function body",
+                Statement::For(f) => Err(ParserError::internal(
+                    "for loop in function body (calls needing it are lowered inline)",
                     format!("{stmt}"),
                     Some(&f.token),
                 )),
                 Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
-                    Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "function body control flow",
+                    Err(ParserError::illegal_context(
+                        "statement in function body",
                         format!("{stmt}"),
                         None,
                     ))
@@ -4240,11 +4383,9 @@ impl<'a> FfParser<'a> {
             &|expr, defs| self.substitute_function_expr(expr, defs),
         )?
         .ok_or_else(|| {
-            ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
+            ParserError::internal(
                 "function return expression",
-                format!("function call to id {:?}", ret_id),
+                format!("no return value resolved for function return var {ret_id:?}"),
                 None,
             )
         })
@@ -4260,9 +4401,7 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let Some(function) = self.module.functions.get(&call.id) else {
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call",
                 format!("unknown function id: {:?}", call.id),
                 Some(&call.comptime.token),
@@ -4274,9 +4413,7 @@ impl<'a> FfParser<'a> {
         } else {
             function.get_function(&[])
         }) else {
-            return Err(ParserError::unsupported(
-                62,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call specialization",
                 format!("{call}"),
                 Some(&call.comptime.token),
@@ -4287,8 +4424,25 @@ impl<'a> FfParser<'a> {
             .iter()
             .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
             .collect();
+        if self.call_requires_inline(call)
+            || self.call_has_unpacked_input_alias(call, &function_body, &ordered_arg_paths)
+        {
+            return self.emit_inline_function_call(
+                call,
+                &function_body,
+                &ordered_arg_paths,
+                true,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            );
+        }
 
-        let function_body = crate::lowering::function_return::implicit_return_body(&function_body);
+        let mut function_body =
+            crate::lowering::function_return::implicit_return_body(&function_body).into_owned();
+        crate::lowering::function_return::refresh_expression_tokens(&mut function_body);
         self.validate_function_call_bindings(call, &function_body)?;
         self.flush_captured_nonlocal_state_before_call(
             call, targets, domain, convert, sources, ir_builder,
@@ -4356,9 +4510,7 @@ impl<'a> FfParser<'a> {
                     continue;
                 }
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-                    return Err(ParserError::unsupported(
-                        61,
-                        LoweringPhase::FfLowering,
+                    return Err(ParserError::internal(
                         "function call missing argument",
                         format!("{call}"),
                         Some(&call.comptime.token),
@@ -4454,9 +4606,7 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let Some(function) = self.module.functions.get(&call.id) else {
-            return Err(ParserError::unsupported(
-                43,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call",
                 format!("unknown function id: {:?}", call.id),
                 Some(&call.comptime.token),
@@ -4468,9 +4618,7 @@ impl<'a> FfParser<'a> {
         } else {
             function.get_function(&[])
         }) else {
-            return Err(ParserError::unsupported(
-                62,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::internal(
                 "function call specialization",
                 format!("{call}"),
                 Some(&call.comptime.token),
@@ -4481,8 +4629,25 @@ impl<'a> FfParser<'a> {
             .iter()
             .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
             .collect();
+        if self.call_requires_inline(call)
+            || self.call_has_unpacked_input_alias(call, &function_body, &ordered_arg_paths)
+        {
+            return self.emit_inline_function_call(
+                call,
+                &function_body,
+                &ordered_arg_paths,
+                false,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            );
+        }
 
-        let function_body = crate::lowering::function_return::implicit_return_body(&function_body);
+        let mut function_body =
+            crate::lowering::function_return::implicit_return_body(&function_body).into_owned();
+        crate::lowering::function_return::refresh_expression_tokens(&mut function_body);
         self.validate_function_call_bindings(call, &function_body)?;
 
         let has_runtime_effect =
@@ -4558,9 +4723,7 @@ impl<'a> FfParser<'a> {
                     continue;
                 }
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-                    return Err(ParserError::unsupported(
-                        61,
-                        LoweringPhase::FfLowering,
+                    return Err(ParserError::internal(
                         "function call missing argument",
                         format!("{call}"),
                         Some(&call.comptime.token),
