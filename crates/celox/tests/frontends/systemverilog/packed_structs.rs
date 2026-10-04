@@ -35,45 +35,7 @@ sv_backends! {
     }
 
     fn packed_struct_field_assignments_and_registers(sim) {
-        @setup {
-            let source = r#"
-                module Top(input bit clk, input bit reset, input logic [7:0] data,
-                           input logic [3:0] tag, output logic [11:0] value,
-                           output logic [11:0] registered);
-                    typedef struct packed { logic [3:0] tag; logic [7:0] data; } request_t;
-                    request_t request, stored;
-                    always_comb begin
-                        request.tag = tag;
-                        request.data = data;
-                        request.data[3:0] ^= 4'hf;
-                    end
-                    always_ff @(posedge clk) begin
-                        if (reset) stored <= '0;
-                        else begin
-                            stored.tag <= request.tag;
-                            stored.data <= request.data;
-                        end
-                    end
-                    assign value = request;
-                    assign registered = stored;
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("packed_struct_register.sv"))], "Top");
-        let clk = sim.event("clk");
-        let reset = sim.signal("reset");
-        let data = sim.signal("data");
-        let tag = sim.signal("tag");
-        sim.modify(|io| io.set(reset, 1u8)).unwrap();
-        sim.tick(clk).unwrap();
-        assert_eq!(sim.get(sim.signal("registered")), 0u8.into());
-        for (d, t) in [(0u8, 0u8), (0xa5, 3), (0xff, 15)] {
-            sim.modify(|io| { io.set(reset, 0u8); io.set(data, d); io.set(tag, t); }).unwrap();
-            let expected = ((t as u16) << 8) | (d ^ 15) as u16;
-            assert_eq!(sim.get(sim.signal("value")), expected.into());
-            sim.tick(clk).unwrap();
-            assert_eq!(sim.get(sim.signal("registered")), expected.into());
-        }
+        @case "packed_structs::packed_struct_field_assignments_and_registers";
     }
 
     fn packed_struct_mixed_state_members(sim) {
@@ -198,35 +160,7 @@ sv_backends! {
     }
 
     fn packed_struct_wide_four_state_layout(sim) {
-        @setup {
-            let source = r#"
-                module Top(input bit clk, input logic [144:0] raw,
-                           output logic [128:0] payload, output logic [15:0] tag,
-                           output logic [144:0] saved);
-                    typedef struct packed { logic [15:0] tag; logic [128:0] payload; } packet_t;
-                    packet_t packet, stored;
-                    assign packet = raw;
-                    assign payload = packet.payload;
-                    assign tag = packet.tag;
-                    always_ff @(posedge clk) stored <= packet;
-                    assign saved = stored;
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("packed_struct_wide.sv"))], "Top")
-            .four_state(true);
-        let raw = sim.signal("raw");
-        let clk = sim.event("clk");
-        let payload_mask = (BigUint::from(1u8) << 129usize) - BigUint::from(1u8);
-        for bit in [0usize, 63, 64, 127, 128, 129, 144] {
-            let value = (BigUint::from(1u8) << bit) | BigUint::from(1u8);
-            let mask = BigUint::from(1u8) << bit;
-            sim.modify(|io| io.set_four_state(raw, value.clone(), mask.clone())).unwrap();
-            sim.tick(clk).unwrap();
-            assert_eq!(sim.get_four_state(sim.signal("payload")), (&value & &payload_mask, &mask & &payload_mask));
-            assert_eq!(sim.get_four_state(sim.signal("tag")), (&value >> 129usize, &mask >> 129usize));
-            assert_eq!(sim.get_four_state(sim.signal("saved")), (value, mask));
-        }
+        @case "packed_structs::packed_struct_wide_four_state_layout";
     }
 
     fn packed_struct_whole_value_signedness(sim) {
@@ -264,56 +198,12 @@ sv_backends! {
     }
 
     fn packed_struct_typedef_bounds_survive_generate_shadowing(sim) {
-        @setup {
-            let source = r#"
-                module Top #(parameter W = 4)(input logic [4:0] raw, output logic [7:0] y);
-                    typedef struct packed { logic [W-1:0] data; logic valid; } request_t;
-                    if (1) begin : g
-                        localparam W = 8;
-                        request_t request;
-                        assign request = raw;
-                        assign y = request.data;
-                    end
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("packed_struct_scope.sv"))], "Top")
-            .four_state(true);
-        let raw = sim.signal("raw");
-        for value in 0u8..32 {
-            sim.modify(|io| io.set(raw, value)).unwrap();
-            assert_eq!(sim.get_four_state(sim.signal("y")), ((value >> 1).into(), 0u8.into()));
-        }
+        @case "packed_structs::packed_struct_typedef_bounds_survive_generate_shadowing";
     }
 }
 
 sv_backends! {
     fn packed_struct_alias_packed_dimensions(sim) {
-        @setup {
-            let source = r#"
-                module Top(input logic [15:0] raw, output logic [15:0] whole,
-                           output logic [7:0] high, low, output logic [31:0] widths);
-                    typedef struct packed { logic [3:0] a, b; } t;
-                    typedef t [1:0] pair_t;
-                    pair_t value;
-                    assign value = raw;
-                    assign whole = value;
-                    assign high = value[1];
-                    assign low = value[0];
-                    localparam WIDTHS = $bits(pair_t) + $bits(value) + $size(value);
-                    assign widths = WIDTHS;
-                endmodule
-            "#;
-        }
-        @build Simulator::from_sv_sources(vec![(source, Path::new("struct_alias_dimensions.sv"))], "Top")
-            .four_state(true);
-        let raw = sim.signal("raw");
-        for (value, mask) in [(0u16, 0u16), (0xabcd, 0), (0x1234, 0x8041), (0xffff, 0xffff)] {
-            sim.modify(|io| io.set_four_state(raw, value.into(), mask.into())).unwrap();
-            assert_eq!(sim.get_four_state(sim.signal("whole")), (value.into(), mask.into()));
-            assert_eq!(sim.get_four_state(sim.signal("high")), ((value >> 8).into(), (mask >> 8).into()));
-            assert_eq!(sim.get_four_state(sim.signal("low")), ((value & 255).into(), (mask & 255).into()));
-            assert_eq!(sim.get(sim.signal("widths")), 34u32.into());
-        }
+        @case "packed_structs::packed_struct_alias_packed_dimensions";
     }
 }

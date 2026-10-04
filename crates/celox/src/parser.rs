@@ -601,13 +601,7 @@ pub fn parse_sv(
     )
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-        celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-            64,
-            celox_frontend_veryl::LoweringPhase::SimulatorParser,
-            "systemverilog analysis",
-            error.to_string(),
-            None,
-        ),
+        celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
     })?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
@@ -625,6 +619,22 @@ pub fn parse_sv(
         component_libraries,
         component_file_base,
     )
+}
+
+/// An analyzer error as a parser error: a construct the analyzer does not
+/// support stays unsupported, and anything else is an error in the source.
+#[cfg(feature = "systemverilog")]
+fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
+    match error {
+        celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
+            64,
+            celox_frontend_veryl::LoweringPhase::SimulatorParser,
+            "systemverilog analysis",
+            error.to_string(),
+            None,
+        ),
+        error => ParserError::illegal_context("systemverilog analysis", error.to_string(), None),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -669,13 +679,7 @@ pub fn parse_mixed(
         celox_frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
             .map_err(|error| match error {
                 celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-                celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-                    64,
-                    celox_frontend_veryl::LoweringPhase::SimulatorParser,
-                    "systemverilog analysis",
-                    error.to_string(),
-                    None,
-                ),
+                celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
             })?;
     parse_with_external_hierarchy(
         top,

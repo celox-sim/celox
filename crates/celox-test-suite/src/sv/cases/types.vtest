@@ -1,0 +1,45 @@
+(group types (category types))
+
+(case simulates_systemverilog_parameterized_port_widths
+  (source "parameter_width.sv" #"
+        module Top #(
+            parameter WIDTH = (4 * 2)
+        ) (
+            input logic [WIDTH - 1:0] a,
+            output logic [WIDTH - 1:0] y
+        );
+            assign y = a + 8'd1;
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0x7f))
+  (assert_eq y 0x80))
+
+(case simulates_systemverilog_bit_ports_as_two_state
+  (four_state)
+  (source "bit_port.sv" #"
+        module Top(
+            output bit [3:0] y
+        );
+            assign y = 4'b10xz;
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0b1000)
+  (let _value (payload (get y)))
+  (let mask (xmask (get y)))
+  (assert (== mask 0)))
+
+(case preserves_integer_atom_state_kinds
+  (four_state)
+  (source "integer_atoms.sv" #"
+        module Top(input logic a, output int two_state, output integer four_state);
+            assign two_state = a;
+            assign four_state = a;
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a (fourstate 1 1)))
+  (assert_eq two_state (fourstate 0 0))
+  (assert (!= (xmask (get four_state)) 0)))

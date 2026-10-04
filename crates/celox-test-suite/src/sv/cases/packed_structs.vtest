@@ -1,0 +1,106 @@
+(group packed_structs (category types))
+
+(case packed_struct_field_assignments_and_registers
+  (source "packed_struct_register.sv" #"
+                module Top(input bit clk, input bit reset, input logic [7:0] data,
+                           input logic [3:0] tag, output logic [11:0] value,
+                           output logic [11:0] registered);
+                    typedef struct packed { logic [3:0] tag; logic [7:0] data; } request_t;
+                    request_t request, stored;
+                    always_comb begin
+                        request.tag = tag;
+                        request.data = data;
+                        request.data[3:0] ^= 4'hf;
+                    end
+                    always_ff @(posedge clk) begin
+                        if (reset) stored <= '0;
+                        else begin
+                            stored.tag <= request.tag;
+                            stored.data <= request.data;
+                        end
+                    end
+                    assign value = request;
+                    assign registered = stored;
+                endmodule
+            "#)
+  (top Top)
+  (modify (set reset 1))
+  (tick clk)
+  (assert_eq registered 0)
+  (for (d t) (list (0 0) (0xa5 3) (0xff 15))
+    (modify
+      (set reset 0)
+      (set data d)
+      (set tag t))
+    (let expected (| (trunc 16 (<< t 8)) (^ d 15)))
+    (assert_eq value expected)
+    (tick clk)
+    (assert_eq registered expected)))
+
+(case packed_struct_wide_four_state_layout
+  (four_state)
+  (source "packed_struct_wide.sv" #"
+                module Top(input bit clk, input logic [144:0] raw,
+                           output logic [128:0] payload, output logic [15:0] tag,
+                           output logic [144:0] saved);
+                    typedef struct packed { logic [15:0] tag; logic [128:0] payload; } packet_t;
+                    packet_t packet, stored;
+                    assign packet = raw;
+                    assign payload = packet.payload;
+                    assign tag = packet.tag;
+                    always_ff @(posedge clk) stored <= packet;
+                    assign saved = stored;
+                endmodule
+            "#)
+  (top Top)
+  (let payload_mask (- (<< 1 129) 1))
+  (for bit (list 0 63 64 127 128 129 144)
+    (let value (| (<< 1 bit) 1))
+    (let mask (<< 1 bit))
+    (modify (set raw (fourstate value mask)))
+    (tick clk)
+    (assert_eq payload (fourstate (& value payload_mask) (& mask payload_mask)))
+    (assert_eq tag (fourstate (>> value 129) (>> mask 129)))
+    (assert_eq saved (fourstate value mask))))
+
+(case packed_struct_typedef_bounds_survive_generate_shadowing
+  (four_state)
+  (source "packed_struct_scope.sv" #"
+                module Top #(parameter W = 4)(input logic [4:0] raw, output logic [7:0] y);
+                    typedef struct packed { logic [W-1:0] data; logic valid; } request_t;
+                    if (1) begin : g
+                        localparam W = 8;
+                        request_t request;
+                        assign request = raw;
+                        assign y = request.data;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 32)
+    (modify (set raw value))
+    (assert_eq y (fourstate (>> value 1) 0))))
+
+(case packed_struct_alias_packed_dimensions
+  (four_state)
+  (source "struct_alias_dimensions.sv" #"
+                module Top(input logic [15:0] raw, output logic [15:0] whole,
+                           output logic [7:0] high, low, output logic [31:0] widths);
+                    typedef struct packed { logic [3:0] a, b; } t;
+                    typedef t [1:0] pair_t;
+                    pair_t value;
+                    assign value = raw;
+                    assign whole = value;
+                    assign high = value[1];
+                    assign low = value[0];
+                    localparam WIDTHS = $bits(pair_t) + $bits(value) + $size(value);
+                    assign widths = WIDTHS;
+                endmodule
+            "#)
+  (top Top)
+  (for (value mask) (list (0 0) (0xabcd 0) (0x1234 0x8041) (0xffff 0xffff))
+    (modify (set raw (fourstate value mask)))
+    (assert_eq whole (fourstate value mask))
+    (assert_eq high (fourstate (>> value 8) (>> mask 8)))
+    (assert_eq low (fourstate (& value 255) (& mask 255)))
+    (assert_eq widths 34)))
