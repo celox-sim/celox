@@ -1,0 +1,59 @@
+{
+  "schema_version": 3,
+  "tool": "verilator",
+  "scope": "Reviewed failures of the SystemVerilog suite retained before the exclusions.",
+  "include_ignored": false,
+  "counts": {
+    "passed": 0,
+    "rejected": 0,
+    "unexpected_accept": 0,
+    "mismatch": 1,
+    "emission_error": 0,
+    "compile_error": 3,
+    "runtime_error": 1,
+    "unsupported": 0,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "generate::counts_only_known_ones_in_generate_system_functions",
+      "phase": "execute",
+      "status": "runtime_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:3:36: Unsupported in C: Generate block has the same name as port: 'a'\n    3 |                     if (1) begin : \\a\n      |                                    ^~\n        <case>/source_0.sv:2:40: ... Location of original declaration\n    2 |                 module Top(input logic a, output logic y);\n      |                                        ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:2:40: Pin is not an in/out/inout/interface: 'a'\n    2 |                 module Top(input logic a, output logic y);\n      |                                        ^\n%Error: <case>/source_0.sv:2:40: Input/output/inout does not appear in port list: 'a'\n    2 |                 module Top(input logic a, output logic y);\n      |                                        ^\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "generate::rejects_an_escaped_generate_block_named_like_a_port",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:35: Use of x/? constant in generate case statement, (no such thing as 'generate casez')\n                                                                                                                                                                                                                                                   : ... note: In instance 'celox_suite_tb.dut'\n    6 |                     case (8'h1 << 'x) 8'bxxxxxxxx: assign y[3]=1; default: initial $fatal; endcase\n      |                                   ^~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:6:39: Use of x/? constant in generate case statement, (no such thing as 'generate casez')\n                                                                                                                                                                                                                                                   : ... note: In instance 'celox_suite_tb.dut'\n    6 |                     case (8'h1 << 'x) 8'bxxxxxxxx: assign y[3]=1; default: initial $fatal; endcase\n      |                                       ^~~~~~~~~~~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "generate::uses_self_determined_unbased_shift_counts_in_generate_cases",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Arrays",
+      "detail": "indexed_select::indexed_unsigned_bases_cross_zero at 534:3: assert_eq wrapped_base: expected 0xa, got 0x5",
+      "expectation": "Simulation",
+      "name": "indexed_select::indexed_unsigned_bases_cross_zero",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Combinational",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:26:30: ../V3DfgSynthesize.cpp:358: Non-ReadOnly reference\n   26 |                         bump(twice);\n      |                              ^~~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "synthesizable::function_output_and_inout_arguments_are_written_back",
+      "phase": "compile",
+      "status": "compile_error"
+    }
+  ]
+}

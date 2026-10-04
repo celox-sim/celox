@@ -1,0 +1,1177 @@
+(group operators (category operators))
+
+(case simulates_systemverilog_top_comb_assign
+  (source "top.sv" #"
+        module Top(input logic [7:0] a, input logic [7:0] b, output logic [7:0] y);
+            assign y = a ^ b;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 0x55)
+    (set b 0x0f))
+  (assert_eq y 0x5a))
+
+(case simulates_systemverilog_binary_operators
+  (source "operators.sv" #"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            input logic [2:0] sh,
+            output logic [7:0] add,
+            output logic [7:0] sub,
+            output logic [7:0] mul,
+            output logic [7:0] div,
+            output logic [7:0] rem,
+            output logic [7:0] shl,
+            output logic [7:0] shr,
+            output logic [7:0] band,
+            output logic [7:0] bor,
+            output logic [7:0] bxor,
+            output logic land,
+            output logic lor,
+            output logic eq,
+            output logic ne
+        );
+            assign add = a + b;
+            assign sub = a - b;
+            assign mul = a * b;
+            assign div = a / b;
+            assign rem = a % b;
+            assign shl = a << sh;
+            assign shr = a >> sh;
+            assign band = a & b;
+            assign bor = a | b;
+            assign bxor = a ^ b;
+            assign land = a && b;
+            assign lor = a || b;
+            assign eq = a == b;
+            assign ne = a != b;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 13)
+    (set b 5)
+    (set sh 2))
+  (assert_eq add 18)
+  (assert_eq sub 8)
+  (assert_eq mul 65)
+  (assert_eq div 2)
+  (assert_eq rem 3)
+  (assert_eq shl 52)
+  (assert_eq shr 3)
+  (assert_eq band 5)
+  (assert_eq bor 13)
+  (assert_eq bxor 8)
+  (assert_eq land 1)
+  (assert_eq lor 1)
+  (assert_eq eq 0)
+  (assert_eq ne 1))
+
+(case simulates_systemverilog_case_equality_operators
+  (four_state)
+  (source "case_equality.sv" #"
+        module Top(
+            input logic [1:0] a,
+            input logic [1:0] b,
+            input logic [127:0] wide_a,
+            input logic [127:0] wide_b,
+            output logic eq_case,
+            output logic ne_case,
+            output logic eq_case_unsized,
+            output logic eq_wildcard_unsized,
+            output logic eq_case_fill,
+            output logic ne_case_fill,
+            output logic eq_wildcard_fill,
+            output logic ne_wildcard_fill,
+            output logic wide_eq_case,
+            output logic wide_ne_case
+        );
+            assign eq_case = a === b;
+            assign ne_case = a !== b;
+            assign eq_case_unsized = a === 0;
+            assign eq_wildcard_unsized = a ==? 0;
+            assign eq_case_fill = a === '1;
+            assign ne_case_fill = a !== '1;
+            assign eq_wildcard_fill = a ==? '1;
+            assign ne_wildcard_fill = a !=? '1;
+            assign wide_eq_case = wide_a === wide_b;
+            assign wide_ne_case = wide_a !== wide_b;
+        endmodule
+    "#)
+  (top Top)
+  (let unknown (<< 1 100))
+  (let known 5)
+  (modify
+    (set a (fourstate 0b11 0b01))
+    (set b (fourstate 0b11 0b01))
+    (set wide_a (fourstate (| known unknown) unknown))
+    (set wide_b (fourstate (| known unknown) unknown)))
+  (assert_eq eq_case (fourstate 1 0))
+  (assert_eq ne_case (fourstate 0 0))
+  (assert_eq eq_case_unsized 0)
+  (assert_eq eq_wildcard_unsized 0)
+  (assert_eq wide_eq_case (fourstate 1 0))
+  (assert_eq wide_ne_case (fourstate 0 0))
+  (modify
+    (set b (fourstate 0b10 0b01))
+    (set wide_b (fourstate known unknown)))
+  (assert_eq eq_case (fourstate 0 0))
+  (assert_eq ne_case (fourstate 1 0))
+  (assert_eq wide_eq_case (fourstate 0 0))
+  (assert_eq wide_ne_case (fourstate 1 0))
+  (modify (set a 0))
+  (assert_eq eq_case_unsized 1)
+  (assert_eq eq_wildcard_unsized 1)
+  (assert_eq eq_case_fill 0)
+  (assert_eq ne_case_fill 1)
+  (assert_eq eq_wildcard_fill 0)
+  (assert_eq ne_wildcard_fill 1)
+  (modify (set a 0b11))
+  (assert_eq eq_case_fill 1)
+  (assert_eq ne_case_fill 0)
+  (assert_eq eq_wildcard_fill 1)
+  (assert_eq ne_wildcard_fill 0))
+
+(case simulates_systemverilog_unary_operators
+  (source "unary.sv" #"
+        module Top(
+            input logic [7:0] a,
+            output logic [7:0] plus,
+            output logic [7:0] neg,
+            output logic [7:0] bit_not,
+            output logic logic_not
+        );
+            assign plus = +a;
+            assign neg = -a;
+            assign bit_not = ~a;
+            assign logic_not = !a;
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 5))
+  (assert_eq plus 5)
+  (assert_eq neg 251)
+  (assert_eq bit_not 250)
+  (assert_eq logic_not 0)
+  (modify (set a 0))
+  (assert_eq logic_not 1))
+
+(case simulates_systemverilog_reduction_unary_operators
+  (source "reduction_unary.sv" #"
+        module Top(
+            input logic [7:0] a,
+            output logic red_and,
+            output logic red_or,
+            output logic red_xor
+        );
+            assign red_and = &a;
+            assign red_or  = |a;
+            assign red_xor = ^a;
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0xff))
+  (assert_eq red_and 1)
+  (assert_eq red_or 1)
+  (assert_eq red_xor 0)
+  (modify (set a 0x10))
+  (assert_eq red_and 0)
+  (assert_eq red_or 1)
+  (assert_eq red_xor 1))
+
+(case simulates_systemverilog_select_and_concat
+  (source "select_concat.sv" #"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic [3:0] hi,
+            output logic [7:0] cat
+        );
+            assign hi = a[7:4];
+            assign cat = {a[3:0], b[7:4]};
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 0xab)
+    (set b 0xcd))
+  (assert_eq hi 0xa)
+  (assert_eq cat 0xbc))
+
+(case simulates_systemverilog_selected_lvalue_assignments
+  (source "selected_lvalue.sv" #"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] b,
+            output logic [7:0] y,
+            output logic [7:0] z
+        );
+            always_comb begin
+                y[3:0] = a[3:0];
+                y[7:4] = b[7:4];
+                z[2] = a[7];
+                z[0] = b[0];
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 0x8d)
+    (set b 0x51))
+  (assert_eq y 0x5d)
+  (assert_eq z 0x05))
+
+(case simulates_systemverilog_selected_lvalue_ff_intermediate
+  (source "selected_lvalue_ff_intermediate.sv" #"
+        module Top(input logic clk, input logic en, input logic [7:0] d, output logic [7:0] q);
+            logic [7:0] next;
+            always_comb next[7] = q[0];
+            always_comb next[0] = d[0];
+            always_ff @(posedge clk) begin
+                if (en) begin
+                    q <= next;
+                end
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set en 1)
+    (set d 1))
+  (tick clk)
+  (assert_eq q 1)
+  (modify (set d 0))
+  (tick clk)
+  (assert_eq q 0x80))
+
+(case simulates_systemverilog_hierarchical_selected_lvalue_ff_intermediate
+  (source "hier_selected_lvalue_ff_intermediate.sv" #"
+        module Child(input logic clk, input logic en, input logic [7:0] d, output logic [7:0] q);
+            logic [7:0] next;
+            always_comb next[7] = q[0];
+            always_comb next[0] = d[0];
+            always_ff @(posedge clk) begin
+                if (en) begin
+                    q <= next;
+                end
+            end
+        endmodule
+
+        module Top(input logic clk, input logic en, input logic [7:0] d, output logic [7:0] q);
+            Child u(.clk(clk), .en(en), .d(d), .q(q));
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set en 1)
+    (set d 1))
+  (tick clk)
+  (assert_eq q 1)
+  (modify (set d 0))
+  (tick clk)
+  (assert_eq q 0x80))
+
+(case simulates_systemverilog_hierarchical_parameter_selected_lvalue_ff_intermediate
+  (source "hier_param_selected_lvalue_ff_intermediate.sv" #"
+        module Child #(parameter int unsigned W = 8) (
+            input logic clk,
+            input logic en,
+            input logic [W-1:0] d,
+            output logic [W-1:0] q
+        );
+            logic [W-1:0] next;
+            always_comb next[W - 1] = q[0];
+            always_comb next[0] = d[0];
+            always_ff @(posedge clk) begin
+                if (en) begin
+                    q <= next;
+                end
+            end
+        endmodule
+
+        module Top(input logic clk, input logic en, input logic [31:0] d, output logic [31:0] q);
+            Child #(.W(32)) u(.clk(clk), .en(en), .d(d), .q(q));
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set en 1)
+    (set d 1))
+  (tick clk)
+  (assert_eq q 1)
+  (modify (set d 0))
+  (tick clk)
+  (assert_eq q 0x80000000))
+
+(case simulates_systemverilog_contiguous_selected_lvalue_ff_intermediate
+  (source "contiguous_selected_lvalue_ff_intermediate.sv" #"
+        module Child #(parameter int unsigned W = 32) (
+            input logic clk,
+            input logic en,
+            input logic [W-1:0] d,
+            output logic [W-1:0] q
+        );
+            logic [W-1:0] next;
+            always_comb next[W - 1] = q[0];
+            for (genvar i = 0; i < W - 1; i++) begin : gen_bits
+                always_comb next[i] = d[i];
+            end
+            always_ff @(posedge clk) begin
+                if (en) begin
+                    q <= next;
+                end
+            end
+        endmodule
+
+        module Top(input logic clk, input logic en, input logic [31:0] d, output logic [31:0] q);
+            Child u(.clk(clk), .en(en), .d(d), .q(q));
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set en 1)
+    (set d 1))
+  (tick clk)
+  (assert_eq q 1)
+  (modify (set d 0))
+  (tick clk)
+  (assert_eq q 0x80000000))
+
+(case simulates_systemverilog_genvar_loop_comb_assignments
+  (source "genvar_loop.sv" #"
+        module Top #(parameter W = 4) (
+            input logic [W-1:0] a,
+            output logic [W-1:0] y
+        );
+            for (genvar i = 0; i < W; i++) begin : gen_bits
+                always_comb y[i] = ~a[i];
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0b1100))
+  (assert_eq y 0b0011))
+
+(case simulates_systemverilog_genvar_loop_with_localparam_and_if
+  (source "genvar_localparam_if.sv" #"
+        module Top(
+            input logic [3:0] a,
+            output logic [3:0] y
+        );
+            for (genvar k = 1; k < 5; k++) begin : gen_bits
+                localparam IDX = k - 1;
+                if (!$onehot(k)) begin : gen_data
+                    localparam DATA_IDX = IDX;
+                    always_comb y[IDX] = a[DATA_IDX];
+                end else begin : gen_data
+                    always_comb y[IDX] = 1'b0;
+                end
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0b1111))
+  (assert_eq y 0b0100))
+
+(case simulates_systemverilog_packed_multidimensional_selects
+  (source "packed_multidim.sv" #"
+        module Top(
+            input logic a,
+            output logic [3:0] y,
+            output logic z
+        );
+            logic [1:0][3:0] m;
+            always_comb begin
+                m[1][2] = a;
+                y = m[1];
+                z = m[1][2];
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 1))
+  (assert_eq y 0b0100)
+  (assert_eq z 1))
+
+(case simulates_systemverilog_simple_always_ff
+  (source "simple_ff.sv" #"
+        module Top(
+            input logic clk,
+            input logic rst,
+            input logic d,
+            output logic q
+        );
+            always_ff @(posedge clk, negedge rst) begin
+                if (!rst) begin
+                    q <= 1'b0;
+                end else begin
+                    q <= d;
+                end
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set d 1))
+  (tick clk)
+  (assert_eq q 0)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 1))
+
+(case simulates_systemverilog_always_ff_if_else_chain
+  (source "ff_if_else_chain.sv" #"
+        module Top(
+            input logic clk,
+            input logic rst,
+            input logic clear,
+            input logic [31:0] d,
+            output logic [31:0] q
+        );
+            always_ff @(posedge clk, negedge rst) begin
+                if (!rst) begin
+                    q <= 32'h0;
+                end else if (clear) begin
+                    q <= 32'h0;
+                end else begin
+                    q <= d;
+                end
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set clear 0)
+    (set d 0xff))
+  (tick clk)
+  (assert_eq q 0)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 0xff)
+  (modify
+    (set clear 1)
+    (set d 0xa5))
+  (tick clk)
+  (assert_eq q 0))
+
+(case simulates_systemverilog_always_ff_case
+  (four_state)
+  (source "ff_case.sv" #"
+        module Top(
+            input bit clk,
+            input bit rst,
+            input logic [1:0] mode,
+            input logic [1:0] dynamic_label,
+            input logic signed [1:0] signed_mode,
+            input logic [7:0] d0,
+            input logic [7:0] d1,
+            input logic [7:0] d2,
+            output logic [7:0] q,
+            output logic [7:0] q_hold,
+            output logic [7:0] q_case_one,
+            output logic [7:0] q_before_case,
+            output logic [7:0] q_after_case,
+            output logic [7:0] q_fill,
+            output logic [7:0] q_parameter,
+            output logic [7:0] q_rhs_width,
+            output logic [7:0] q_overlap,
+            output logic [7:0] q_exact,
+            output logic [7:0] q_dynamic
+        );
+            localparam logic [1:0] P = 2'b11;
+
+            always_ff @(posedge clk, negedge rst) begin
+                if (!rst) begin
+                    q <= 8'h00;
+                    q_hold <= 8'h00;
+                    q_case_one <= 8'h00;
+                    q_before_case <= 8'h00;
+                    q_after_case <= 8'h00;
+                    q_fill <= 8'h00;
+                    q_parameter <= 8'h00;
+                    q_rhs_width <= 8'h00;
+                    q_overlap <= 8'h00;
+                    q_exact <= 8'h00;
+                    q_dynamic <= 8'h00;
+                end else begin
+                    case (mode)
+                        0: begin
+                            q <= d0;
+                            q_hold <= d0;
+                        end
+                        1, 2: begin
+                            q <= d1;
+                            q_hold <= d1;
+                        end
+                        default: q <= d2;
+                    endcase
+
+                    case (1)
+                        2'b10: q_case_one <= d0;
+                        default: q_case_one <= d2;
+                    endcase
+
+                    q_before_case <= 8'h55;
+                    case (mode)
+                        0: q_before_case <= d0;
+                        default: ;
+                    endcase
+
+                    case (mode)
+                        0: q_after_case <= d0;
+                        default: q_after_case <= d1;
+                    endcase
+                    q_after_case <= d2;
+
+                    case (d0)
+                        '1: q_fill <= 8'ha5;
+                        default: q_fill <= 8'h00;
+                    endcase
+
+                    case (signed_mode)
+                        P: q_parameter <= 8'h66;
+                        default: q_parameter <= 8'h00;
+                    endcase
+
+                    case (mode)
+                        0: q_rhs_width <= 0;
+                        default: q_rhs_width <= 1'b1;
+                    endcase
+
+                    case (mode)
+                        2'b1x: q_exact <= 8'ha1;
+                        2'b1z: q_exact <= 8'hb2;
+                        default: q_exact <= 8'hc3;
+                    endcase
+
+                    case (mode)
+                        dynamic_label: q_dynamic <= 8'hd4;
+                        default: q_dynamic <= 8'he5;
+                    endcase
+
+                    q_overlap[0] <= 1'b1;
+                    case (mode)
+                        1: q_overlap <= 0;
+                        default: ;
+                    endcase
+                end
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set mode 0)
+    (set dynamic_label 0)
+    (set signed_mode 3)
+    (set d0 0x11)
+    (set d1 0x22)
+    (set d2 0x33))
+  (tick clk)
+  (assert_eq q 0)
+  (assert_eq q_hold 0)
+  (assert_eq q_case_one 0)
+  (assert_eq q_before_case 0)
+  (assert_eq q_after_case 0)
+  (assert_eq q_fill 0)
+  (assert_eq q_parameter 0)
+  (assert_eq q_rhs_width 0)
+  (assert_eq q_overlap 0)
+  (assert_eq q_exact 0)
+  (assert_eq q_dynamic 0)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq q 0x11)
+  (assert_eq q_hold 0x11)
+  (assert_eq q_case_one 0x33)
+  (assert_eq q_before_case 0x11)
+  (assert_eq q_after_case 0x33)
+  (assert_eq q_fill 0)
+  (assert_eq q_parameter 0x66)
+  (assert_eq q_rhs_width 0)
+  (assert_eq q_overlap 1)
+  (modify (set mode 1))
+  (tick clk)
+  (assert_eq q 0x22)
+  (assert_eq q_overlap 0)
+  (assert_eq q_rhs_width 1)
+  (modify (set mode 2))
+  (tick clk)
+  (assert_eq q 0x22)
+  (assert_eq q_hold 0x22)
+  (assert_eq q_case_one 0x33)
+  (assert_eq q_before_case 0x55)
+  (assert_eq q_after_case 0x33)
+  (assert_eq q_fill 0)
+  (assert_eq q_parameter 0x66)
+  (assert_eq q_rhs_width 1)
+  (assert_eq q_overlap 1)
+  (modify (set mode 3))
+  (tick clk)
+  (assert_eq q 0x33)
+  (assert_eq q_hold 0x22)
+  (assert_eq q_case_one 0x33)
+  (assert_eq q_before_case 0x55)
+  (assert_eq q_after_case 0x33)
+  (assert_eq q_fill 0)
+  (assert_eq q_parameter 0x66)
+  (assert_eq q_rhs_width 1)
+  (assert_eq q_overlap 1)
+  (modify
+    (set mode (fourstate 0 0b11))
+    (set dynamic_label (fourstate 0 0b11))
+    (set d2 0x44))
+  (tick clk)
+  (assert_eq q 0x44)
+  (assert_eq q_hold 0x22)
+  (assert_eq q_case_one 0x44)
+  (assert_eq q_before_case 0x55)
+  (assert_eq q_after_case 0x44)
+  (assert_eq q_fill 0)
+  (assert_eq q_parameter 0x66)
+  (assert_eq q_rhs_width 1)
+  (assert_eq q_overlap 1)
+  (assert_eq q_exact 0xc3)
+  (assert_eq q_dynamic 0xd4)
+  (modify (set d0 0xff))
+  (tick clk)
+  (assert_eq q_fill 0xa5)
+  ; 2'b1x has payload 0b11 and mask 0b01; 2'b1z has payload 0b10
+  ; with the same mask. Exact case equality must distinguish them.
+  (modify
+    (set mode (fourstate 0b11 0b01))
+    (set dynamic_label (fourstate 0b11 0b01)))
+  (tick clk)
+  (assert_eq q_exact 0xa1)
+  (assert_eq q_dynamic 0xd4)
+  (modify (set dynamic_label (fourstate 0b10 0b01)))
+  (tick clk)
+  (assert_eq q_exact 0xa1)
+  (assert_eq q_dynamic 0xe5)
+  (modify (set mode (fourstate 0b10 0b01)))
+  (tick clk)
+  (assert_eq q_exact 0xb2)
+  (assert_eq q_dynamic 0xd4))
+
+(case simulates_systemverilog_always_ff_case_context_values
+  (source "ff_case_context_values.sv" #"
+        module Top(
+            input logic clk,
+            input logic mode,
+            input logic signed [1:0] signed_mode,
+            input logic signed [7:0] signed_value,
+            input logic [255:0] wide_mode,
+            input logic [255:0] wide_expr_mode,
+            output logic [7:0] q_negative,
+            output logic [7:0] q_scalar_signed,
+            output logic [7:0] q_wide_parameter,
+            output logic [7:0] q_wide_fill,
+            output logic [7:0] q_wide_expression,
+            output logic [7:0] q_natural_width,
+            output logic q_reduction,
+            output logic q_logic_not,
+            output logic [7:0] q_narrow_shift,
+            output logic [7:0] q_mux_selector,
+            output logic [7:0] q_dependent_parameter,
+            output logic [63:0] q_fill,
+            output logic [63:0] q_nested_fill,
+            output logic [63:0] q_shift
+        );
+            localparam NEGATIVE = -1;
+            localparam logic signed SCALAR_SIGNED = 1'b1;
+            localparam logic [255:0] WIDE_NEGATIVE = -1;
+            localparam logic [255:0] WIDE_FILL = '1;
+            localparam logic [255:0] WIDE_SHIFT = 256'b1 << 200;
+            localparam logic [1:0] TRUNCATED = 4;
+            localparam DEPENDENT = TRUNCATED + 1;
+
+            always_ff @(posedge clk) begin
+                case (signed_mode)
+                    NEGATIVE: q_negative <= NEGATIVE;
+                    default: q_negative <= 0;
+                endcase
+                case (signed_mode)
+                    SCALAR_SIGNED: q_scalar_signed <= 8'ha5;
+                    default: q_scalar_signed <= 0;
+                endcase
+                case (wide_mode)
+                    WIDE_NEGATIVE: q_wide_parameter <= 8'hb6;
+                    default: q_wide_parameter <= 0;
+                endcase
+                case (wide_mode)
+                    WIDE_FILL: q_wide_fill <= 8'hc7;
+                    default: q_wide_fill <= 0;
+                endcase
+                case (wide_expr_mode)
+                    WIDE_SHIFT: q_wide_expression <= 8'hd8;
+                    default: q_wide_expression <= 0;
+                endcase
+                case (mode)
+                    0: q_natural_width <= 16'h0100 / 16'd2;
+                    default: q_natural_width <= 0;
+                endcase
+                q_reduction <= |signed_value;
+                q_logic_not <= !signed_value;
+                q_narrow_shift <= signed_value >> 1;
+                case (mode ? 1'b0 : 2'b10)
+                    2'b10: q_mux_selector <= 8'he9;
+                    default: q_mux_selector <= 0;
+                endcase
+                case (1'b1)
+                    DEPENDENT: q_dependent_parameter <= 8'hfa;
+                    default: q_dependent_parameter <= 0;
+                endcase
+                case (mode)
+                    0: q_fill <= '1;
+                    default: q_fill <= '0;
+                endcase
+                q_nested_fill <= !mode ? '1 : 0;
+                case (mode)
+                    0: q_shift <= 1 << 40;
+                    default: q_shift <= 0;
+                endcase
+            end
+        endmodule
+    "#)
+  (top Top)
+  (let wide_negative (- (<< 1 256) 1))
+  (let wide_shift (<< 1 200))
+  (modify
+    (set mode 0)
+    (set signed_mode 3)
+    (set signed_value 0x82)
+    (set wide_mode wide_negative)
+    (set wide_expr_mode wide_shift))
+  (tick clk)
+  (assert_eq q_negative 0xff)
+  (assert_eq q_scalar_signed 0xa5)
+  (assert_eq q_wide_parameter 0xb6)
+  (assert_eq q_wide_fill 0xc7)
+  (assert_eq q_wide_expression 0xd8)
+  (assert_eq q_natural_width 0x80)
+  (assert_eq q_reduction 1)
+  (assert_eq q_logic_not 0)
+  (assert_eq q_narrow_shift 0x41)
+  (assert_eq q_mux_selector 0xe9)
+  (assert_eq q_dependent_parameter 0xfa)
+  (assert_eq q_fill 0xffffffffffffffff)
+  (assert_eq q_nested_fill 0xffffffffffffffff)
+  (assert_eq q_shift (trunc 64 (<< 1 40))))
+
+(case simulates_systemverilog_always_ff_case_calls_and_xz_parameters
+  (four_state)
+  (source "ff_case_calls_and_xz_parameters.sv" #"
+        module Top(
+            input bit clk,
+            input logic [1:0] mode,
+            input logic signed [1:0] signed_mode,
+            input logic [7:0] d,
+            output logic [7:0] q_unrelated,
+            output logic [7:0] q_function,
+            output logic [7:0] q_parameter_xz,
+            output logic [7:0] q_parameter_expr,
+            output logic [7:0] q_function_width,
+            output logic [7:0] q_function_signed,
+            output logic [7:0] q_function_param,
+            output logic [7:0] q_parameter_x_fill,
+            output logic [7:0] q_parameter_z_fill,
+            output logic [7:0] q_function_integer,
+            output logic [7:0] q_function_typedef,
+            output logic [7:0] q_function_nonansi,
+            output logic [7:0] q_function_inherited_param,
+            output logic q_const_case_equality,
+            output logic q_const_case_fill,
+            output logic q_const_wildcard_equality
+        );
+            typedef logic [1:0] word_t;
+
+            localparam logic [1:0] X_LABEL = 2'b1x;
+            localparam EXPR_LABEL = 2'b11 + 2'b00;
+            localparam logic [3:0] X_FILL = 'x;
+            localparam logic [3:0] Z_FILL = 'z;
+            localparam MATCH_X = 1'bx === 1'bx;
+            localparam MATCH_FILL = 8'hff === '1;
+            localparam MATCH_WILDCARD = 2'b10 ==? 2'b1x;
+
+            function automatic logic [1:0] decode(input logic [1:0] value);
+                return value;
+            endfunction
+
+            function automatic logic [7:0] passthrough(input logic [7:0] value);
+                return value;
+            endfunction
+
+            function automatic logic [1:0] truncate(input logic value);
+                return 4;
+            endfunction
+
+            function automatic logic signed decode_signed(input logic value);
+                return 1'b1;
+            endfunction
+
+            function automatic logic is_zero(input logic [1:0] value);
+                return value === 0;
+            endfunction
+
+            function automatic integer decode_integer(input logic ignored);
+                return 2;
+            endfunction
+
+            function automatic word_t decode_typedef(input logic ignored);
+                return 4;
+            endfunction
+
+            function automatic logic decode_nonansi;
+                input logic [1:0] value;
+                return value === 0;
+            endfunction
+
+            function automatic logic grouped(input logic [3:0] a, b);
+                return b === 4'b0100;
+            endfunction
+
+            always_ff @(posedge clk) begin
+                q_unrelated <= d;
+                case (decode(mode))
+                    2'b01: q_function <= passthrough(d);
+                    default: q_function <= 0;
+                endcase
+                case (mode)
+                    X_LABEL: q_parameter_xz <= 8'ha5;
+                    default: q_parameter_xz <= 0;
+                endcase
+                case (signed_mode)
+                    EXPR_LABEL: q_parameter_expr <= 8'ha6;
+                    default: q_parameter_expr <= 0;
+                endcase
+                case (truncate(mode[0]))
+                    2'b00: q_function_width <= 8'hb6;
+                    default: q_function_width <= 0;
+                endcase
+                case (signed_mode)
+                    decode_signed(mode[0]): q_function_signed <= 8'hc7;
+                    default: q_function_signed <= 0;
+                endcase
+                case (is_zero(4'b0100))
+                    1'b1: q_function_param <= 8'hd8;
+                    default: q_function_param <= 0;
+                endcase
+                q_parameter_x_fill <= X_FILL;
+                q_parameter_z_fill <= Z_FILL;
+                case (decode_integer(mode[0]))
+                    2: q_function_integer <= 8'he9;
+                    default: q_function_integer <= 0;
+                endcase
+                case (decode_typedef(mode[0]))
+                    2'b00: q_function_typedef <= 8'hfa;
+                    default: q_function_typedef <= 0;
+                endcase
+                case (decode_nonansi(4'b0100))
+                    1'b1: q_function_nonansi <= 8'hab;
+                    default: q_function_nonansi <= 0;
+                endcase
+                case (grouped(0, 4'b0100))
+                    1'b1: q_function_inherited_param <= 8'hbc;
+                    default: q_function_inherited_param <= 0;
+                endcase
+                q_const_case_equality <= MATCH_X;
+                q_const_case_fill <= MATCH_FILL;
+                q_const_wildcard_equality <= MATCH_WILDCARD;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set mode 1)
+    (set signed_mode 3)
+    (set d 0x3c))
+  (tick clk)
+  (assert_eq q_unrelated 0x3c)
+  (assert_eq q_function 0x3c)
+  (assert_eq q_parameter_xz 0)
+  (assert_eq q_parameter_expr 0xa6)
+  (assert_eq q_function_width 0xb6)
+  (assert_eq q_function_signed 0xc7)
+  (assert_eq q_function_param 0xd8)
+  (assert_eq q_parameter_x_fill (fourstate 0x0f 0x0f))
+  (assert_eq q_parameter_z_fill (fourstate 0 0x0f))
+  (assert_eq q_function_integer 0xe9)
+  (assert_eq q_function_typedef 0xfa)
+  (assert_eq q_function_nonansi 0xab)
+  (assert_eq q_function_inherited_param 0xbc)
+  (assert_eq q_const_case_equality 1)
+  (assert_eq q_const_case_fill 1)
+  (assert_eq q_const_wildcard_equality 1)
+  (modify
+    (set mode (fourstate 0b11 0b01))
+    (set d 0x5a))
+  (tick clk)
+  (assert_eq q_unrelated 0x5a)
+  (assert_eq q_function 0)
+  (assert_eq q_parameter_xz 0xa5)
+  (assert_eq q_parameter_expr 0xa6)
+  (assert_eq q_function_width 0xb6)
+  (assert_eq q_function_signed 0xc7)
+  (assert_eq q_function_param 0xd8)
+  (assert_eq q_parameter_x_fill (fourstate 0x0f 0x0f))
+  (assert_eq q_parameter_z_fill (fourstate 0 0x0f))
+  (assert_eq q_function_integer 0xe9)
+  (assert_eq q_function_typedef 0xfa)
+  (assert_eq q_function_nonansi 0xab)
+  (assert_eq q_function_inherited_param 0xbc)
+  (assert_eq q_const_case_equality 1)
+  (assert_eq q_const_case_fill 1)
+  (assert_eq q_const_wildcard_equality 1))
+
+(case simulates_systemverilog_repeat_concat
+  (source "repeat_concat.sv" #"
+        module Top(input logic [1:0] a, output logic [7:0] y);
+            assign y = {4{a}};
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0b10))
+  (assert_eq y 0xaa))
+
+(case preserves_unknown_complement_and_converts_bit_function_arguments
+  (four_state)
+  (source "four_state_unary.sv" #"
+        module Top(input logic a, output logic complement_is_x, output logic function_value);
+            function automatic logic normalize(input bit value);
+                return value;
+            endfunction
+            assign complement_is_x = (~a === 1'bx);
+            assign function_value = normalize(a);
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a (fourstate 1 1)))
+  (assert_eq complement_is_x 1)
+  (assert_eq function_value 0))
+
+(case applies_procedural_truth_and_bit_conversion_to_function_results
+  (four_state)
+  (source "function_state.sv" #"
+        module Top(input logic select, output logic if_value, output logic bit_value);
+            function automatic logic choose(input logic condition);
+                if (condition) return 1'b1;
+                else return 1'b0;
+            endfunction
+            function automatic bit to_bit();
+                return 1'bx;
+            endfunction
+            assign if_value = choose(select);
+            assign bit_value = to_bit();
+        endmodule
+    "#)
+  (top Top)
+  (modify (set select (fourstate 1 1)))
+  (assert_eq if_value 0)
+  (assert_eq bit_value 0))
+
+(case tracks_nested_function_slice_dependencies
+  (source "nested_slice_dependency.sv" #"
+        module Top(input logic [3:0] value, output logic [1:0] y);
+            logic [7:0] intermediate;
+            function automatic logic [1:0] low2(input logic [3:0] v);
+                return v[1:0];
+            endfunction
+            assign intermediate[7:4] = value;
+            assign y = low2(intermediate[7:4]);
+        endmodule
+    "#)
+  (top Top)
+  (modify (set value 0b1011))
+  (assert_eq y 0b11)
+  (modify (set value 0b0100))
+  (assert_eq y 0))
+
+(case preserves_function_locals_assigned_by_conditionals
+  (source "function_local_if.sv" #"
+        module Top(input logic select, output logic y);
+            function automatic logic choose(input logic condition);
+                logic value;
+                value = 1'b0;
+                if (condition) value = 1'b1;
+                else value = 1'b0;
+                return value;
+            endfunction
+            assign y = choose(select);
+        endmodule
+    "#)
+  (top Top)
+  (modify (set select 1))
+  (assert_eq y 1)
+  (modify (set select 0))
+  (assert_eq y 0))
+
+(case preserves_function_locals_assigned_by_case_items
+  (source "function_local_case.sv" #"
+        module Top(input logic select, output logic y);
+            function automatic logic choose(input logic condition);
+                logic value;
+                value = 1'b0;
+                case (condition)
+                    1'b1: value = 1'b1;
+                    default: value = 1'b0;
+                endcase
+                return value;
+            endfunction
+            assign y = choose(select);
+        endmodule
+    "#)
+  (top Top)
+  (modify (set select 1))
+  (assert_eq y 1)
+  (modify (set select 0))
+  (assert_eq y 0))
+
+(case preserves_disjoint_slice_writes_in_merged_always_ff_processes
+  (source "disjoint_ff_slices.sv" #"
+        module Top(input logic clk, input logic a, input logic b, output logic [1:0] q);
+            always_ff @(posedge clk) q[0] <= a;
+            always_ff @(posedge clk) q[1] <= b;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 1)
+    (set b 1))
+  (tick clk)
+  (assert_eq q 3))
+
+(case infers_async_reset_from_always_ff_assignment_rhs
+  (source "rhs_reset.sv" #"
+        module Top(input logic clk, input logic rst, input logic d, output logic q);
+            always_ff @(posedge clk or posedge rst) q <= rst ? 1'b0 : d;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set d 1))
+  (tick clk)
+  (assert_eq q 1))
+
+(case preserves_multidimensional_packed_prefix_in_part_selects
+  (source "packed_prefix_select.sv" #"
+        module Top(input logic [1:0][7:0] a, output logic [7:0] y);
+            assign y = a[1][7:0];
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0xabcd))
+  (assert_eq y 0xab))
+
+(case guards_division_by_zero_nested_under_muxes
+  (four_state)
+  (source "nested_zero_div.sv" #"
+        module Top(input logic select, input logic [7:0] a, b, output logic [7:0] y);
+            assign y = select ? (a / b) : 8'h00;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set select 1)
+    (set a 5)
+    (set b 0))
+  (assert_eq y (fourstate 0xff 0xff)))
+
+(case zero_extends_mixed_signed_arithmetic_operands
+  (source "mixed_signed_width.sv" #"
+        module Top(
+            input logic clk,
+            input logic signed [7:0] a,
+            input logic [15:0] b,
+            output logic [15:0] comb,
+            output logic [15:0] q
+        );
+            assign comb = a + b;
+            always_ff @(posedge clk) q <= a + b;
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 0xff)
+    (set b 0))
+  (assert_eq comb 0x00ff)
+  (tick clk)
+  (assert_eq q 0x00ff))
+
+(case propagates_child_input_width_into_connection_expressions
+  (source "connection_context.sv" #"
+        module Child(input logic [15:0] value, output logic [15:0] y);
+            assign y = value;
+        endmodule
+        module Top(input logic [7:0] a, output logic [15:0] y);
+            Child child(.value(a << 8), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 1))
+  (assert_eq y 0x0100))
+
+(case preserves_signed_parameter_types_in_hierarchy_connections
+  (source "parameter_connection_type.sv" #"
+        module Child(input logic signed [63:0] value, output logic [63:0] y);
+            assign y = value;
+        endmodule
+        module Top #(
+            parameter logic signed [7:0] P = -1
+        ) (output logic [63:0] y);
+            Child child(.value(P), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq y 0xffffffffffffffff))
+
+(case converts_function_arguments_using_actual_signedness
+  (source "function_argument_signedness.sv" #"
+        module Top(
+            input logic [7:0] unsigned_value,
+            input logic signed [7:0] signed_value,
+            output logic [15:0] unsigned_result,
+            output logic [15:0] signed_result,
+            output logic [15:0] formal_signed_shift
+        );
+            function automatic logic signed [15:0] pass_signed(
+                input logic signed [15:0] value
+            );
+                return value;
+            endfunction
+            function automatic logic signed [15:0] shift_signed(
+                input logic signed [15:0] value
+            );
+                return value >>> 8;
+            endfunction
+
+            assign unsigned_result = pass_signed(unsigned_value);
+            assign signed_result = pass_signed(signed_value);
+            assign formal_signed_shift = shift_signed(unsigned_value);
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set unsigned_value 0x80)
+    (set signed_value 0x80))
+  (assert_eq unsigned_result 0x0080)
+  (assert_eq signed_result 0xff80)
+  (assert_eq formal_signed_shift 0))
+
+(case negates_wide_systemverilog_values
+  (source "wide_negate.sv" #"
+        module Top(input logic [127:0] a, output logic [127:0] y);
+            assign y = -a;
+        endmodule
+    "#)
+  (top Top)
+  (let modulus (<< 1 128))
+  (let value (<< 1 64))
+  (set a value)
+  (assert_eq y (- modulus value))
+  (set a 0)
+  (assert_eq y 0))

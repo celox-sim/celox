@@ -299,8 +299,8 @@ fn child_output_driver_ranges(
         let Some(child) = modules.get(&child_id) else {
             continue;
         };
-        let element_connections = instance.array_element.and_then(|(position, count)| {
-            array_element_connections(
+        let element_connections = match instance.array_element {
+            Some((position, count)) => match array_element_connections(
                 &instance.port_connections,
                 child,
                 position,
@@ -309,9 +309,13 @@ fn child_output_driver_ranges(
                 &module.signal_names,
                 &module.constants,
                 &module.parameter_types,
-            )
-            .ok()
-        });
+            ) {
+                Ok(connections) => Some(connections),
+                // Building the instance reports the invalid connection.
+                Err(_) => continue,
+            },
+            None => None,
+        };
         let connections = element_connections
             .as_deref()
             .unwrap_or(&instance.port_connections);
@@ -1278,27 +1282,30 @@ fn array_element_connections(
             ) else {
                 return Ok(connection.clone());
             };
-            // A fill literal ('0, '1, 'x) or an unsized constant takes its
-            // width from the port, so every element shares it.
-            let context_sized = matches!(
-                actual_expr,
-                sv::ir::Expr::Literal(literal)
-                    if unbased_fill_literal(literal).is_some()
-                        || !literal.contains('\'')
-                        || literal.starts_with('\'')
-            );
-            if actual_width == port_width || context_sized {
+            if actual_width == port_width {
                 return Ok(connection.clone());
             }
+            // Any other width is an error (IEEE 1800-2023 23.3.3.5), including
+            // a fill literal ('0 is one bit) or an unsized constant (32 bits).
             let mismatch = || {
-                unsupported(format!(
-                    "`{}` is {actual_width} bits wide; a {port_width}-bit port of {count} elements needs {port_width} or {} bits",
-                    connection.formal,
-                    port_width * count
-                ))
+                ParserError::illegal_context(
+                    "systemverilog module instance array connection",
+                    format!(
+                        "`{}` is {actual_width} bits wide; a {port_width}-bit port of {count} elements needs {port_width} or {} bits",
+                        connection.formal,
+                        port_width * count
+                    ),
+                    None,
+                )
             };
-            let sv::ir::Expr::Ident(name) = actual_expr else {
+            if actual_width != port_width * count {
                 return Err(mismatch());
+            }
+            let sv::ir::Expr::Ident(name) = actual_expr else {
+                return Err(unsupported(format!(
+                    "`{}` is split between the elements only from a named vector or array",
+                    connection.formal
+                )));
             };
             let unpacked = parent_signal_names
                 .get(name)
@@ -1329,9 +1336,6 @@ fn array_element_connections(
                             [] | [(_, 0)]
                         )
                 });
-            if actual_width != port_width * count {
-                return Err(mismatch());
-            }
             if !zero_based {
                 return Err(unsupported(format!(
                     "`{}` is split between the elements only from a vector declared [N-1:0]",

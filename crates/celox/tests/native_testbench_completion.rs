@@ -6,7 +6,7 @@ mod test_utils;
 // This is a Celox adapter contract test, rather than a portable HDL case:
 // the ordinary native execution API intentionally permits fall-through.
 fn check_completion(backend: &str) {
-    use celox_test_suite_veryl::Design;
+    use celox_test_suite::Design;
 
     for (name, body, expected_error) in [
         ("finish", "$assert(1'd1); $finish();", None),
