@@ -72,7 +72,6 @@ all_backends! {
     }
 
     fn test_as_operator_passthrough(sim) {
-        @ignore_on(sv);
         @case "operators::test_as_operator_passthrough";
     }
 
@@ -93,22 +92,18 @@ all_backends! {
     }
 
     fn test_signed_comparison_after_as_cast(sim) {
-        @ignore_on(sv);
         @case "operators::test_signed_comparison_after_as_cast";
     }
 
     fn test_cast_signed_to_unsigned_affects_comparison(sim) {
-        @ignore_on(sv);
         @case "operators::test_cast_signed_to_unsigned_affects_comparison";
     }
 
     fn test_symbolic_store_preserves_declared_state_signedness(sim) {
-        @ignore_on(sv);
         @case "operators::test_symbolic_store_preserves_declared_state_signedness";
     }
 
     fn test_unsigned_type_cast_does_not_inherit_source_signedness(sim) {
-        @ignore_on(sv);
         @case "operators::test_unsigned_type_cast_does_not_inherit_source_signedness";
     }
 

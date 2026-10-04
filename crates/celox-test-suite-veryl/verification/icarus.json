@@ -6532,6 +6532,29 @@
     },
     {
       "category": "Hierarchy",
+      "detail": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports that uwire y has two drivers. The corresponding Verilator run passes.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/limitations/icarus.json",
+          "LIMITATIONS.md#icarus-instance-array-unpacked-port"
+        ],
+        "id": "icarus_instance_array_unpacked_port",
+        "observed_version": "Veryl 0.22.0; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not distribute an unpacked array connection over the elements of an instance array (IEEE 1800-2023 23.3.3.5) and reports that uwire y has two drivers. The corresponding Verilator run passes.",
+        "upstream": []
+      },
+      "name": "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
       "detail": "Icarus 13.0 rejects output arguments on these functions (function port is not an input port). These fixtures cannot reach simulation.",
       "expectation": "Simulation",
       "known_issue": {
@@ -10161,7 +10184,7 @@
   "counts": {
     "compile_error": 8,
     "emission_error": 0,
-    "ignored": 194,
+    "ignored": 195,
     "mismatch": 0,
     "passed": 484,
     "rejected": 8,

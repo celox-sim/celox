@@ -31,6 +31,7 @@ pub struct SignalLayout {
 #[derive(Debug, Clone, Serialize)]
 pub struct HierarchyNode {
     pub module_name: String,
+    pub index: usize,
     pub signals: HashMap<String, SignalLayout>,
     pub children: HashMap<String, Vec<HierarchyNode>>,
 }
@@ -125,6 +126,7 @@ pub fn build_hierarchy_node(h: &InstanceHierarchy, four_state: bool) -> Hierarch
 
     HierarchyNode {
         module_name: h.module_name.clone(),
+        index: h.index,
         signals,
         children,
     }

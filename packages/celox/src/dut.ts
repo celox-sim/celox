@@ -258,7 +258,7 @@ export function createDut<P>(
 	// Attach child instance accessors from hierarchy
 	if (hierarchy) {
 		for (const [childName, instances] of Object.entries(hierarchy.children)) {
-			if (instances.length === 1) {
+			if (instances.length === 1 && (instances[0]!.index ?? 0) === 0) {
 				const childDut = createChildDut(buffer, instances[0]!, handle, state);
 				Object.defineProperty(obj, childName, {
 					value: childDut,
@@ -266,10 +266,18 @@ export function createDut<P>(
 					configurable: false,
 					writable: false,
 				});
-			} else if (instances.length > 1) {
-				const childDuts = instances.map((inst) =>
-					createChildDut(buffer, inst, handle, state),
-				);
+			} else if (instances.length > 0) {
+				// Elements sit at their declared index (an instance array declared
+				// `u[3:2]` has no elements 0 and 1).
+				const childDuts: unknown[] = [];
+				instances.forEach((inst, position) => {
+					childDuts[inst.index ?? position] = createChildDut(
+						buffer,
+						inst,
+						handle,
+						state,
+					);
+				});
 				Object.defineProperty(obj, childName, {
 					value: childDuts,
 					enumerable: true,
@@ -338,7 +346,7 @@ export function createChildDut(
 
 	// Recursively attach children
 	for (const [childName, instances] of Object.entries(hierarchy.children)) {
-		if (instances.length === 1) {
+		if (instances.length === 1 && (instances[0]!.index ?? 0) === 0) {
 			const childDut = createChildDut(buffer, instances[0]!, handle, state);
 			Object.defineProperty(obj, childName, {
 				value: childDut,
@@ -346,10 +354,18 @@ export function createChildDut(
 				configurable: false,
 				writable: false,
 			});
-		} else if (instances.length > 1) {
-			const childDuts = instances.map((inst) =>
-				createChildDut(buffer, inst, handle, state),
-			);
+		} else if (instances.length > 0) {
+			// Elements sit at their declared index (an instance array declared
+			// `u[3:2]` has no elements 0 and 1).
+			const childDuts: unknown[] = [];
+			instances.forEach((inst, position) => {
+				childDuts[inst.index ?? position] = createChildDut(
+					buffer,
+					inst,
+					handle,
+					state,
+				);
+			});
 			Object.defineProperty(obj, childName, {
 				value: childDuts,
 				enumerable: true,

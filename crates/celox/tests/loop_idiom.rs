@@ -89,7 +89,6 @@ fn test_recovered_bit_count_loop_semantics(sim) {
 }
 
 fn test_guarded_packed_scan(sim) {
-    @ignore_on(sv);
     @case "loop_idiom::test_guarded_packed_scan";
 }
 

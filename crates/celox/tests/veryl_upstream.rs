@@ -20,8 +20,6 @@ all_backends! {
         @case "veryl_language::inside_outside_range_endpoints";
     }
     fn parameter_expression_type_cast_widths(sim) {
-        // SV frontend issue #64: unsupported cast expressions.
-        @ignore_on(sv);
         @case "veryl_language::parameter_expression_type_cast_widths";
     }
     fn packed_union_members_alias(sim) {

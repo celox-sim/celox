@@ -121,6 +121,25 @@ fn comb_processes_from_module_common_item(
                 processes.push(substitute_process_constants(process, const_env));
             }
         }
+        sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) => {
+            // `wire [7:0] w = expr;` declares a net and drives it continuously.
+            for assignment in
+                net_declaration_assignments(declaration, syntax_tree, packed_dimensions)?
+            {
+                let assignment = substitute_assignment_constants_with_parameter_literals(
+                    assignment,
+                    const_env,
+                    parameter_literals,
+                );
+                processes.push(CombProcess::new(
+                    CombProcessKind::ContinuousAssign,
+                    condition
+                        .clone()
+                        .map(|condition| substitute_const_expr_constants(condition, const_env)),
+                    vec![assignment],
+                ));
+            }
+        }
         sv_parser::ModuleCommonItem::NetAlias(_) => {
             return Err(AnalyzerError::Unsupported(
                 "module-level net alias".to_string(),
@@ -129,6 +148,38 @@ fn comb_processes_from_module_common_item(
         _ => {}
     }
     Ok(())
+}
+
+fn net_declaration_assignments(
+    declaration: &sv_parser::ModuleOrGenerateItemDeclaration,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Result<Vec<Assignment>, AnalyzerError> {
+    let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) =
+        declaration
+    else {
+        return Ok(Vec::new());
+    };
+    let sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) = &**declaration else {
+        return Ok(Vec::new());
+    };
+    let sv_parser::NetDeclaration::NetType(net) = &**net else {
+        return Ok(Vec::new());
+    };
+    let mut assignments = Vec::new();
+    for assignment in net.nodes.5.nodes.0.contents() {
+        let Some((_, expression)) = &assignment.nodes.2 else {
+            continue;
+        };
+        let name = identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), syntax_tree)
+            .ok_or_else(|| AnalyzerError::Unsupported("net declaration assignment".to_string()))?;
+        let rhs = expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("continuous assignment expression".to_string())
+            })?;
+        assignments.push(Assignment::new(LValue::Ident(name), rhs));
+    }
+    Ok(assignments)
 }
 
 fn assignments_from_continuous_assign(
@@ -149,8 +200,9 @@ fn assignments_from_continuous_assign(
                     .ok_or_else(|| {
                         AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
                     })?;
-                let rhs = expr_from_expression_with_types(
+                let rhs = expr_from_expression_for_lvalue(
                     &assignment.nodes.2,
+                    &lhs,
                     syntax_tree,
                     packed_dimensions,
                 )
@@ -184,8 +236,9 @@ fn assignments_from_continuous_assign(
                         .ok_or_else(|| {
                             AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
                         })?;
-                let rhs = expr_from_expression_with_types(
+                let rhs = expr_from_expression_for_lvalue(
                     &assignment.nodes.2,
+                    &lhs,
                     syntax_tree,
                     packed_dimensions,
                 )
@@ -218,13 +271,13 @@ fn comb_process_from_always_construct(
     expression_signedness: &HashMap<String, bool>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
-    if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
+    let Some(body) = always_comb_body(always) else {
         return Ok(None);
-    }
-    validate_always_comb_statement(&always.nodes.1)?;
+    };
+    validate_always_comb_statement(body)?;
     let mut guarded_assignments = Vec::new();
     conditional_assignments_from_statement(
-        &always.nodes.1,
+        body,
         None,
         true,
         true,
@@ -281,9 +334,19 @@ fn comb_assignments_from_guarded(
     let mut lvalues_changed = false;
     let mut changed_chains = HashSet::default();
     for (target, indices) in targets.iter().zip(&groups) {
+        // Unconditional writes normally stay as written. When a later write
+        // reads the target (`n = a; n = n + 1;`), the value established by the
+        // earlier writes has to be substituted into it instead.
         let preserve_target_writes = indices
             .iter()
-            .all(|index| guarded[*index].condition().is_none());
+            .all(|index| guarded[*index].condition().is_none())
+            && !indices.iter().skip(1).any(|index| {
+                expr_references_overlapping_lvalue(
+                    guarded[*index].assignment().rhs(),
+                    target,
+                    &packed_dimensions.const_env,
+                )
+            });
         let initial = overlapping_value_before(&guarded, indices[0], target, packed_dimensions);
         let (changed, chains) = substitute_intermediate_comb_value_reads(
             &mut guarded,
@@ -639,11 +702,6 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
                     "casez, casex, or pattern case inside always_comb".to_string(),
                 ));
             };
-            if !matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_)) {
-                return Err(AnalyzerError::Unsupported(
-                    "casez or casex inside always_comb".to_string(),
-                ));
-            }
             for item in std::iter::once(&case.nodes.3).chain(case.nodes.4.iter()) {
                 match item {
                     sv_parser::CaseItem::NonDefault(item) => {
@@ -657,7 +715,14 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
             Ok(())
         }
         sv_parser::StatementItem::SeqBlock(block) => {
-            if !block.nodes.2.is_empty() {
+            // Local variables are hoisted to module signals; other block
+            // declarations (parameters, `let`) are not lowered.
+            if block
+                .nodes
+                .2
+                .iter()
+                .any(|item| !matches!(item, sv_parser::BlockItemDeclaration::Data(_)))
+            {
                 return Err(AnalyzerError::Unsupported(
                     "block-local declaration inside always_comb".to_string(),
                 ));
@@ -667,6 +732,25 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
                     validate_always_comb_statement(stmt)?;
                 }
             }
+            Ok(())
+        }
+        sv_parser::StatementItem::JumpStatement(jump)
+            if matches!(
+                &**jump,
+                sv_parser::JumpStatement::Break(_) | sv_parser::JumpStatement::Continue(_)
+            ) =>
+        {
+            Ok(())
+        }
+        // A call of a user function; its `output` arguments are lowered with
+        // the statement.
+        sv_parser::StatementItem::SubroutineCallStatement(call)
+            if matches!(
+                &**call,
+                sv_parser::SubroutineCallStatement::SubroutineCall(call)
+                    if matches!(call.0, sv_parser::SubroutineCall::TfCall(_))
+            ) =>
+        {
             Ok(())
         }
         sv_parser::StatementItem::LoopStatement(loop_statement) => {

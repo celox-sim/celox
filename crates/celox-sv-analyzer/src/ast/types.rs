@@ -75,34 +75,42 @@ pub(super) fn type_aliases_from_module_node_with_env(
     }
     // Alias dimensions belong to their definition scope, not the scope that
     // later declares a signal of that type. Rebuilt for each specialization.
+    // A non-negative bound is written as a plain decimal so that it does not
+    // widen the index arithmetic of a run-time select to 128 bits.
     for ty in aliases.values_mut() {
         for range in &mut ty.packed_ranges {
             if let Some(value) = eval_ast_const_expr(&range.left, const_env) {
-                range.left = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+                range.left = bound_literal(value);
             }
             if let Some(value) = eval_ast_const_expr(&range.right, const_env) {
-                range.right = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+                range.right = bound_literal(value);
             }
         }
         for range in &mut ty.unpacked_ranges {
             if let Some(value) = eval_ast_const_expr(&range.left, const_env) {
-                range.left = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+                range.left = bound_literal(value);
             }
             if let Some(value) = eval_ast_const_expr(&range.right, const_env) {
-                range.right = ConstExpr::Literal(format_typed_parameter_literal(value, 128, true));
+                range.right = bound_literal(value);
             }
             if let Some(value) = range
                 .size
                 .as_ref()
                 .and_then(|size| eval_ast_const_expr(size, const_env))
             {
-                range.size = Some(ConstExpr::Literal(format_typed_parameter_literal(
-                    value, 128, true,
-                )));
+                range.size = Some(bound_literal(value));
             }
         }
     }
     Ok(aliases)
+}
+
+fn bound_literal(value: i128) -> ConstExpr {
+    if value >= 0 {
+        ConstExpr::Literal(value.to_string())
+    } else {
+        ConstExpr::Literal(format_typed_parameter_literal(value, 128, true))
+    }
 }
 
 fn add_type_alias_from_data_declaration(

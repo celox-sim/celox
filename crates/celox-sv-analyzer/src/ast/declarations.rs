@@ -126,6 +126,82 @@ pub(super) fn ports_from_module_node(
     Ok(ports)
 }
 
+/// The positional interface of a module: its ports in declaration order and
+/// the overridable (non-local, non-type) parameters of its `#(...)` list.
+pub(super) fn module_interface_from_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<ModuleInterface, AnalyzerError> {
+    let mut ports = Vec::new();
+    for child in node.clone() {
+        match child {
+            RefNode::AnsiPortDeclarationNet(port) => {
+                ports.push(port_name(
+                    RefNode::PortIdentifier(&port.nodes.1),
+                    syntax_tree,
+                )?);
+            }
+            RefNode::AnsiPortDeclarationVariable(port) => {
+                ports.push(port_name(
+                    RefNode::PortIdentifier(&port.nodes.1),
+                    syntax_tree,
+                )?);
+            }
+            _ => {}
+        }
+    }
+    let mut parameters = Vec::new();
+    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node) {
+        let push_declaration = |declaration: &sv_parser::ParameterPortDeclaration,
+                                parameters: &mut Vec<String>| {
+            if matches!(
+                declaration,
+                sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_)
+                    | sv_parser::ParameterPortDeclaration::TypeList(_)
+            ) {
+                return;
+            }
+            for child in RefNode::ParameterPortDeclaration(declaration) {
+                match child {
+                    RefNode::ParamAssignment(assignment) => parameters.extend(identifier_text(
+                        RefNode::ParameterIdentifier(&assignment.nodes.0),
+                        syntax_tree,
+                    )),
+                    RefNode::TypeAssignment(assignment) => parameters.extend(identifier_text(
+                        RefNode::TypeIdentifier(&assignment.nodes.0),
+                        syntax_tree,
+                    )),
+                    _ => {}
+                }
+            }
+        };
+        match list {
+            sv_parser::ParameterPortList::Assignment(list) => {
+                for child in RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0) {
+                    if let RefNode::ParamAssignment(assignment) = child
+                        && let Some(name) = identifier_text(
+                            RefNode::ParameterIdentifier(&assignment.nodes.0),
+                            syntax_tree,
+                        )
+                    {
+                        parameters.push(name);
+                    }
+                }
+                for (_, declaration) in &list.nodes.1.nodes.1.1 {
+                    push_declaration(declaration, &mut parameters);
+                }
+            }
+            sv_parser::ParameterPortList::Declaration(list) => {
+                for declaration in list.nodes.1.nodes.1.contents() {
+                    push_declaration(declaration, &mut parameters);
+                }
+            }
+            sv_parser::ParameterPortList::Empty(_) => {}
+        }
+    }
+    Ok(ModuleInterface { ports, parameters })
+}
+
 pub(super) fn parameters_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -334,6 +410,27 @@ fn signals_from_module_common_item(
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
 ) -> Result<(), AnalyzerError> {
+    if let sv_parser::ModuleCommonItem::AlwaysConstruct(always) = item
+        && always_kind(always) == AlwaysKind::Comb
+    {
+        // A variable declared inside an `always_comb` block is hoisted to a
+        // module signal. A clash with another signal of the same name is
+        // reported as a duplicate internal signal.
+        for node in RefNode::Statement(&always.nodes.1) {
+            if let RefNode::DataDeclaration(data) = node {
+                let mut declared = signals_from_data_declaration(
+                    data,
+                    syntax_tree,
+                    type_aliases,
+                    const_env,
+                    selected_name,
+                )?;
+                substitute_signal_local_constants(&mut declared, const_env);
+                signals.extend(declared);
+            }
+        }
+        return Ok(());
+    }
     if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = item {
         let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
             declaration,

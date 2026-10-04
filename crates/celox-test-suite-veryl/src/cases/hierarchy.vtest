@@ -68,6 +68,35 @@ assign o_data = {data[2], data[1]};
   (top Top)
   (assert_eq o_data 0x3412))
 
+(case test_instance_array_broadcast_and_unpacked_array_connection
+  (source "test.veryl" #"
+module Child (
+a: input  logic<4>,
+en: input  logic,
+y: output logic<4>
+) {
+assign y = if en ? ~a : a;
+}
+module Top (
+a: input  logic<4>,
+en: input  logic,
+y: output logic<4>[2]
+) {
+inst u: Child [2] (
+a,
+en,
+y,
+);
+}
+"#)
+  (top Top)
+  (modify
+    (set a 0x5)
+    (set en 1))
+  (assert_eq y 0xaa)
+  (modify (set en 0))
+  (assert_eq y 0x55))
+
 (case test_instance_input_function_output_writeback
   ; veryl-simulator currently evaluates the connection value but does
   ; not write the function output actual back to the parent variable.

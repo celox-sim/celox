@@ -4,7 +4,6 @@ mod test_utils;
 
 all_backends! {
     fn cast_binary_semantics_match_between_comb_and_ff(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::cast_binary_semantics_match_between_comb_and_ff";
     }
 
@@ -14,7 +13,6 @@ all_backends! {
     }
 
     fn constant_and_runtime_casts_use_the_same_resize_rule(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::constant_and_runtime_casts_use_the_same_resize_rule";
     }
 
@@ -35,7 +33,6 @@ all_backends! {
     }
 
     fn signed_type_cast_keeps_comparison_operands_signed(sim) {
-        @ignore_on(sv);
         @case "expression_semantics::signed_type_cast_keeps_comparison_operands_signed";
     }
 

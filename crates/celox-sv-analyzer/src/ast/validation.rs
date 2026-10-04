@@ -33,6 +33,68 @@ pub(super) fn reject_unsupported_multidimensional_packed_bounds(
     }
 }
 
+/// How an `always` construct is simulated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AlwaysKind {
+    Comb,
+    Ff,
+    Unsupported,
+}
+
+/// `always_comb` and `always @*` are combinational; `always_ff` and an
+/// `always` sensitive to clock edges are sequential. Other sensitivity lists
+/// (incomplete level-sensitive lists, `always_latch`) are not supported.
+pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
+    match always.nodes.0 {
+        sv_parser::AlwaysKeyword::AlwaysComb(_) => AlwaysKind::Comb,
+        sv_parser::AlwaysKeyword::AlwaysFf(_) => AlwaysKind::Ff,
+        sv_parser::AlwaysKeyword::AlwaysLatch(_) => AlwaysKind::Unsupported,
+        sv_parser::AlwaysKeyword::Always(_) => {
+            let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
+                &always.nodes.1.nodes.2
+            else {
+                return AlwaysKind::Unsupported;
+            };
+            let sv_parser::ProceduralTimingControl::EventControl(control) = &timing.nodes.0 else {
+                return AlwaysKind::Unsupported;
+            };
+            match &**control {
+                sv_parser::EventControl::Asterisk(_)
+                | sv_parser::EventControl::ParenAsterisk(_) => AlwaysKind::Comb,
+                sv_parser::EventControl::EventExpression(_)
+                    if RefNode::ProceduralTimingControl(&timing.nodes.0)
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::EdgeIdentifier(_))) =>
+                {
+                    AlwaysKind::Ff
+                }
+                _ => AlwaysKind::Unsupported,
+            }
+        }
+    }
+}
+
+/// The statement an combinational `always` evaluates, without its event control.
+pub(super) fn always_comb_body(
+    always: &sv_parser::AlwaysConstruct,
+) -> Option<&sv_parser::Statement> {
+    match always.nodes.0 {
+        sv_parser::AlwaysKeyword::AlwaysComb(_) => Some(&always.nodes.1),
+        sv_parser::AlwaysKeyword::Always(_) if always_kind(always) == AlwaysKind::Comb => {
+            let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
+                &always.nodes.1.nodes.2
+            else {
+                return None;
+            };
+            match &timing.nodes.1 {
+                sv_parser::StatementOrNull::Statement(statement) => Some(statement),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn static_for_loop_iterations(
     loop_statement: &sv_parser::LoopStatement,
     syntax_tree: &SyntaxTree,
@@ -492,16 +554,13 @@ pub(super) fn reject_silently_ignored_constructs(
                 return Err(AnalyzerError::Unsupported("enum port".to_string()));
             }
             RefNode::AlwaysConstruct(always) => {
-                if matches!(
-                    always.nodes.0,
-                    sv_parser::AlwaysKeyword::Always(_) | sv_parser::AlwaysKeyword::AlwaysLatch(_)
-                ) {
+                if always_kind(always) == AlwaysKind::Unsupported {
                     return Err(AnalyzerError::Unsupported(
                         "always and always_latch processes".to_string(),
                     ));
                 }
                 let body = RefNode::Statement(&always.nodes.1);
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                if always_kind(always) == AlwaysKind::Ff
                     && body
                         .clone()
                         .into_iter()
@@ -511,11 +570,11 @@ pub(super) fn reject_silently_ignored_constructs(
                         "blocking assignment inside always_ff".to_string(),
                     ));
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
+                if always_kind(always) == AlwaysKind::Ff {
                     validate_static_for_loops_in_statement(&always.nodes.1, syntax_tree, const_env)?;
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
-                    validate_static_for_loops_in_statement(&always.nodes.1, syntax_tree, const_env)
+                if let Some(comb_body) = always_comb_body(always) {
+                    validate_static_for_loops_in_statement(comb_body, syntax_tree, const_env)
                         .map_err(|error| match error {
                             AnalyzerError::Unsupported(construct)
                                 if construct == "procedural loop inside always_ff" =>
@@ -527,24 +586,23 @@ pub(super) fn reject_silently_ignored_constructs(
                             error => error,
                         })?;
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                if always_kind(always) == AlwaysKind::Ff
                     && body.clone().into_iter().any(|node| {
                         matches!(
                             node,
                             RefNode::CaseStatement(case)
                                 if !matches!(
                                     case,
-                                    sv_parser::CaseStatement::Normal(case)
-                                        if matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_))
+                                    sv_parser::CaseStatement::Normal(_)
                                 )
                         )
                     })
                 {
                     return Err(AnalyzerError::Unsupported(
-                        "casez, casex, or pattern case inside always_ff".to_string(),
+                        "pattern case inside always_ff".to_string(),
                     ));
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
+                if always_kind(always) == AlwaysKind::Comb
                     && body
                         .clone()
                         .into_iter()
@@ -554,7 +612,7 @@ pub(super) fn reject_silently_ignored_constructs(
                         "nonblocking assignment inside always_comb".to_string(),
                     ));
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                if always_kind(always) == AlwaysKind::Ff
                     && body.clone().into_iter().any(|node| {
                         matches!(
                             node,
@@ -567,7 +625,7 @@ pub(super) fn reject_silently_ignored_constructs(
                         "iff-qualified always_ff event".to_string(),
                     ));
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                if always_kind(always) == AlwaysKind::Ff
                     && body
                         .clone()
                         .into_iter()
@@ -577,22 +635,19 @@ pub(super) fn reject_silently_ignored_constructs(
                         "concatenated always_ff assignment target".to_string(),
                     ));
                 }
-                if body
-                    .into_iter()
-                    .any(|node| matches!(node, RefNode::DataDeclaration(_)))
+                if always_kind(always) != AlwaysKind::Comb
+                    && body
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::DataDeclaration(_)))
                 {
-                    let detail = if matches!(
-                        always.nodes.0,
-                        sv_parser::AlwaysKeyword::AlwaysComb(_)
-                    ) {
-                        "block-local declaration inside always_comb"
-                    } else {
-                        "procedural local data declaration"
-                    };
-                    return Err(AnalyzerError::Unsupported(detail.to_string()));
+                    return Err(AnalyzerError::Unsupported(
+                        "procedural local data declaration".to_string(),
+                    ));
                 }
             }
-            RefNode::NetDeclAssignment(assignment) if assignment.nodes.2.is_some() => {
+            RefNode::NetDeclAssignment(assignment)
+                if assignment.nodes.2.is_some() && !assignment.nodes.1.is_empty() =>
+            {
                 return Err(AnalyzerError::Unsupported(
                     "net declaration assignment".to_string(),
                 ));
@@ -644,8 +699,7 @@ pub(super) fn reject_silently_ignored_constructs(
             }
             RefNode::IndexedRange(range) if
                 indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree,
-                    &indexed_dimensions)
-                    .and_then(|base| eval_ast_const_expr(&base, const_env)).is_none()
+                    &indexed_dimensions).is_none()
                 || !positive_indexed_width(&range.nodes.2, syntax_tree, &indexed_dimensions) => {
                 return Err(AnalyzerError::Unsupported(
                     "indexed part-select".to_string(),
@@ -707,7 +761,7 @@ pub(super) fn reject_silently_ignored_constructs(
                     .any(non_input_function_port) =>
             {
                 return Err(AnalyzerError::Unsupported(
-                    "output or inout function argument".to_string(),
+                    "ref function argument".to_string(),
                 ));
             }
             RefNode::FunctionDeclaration(function)
@@ -717,14 +771,13 @@ pub(super) fn reject_silently_ignored_constructs(
                         RefNode::CaseStatement(case)
                             if !matches!(
                                 case,
-                                sv_parser::CaseStatement::Normal(case)
-                                    if matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_))
+                                sv_parser::CaseStatement::Normal(_)
                             )
                     )
                 }) =>
             {
                 return Err(AnalyzerError::Unsupported(
-                    "casez or casex inside function".to_string(),
+                    "pattern case inside function".to_string(),
                 ));
             }
             RefNode::FunctionDeclaration(function)
@@ -863,10 +916,12 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
         RefNode::TfPortDeclaration(port) => Some(&port.nodes.1),
         _ => return false,
     };
+    // `output` and `inout` arguments are written back by the call statement;
+    // pass-by-reference is not lowered.
     match direction {
         None => false,
         Some(sv_parser::TfPortDirection::PortDirection(direction)) => {
-            !matches!(&**direction, sv_parser::PortDirection::Input(_))
+            matches!(&**direction, sv_parser::PortDirection::Ref(_))
         }
         Some(sv_parser::TfPortDirection::ConstRef(_)) => true,
     }

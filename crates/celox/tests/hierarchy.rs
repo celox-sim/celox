@@ -68,6 +68,13 @@ o_data: top_out[i],
         @case "hierarchy::test_instance_unpacked_array_slice_output";
     }
 
+    fn test_instance_array_broadcast_and_unpacked_array_connection(sim) {
+        // Neither veryl-simulator nor the Veryl frontend supports instance
+        // arrays; the emitted SystemVerilog does.
+        @ignore_on(native, cranelift, wasm, interp, veryl);
+        @case "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection";
+    }
+
     fn test_instance_input_function_output_writeback(sim) {
         @ignore_on(sv);
         @case "hierarchy::test_instance_input_function_output_writeback";
@@ -149,7 +156,7 @@ assign seen_o = seen;
     }
 
     fn test_instance_output_concat_advances_each_destination(sim) {
-        @ignore_on(veryl, sv);
+        @ignore_on(veryl);
         @case "hierarchy::test_instance_output_concat_advances_each_destination";
     }
 
@@ -171,7 +178,7 @@ fn test_dynamic_output_port_rmw_preserves_unselected_bits(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
     // The SV analyzer stops at unsupported indexed part-select, before checking
     // the output destination. That limitation is not a successful rejection.
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits";
 }
 
@@ -184,14 +191,14 @@ fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
 fn test_dynamic_minus_colon_output_port_rmw(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
     // The SV analyzer cannot analyze indexed part-selects yet.
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "hierarchy::test_dynamic_minus_colon_output_port_rmw";
 }
 
 fn test_dynamic_step_output_port_rmw(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
     // The SV analyzer cannot analyze indexed part-selects yet.
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "hierarchy::test_dynamic_step_output_port_rmw";
 }
 

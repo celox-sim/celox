@@ -18,3 +18,13 @@ pub(super) struct PackedMember {
     offset: usize,
     r#type: Type,
 }
+
+impl PackedMember {
+    pub(in crate::ast) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(in crate::ast) fn r#type(&self) -> &Type {
+        &self.r#type
+    }
+}

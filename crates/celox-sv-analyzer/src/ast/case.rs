@@ -18,11 +18,6 @@ pub(super) fn conditional_assignments_from_case_statement(
             "casez, casex, or pattern case inside always_comb".to_string(),
         ));
     };
-    if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
-        return Err(AnalyzerError::Unsupported(
-            "casez or casex inside always_comb".to_string(),
-        ));
-    }
     let case_expr = expr_from_expression_with_types(
         &stmt.nodes.2.nodes.1.nodes.0,
         syntax_tree,
@@ -68,7 +63,11 @@ pub(super) fn conditional_assignments_from_case_statement(
                             "always_ff case item expression lowering".to_string(),
                         )
                     })?;
-                    conditions.push(case_item_condition(case_expr.clone(), expr));
+                    conditions.push(case_item_condition(
+                        case_expr.clone(),
+                        expr,
+                        case_keyword_is_wildcard(&stmt.nodes.1),
+                    ));
                 }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
                     left: Box::new(left),
@@ -193,6 +192,14 @@ pub(super) fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimension
                                 eval_ast_const_expr(&right, &packed_dimensions.const_env)
                             })
                             .is_some_and(|right| right != 0)))
+        }
+        Expr::Inside { expr, items } => {
+            expr_is_two_state(expr, packed_dimensions)
+                && items.iter().all(|item| {
+                    item.exprs()
+                        .into_iter()
+                        .all(|operand| expr_is_two_state(operand, packed_dimensions))
+                })
         }
         Expr::Mux {
             condition,

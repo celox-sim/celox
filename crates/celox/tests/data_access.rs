@@ -27,7 +27,6 @@ all_backends! {
     }
 
     fn test_multidimensional_access(sim) {
-        @ignore_on(sv);
         @case "data_access::test_multidimensional_access";
     }
 
@@ -36,12 +35,10 @@ all_backends! {
     }
 
     fn test_dynamic_slice_bullying(sim) {
-        @ignore_on(sv);
         @case "data_access::test_dynamic_slice_bullying";
     }
 
     fn test_dynamic_minus_colon_and_step_read_write(sim) {
-        @ignore_on(sv);
         @case "data_access::test_dynamic_minus_colon_and_step_read_write";
     }
 
@@ -60,7 +57,6 @@ all_backends! {
     }
 
     fn test_dynamic_index_with_bitslice(sim) {
-        @ignore_on(sv);
         @case "data_access::test_dynamic_index_with_bitslice";
     }
 
@@ -75,7 +71,6 @@ all_backends! {
     }
 
     fn test_ff_bit_select_in_generate_loop(sim) {
-        @ignore_on(sv);
         @case "data_access::test_ff_bit_select_in_generate_loop";
     }
 }
