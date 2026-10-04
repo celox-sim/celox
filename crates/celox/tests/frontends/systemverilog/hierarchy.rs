@@ -2,266 +2,35 @@ use super::*;
 
 sv_backends! {
     fn drives_omitted_and_open_child_inputs_with_z(sim) {
-        @setup {
-    let sv = r#"
-        module Child(input logic a, output logic y); assign y = (a === 1'bz); endmodule
-        module Top(output logic omitted, output logic open);
-            Child omitted_child(.y(omitted));
-            Child open_child(.a(), .y(open));
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("open_input.sv"))], "Top")
-            .four_state(true);
-
-    sim.modify(|_| {}).unwrap();
-    assert_eq!(sim.get(sim.signal("omitted")), 1u8.into());
-    assert_eq!(sim.get(sim.signal("open")), 1u8.into());
+        @case "hierarchy::drives_omitted_and_open_child_inputs_with_z";
     }
 
     fn treats_child_outputs_as_explicit_net_drivers(sim) {
-        @setup {
-    let sv = r#"
-        module Source(input logic a, output logic y); assign y = a; endmodule
-        module Sink(input logic a, output logic y); assign y = a; endmodule
-        module Top(input logic a, output logic y);
-            wire w;
-            Source source(.a(a), .y(w));
-            Sink sink(.a(w), .y(y));
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("explicit_net_driver.sv"))], "Top");
-
-    let a = sim.signal("a");
-    sim.modify(|io| io.set(a, 1u8)).unwrap();
-    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+        @case "hierarchy::treats_child_outputs_as_explicit_net_drivers";
     }
 
     fn simulates_systemverilog_named_port_hierarchy(sim) {
-        @setup {
-    let sv = r#"
-        module Xor8(input logic [7:0] a, input logic [7:0] b, output logic [7:0] y);
-            assign y = a ^ b;
-        endmodule
-
-        module Top(input logic [7:0] lhs, input logic [7:0] rhs, output logic [7:0] out);
-            Xor8 u_xor(
-                .a(lhs),
-                .b(rhs),
-                .y(out)
-            );
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("hierarchy.sv"))], "Top");
-
-    let lhs = sim.signal("lhs");
-    let rhs = sim.signal("rhs");
-    let out = sim.signal("out");
-
-    sim.modify(|io| {
-        io.set(lhs, 0xa5u8);
-        io.set(rhs, 0x3cu8);
-    })
-    .unwrap();
-
-    assert_eq!(sim.get(out), 0x99u8.into());
+        @case "hierarchy::simulates_systemverilog_named_port_hierarchy";
     }
 
     fn simulates_systemverilog_hierarchy_through_internal_signal(sim) {
-        @setup {
-    let sv = r#"
-        module Xor8(input logic [7:0] a, input logic [7:0] b, output logic [7:0] y);
-            assign y = a ^ b;
-        endmodule
-
-        module Top(input logic [7:0] lhs, input logic [7:0] rhs, output logic [7:0] out);
-            logic [7:0] rhs_tmp;
-            assign rhs_tmp = rhs;
-            Xor8 u_xor(
-                .a(lhs),
-                .b(rhs_tmp),
-                .y(out)
-            );
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("internal_hierarchy.sv"))], "Top");
-
-    let lhs = sim.signal("lhs");
-    let rhs = sim.signal("rhs");
-    let out = sim.signal("out");
-
-    sim.modify(|io| {
-        io.set(lhs, 0xf0u8);
-        io.set(rhs, 0x0fu8);
-    })
-    .unwrap();
-
-    assert_eq!(sim.get(out), 0xffu8.into());
+        @case "hierarchy::simulates_systemverilog_hierarchy_through_internal_signal";
     }
 
     fn simulates_veryl_generated_style_gray_encoder_hierarchy(sim) {
-        @setup {
-    let sv = r#"
-        module gray_encoder #(
-            parameter int unsigned WIDTH = 32
-        ) (
-            input var logic [WIDTH-1:0] i_bin,
-            output var logic [WIDTH-1:0] o_gray
-        );
-            always_comb o_gray = i_bin ^ (i_bin >> 1);
-        endmodule
-
-        module Top (
-            input  var logic [32-1:0] i_bin,
-            output var logic [32-1:0] o_gray
-        );
-            gray_encoder #(
-                .WIDTH (32)
-            ) u_enc (
-                .i_bin  (i_bin),
-                .o_gray (o_gray)
-            );
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("generated_gray_encoder.sv"))], "Top");
-
-    let i_bin = sim.signal("i_bin");
-    let o_gray = sim.signal("o_gray");
-
-    sim.modify(|io| io.set(i_bin, 0b1011_0000u32)).unwrap();
-    assert_eq!(sim.get(o_gray), 0b1110_1000u32.into());
+        @case "hierarchy::simulates_veryl_generated_style_gray_encoder_hierarchy";
     }
 
     fn simulates_parameter_specialized_systemverilog_hierarchy(sim) {
-        @setup {
-    let sv = r#"
-        module Pass #(
-            parameter int unsigned WIDTH = 1
-        ) (
-            input  logic [WIDTH-1:0] i,
-            output logic [WIDTH-1:0] o
-        );
-            assign o = i;
-        endmodule
-
-        module Top(
-            input  logic [7:0] i8,
-            input  logic [15:0] i16,
-            output logic [7:0] o8,
-            output logic [15:0] o16
-        );
-            Pass #(.WIDTH(8)) u8 (
-                .i(i8),
-                .o(o8)
-            );
-            Pass #(.WIDTH(16)) u16 (
-                .i(i16),
-                .o(o16)
-            );
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("parameterized_hierarchy.sv"))], "Top");
-
-    let i8 = sim.signal("i8");
-    let i16 = sim.signal("i16");
-    let o8 = sim.signal("o8");
-    let o16 = sim.signal("o16");
-
-    sim.modify(|io| {
-        io.set(i8, 0xa5u8);
-        io.set(i16, 0x5aa5u16);
-    })
-    .unwrap();
-
-    assert_eq!(sim.get(o8), 0xa5u8.into());
-    assert_eq!(sim.get(o16), 0x5aa5u16.into());
+        @case "hierarchy::simulates_parameter_specialized_systemverilog_hierarchy";
     }
 
     fn simulates_systemverilog_hierarchical_always_ff(sim) {
-        @setup {
-    let sv = r#"
-        module Child(input logic clk, input logic rst, input logic d, output logic q);
-            always_ff @(posedge clk, negedge rst) begin
-                if (!rst) begin
-                    q <= 1'b0;
-                end else begin
-                    q <= d;
-                end
-            end
-        endmodule
-
-        module Top(input logic clk, input logic rst, input logic d, output logic q);
-            Child u(.clk(clk), .rst(rst), .d(d), .q(q));
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("hierarchical_ff.sv"))], "Top");
-
-    let clk = sim.event("clk");
-    let rst = sim.signal("rst");
-    let d = sim.signal("d");
-    let q = sim.signal("q");
-
-    sim.modify(|io| {
-        io.set(rst, 0u8);
-        io.set(d, 1u8);
-    }).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 0u8.into());
-
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 1u8.into());
+        @case "hierarchy::simulates_systemverilog_hierarchical_always_ff";
     }
 
     fn simulates_systemverilog_hierarchical_always_ff_with_constant_clear(sim) {
-        @setup {
-    let sv = r#"
-        module Child(
-            input logic clk,
-            input logic rst,
-            input logic clear,
-            input logic d,
-            output logic q
-        );
-            always_ff @(posedge clk, negedge rst) begin
-                if (!rst) begin
-                    q <= 1'b0;
-                end else if (clear) begin
-                    q <= 1'b0;
-                end else begin
-                    q <= d;
-                end
-            end
-        endmodule
-
-        module Top(input logic clk, input logic rst, input logic d, output logic q);
-            Child u(.clk(clk), .rst(rst), .clear(1'b0), .d(d), .q(q));
-        endmodule
-    "#;
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("hierarchical_ff_constant_clear.sv"))], "Top");
-
-    let clk = sim.event("clk");
-    let rst = sim.signal("rst");
-    let d = sim.signal("d");
-    let q = sim.signal("q");
-
-    sim.modify(|io| {
-        io.set(rst, 0u8);
-        io.set(d, 1u8);
-    }).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 0u8.into());
-
-    sim.modify(|io| io.set(rst, 1u8)).unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 1u8.into());
+        @case "hierarchy::simulates_systemverilog_hierarchical_always_ff_with_constant_clear";
     }
 
     fn simulates_veryl_generated_countones_sv(sim) {

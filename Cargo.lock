@@ -431,7 +431,7 @@ dependencies = [
  "celox-sir-opt",
  "celox-slt",
  "celox-state-layout",
- "celox-test-suite-veryl",
+ "celox-test-suite",
  "celox-testbench",
  "clap",
  "codspeed-criterion-compat",
@@ -788,9 +788,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "celox-test-suite-veryl"
+name = "celox-test-suite"
 version = "0.10.1"
 dependencies = [
+ "celox-sv-analyzer",
  "clap",
  "num-bigint",
  "num-traits",

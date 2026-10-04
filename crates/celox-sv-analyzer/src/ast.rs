@@ -527,6 +527,26 @@ impl Module {
                 name: instance.name().to_string(),
             });
         }
+        // A generate block shares its name space with the module's other
+        // declarations (IEEE 1800-2023 27.6, 23.9).
+        let scope_heads: HashSet<&str> = signals
+            .iter()
+            .map(Signal::name)
+            .chain(instances.iter().map(Instance::name))
+            .filter_map(generate_scope_head)
+            .collect();
+        if let Some(conflict) = ports
+            .iter()
+            .map(Port::name)
+            .chain(signals.iter().map(Signal::name))
+            .chain(instances.iter().map(Instance::name))
+            .find(|conflict| scope_heads.contains(conflict))
+        {
+            return Err(AnalyzerError::DuplicateGenerateScope {
+                module: name,
+                name: conflict.to_string(),
+            });
+        }
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let mut parameter_values = parameter_value_env(&parameters, &const_env);
         for (name, value) in &enum_constants.exprs {
@@ -1588,3 +1608,15 @@ impl DerefMut for PackedDimensions {
 }
 
 const MAX_DYNAMIC_SELECT_EXPANSION: u128 = 4_096;
+
+/// The outermost generate scope of a scoped name such as `g.x` or `g[0].x`,
+/// or `None` for a name declared directly in the module. An escaped scope
+/// component ends at its terminating space.
+fn generate_scope_head(name: &str) -> Option<&str> {
+    let end = if name.starts_with('\\') {
+        name.find(' ')? + 1
+    } else {
+        name.find(['.', '['])?
+    };
+    Some(&name[..end])
+}

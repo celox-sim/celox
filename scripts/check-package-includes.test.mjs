@@ -24,7 +24,7 @@ test("accepts packaged local paths with all macro delimiters and raw strings", (
 test("rejects sibling-crate paths including the release regression", (t) => {
   const root = fixture(t);
   for (const macro of ["include_str", "include_bytes", "include"]) {
-    const errors = checkSource(`${macro}!(\n"../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_shared_clock.veryl"\n)`, "tests/runtime.rs", root, new Set());
+    const errors = checkSource(`${macro}!(\n"../../celox-test-suite/fixtures/testbench/concurrent_initial_shared_clock.veryl"\n)`, "tests/runtime.rs", root, new Set());
     assert.match(errors.join("\n"), /runtime.rs:1:.*path escapes the crate/);
   }
 });
