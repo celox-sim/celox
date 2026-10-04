@@ -35,12 +35,10 @@ all_backends! {
     }
 
     fn test_dynamic_slice_bullying(sim) {
-        @ignore_on(sv);
         @case "data_access::test_dynamic_slice_bullying";
     }
 
     fn test_dynamic_minus_colon_and_step_read_write(sim) {
-        @ignore_on(sv);
         @case "data_access::test_dynamic_minus_colon_and_step_read_write";
     }
 

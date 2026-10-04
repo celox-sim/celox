@@ -206,7 +206,6 @@ assign x0 = x[0];
     }
 
     fn test_concat_with_dynamic_index_runtime(sim) {
-        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 a: input logic<4>,

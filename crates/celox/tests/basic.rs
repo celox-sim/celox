@@ -350,7 +350,6 @@ module Top (
     }
 
     fn test_always_comb_blocking_assignment_chain(sim) {
-        @ignore_on(sv);
         @case "basic::test_always_comb_blocking_assignment_chain";
     }
 }

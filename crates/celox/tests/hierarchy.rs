@@ -171,7 +171,7 @@ fn test_dynamic_output_port_rmw_preserves_unselected_bits(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
     // The SV analyzer stops at unsupported indexed part-select, before checking
     // the output destination. That limitation is not a successful rejection.
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits";
 }
 
@@ -184,14 +184,14 @@ fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
 fn test_dynamic_minus_colon_output_port_rmw(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
     // The SV analyzer cannot analyze indexed part-selects yet.
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "hierarchy::test_dynamic_minus_colon_output_port_rmw";
 }
 
 fn test_dynamic_step_output_port_rmw(sim) {
     // Upstream veryl-simulator still accepts this invalid destination.
     // The SV analyzer cannot analyze indexed part-selects yet.
-    @ignore_on(veryl, sv);
+    @ignore_on(veryl);
     @case "hierarchy::test_dynamic_step_output_port_rmw";
 }
 

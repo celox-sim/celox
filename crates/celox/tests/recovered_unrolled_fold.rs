@@ -8,7 +8,6 @@ all_backends! {
 // Independent reductions without feedback retain their shared loop and
 // induction variable. Check both reductions across changing external inputs.
 fn recovered_independent_reductions_share_input_correctly(sim) {
-    @ignore_on(sv);
     @case "recovered_unrolled_fold::recovered_independent_reductions_share_input_correctly";
 }
 
