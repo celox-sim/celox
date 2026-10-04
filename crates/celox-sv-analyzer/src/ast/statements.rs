@@ -136,6 +136,52 @@ fn push_procedural_assignment(
     ));
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JumpKind {
+    Break,
+    Continue,
+}
+
+thread_local! {
+    /// One entry per `for` loop being unrolled: the `break` / `continue`
+    /// statements met so far, each with the condition under which it executes.
+    static LOOP_JUMPS: std::cell::RefCell<Vec<Vec<(JumpKind, Expr)>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn jump_count() -> usize {
+    LOOP_JUMPS.with(|jumps| jumps.borrow().last().map_or(0, Vec::len))
+}
+
+/// The conditions of the jumps recorded since `start` in the innermost loop.
+fn jump_conditions_since(start: usize) -> Vec<Expr> {
+    LOOP_JUMPS.with(|jumps| {
+        jumps
+            .borrow()
+            .last()
+            .map(|jumps| jumps[start..].iter().map(|(_, c)| c.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// `condition` and "none of `jumps` was taken".
+fn without_jumps(condition: Option<Expr>, jumps: Vec<Expr>) -> Option<Expr> {
+    let Some(taken) = jumps.into_iter().reduce(|left, right| Expr::Binary {
+        left: Box::new(left),
+        op: BinaryOp::LogicOr,
+        right: Box::new(right),
+    }) else {
+        return condition;
+    };
+    combine_expr_conditions(
+        condition,
+        Expr::Unary {
+            op: UnaryOp::LogicNot,
+            expr: Box::new(taken),
+        },
+    )
+}
+
 pub(super) fn conditional_assignments_from_statement(
     stmt: &sv_parser::Statement,
     condition: Option<Expr>,
@@ -211,6 +257,30 @@ pub(super) fn conditional_assignments_from_statement(
             })?;
             push_procedural_assignment(assignments, condition, lhs, rhs, packed_dimensions);
         }
+        sv_parser::StatementItem::JumpStatement(jump) => {
+            let kind = match &**jump {
+                sv_parser::JumpStatement::Break(_) => JumpKind::Break,
+                sv_parser::JumpStatement::Continue(_) => JumpKind::Continue,
+                sv_parser::JumpStatement::Return(_) => {
+                    return Err(AnalyzerError::Unsupported(
+                        "return outside a function".to_string(),
+                    ));
+                }
+            };
+            let taken = condition
+                .clone()
+                .unwrap_or_else(|| Expr::Literal("1'b1".to_string()));
+            LOOP_JUMPS
+                .with(|jumps| {
+                    jumps
+                        .borrow_mut()
+                        .last_mut()
+                        .map(|jumps| jumps.push((kind, taken)))
+                })
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("break or continue outside a loop".to_string())
+                })?;
+        }
         sv_parser::StatementItem::SubroutineCallStatement(call) => {
             for (lhs, rhs) in
                 function_call_output_assignments(call, syntax_tree, packed_dimensions)?
@@ -225,7 +295,11 @@ pub(super) fn conditional_assignments_from_statement(
             }
         }
         sv_parser::StatementItem::SeqBlock(block) => {
+            // After a `break` or `continue` is taken, the rest of the block
+            // does not run.
+            let mut condition = condition;
             for stmt in &block.nodes.3 {
+                let jumps_before = jump_count();
                 conditional_assignments_from_statement_or_null(
                     stmt,
                     condition.clone(),
@@ -236,6 +310,7 @@ pub(super) fn conditional_assignments_from_statement(
                     packed_dimensions,
                     assignments,
                 )?;
+                condition = without_jumps(condition, jump_conditions_since(jumps_before));
             }
         }
         sv_parser::StatementItem::ConditionalStatement(stmt) => {
@@ -286,48 +361,80 @@ pub(super) fn conditional_assignments_from_statement(
             } else {
                 values.into_iter().map(|value| (value, true)).collect()
             };
-            for (value, reachable) in iterations {
-                let mut loop_env = const_env.clone();
-                loop_env.insert(name.clone(), value);
-                let mut loop_packed_dimensions = packed_dimensions.clone();
-                let mut loop_const_env = loop_env.clone();
-                insert_parameter_type_markers(
-                    &mut loop_const_env,
-                    &name,
-                    ExprType {
-                        width: 32,
-                        signed: true,
-                    },
-                );
-                loop_packed_dimensions.const_env = loop_const_env.clone();
-                let start = assignments.len();
-                let iteration_condition = if reachable {
-                    condition.clone()
-                } else {
-                    combine_expr_conditions(condition.clone(), Expr::Literal("1'b0".to_string()))
-                };
-                conditional_assignments_from_statement_or_null(
-                    body,
-                    iteration_condition,
-                    exhaustive_fallback && reachable,
-                    retain_unreachable_writes,
-                    syntax_tree,
-                    &loop_const_env,
-                    &loop_packed_dimensions,
-                    assignments,
-                )?;
-                for assignment in &mut assignments[start..] {
-                    assignment.condition = assignment.condition.take().map(|condition| {
-                        substitute_expr_constants_with_parameter_literals(
-                            condition,
-                            &loop_env,
-                            &HashMap::default(),
+            LOOP_JUMPS.with(|jumps| jumps.borrow_mut().push(Vec::new()));
+            // Conditions under which an earlier iteration executed `break`.
+            let mut broken: Vec<Expr> = Vec::new();
+            let result = (|| -> Result<(), AnalyzerError> {
+                for (value, reachable) in iterations {
+                    let mut loop_env = const_env.clone();
+                    loop_env.insert(name.clone(), value);
+                    let mut loop_packed_dimensions = packed_dimensions.clone();
+                    let mut loop_const_env = loop_env.clone();
+                    insert_parameter_type_markers(
+                        &mut loop_const_env,
+                        &name,
+                        ExprType {
+                            width: 32,
+                            signed: true,
+                        },
+                    );
+                    loop_packed_dimensions.const_env = loop_const_env.clone();
+                    let start = assignments.len();
+                    let iteration_condition = if reachable {
+                        without_jumps(condition.clone(), broken.clone())
+                    } else {
+                        combine_expr_conditions(
+                            condition.clone(),
+                            Expr::Literal("1'b0".to_string()),
                         )
+                    };
+                    let jumps_before = jump_count();
+                    conditional_assignments_from_statement_or_null(
+                        body,
+                        iteration_condition,
+                        exhaustive_fallback && reachable,
+                        retain_unreachable_writes,
+                        syntax_tree,
+                        &loop_const_env,
+                        &loop_packed_dimensions,
+                        assignments,
+                    )?;
+                    for assignment in &mut assignments[start..] {
+                        assignment.condition = assignment.condition.take().map(|condition| {
+                            substitute_expr_constants_with_parameter_literals(
+                                condition,
+                                &loop_env,
+                                &HashMap::default(),
+                            )
+                        });
+                        assignment.assignment = substitute_assignment_constants(
+                            assignment.assignment.clone(),
+                            &loop_env,
+                        );
+                    }
+                    // A `break` ends every later iteration; a `continue` only the
+                    // rest of this one. Fix the loop index in the condition now.
+                    let iteration_jumps = LOOP_JUMPS.with(|jumps| {
+                        jumps
+                            .borrow_mut()
+                            .last_mut()
+                            .map(|jumps| jumps.split_off(jumps_before))
+                            .unwrap_or_default()
                     });
-                    assignment.assignment =
-                        substitute_assignment_constants(assignment.assignment.clone(), &loop_env);
+                    for (kind, taken) in iteration_jumps {
+                        if kind == JumpKind::Break {
+                            broken.push(substitute_expr_constants_with_parameter_literals(
+                                taken,
+                                &loop_env,
+                                &HashMap::default(),
+                            ));
+                        }
+                    }
                 }
-            }
+                Ok(())
+            })();
+            LOOP_JUMPS.with(|jumps| jumps.borrow_mut().pop());
+            result?;
         }
         _ => {
             return Err(AnalyzerError::Unsupported(

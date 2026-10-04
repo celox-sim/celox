@@ -351,6 +351,94 @@ sv_backends! {
         }
     }
 
+    fn tasks_without_timing_write_their_outputs(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic clk, input logic [7:0] a,
+                           output logic [7:0] sum, mask, q);
+                    task automatic stats(input logic [7:0] x, output logic [7:0] s, m);
+                        logic [7:0] t;
+                        t = x + 3;
+                        s = t * 2;
+                        m = t & 8'h0f;
+                    endtask
+                    task automatic load(input logic [7:0] x, output logic [7:0] z);
+                        z = ~x;
+                    endtask
+                    always_comb stats(a, sum, mask);
+                    always_ff @(posedge clk) load(a, q);
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("tasks.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u8, 1, 100, 255] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            let t = value.wrapping_add(3);
+            assert_eq!(sim.get(sim.signal("sum")), t.wrapping_mul(2).into());
+            assert_eq!(sim.get(sim.signal("mask")), (t & 0xf).into());
+            sim.tick(sim.event("clk")).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), (!value).into());
+        }
+    }
+
+    fn break_and_continue_end_unrolled_loop_iterations(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic clk, input logic [8:0] a, output logic [7:0] first,
+                           even, lead, rows, q);
+                    always_comb begin
+                        first = 8'hff;
+                        for (int i = 0; i < 8; i++) begin
+                            if (a[i]) begin first = i[7:0]; break; end
+                        end
+                        even = 0;
+                        for (int i = 0; i < 8; i++) begin
+                            if (i[0]) continue;
+                            even = even + a[i];
+                        end
+                        lead = 0;
+                        for (int i = 0; i < 8; i++) begin
+                            if (a[i]) break;
+                            lead = lead + 1;
+                        end
+                        rows = 0;
+                        for (int r = 0; r < 3; r++) begin
+                            for (int c = 0; c < 3; c++) begin
+                                if (!a[r*3+c]) break;
+                                rows = rows + 1;
+                            end
+                        end
+                    end
+                    always_ff @(posedge clk) begin
+                        q <= 8'hff;
+                        for (int i = 0; i < 8; i++) begin
+                            if (a[i]) begin q <= i[7:0]; break; end
+                        end
+                    end
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("jumps.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u16, 0x1ff, 0x0a8, 0x005, 0x080, 0x1b7] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            let bit = |i: u32| (value >> i) & 1;
+            let first = (0..8).find(|i| bit(*i) != 0).map_or(0xff, |i| i as u8);
+            let even = (0..8).step_by(2).map(bit).sum::<u16>() as u8;
+            let lead = (0..8).take_while(|i| bit(*i) == 0).count() as u8;
+            let rows: u8 = (0..3)
+                .map(|r| (0..3).take_while(|c| bit(r * 3 + c) != 0).count() as u8)
+                .sum();
+            assert_eq!(sim.get(sim.signal("first")), first.into(), "a={value:#x}");
+            assert_eq!(sim.get(sim.signal("even")), even.into(), "a={value:#x}");
+            assert_eq!(sim.get(sim.signal("lead")), lead.into(), "a={value:#x}");
+            assert_eq!(sim.get(sim.signal("rows")), rows.into(), "a={value:#x}");
+            sim.tick(sim.event("clk")).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), first.into(), "a={value:#x}");
+        }
+    }
+
     fn block_locals_and_dependent_assignments_accumulate(sim) {
         @setup {
             let source = r#"
@@ -408,4 +496,16 @@ fn block_local_names_may_not_shadow_other_signals() {
             "{error}"
         );
     }
+}
+
+#[test]
+fn task_timing_control_is_rejected() {
+    let source = "module Top(input logic [7:0] a, output logic [7:0] y); \
+        task automatic t(input logic [7:0] x, output logic [7:0] z); #5 z = x; endtask \
+        always_comb t(a, y); endmodule";
+    let error = Simulator::from_sv_sources(vec![(source, Path::new("task_delay.sv"))], "Top")
+        .build_cranelift()
+        .expect_err("a task with a delay must be rejected")
+        .to_string();
+    assert!(error.contains("Unsupported"), "{error}");
 }

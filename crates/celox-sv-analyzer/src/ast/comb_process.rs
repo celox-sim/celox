@@ -734,6 +734,14 @@ fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), Ana
             }
             Ok(())
         }
+        sv_parser::StatementItem::JumpStatement(jump)
+            if matches!(
+                &**jump,
+                sv_parser::JumpStatement::Break(_) | sv_parser::JumpStatement::Continue(_)
+            ) =>
+        {
+            Ok(())
+        }
         // A call of a user function; its `output` arguments are lowered with
         // the statement.
         sv_parser::StatementItem::SubroutineCallStatement(call)
