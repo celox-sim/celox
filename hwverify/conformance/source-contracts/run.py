@@ -149,6 +149,10 @@ def main():
             expect(bus, 'trace_no_failure')
             if bus['structural']['status'] != 'verified' or bus['independent']['status'] != 'sampled_prefix_passed': raise RuntimeError('registered wait witness not independently legal')
             passed(channel + '_registered_ready_wait', ordinary_axi_checks='passed', structural='verified', application_launch='violated', ready_low_cover={'edge': 1, 'valid_after': {v: trace[1]['state_after'][v]['value'] for v in valids}})
+        from reset_outputs import run as reset_output_controls
+        results.extend(reset_output_controls(root, good, cli, axi, args.out))
+        from endpoint_bindings import run as endpoint_controls
+        results.extend(endpoint_controls(root, good, cli, args.out))
     replay.write(args.out / 'results.json', results); print(json.dumps({'status': 'passed', 'cases': len(results), 'known_unknowns': [r for r in results if r['status'] == 'unknown']}))
 
 if __name__ == '__main__': main()

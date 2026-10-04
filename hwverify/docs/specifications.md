@@ -724,7 +724,18 @@ and native literals/operators. The obligations are:
 No empty bypass or eventual-response requirement is introduced. Inactive slot bits
 are unconstrained. The source adapter requires explicit actual state mappings and
 actual output ports; it rejects input-dependent output abstractions, wrong widths,
-duplicate slot aliases, and response functions referring to DUT state. A same-width
+duplicate slot aliases, and response functions referring to DUT state. Each bound
+output is also lowered separately with reset asserted. The native typed evaluator
+checks that its settled reset value equals the normal state-only abstraction
+applied to reset-established registers. Input-dependent or differing reset values
+are rejected as unsupported bindings, before any obligation can pass. This does
+not impose an AXI reset value on payload/READY: it rejects a phase-dependent output
+that the single state-only binding cannot represent. Equal reset values, including
+compatible reset muxes, remain supported. `reset-output-bindings.json`,
+`reset-output-model.json` and `reset-output-check.json` retain this evidence;
+concrete replay additionally compares the claimed physical outputs with Celox's
+post-reset-edge sample in `reset-output-comparison.json`. No reset waveform or
+asynchronous timing claim is added. A same-width
 wrong slot mapping is still a possible author error: checked storage transitions,
 not the field name, provide its behavioral evidence. Conclude correspondence only
 when **all** obligations succeed for the same source/binding identity and scope.
@@ -749,7 +760,10 @@ fairness, general progress, or independence from all historical READY values.
 The application defines offer/completion meaning. Configuring a READY-gated offer
 would not justify that meaning and must not be presented as proof of AXI causality.
 The read/write examples bind real `start_read`/`start_write` inputs, busy registers,
-and corresponding VALID outputs; mutants gate initiation on READY. Actual READY-low
+and corresponding VALID outputs; mutants gate initiation on READY. VALID aliases
+must resolve to distinct physical output ports: two alias names for one pin cannot
+establish two offers. Distinct physical pins with equal normal expressions remain
+supported; expression equality alone is not an endpoint collision. Actual READY-low
 covers demonstrate available work and detect the registered wait even though ordinary
 sampled AXI and source combinational-path checks pass. This first template does not
 claim simultaneous busy-slot replacement or arbitrary pipeline offer behavior.
@@ -783,7 +797,8 @@ reset epochs remain rejected by the source replay route.
 `conformance/source-contracts/run.py` tests independent depth-10 FIFO searches,
 read/write offer searches, two outstanding requests, stalls, repeated addresses,
 simultaneous events, full-queue backpressure, reset polarity, mutations, incorrect
-bindings, and stale witnesses. Its separate complete AXI depth-10 search currently
+bindings, reset-phase mismatches on VALID/data/READY under both polarities, physical
+endpoint aliases, and stale witnesses. Its separate complete AXI depth-10 search currently
 returns `Unknown` from the finite solver term-depth budget; this is retained in
 `results.json`, not counted as a protocol proof. Actual scenario traces independently
 pass the ordinary AXI checks. Other example/test results do not discharge this limit.

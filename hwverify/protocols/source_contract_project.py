@@ -23,6 +23,11 @@ def prepare(path, out, obligation):
     project = replay.prepare_project(replay.project_file(path.resolve().parent, config['project']), out)
     if project['goal'] != 'safety': raise ValueError('source contract requires safety project')
     doc = project['document']; imp = doc['implementation']; contract = config['contract']; manifest = project['manifest']
+    # Native state bindings have no phase-dependent output expression. Validate
+    # their settled reset values against a separate reset=True source lowering.
+    reset_lift = replay.invoke([replay.LIFTER, out / 'compiled.json', out / 'reset-bindings.json', '--inline'])
+    reset_impl = {'wires': reset_lift['wires'], 'reset': imp['reset']}
+    reset_outputs = {}
     def state(alias, ty):
         if not isinstance(alias, str) or imp['state'].get(alias) != ty: raise ValueError('missing/wrong-width source state: ' + str(alias))
         return 's.' + alias
@@ -41,6 +46,14 @@ def prepare(path, out, obligation):
             if isinstance(v, list):
                 for x in v[1:]: state_only(x)
         state_only(term)
+        normal_at_reset = expand(term, imp, reset=True)
+        actual_reset = expand(reset_lift['outputs'][alias], reset_impl, reset=True)
+        def closed(v):
+            if isinstance(v, str): raise ValueError('unsupported input-dependent reset output binding: ' + alias)
+            if isinstance(v, list):
+                for x in v[1:]: closed(x)
+        closed(normal_at_reset); closed(actual_reset)
+        reset_outputs[alias] = {'type': ty, 'normal': normal_at_reset, 'actual': actual_reset, 'port': entry['signal']}
         return term
     if contract['kind'] == 'fifo_read':
         replay.exact(contract, ['kind', 'name', 'capacity', 'request_width', 'response_width', 'count', 'slots', 'request_valid', 'request_payload', 'request_ready', 'response_valid', 'response_data', 'response_ready', 'response_function'], 'FIFO source contract')
@@ -61,6 +74,10 @@ def prepare(path, out, obligation):
         replay.exact(contract, ['kind', 'name', 'busy', 'valids', 'offer', 'completion_valid', 'completion_ready'], 'offer source contract')
         if not isinstance(contract['valids'], list) or not contract['valids'] or len(set(contract['valids'])) != len(contract['valids']): raise ValueError('map distinct offered VALID outputs')
         bindings = {'busy': state(contract['busy'], 'bool'), **{'valid_' + str(i): output(alias, 'bool') for i, alias in enumerate(contract['valids'])}}
+        physical_valids = [manifest['signals'][alias]['signal'] for alias in contract['valids']]
+        if len(set(physical_valids)) != len(physical_valids):
+            raise ValueError('offered VALID aliases must resolve to distinct physical output ports')
+        # Equal normal expressions on distinct physical ports are allowed.
         # Completion output is state-only and is not an assumed environment guarantee.
         complete = ['and', inp(contract['completion_valid'], 'bool'), output(contract['completion_ready'], 'bool')]
         documents = idle_offer_step(doc, contract['name'], bindings, inp(contract['offer'], 'bool'), complete)
@@ -68,6 +85,7 @@ def prepare(path, out, obligation):
                     'limits': 'one-step application contract, not AXI normative latency or global READY-history noninterference; application offer meaning is declared'}
     else: raise ValueError('unsupported source contract kind')
     if obligation not in documents: raise ValueError('choose obligation: ' + ', '.join(documents))
+    project['reset_output_binding'] = validate_reset_outputs(reset_outputs, out)
     project['document'] = documents[obligation]
     project['identity'].update({'source_contract_sha256': replay.sha(replay.canonical(config)),
                                 'source_contract_library_sha256': replay.sha((ROOT / 'protocols/source_contracts.py').read_bytes()),
@@ -77,10 +95,59 @@ def prepare(path, out, obligation):
                                 'source_project_driver_sha256': replay.sha(Path(replay.__file__).read_bytes()),
                                 'obligation_sha256': replay.sha(obligation.encode()),
                                 'document_sha256': replay.sha(replay.canonical(project['document']))})
-    project['contract_evidence'] = {**evidence, 'checked_scope': 'original specification plus selected obligation; a failure may originate in either', 'obligation': obligation, 'independent_obligations': list(documents), 'binding': contract}
+    project['contract_evidence'] = {**evidence, 'reset_output_binding': project['reset_output_binding'], 'checked_scope': 'original specification plus selected obligation; a failure may originate in either', 'obligation': obligation, 'independent_obligations': list(documents), 'binding': contract}
     replay.write(out / 'model.json', project['document']); replay.write(out / 'project-identity.json', project['identity'])
     replay.write(out / 'contract-evidence.json', project['contract_evidence'])
     return project
+
+
+def validate_reset_outputs(outputs, out):
+    """Use the native typed evaluator, not Python expression equivalence rules.
+
+    Only closed settled reset values are admitted. Different reset/normal values
+    cannot be represented by a single state-only binding, even when the differing
+    payload is irrelevant to a particular protocol rule. Reject rather than claim
+    an initialization property about a substituted output.
+    """
+    state = {}; values = {}; checks = []
+    for index, entry in enumerate(outputs.values()):
+        for phase in ('normal', 'actual'):
+            name = phase + '_' + str(index); state[name] = entry['type']; values[name] = entry[phase]
+        checks.append(['eq', 's.normal_' + str(index), 's.actual_' + str(index)])
+    predicate = True
+    for check in checks: predicate = ['and', predicate, check]
+    document = {'version': 3, 'kind': 'specification', 'name': 'Source output reset-phase binding',
+                'inputs': {'rst': 'bool'}, 'observations': {}, 'operations': {'tick': {}},
+                'components': {'ResetBinding': {'state': {'matches': 'bool'}, 'init': 's.matches', 'invariant': True, 'steps': {'tick': True}, 'examples': {}}},
+                'compositions': {'ResetChecked': {'members': ['ResetBinding'], 'examples': {}}},
+                'implementation': {'composition': 'ResetChecked', 'reset_input': 'rst', 'state': state, 'reset': values,
+                                   'next': {name: 's.' + name for name in state}, 'wires': {}, 'operations': {'tick': True},
+                                   'binding': {'states': {'ResetBinding': {'matches': predicate}}, 'observations': {}}}}
+    replay.write(out / 'reset-output-bindings.json', outputs)
+    replay.write(out / 'reset-output-model.json', document)
+    checked = replay.core(document, 'check_stimulus', goal='safety', inputs=[{'rst': True}])
+    replay.write(out / 'reset-output-check.json', checked)
+    after = checked['trace'][0]['state_after']
+    if checked['status'] != 'trace_no_failure':
+        mismatches = [alias for index, alias in enumerate(outputs) if after['normal_' + str(index)]['value'] != after['actual_' + str(index)]['value']]
+        raise ValueError('unsupported reset-dependent output binding: ' + ', '.join(mismatches) + '; normal state abstraction differs from actual reset lowering')
+    return {'status': 'checked_against_separate_reset_lowering', 'scope': 'settled post-reset-edge values only; no waveform or asynchronous timing claim',
+            'outputs': {alias: {'port': entry['port'], 'type': entry['type'], 'value': after['actual_' + str(index)]['value']}
+                        for index, (alias, entry) in enumerate(outputs.items())}}
+
+
+def simulate(project, inputs, out):
+    result = replay.simulate(project, inputs, out)
+    actual = replay.load_json(out / 'simulation.json')['trace'][0]['after']
+    for alias, entry in project['reset_output_binding']['outputs'].items():
+        if actual.get(entry['port']) != str(int(entry['value'])):
+            comparison = {'status': 'simulator_divergence', 'edge': 0, 'phase': 'after', 'signal': entry['port'], 'alias': alias,
+                          'reason': 'reset output differs from separately validated source binding'}
+            replay.write(out / 'comparison.json', comparison)
+            raise replay.SimulationDivergence(json.dumps(comparison))
+    replay.write(out / 'reset-output-comparison.json', {'status': 'simulation_matches_reset_output_binding', 'edge': 0,
+                                                     'outputs': project['reset_output_binding']['outputs']})
+    return result
 
 
 def main():
@@ -100,7 +167,7 @@ def main():
             if checked['status'] == 'reset_reachable_failure':
                 replay.core(project['document'], 'replay', witness=checked['witness'])
                 inputs = [f['inputs'] for f in checked['witness']['trace']]
-                if replay.simulate(project, inputs, args.out)[0] != 'reset_reachable_failure': raise ValueError('failure did not reproduce')
+                if simulate(project, inputs, args.out)[0] != 'reset_reachable_failure': raise ValueError('failure did not reproduce')
                 result['simulation'] = 'simulation_matches_validated_trace'
                 if args.regression:
                     saved = {'version': 2, 'project': project['name'], 'goal': project['goal'], 'depth': project['depth'], 'identity': project['identity'], 'inputs': inputs}
@@ -112,7 +179,7 @@ def main():
             else:
                 if args.inputs is None: raise ValueError('stimulus requires --inputs')
                 inputs = replay.load_json(args.inputs)
-            result['status'], _ = replay.simulate(project, inputs, args.out)
+            result['status'], _ = simulate(project, inputs, args.out)
             result['simulation'] = 'simulation_matches_validated_trace'
             if args.mode == 'replay' and result['status'] != 'reset_reachable_failure': raise ValueError('saved failure did not reproduce')
         replay.write(args.out / 'result.json', result); print(json.dumps(result))
