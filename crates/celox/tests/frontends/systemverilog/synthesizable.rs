@@ -266,6 +266,40 @@ sv_backends! {
         }
     }
 
+    fn struct_assignment_patterns_follow_the_target_layout(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic clk, input logic [7:0] a, output logic [11:0] named,
+                           output logic [11:0] positional, output logic [11:0] filled,
+                           output logic [11:0] registered);
+                    typedef struct packed { logic [3:0] p; logic q; logic [6:0] r; } t_t;
+                    t_t from_assign, from_comb, from_default, in_ff;
+                    assign from_assign = '{p: a[3:0], q: a[7], r: a[6:0]};
+                    always_comb from_comb = '{a[3:0], a[7], a[6:0]};
+                    always_comb from_default = '{q: 1'b1, default: '0};
+                    always_ff @(posedge clk) in_ff <= '{r: a[6:0], q: a[0], p: a[7:4]};
+                    assign named = from_assign;
+                    assign positional = from_comb;
+                    assign filled = from_default;
+                    assign registered = in_ff;
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("struct_patterns.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u8, 0xd5, 0x2a, 0xff] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            let low = u16::from(value & 0x7f);
+            let expected = u16::from(value & 0xf) << 8 | u16::from(value >> 7) << 7 | low;
+            assert_eq!(sim.get(sim.signal("named")), expected.into(), "a={value:#x}");
+            assert_eq!(sim.get(sim.signal("positional")), expected.into(), "a={value:#x}");
+            assert_eq!(sim.get(sim.signal("filled")), 0x080u16.into());
+            sim.tick(sim.event("clk")).unwrap();
+            let registered = u16::from(value >> 4) << 8 | u16::from(value & 1) << 7 | low;
+            assert_eq!(sim.get(sim.signal("registered")), registered.into(), "a={value:#x}");
+        }
+    }
+
     fn block_locals_and_dependent_assignments_accumulate(sim) {
         @setup {
             let source = r#"

@@ -67,11 +67,15 @@ pub(super) fn conditional_assignments_from_statement(
             let lowered = match &assignment.0 {
                 sv_parser::BlockingAssignment::Variable(assignment) => {
                     variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
-                        .zip(expr_from_expression_with_types(
-                            &assignment.nodes.3,
-                            syntax_tree,
-                            packed_dimensions,
-                        ))
+                        .and_then(|lhs| {
+                            let rhs = expr_from_expression_for_lvalue(
+                                &assignment.nodes.3,
+                                &lhs,
+                                syntax_tree,
+                                packed_dimensions,
+                            )?;
+                            Some((lhs, rhs))
+                        })
                 }
                 sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
                     let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
@@ -80,11 +84,14 @@ pub(super) fn conditional_assignments_from_statement(
                         syntax_tree,
                         packed_dimensions,
                     );
-                    let rhs = expr_from_expression_with_types(
-                        &assignment.nodes.2,
-                        syntax_tree,
-                        packed_dimensions,
-                    );
+                    let rhs = lhs.as_ref().and_then(|lhs| {
+                        expr_from_expression_for_lvalue(
+                            &assignment.nodes.2,
+                            lhs,
+                            syntax_tree,
+                            packed_dimensions,
+                        )
+                    });
                     match (lhs, rhs, op) {
                         (Some(lhs), Some(rhs), Some("=")) => Some((lhs, rhs)),
                         (Some(lhs), Some(rhs), Some(op)) => {
@@ -109,8 +116,9 @@ pub(super) fn conditional_assignments_from_statement(
                     .ok_or_else(|| {
                         AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
                     })?;
-            let rhs = expr_from_expression_with_types(
+            let rhs = expr_from_expression_for_lvalue(
                 &assignment.0.nodes.3,
+                &lhs,
                 syntax_tree,
                 packed_dimensions,
             )

@@ -66,6 +66,115 @@ fn expr_from_expression_with_types_raw(
     }
 }
 
+/// Lower the right-hand side of an assignment to `lhs`. An assignment pattern
+/// (`'{a, b}`, `'{x: a, default: b}`) takes its shape from the target.
+pub(super) fn expr_from_expression_for_lvalue(
+    expr: &sv_parser::Expression,
+    lhs: &LValue,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    if let sv_parser::Expression::Primary(primary) = expr
+        && let sv_parser::Primary::AssignmentPatternExpression(pattern) = &**primary
+    {
+        return expr_from_assignment_pattern(&pattern.nodes.1, lhs, syntax_tree, packed_dimensions);
+    }
+    expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+}
+
+/// An assignment pattern for a packed structure (its members in declaration
+/// order, the first being the most significant) or a `default` fill.
+fn expr_from_assignment_pattern(
+    pattern: &sv_parser::AssignmentPattern,
+    lhs: &LValue,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let LValue::Ident(name) = lhs else {
+        return None;
+    };
+    let members = &packed_dimensions.get(name)?.members;
+    let lower = |expr: &sv_parser::Expression| {
+        expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+    };
+    // The expression assigned to each member, in declaration order.
+    let values: Vec<&sv_parser::Expression> = match pattern {
+        sv_parser::AssignmentPattern::List(list) => {
+            let values = list.nodes.0.nodes.1.contents();
+            if members.is_empty() || values.len() != members.len() {
+                return None;
+            }
+            values
+        }
+        sv_parser::AssignmentPattern::Structure(structure) => {
+            let items = structure.nodes.0.nodes.1.contents();
+            let mut default = None;
+            let mut named: Vec<(String, &sv_parser::Expression)> = Vec::new();
+            for (key, _, value) in items {
+                match key {
+                    sv_parser::StructurePatternKey::MemberIdentifier(member) => named.push((
+                        identifier_text(RefNode::MemberIdentifier(member), syntax_tree)?,
+                        value,
+                    )),
+                    sv_parser::StructurePatternKey::AssignmentPatternKey(key) => {
+                        let sv_parser::AssignmentPatternKey::Default(_) = &**key else {
+                            return None;
+                        };
+                        default = Some(value);
+                    }
+                }
+            }
+            if members.is_empty() {
+                // `'{default: v}` fills a vector.
+                return match (named.is_empty(), default) {
+                    (true, Some(value)) => lower(value),
+                    _ => None,
+                };
+            }
+            if named
+                .iter()
+                .any(|(name, _)| !members.iter().any(|member| member.name() == name))
+            {
+                return None;
+            }
+            members
+                .iter()
+                .map(|member| {
+                    named
+                        .iter()
+                        .find(|(name, _)| name == member.name())
+                        .map(|(_, value)| *value)
+                        .or(default)
+                })
+                .collect::<Option<Vec<_>>>()?
+        }
+        _ => return None,
+    };
+    let parts = members
+        .iter()
+        .zip(values)
+        .map(|(member, value)| {
+            let width = expr_type_from_type(member.r#type(), &packed_dimensions.const_env)?.width;
+            let value = lower(value)?;
+            let signed = expr_signedness(
+                &value,
+                &packed_dimensions.expression_signedness,
+                &packed_dimensions.functions,
+            )
+            .unwrap_or(false);
+            Some(Expr::Resize {
+                expr: Box::new(value),
+                width,
+                signed,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(match <[Expr; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => Expr::Concat(parts),
+    })
+}
+
 /// `x inside {a, [lo:hi], ...}`: kept as an `Inside` expression, so that its
 /// operands and its matching rules stay visible to later stages.
 fn expr_from_inside_expression(

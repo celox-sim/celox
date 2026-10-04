@@ -94,8 +94,9 @@ use dimensions::{
     variable_signed_marker, variable_size_function_width, variable_size_marker,
 };
 use expressions::{
-    expr_from_expression, expr_from_expression_with_types, expr_from_function_subroutine_call,
-    expr_from_primary, expression_is_grouped, guard_zero_divisions,
+    expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
+    expr_from_function_subroutine_call, expr_from_primary, expression_is_grouped,
+    guard_zero_divisions,
 };
 use ff_process::ff_processes_from_module_node;
 use functions::{

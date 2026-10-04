@@ -200,8 +200,9 @@ fn assignments_from_continuous_assign(
                     .ok_or_else(|| {
                         AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
                     })?;
-                let rhs = expr_from_expression_with_types(
+                let rhs = expr_from_expression_for_lvalue(
                     &assignment.nodes.2,
+                    &lhs,
                     syntax_tree,
                     packed_dimensions,
                 )
@@ -235,8 +236,9 @@ fn assignments_from_continuous_assign(
                         .ok_or_else(|| {
                             AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
                         })?;
-                let rhs = expr_from_expression_with_types(
+                let rhs = expr_from_expression_for_lvalue(
                     &assignment.nodes.2,
+                    &lhs,
                     syntax_tree,
                     packed_dimensions,
                 )
