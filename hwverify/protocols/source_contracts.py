@@ -92,3 +92,61 @@ def idle_offer_step(document, name, bindings, offer, completion):
         'launch': _attach(document, name + '_launch', types, bindings, all_of(inv('s.busy'), *(inv('s.' + k) for k in valids)), True,
                           ite(all_of(offer, available), launched, True)),
     }
+
+
+def memory_write(document, name, address_width, data_width, locations, initial, bindings, inputs):
+    """Single outstanding AW/W pair, explicit scalar memory and actual effect event.
+
+    Six independent obligations bind actual request slots, actual apply/applied
+    signals, memory cells and response pins. Effects have no invented deadline.
+    Byte lanes are little-endian; addresses select aligned bus-width words.
+    Unmapped addresses have no write effect and respond DECERR; reads return zero.
+    Readback is an explicit one-edge, read-before-write application contract.
+    Neither response IDs nor effect origins are assigned by a monitor.
+    """
+    if type(data_width) is not int or data_width not in (32, 64): raise ValueError('memory data width must be 32 or 64')
+    lanes = data_width // 8
+    if type(address_width) is not int or not lanes.bit_length() - 1 <= address_width <= 64: raise ValueError('unsupported memory address width')
+    if not isinstance(locations, list) or not 1 <= len(locations) <= 16 or any(type(x) is not int or not 0 <= x < 1 << address_width or x % lanes for x in locations) or len(set(locations)) != len(locations):
+        raise ValueError('memory locations must be distinct aligned addresses, 1..16 cells')
+    if not isinstance(initial, list) or len(initial) != len(locations) or any(type(x) is not int or not 0 <= x < 1 << data_width for x in initial): raise ValueError('invalid explicit initial memory')
+    if set(inputs) != {'aw_valid','aw_address','w_valid','w_data','w_strobes','b_ready','ar_valid','ar_address','r_ready'}: raise ValueError('memory input binding fields mismatch')
+    types = {k: 'bool' for k in ['aw_pending','w_pending','applied','apply','aw_ready','w_ready','b_valid','read_ready','read_valid']}
+    types.update({'address': {'bv': address_width}, 'data': {'bv': data_width}, 'strobes': {'bv': lanes},
+                  'b_response': {'bv': 2}, 'read_data': {'bv': data_width}, 'read_response': {'bv': 2},
+                  **{'cell_' + str(i): {'bv': data_width} for i in range(len(locations))}})
+    push_a = all_of(inputs['aw_valid'], 's.aw_ready'); push_w = all_of(inputs['w_valid'], 's.w_ready')
+    retire = all_of('s.b_valid', inputs['b_ready']); apply = 's.apply'
+    requests = [eq('n.' + field, any_of(all_of('s.' + field, inv(retire)), push)) for field, push in [('aw_pending', push_a), ('w_pending', push_w)]]
+    for field, push, value in [('address', push_a, inputs['aw_address']), ('data', push_w, inputs['w_data']), ('strobes', push_w, inputs['w_strobes'])]:
+        owner = 'aw_pending' if field == 'address' else 'w_pending'
+        requests.append(ite('n.' + owner, eq('n.' + field, ite(push, value, 's.' + field)), True))
+    mask = bv(data_width, 0)
+    for lane in range(lanes):
+        enabled = inv(eq(expr('band', 's.strobes', bv(lanes, 1 << lane)), bv(lanes, 0)))
+        mask = expr('bor', mask, ite(enabled, bv(data_width, 255 << (lane * 8)), bv(data_width, 0)))
+    def selected(address, location):
+        return eq(expr('band', address, bv(address_width, ((1 << address_width) - 1) & ~(lanes - 1))), bv(address_width, location))
+    write_hits = [selected('s.address', address) for address in locations]
+    effects = []; reset_cells = []
+    read_value = bv(data_width, 0)
+    for i, address in reversed(list(enumerate(locations))):
+        cell = 'cell_' + str(i)
+        merged = expr('bor', expr('band', 's.' + cell, expr('bnot', mask)), expr('band', 's.data', mask))
+        effects.append(eq('n.' + cell, ite(all_of(apply, write_hits[i]), merged, 's.' + cell)))
+        reset_cells.append(eq('s.' + cell, bv(data_width, initial[i])))
+        read_value = ite(selected(inputs['ar_address'], address), 's.' + cell, read_value)
+    response = ite('s.b_valid', all_of('s.applied','s.aw_pending','s.w_pending',eq('s.b_response', ite(any_of(*write_hits),bv(2,0),bv(2,3)))), True)
+    read_push = all_of(inputs['ar_valid'], 's.read_ready')
+    read_code = ite(any_of(*(selected(inputs['ar_address'], a) for a in locations)), bv(2,0), bv(2,3))
+    obligations = {
+        'requests': (all_of(inv('s.aw_pending'),inv('s.w_pending')), True, all_of(*requests)),
+        'capacity': (True, True, inv(any_of(all_of(push_a,'s.aw_pending',inv(retire)),all_of(push_w,'s.w_pending',inv(retire))))),
+        'effects': (all_of(*reset_cells), True, all_of(*effects)),
+        'completion': (inv('s.applied'), True, all_of(ite(apply,all_of('s.aw_pending','s.w_pending',inv('s.applied')),True),
+                            ite(retire,'s.applied',True),eq('n.applied',ite(retire,False,any_of('s.applied',apply))))),
+        'response': (inv('s.b_valid'), response, ite(all_of('s.b_valid',inv(inputs['b_ready'])),all_of('n.b_valid',eq('n.b_response','s.b_response')),True)),
+        'readback': (inv('s.read_valid'), True, all_of(eq('n.read_valid',any_of(read_push,all_of('s.read_valid',inv(inputs['r_ready'])))),
+                           eq('n.read_data',ite(read_push,read_value,'s.read_data')),eq('n.read_response',ite(read_push,read_code,'s.read_response')))),
+    }
+    return {key: _attach(document, name + '_' + key, types, bindings, *parts) for key, parts in obligations.items()}

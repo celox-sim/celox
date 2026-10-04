@@ -13,7 +13,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from protocols.axi4lite_project import replay, expand
-from protocols.source_contracts import fifo_read, idle_offer_step
+from protocols.source_contracts import fifo_read, idle_offer_step, memory_write
 
 
 def prepare(path, out, obligation):
@@ -34,12 +34,13 @@ def prepare(path, out, obligation):
     def inp(alias, ty):
         if not isinstance(alias, str) or doc['inputs'].get(alias) != ty or alias == imp['reset_input']: raise ValueError('missing/wrong-width contract input: ' + str(alias))
         return 'i.' + alias
-    def output(alias, ty):
+    def output(alias, ty, require_port=True):
         entry = manifest['signals'].get(alias)
         if entry is None or entry['type'] != ty: raise ValueError('missing/wrong-width source output: ' + str(alias))
         compiled = replay.load_json(out / 'compiled.json')
         top = {s['path'][0]: s for s in compiled['signals'] if not s['instances'] and len(s['path']) == 1}
-        if top[entry['signal']]['kind'] != 'Output': raise ValueError('contract output must map an actual output port')
+        if require_port and top[entry['signal']]['kind'] != 'Output': raise ValueError('contract output must map an actual output port')
+        if top[entry['signal']]['kind'] == 'Input': raise ValueError('effect signal must not map an external input')
         term = expand('w.' + alias, imp)
         def state_only(v):
             if isinstance(v, str) and not v.startswith('s.'): raise ValueError('contract output must be state-only')
@@ -83,6 +84,28 @@ def prepare(path, out, obligation):
         documents = idle_offer_step(doc, contract['name'], bindings, inp(contract['offer'], 'bool'), complete)
         evidence = {'kind': 'explicit_application_idle_offer', 'availability': 'not busy and no pending bound VALID',
                     'limits': 'one-step application contract, not AXI normative latency or global READY-history noninterference; application offer meaning is declared'}
+    elif contract['kind'] == 'memory_write':
+        replay.exact(contract, ['kind','name','address_width','data_width','locations','state','signals','inputs'], 'memory source contract')
+        aw = contract['address_width']; dw = contract['data_width']
+        if type(dw) is not int or dw not in (32,64): raise ValueError('memory data width must be 32 or 64')
+        if not isinstance(contract['locations'],list): raise ValueError('declare explicit memory locations')
+        cells = []; addresses = []; initial = []
+        for location in contract['locations']:
+            replay.exact(location,['address','state','initial'],'memory location')
+            addresses.append(location['address']); initial.append(location['initial']); cells.append(location['state'])
+        if len(set(cells)) != len(cells): raise ValueError('memory cells must map distinct actual state registers')
+        state_types = {'aw_pending':'bool','w_pending':'bool','applied':'bool','address':{'bv':aw},'data':{'bv':dw},'strobes':{'bv':dw//8}}
+        signal_types = {'apply':'bool','aw_ready':'bool','w_ready':'bool','b_valid':'bool','b_response':{'bv':2},'read_ready':'bool','read_valid':'bool','read_data':{'bv':dw},'read_response':{'bv':2}}
+        input_types = {'aw_valid':'bool','aw_address':{'bv':aw},'w_valid':'bool','w_data':{'bv':dw},'w_strobes':{'bv':dw//8},'b_ready':'bool','ar_valid':'bool','ar_address':{'bv':aw},'r_ready':'bool'}
+        for group, types in [('state',state_types),('signals',signal_types),('inputs',input_types)]: replay.exact(contract[group],types,'memory '+group)
+        bindings = {name:state(contract['state'][name],ty) for name,ty in state_types.items()}
+        bindings.update({'cell_'+str(i):state(alias,{'bv':dw}) for i,alias in enumerate(cells)})
+        bindings.update({name:output(contract['signals'][name],ty,require_port=name!='apply') for name,ty in signal_types.items()})
+        inputs = {name:inp(contract['inputs'][name],ty) for name,ty in input_types.items()}
+        documents = memory_write(doc,contract['name'],aw,dw,addresses,initial,bindings,inputs)
+        evidence = {'kind':'explicit_source_memory_effects','semantics':'little-endian byte strobes, aligned word decode, declared reset contents; unmapped writes have no effect and return DECERR; readback is one-edge read-before-write',
+                    'origin_evidence':'actual accepted AW/W storage, actual apply/applied signals, actual memory-register transitions and response pins; no monitor response identities',
+                    'limits':'single outstanding paired write; no eventual application/response, no general peripheral side-effect claim; source semantics and effect-event meaning are declared'}
     else: raise ValueError('unsupported source contract kind')
     if obligation not in documents: raise ValueError('choose obligation: ' + ', '.join(documents))
     project['reset_output_binding'] = validate_reset_outputs(reset_outputs, out)

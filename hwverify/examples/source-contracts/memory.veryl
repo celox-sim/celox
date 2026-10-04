@@ -1,0 +1,84 @@
+// Explicit two-word memory; AW/W captured independently, one paired write outstanding.
+// Byte strobes preserve disabled lanes; reads sample memory before a same-edge write.
+module ByteMemorySubordinate (
+    clk: input clock, rst_n: input bit,
+    awvalid: input bit, awready: output bit, awaddr: input bit<8>, awprot: input bit<3>,
+    wvalid: input bit, wready: output bit, wdata: input bit<32>, wstrb: input bit<4>,
+    bvalid: output bit, bready: input bit, bresp: output bit<2>,
+    arvalid: input bit, arready: output bit, araddr: input bit<8>, arprot: input bit<3>,
+    rvalid: output bit, rready: input bit, rdata: output bit<32>, rresp: output bit<2>,
+) {
+    var a_full: bit;
+    var d_full: bit;
+    var held_addr: bit<8>;
+    var held_data: bit<32>;
+    var held_strb: bit<4>;
+    var write_done: bit;
+    var apply_write: bit;
+    var word_addr: bit<8>;
+    var read_word_addr: bit<8>;
+    var mem0: bit<32>;
+    var mem1: bit<32>;
+    var lane0_0: bit<32>;
+    var lane0_1: bit<32>;
+    var lane0_2: bit<32>;
+    var lane0_3: bit<32>;
+    var lane1_0: bit<32>;
+    var lane1_1: bit<32>;
+    var lane1_2: bit<32>;
+    var lane1_3: bit<32>;
+    always_comb {
+        if (held_strb & 4'd1) != 0 { lane0_0 = held_data & 32'd255; }
+        else { lane0_0 = mem0 & 32'd255; }
+        if (held_strb & 4'd2) != 0 { lane0_1 = held_data & 32'd65280; }
+        else { lane0_1 = mem0 & 32'd65280; }
+        if (held_strb & 4'd4) != 0 { lane0_2 = held_data & 32'd16711680; }
+        else { lane0_2 = mem0 & 32'd16711680; }
+        if (held_strb & 4'd8) != 0 { lane0_3 = held_data & 32'd4278190080; }
+        else { lane0_3 = mem0 & 32'd4278190080; }
+        if (held_strb & 4'd1) != 0 { lane1_0 = held_data & 32'd255; }
+        else { lane1_0 = mem1 & 32'd255; }
+        if (held_strb & 4'd2) != 0 { lane1_1 = held_data & 32'd65280; }
+        else { lane1_1 = mem1 & 32'd65280; }
+        if (held_strb & 4'd4) != 0 { lane1_2 = held_data & 32'd16711680; }
+        else { lane1_2 = mem1 & 32'd16711680; }
+        if (held_strb & 4'd8) != 0 { lane1_3 = held_data & 32'd4278190080; }
+        else { lane1_3 = mem1 & 32'd4278190080; }
+    }
+    assign awready = !a_full;
+    assign wready = !d_full;
+    assign apply_write = a_full && d_full && !write_done;
+    assign bvalid = write_done;
+    assign word_addr = held_addr & 8'hfc;
+    assign read_word_addr = araddr & 8'hfc;
+    always_comb {
+        if word_addr == 0 || word_addr == 4 { bresp = 2'd0; }
+        else { bresp = 2'd3; }
+    }
+    assign arready = !rvalid;
+    always_ff (clk) {
+        if !rst_n {
+            a_full = 0; d_full = 0; held_addr = 0; held_data = 0; held_strb = 0; write_done = 0;
+            mem0 = 32'h11223344; mem1 = 32'h55667788;
+            rvalid = 0; rdata = 0; rresp = 0;
+        } else {
+            if awvalid && awready { a_full = 1; held_addr = awaddr; }
+            if wvalid && wready { d_full = 1; held_data = wdata; held_strb = wstrb; }
+            if apply_write {
+                write_done = 1;
+                if word_addr == 0 { mem0 = lane0_0 | lane0_1 | lane0_2 | lane0_3; }
+                if word_addr == 4 { mem1 = lane1_0 | lane1_1 | lane1_2 | lane1_3; }
+            }
+            if bvalid && bready { a_full = 0; d_full = 0; write_done = 0; }
+            if arvalid && arready {
+                rvalid = 1;
+                if read_word_addr == 0 { rdata = mem0; rresp = 2'd0; }
+                else {
+                    if read_word_addr == 4 { rdata = mem1; rresp = 2'd0; }
+                    else { rdata = 0; rresp = 2'd3; }
+                }
+            }
+            if rvalid && rready { rvalid = 0; }
+        }
+    }
+}

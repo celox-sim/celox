@@ -161,7 +161,7 @@ fn search_with_limits(
     }
     let mut prefix = conjunction(&reset_constraints);
     let mut formula = if selected == "safety" {
-        and(prefix.clone(), not(substitute(&safety.reset_good, &sub)))
+        not(substitute(&safety.reset_good, &sub))
     } else {
         boolv(false)
     };
@@ -207,8 +207,14 @@ fn search_with_limits(
             age = next_age;
             bad
         };
-        formula = or(formula, and(prefix.clone(), bad));
+        formula = or(formula, bad);
     }
+    // Every machine state has a total next expression over finite scalar sorts.
+    // Thus an earlier failing prefix extends to this bound for arbitrary future
+    // nonreset inputs. Conjoin the full trajectory once, outside the failure OR:
+    // this preserves existence of a failure and exposes mandatory frame equations
+    // to the solver, without assuming any specification invariant or guarantee.
+    let formula = and(prefix, formula);
     let solved = finite::solve_with_hint(&formula, &context, limits, SearchHint::Sat);
     report["solver"] = solved.diagnostics();
     match solved.verdict {
@@ -551,6 +557,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(limited["status"], "unknown");
+    }
+    #[test]
+    fn complete_trajectory_query_matches_exhaustive_prefix_failures() {
+        // The specification may already fail at reset or an early edge. Future
+        // equations must not silently assume its invariant or require progress.
+        for target in 0..4u64 {
+            let d = json!({"version":3,"kind":"specification","name":"total scalar trajectory",
+                "inputs":{"rst":"bool","choose":"bool"},"observations":{},"operations":{"tick":{}},
+                "components":{"Check":{"state":{"value":{"bv":2}},"init":["eq","s.value",["bv",2,0]],
+                    "invariant":["not",["eq","s.value",["bv",2,target]]],"steps":{"tick":true},"examples":{}}},
+                "compositions":{"System":{"members":["Check"],"examples":{}}},
+                "implementation":{"composition":"System","reset_input":"rst","state":{"value":{"bv":2}},
+                    "reset":{"value":["bv",2,0]},"next":{"value":["ite","i.choose",["add","s.value",["bv",2,1]],"s.value"]},
+                    "wires":{},"operations":{"tick":true},"binding":{"states":{"Check":{"value":"s.value"}},"observations":{}}}});
+            let s = spec(&d);
+            for depth in 1..=4 {
+                let mut any_failure = false;
+                for choices in 0..(1 << depth) {
+                    let mut trace = vec![json!({"rst":true,"choose":false})];
+                    let mut count = 0;
+                    let mut failed = target == 0;
+                    for edge in 0..depth {
+                        let choose = choices & (1 << edge) != 0;
+                        if choose {
+                            count = (count + 1) % 4;
+                        }
+                        failed |= count == target;
+                        trace.push(json!({"rst":false,"choose":choose}));
+                    }
+                    let actual = check_stimulus(&s, "safety", &trace).unwrap();
+                    assert_eq!(actual["status"] == "reset_reachable_failure", failed);
+                    any_failure |= failed;
+                }
+                let result = search_reachable(&s, "safety", depth).unwrap();
+                assert_eq!(
+                    result["status"],
+                    if any_failure {
+                        "reset_reachable_failure"
+                    } else {
+                        "bounded_no_failure"
+                    }
+                );
+                if any_failure {
+                    validate_reachable(&s, &result["witness"]).unwrap();
+                }
+            }
+        }
     }
     #[test]
     fn sampled_dut_signals_use_preedge_state_and_reject_bad_names() {
