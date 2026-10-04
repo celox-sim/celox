@@ -1440,6 +1440,18 @@ impl NativeSimulatorHandle {
         Ok(())
     }
 
+    /// Finish the current VCD file and continue the waveform in a new file,
+    /// whose timestamps start over.
+    #[napi]
+    pub fn switch_vcd(&mut self, path: String) -> Result<()> {
+        let writer = self.vcd_writer.as_mut().ok_or_else(|| {
+            Error::from_reason("VCD output was not enabled when the simulator was created")
+        })?;
+        writer
+            .restart(&path)
+            .map_err(|e| Error::from_reason(format!("failed to start {path}: {e}")))
+    }
+
     /// Save the design state.
     #[napi]
     pub fn checkpoint(&self) -> Result<NativeSimulatorCheckpoint> {
@@ -1456,11 +1468,6 @@ impl NativeSimulatorHandle {
     /// logic.
     #[napi]
     pub fn restore(&mut self, checkpoint: &NativeSimulatorCheckpoint) -> Result<()> {
-        if self.vcd_writer.is_some() {
-            return Err(Error::from_reason(
-                celox::CheckpointError::VcdAttached.to_string(),
-            ));
-        }
         let runtime_errors = self.runtime_errors.clone();
         let b = self
             .backend
@@ -1468,6 +1475,9 @@ impl NativeSimulatorHandle {
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         b.restore_state(&checkpoint.image, self.state_fingerprint)
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        if let Some(writer) = &mut self.vcd_writer {
+            writer.rescan();
+        }
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
@@ -1489,11 +1499,6 @@ impl NativeSimulatorHandle {
     /// combinational logic.
     #[napi]
     pub fn load_state(&mut self, bytes: Uint8Array) -> Result<()> {
-        if self.vcd_writer.is_some() {
-            return Err(Error::from_reason(
-                celox::CheckpointError::VcdAttached.to_string(),
-            ));
-        }
         let file = parse_state_file(&bytes)?;
         let runtime_errors = self.runtime_errors.clone();
         let b = self
@@ -1504,6 +1509,9 @@ impl NativeSimulatorHandle {
             .map_err(|mismatch| {
                 Error::from_reason(celox::StateError::Mismatch(mismatch).to_string())
             })?;
+        if let Some(writer) = &mut self.vcd_writer {
+            writer.rescan();
+        }
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
@@ -1891,8 +1899,20 @@ impl NativeSimulationHandle {
             .sim
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
-        sim.dump(timestamp as u64);
-        Ok(())
+        sim.try_dump(timestamp as u64)
+            .map_err(|e| Error::from_reason(format!("VCD write error: {e}")))
+    }
+
+    /// Finish the current VCD file and continue the waveform in a new file,
+    /// whose timestamps start over.
+    #[napi]
+    pub fn switch_vcd(&mut self, path: String) -> Result<()> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.switch_vcd(&path)
+            .map_err(|e| Error::from_reason(format!("failed to start {path}: {e}")))
     }
 
     /// Save the design state, simulation time, clocks and pending events.

@@ -241,13 +241,11 @@ impl<B: SimBackend> Simulator<B> {
     /// same width; otherwise nothing is changed and the differences are
     /// returned. Combinational objects are recomputed. Runtime events do not
     /// fire for the jump to the loaded state. A schedule in the file is
-    /// ignored. Loading is rejected while a VCD writer is attached.
+    /// ignored. An attached VCD writer records the loaded values as changes
+    /// at the next dump.
     pub fn load_state(&mut self, file: &StateFile) -> Result<(), StateError> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
-        }
-        if self.vcd_writer.is_some() {
-            return Err(CheckpointError::VcdAttached.into());
         }
         self.state_schema()
             .load(&mut self.backend, file)
@@ -259,6 +257,9 @@ impl<B: SimBackend> Simulator<B> {
             .map_err(|error| StateError::Runtime(self.decorate_runtime_error(error)))?;
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
         self.comb_observer_initial_eval = false;
+        if let Some(writer) = &mut self.vcd_writer {
+            writer.rescan();
+        }
         self.dirty = false;
         Ok(())
     }

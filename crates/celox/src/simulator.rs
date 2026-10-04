@@ -112,6 +112,15 @@ mod host {
         tick_timing_eval_comb_ns: u64,
     }
 
+    /// Why [`Simulator::try_dump`] failed.
+    #[derive(Debug, thiserror::Error)]
+    pub enum DumpError {
+        #[error("evaluating combinational logic failed: {0}")]
+        Runtime(RuntimeErrorCode),
+        #[error(transparent)]
+        Io(std::io::Error),
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RuntimeEvent {
         Display { message: String },
@@ -893,17 +902,45 @@ mod host {
         }
 
         /// Captures the current state of all signals and writes them to the VCD file.
+        ///
+        /// # Panics
+        ///
+        /// Panics where [`Self::try_dump`] returns an error.
         pub fn dump(&mut self, timestamp: u64) {
+            if let Err(error) = self.try_dump(timestamp) {
+                panic!("VCD dump at {timestamp} failed: {error}");
+            }
+        }
+
+        /// Captures the current state of all signals and writes them to the
+        /// VCD file. Fails if combinational evaluation or writing fails, or
+        /// if `timestamp` is earlier than the last dumped timestamp.
+        pub fn try_dump(&mut self, timestamp: u64) -> Result<(), DumpError> {
             if self.dirty {
-                self.eval_comb_checked().unwrap();
+                self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
             }
             let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 writer
                     .dump_backend(timestamp, &mut self.backend, &component_traces)
-                    .unwrap();
+                    .map_err(DumpError::Io)?;
             }
+            Ok(())
+        }
+
+        /// Finish the current VCD file and continue the waveform in a new
+        /// file at `path`, whose timestamps start over. Use it to record a
+        /// simulation rewound by a restore. Fails if the simulator was built
+        /// without VCD output.
+        pub fn switch_vcd(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+            let writer = self.vcd_writer.as_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "VCD output was not enabled when the simulator was built",
+                )
+            })?;
+            writer.restart(path)
         }
 
         /// Make buffered waveform output visible and report write errors.

@@ -110,6 +110,12 @@ pub struct VcdWriter<W: Write = File> {
     selected: Vec<usize>,
     /// Consumed groups retained after a failed dump; empty after success.
     activity: Vec<usize>,
+    /// Set when memory changed without marking activity (a restored state),
+    /// so the next backend dump scans every signal.
+    rescan_pending: bool,
+    /// Signal descriptions, kept to restart the waveform in another file.
+    descs: Vec<VcdSignalDesc>,
+    external_descs: Vec<VcdExternalSignalDesc>,
     timestamp: u64,
     header_written: bool,
     initial_values_written: bool,
@@ -132,6 +138,17 @@ struct VcdOutput<W: Write> {
 impl VcdWriter<File> {
     pub fn new<P: AsRef<Path>>(path: P, descs: &[VcdSignalDesc]) -> std::io::Result<Self> {
         Ok(Self::from_writer(File::create(path)?, descs))
+    }
+
+    /// Finish the current file and continue the waveform, with the same
+    /// signals, in a new file at `path`. The first dump there records every
+    /// value, and its timestamps start over.
+    pub fn restart<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
+        let mut next = Self::new(path, &self.descs)?;
+        next.add_external_signals(&self.external_descs)?;
+        self.flush()?;
+        *self = next;
+        Ok(())
     }
 }
 
@@ -166,6 +183,9 @@ impl<W: Write> VcdWriter<W> {
             groups,
             selected: Vec::new(),
             activity: Vec::new(),
+            rescan_pending: false,
+            descs: descs.to_vec(),
+            external_descs: Vec::new(),
             timestamp: 0,
             header_written: false,
             initial_values_written: false,
@@ -184,6 +204,13 @@ impl<W: Write> VcdWriter<W> {
     }
     pub fn get_ref(&self) -> &W {
         self.output.writer.get_ref()
+    }
+
+    /// Make the next [`Self::dump_backend`] compare every signal: memory
+    /// changed without marking VCD activity, for example by restoring a
+    /// checkpoint.
+    pub fn rescan(&mut self) {
+        self.rescan_pending = true;
     }
 
     /// Dump as the backend's sole incremental waveform observer. Multiple
@@ -214,10 +241,12 @@ impl<W: Write> VcdWriter<W> {
         let (ptr, size) = backend.memory_as_ptr();
         // SAFETY: the backend owns the image and cannot run during this dump.
         let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
+        let tracked = tracked && !self.rescan_pending;
         let result =
             self.dump_with_activity(timestamp, memory, external, tracked.then_some(&activity));
         if result.is_ok() {
             activity.clear();
+            self.rescan_pending = false;
         }
         self.activity = activity;
         result
@@ -256,6 +285,7 @@ impl<W: Write> VcdWriter<W> {
                 "cannot add external VCD signals after the first dump",
             ));
         }
+        self.external_descs = descs.to_vec();
         for desc in descs {
             let index = self.external_count;
             self.external_count += 1;
@@ -396,6 +426,16 @@ impl<W: Write> VcdWriter<W> {
         activity: Option<&[usize]>,
     ) -> std::io::Result<()> {
         self.validate_external_count(external.len())?;
+        if self.header_written && timestamp < self.timestamp {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "VCD timestamp {timestamp} is earlier than the last dumped timestamp {}; \
+                     start a new file to record a rewound simulation",
+                    self.timestamp
+                ),
+            ));
+        }
         // Finish the previous attempt before starting a new timestamp or
         // consulting caches that include its queued value records.
         self.output.write_encoded()?;
@@ -1620,5 +1660,27 @@ mod encoding_tests {
         let mut writer = VcdWriter::from_writer(BadFlush, &[]);
         writer.dump(0, &[]).unwrap();
         assert_eq!(writer.flush().unwrap_err().to_string(), "flush failed");
+    }
+
+    #[test]
+    fn rejects_timestamps_earlier_than_the_last_dump() {
+        let desc = VcdSignalDesc {
+            scope: "top".into(),
+            name: "q".into(),
+            offset: 0,
+            width: 8,
+            is_4state: false,
+        };
+        let mut writer = VcdWriter::from_writer(Vec::new(), &[desc]);
+        writer.dump(5, &[1]).unwrap();
+        writer.dump(5, &[2]).unwrap();
+        let error = writer.dump(4, &[3]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        writer.dump(6, &[4]).unwrap();
+        let bytes = writer.into_inner().unwrap();
+        assert_eq!(
+            changes(&bytes),
+            [(5, "1".into()), (5, "10".into()), (6, "100".into())]
+        );
     }
 }

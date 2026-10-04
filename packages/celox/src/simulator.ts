@@ -559,8 +559,8 @@ export class Simulator<P = Record<string, unknown>> {
 	/**
 	 * Return to the state saved in `checkpoint`.
 	 *
-	 * Throws if the checkpoint comes from another design, or if VCD output is
-	 * enabled (the waveform cannot go back in time).
+	 * Throws if the checkpoint comes from another design. VCD output records
+	 * the restored values as changes at the next `dump()`.
 	 */
 	restore(checkpoint: SimulatorCheckpoint): void {
 		this.ensureAlive();
@@ -569,6 +569,20 @@ export class Simulator<P = Record<string, unknown>> {
 		}
 		this._handle.restore(checkpoint._native);
 		this._state.dirty = false;
+	}
+
+	/**
+	 * Finish the current VCD file and continue the waveform in a new file at
+	 * `path`, whose timestamps start over. Use it to record a simulator rewound
+	 * by `restore()` or `loadState()`: `dump()` rejects a timestamp earlier
+	 * than the last one it wrote.
+	 */
+	switchVcd(path: string): void {
+		this.ensureAlive();
+		if (!this._handle.switchVcd) {
+			throw new Error("This simulator does not support switching VCD files");
+		}
+		this._handle.switchVcd(path);
 	}
 
 	/**
@@ -590,8 +604,7 @@ export class Simulator<P = Record<string, unknown>> {
 	 * Load state file bytes saved by `saveState()`, matching signals by path.
 	 *
 	 * Throws without changing anything if a register, memory or input of this
-	 * design is missing from the file or has another width, or if VCD output
-	 * is enabled.
+	 * design is missing from the file or has another width.
 	 */
 	loadState(bytes: Uint8Array): void {
 		this.ensureAlive();

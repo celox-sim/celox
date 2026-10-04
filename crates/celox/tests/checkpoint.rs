@@ -1,3 +1,4 @@
+use celox::SimBackend as _;
 use celox::{
     BigUint, CheckpointError, OptLevel, RuntimeEvent, Simulation, Simulator, TierPromotion,
 };
@@ -203,15 +204,93 @@ fn restore_rejects_another_design() {
     );
 }
 
+const COUNTER: &str = r#"
+module Top (clk: input clock, q: output logic<8>) {
+    always_ff (clk) { q = q + 8'd1; }
+}
+"#;
+
+/// The value lines a VCD file records at `time`.
+fn values_at(vcd: &str, time: u64) -> Vec<&str> {
+    let marker = format!("#{time}");
+    vcd.lines()
+        .skip_while(|line| *line != marker)
+        .skip(1)
+        .take_while(|line| !line.starts_with('#'))
+        .collect()
+}
+
 #[test]
-fn restore_rejects_an_attached_vcd_writer() {
+fn restore_with_vcd_records_the_jump_and_keeps_change_tracking() {
     let dir = tempfile::tempdir().unwrap();
-    let mut sim = Simulator::builder(DESIGN, "Top")
-        .vcd(dir.path().join("wave.vcd"))
+    let path = dir.path().join("wave.vcd");
+    let mut sim = Simulator::builder(COUNTER, "Top")
+        .vcd(&path)
         .build()
         .unwrap();
+    let clk = sim.event("clk");
+    for time in 0..=10 {
+        sim.dump(time);
+        if time == 5 {
+            let checkpoint = sim.checkpoint().unwrap();
+            for _ in 0..5 {
+                sim.tick(clk).unwrap();
+                sim.dump(time + 1);
+            }
+            sim.restore(&checkpoint).unwrap();
+            break;
+        }
+        sim.tick(clk).unwrap();
+    }
+    assert!(sim.backend_ref().vcd_tracking_enabled());
+    // q was 5 at the checkpoint and 10 when it was restored.
+    sim.try_dump(11).unwrap();
+    sim.flush_vcd().unwrap();
+    let vcd = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        values_at(&vcd, 11)
+            .iter()
+            .any(|line| line.starts_with("b101 ")),
+        "{vcd}"
+    );
+
+    let error = sim.try_dump(3).unwrap_err();
+    assert!(
+        matches!(&error, celox::DumpError::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput),
+        "{error}"
+    );
+}
+
+#[test]
+fn switch_vcd_records_a_rewound_simulation_in_a_new_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sim = Simulator::builder(COUNTER, "Top")
+        .vcd(dir.path().join("first.vcd"))
+        .build()
+        .unwrap();
+    let clk = sim.event("clk");
+    sim.tick(clk).unwrap();
     let checkpoint = sim.checkpoint().unwrap();
-    assert_eq!(sim.restore(&checkpoint), Err(CheckpointError::VcdAttached));
+    for time in 0..4 {
+        sim.tick(clk).unwrap();
+        sim.dump(time);
+    }
+    sim.restore(&checkpoint).unwrap();
+    let second = dir.path().join("second.vcd");
+    sim.switch_vcd(&second).unwrap();
+    sim.try_dump(0).unwrap();
+    sim.flush_vcd().unwrap();
+    let vcd = std::fs::read_to_string(&second).unwrap();
+    assert!(vcd.contains("$enddefinitions"), "{vcd}");
+    assert!(
+        values_at(&vcd, 0)
+            .iter()
+            .any(|line| line.starts_with("b1 ")),
+        "{vcd}"
+    );
+
+    let mut plain = Simulator::builder(COUNTER, "Top").build().unwrap();
+    assert!(plain.switch_vcd(dir.path().join("none.vcd")).is_err());
 }
 
 fn timed_trace(sim: &mut Simulation, until: u64) -> Vec<(u64, Vec<BigUint>)> {

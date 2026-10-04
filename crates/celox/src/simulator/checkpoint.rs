@@ -47,7 +47,8 @@ impl StateImage {
     }
 
     /// Write the design state into `backend`, whose layout has `fingerprint`.
-    /// The caller must re-evaluate combinational logic afterwards.
+    /// The caller must re-evaluate combinational logic afterwards, and have a
+    /// VCD writer rescan, since the write marks no VCD activity.
     pub fn restore_into<B: SimBackend>(
         &self,
         backend: &mut B,
@@ -58,13 +59,7 @@ impl StateImage {
         }
         let range = state_range(backend);
         assert_eq!(range.len(), self.bytes.len());
-        let (ptr, len) = backend.memory_as_mut_ptr();
-        assert!(range.end <= len, "stable region exceeds the memory image");
-        // Safety: the backend exposes `len` writable bytes at `ptr`, and the
-        // image is a separate allocation.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.bytes.as_ptr(), ptr.add(range.start), range.len());
-        }
+        backend.write_memory(range.start, &self.bytes);
         Ok(())
     }
 
@@ -125,8 +120,6 @@ pub enum CheckpointError {
         "checkpoints are not supported for designs with external components, whose state Celox cannot capture"
     )]
     ExternalComponents,
-    #[error("cannot restore a checkpoint while a VCD writer is attached")]
-    VcdAttached,
     #[error("the checkpoint was taken from a different design")]
     DesignMismatch,
 }
@@ -150,8 +143,9 @@ impl<B: SimBackend> Simulator<B> {
     /// Return to the state saved in `checkpoint`.
     ///
     /// Runtime events (`$display`, assertions) emitted after the checkpoint
-    /// are not withdrawn. Restoring is rejected while a VCD writer is
-    /// attached, because the waveform cannot go back in time.
+    /// are not withdrawn. An attached VCD writer keeps its file and records
+    /// the restored values as changes at the next dump; to record a rewound
+    /// simulation, continue in a new file with [`Self::switch_vcd`].
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         self.validate_restore(checkpoint)?;
         let fingerprint = self.state_fingerprint();
@@ -161,6 +155,9 @@ impl<B: SimBackend> Simulator<B> {
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
+        if let Some(writer) = &mut self.vcd_writer {
+            writer.rescan();
+        }
         self.dirty = true;
         self.settle_dirty_for_runtime_event_drain();
         Ok(())
@@ -170,9 +167,6 @@ impl<B: SimBackend> Simulator<B> {
     pub(crate) fn validate_restore(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents);
-        }
-        if self.vcd_writer.is_some() {
-            return Err(CheckpointError::VcdAttached);
         }
         if !checkpoint.image.matches(self.state_fingerprint()) {
             return Err(CheckpointError::DesignMismatch);

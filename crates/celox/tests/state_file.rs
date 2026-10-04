@@ -301,3 +301,35 @@ fn simulation_requires_a_schedule() {
         Err(StateError::MissingSchedule)
     ));
 }
+
+#[test]
+fn loading_into_a_vcd_simulator_records_the_loaded_values() {
+    let design = r#"
+        module Top (clk: input clock, q: output logic<8>) {
+            always_ff (clk) { q = q + 8'd1; }
+        }
+    "#;
+    let mut source = Simulator::builder(design, "Top").build().unwrap();
+    let clk = source.event("clk");
+    for _ in 0..6 {
+        source.tick(clk).unwrap();
+    }
+    let file = source.save_state().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wave.vcd");
+    let mut target = Simulator::builder(design, "Top")
+        .vcd(&path)
+        .build()
+        .unwrap();
+    target.dump(0);
+    target.load_state(&file).unwrap();
+    target.dump(1);
+    target.flush_vcd().unwrap();
+    let vcd = std::fs::read_to_string(&path).unwrap();
+    let after_load = vcd.split("#1\n").nth(1).unwrap();
+    assert!(
+        after_load.lines().any(|line| line.starts_with("b110 ")),
+        "{vcd}"
+    );
+}

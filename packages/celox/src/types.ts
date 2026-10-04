@@ -128,6 +128,8 @@ export interface NativeFrontendSimulatorHandle
 	saveState?(): Uint8Array;
 	/** Load state file bytes and settle combinational logic. */
 	loadState?(bytes: Uint8Array): void;
+	/** Continue the waveform in a new VCD file. */
+	switchVcd?(path: string): void;
 	initialMemoryBytes?: never;
 	combWasmBytes?: never;
 	eventWasmBytes?: never;
@@ -185,6 +187,8 @@ export interface NativeSimulatorHandle {
 	saveState?(): Uint8Array;
 	/** Load state file bytes and settle combinational logic. */
 	loadState?(bytes: Uint8Array): void;
+	/** Continue the waveform in a new VCD file. */
+	switchVcd?(path: string): void;
 }
 
 /**
@@ -211,6 +215,8 @@ export interface NativeSimulationHandle {
 	loadState?(bytes: Uint8Array): void;
 	/** Registered periodic clocks, by event ID. */
 	clockPeriods?(): { eventId: number; period: number }[];
+	/** Continue the waveform in a new VCD file. */
+	switchVcd?(path: string): void;
 }
 
 /**

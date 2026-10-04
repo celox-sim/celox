@@ -55,6 +55,7 @@ export interface RawNapiSimulationHandle {
 	saveState?(): Uint8Array;
 	loadState?(bytes: Uint8Array): void;
 	clockPeriods?(): { eventId: number; period: number }[];
+	switchVcd?(path: string): void;
 	dispose(): void;
 }
 
@@ -828,6 +829,9 @@ export function wrapDirectSimulatorHandle(
 					loadState: (bytes) => raw.loadState!(bytes),
 				}
 			: {}),
+		...(raw.switchVcd
+			? { switchVcd: (path: string) => raw.switchVcd!(path) }
+			: {}),
 	};
 }
 
@@ -876,6 +880,9 @@ export function wrapDirectSimulationHandle(
 					saveState: () => raw.saveState!(),
 					loadState: (bytes) => raw.loadState!(bytes),
 				}
+			: {}),
+		...(raw.switchVcd
+			? { switchVcd: (path: string) => raw.switchVcd!(path) }
 			: {}),
 		...(raw.clockPeriods ? { clockPeriods: () => raw.clockPeriods!() } : {}),
 	};

@@ -52,12 +52,29 @@ sim.time(); // 100
 ## Limitations
 
 - `restore()` throws when the checkpoint comes from a different design.
-- `restore()` throws when VCD output is enabled, because the waveform cannot
-  go back in time.
 - `$display` output and assertion messages emitted after the checkpoint are
   not withdrawn. Running the same cycles again emits them again.
 - Checkpoints live in memory. To keep state across processes, use a state
   file.
+
+## Waveforms
+
+VCD output keeps recording across a restore: the next `dump()` writes the
+restored values as changes. A VCD file cannot go back in time, so `dump()`
+throws when its timestamp is earlier than the last one written. To record a
+rewound `Simulation`, or each scenario forked from a checkpoint, continue in a
+new file with `switchVcd()`:
+
+```typescript
+const sim = Simulation.fromSource(SOURCE, "Counter", { vcd: "./main.vcd" });
+// ...
+sim.restore(checkpoint);
+sim.switchVcd("./retry.vcd"); // timestamps start over in the new file
+sim.dump(sim.time());
+```
+
+In Rust, `try_dump()` returns these errors instead of panicking like
+`dump()`, and `switch_vcd()` starts the new file.
 
 ## Rust API
 

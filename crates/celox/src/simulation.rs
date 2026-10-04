@@ -285,6 +285,16 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.dump(timestamp);
     }
 
+    /// See [`Simulator::try_dump`].
+    pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
+        self.simulator.try_dump(timestamp)
+    }
+
+    /// See [`Simulator::switch_vcd`].
+    pub fn switch_vcd(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.simulator.switch_vcd(path)
+    }
+
     pub fn flush_vcd(&mut self) -> std::io::Result<()> {
         self.simulator.flush_vcd()
     }

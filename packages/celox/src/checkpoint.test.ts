@@ -140,13 +140,26 @@ describe("Simulator checkpoints", () => {
 		other.dispose();
 	});
 
-	test("restore rejects enabled VCD output", () => {
-		const sim = Simulator.fromSource(COUNTER_SOURCE, "Counter", {
-			vcd: vcdPath(),
+	test("restore keeps VCD output and rejects rewound timestamps", () => {
+		const first = vcdPath();
+		const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			vcd: first,
 		});
+		startCounter(sim);
 		const checkpoint = sim.checkpoint();
-		expect(() => sim.restore(checkpoint)).toThrow(/VCD/);
+		for (let time = 0; time < 4; time++) {
+			sim.tick();
+			sim.dump(time);
+		}
+		sim.restore(checkpoint);
+		expect(() => sim.dump(1)).toThrow(/earlier than the last dumped/);
+		sim.dump(10);
+
+		const second = path.join(path.dirname(first), "second.vcd");
+		sim.switchVcd(second);
+		sim.dump(0);
 		sim.dispose();
+		expect(readFileSync(second, "utf8")).toContain("$enddefinitions");
 	});
 
 	test("tiered simulators restore across promotion", async () => {
@@ -236,13 +249,24 @@ describe("Simulation checkpoints", () => {
 		fork.dispose();
 	});
 
-	test("restore rejects enabled VCD output", () => {
-		const sim = Simulation.fromSource(COUNTER_SOURCE, "Counter", {
-			vcd: vcdPath(),
+	test("a restored simulation records into a new VCD file", () => {
+		const first = vcdPath();
+		const sim = Simulation.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
+			vcd: first,
 		});
+		startTimedCounter(sim);
+		sim.runUntil(50);
 		const checkpoint = sim.checkpoint();
-		expect(() => sim.restore(checkpoint)).toThrow(/VCD/);
+		sim.runUntil(100);
+		sim.dump(sim.time());
+		sim.restore(checkpoint);
+		expect(() => sim.dump(sim.time())).toThrow(/earlier than the last dumped/);
+
+		const second = path.join(path.dirname(first), "second.vcd");
+		sim.switchVcd(second);
+		sim.dump(sim.time());
 		sim.dispose();
+		expect(readFileSync(second, "utf8")).toContain("#50");
 	});
 });
 
