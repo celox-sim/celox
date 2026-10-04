@@ -4226,6 +4226,14 @@
       "category": "Hierarchy",
       "detail": "",
       "expectation": "Simulation",
+      "name": "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection",
+      "phase": "execute",
+      "status": "passed"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "hierarchy::test_instance_input_function_output_concat_dynamic_writeback",
       "phase": "execute",
       "status": "passed"
@@ -6745,7 +6753,7 @@
     "emission_error": 0,
     "ignored": 91,
     "mismatch": 0,
-    "passed": 489,
+    "passed": 490,
     "rejected": 1,
     "runtime_error": 0,
     "unexpected_accept": 0,

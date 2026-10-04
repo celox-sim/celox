@@ -1250,6 +1250,14 @@
     },
     {
       "category": "Hierarchy",
+      "detail": "compile hierarchy::test_instance_array_broadcast_and_unpacked_array_connection: Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:11: vvp.tgt error: uwire \"y\" must have a single driver, found (2).\nerror: Code generation had 1 error(s).\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Hierarchy",
       "detail": "compile hierarchy::test_instance_input_function_output_concat_dynamic_writeback: Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:16: error: Function Top.write_pair port dst is not an input port.\n<case>/source_0.sv:16:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "hierarchy::test_instance_input_function_output_concat_dynamic_writeback",
@@ -1474,7 +1482,7 @@
     }
   ],
   "counts": {
-    "compile_error": 122,
+    "compile_error": 123,
     "emission_error": 60,
     "ignored": 0,
     "mismatch": 0,
