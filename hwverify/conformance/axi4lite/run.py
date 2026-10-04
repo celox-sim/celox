@@ -116,6 +116,41 @@ def main():
             counterpart = cli('stimulus', good / 'manager-binding.json', '--inputs', stimuli, '--out', args.out / (name + '-good'))
             if counterpart['status'] != 'trace_no_failure' or counterpart['independent']['status'] != 'sampled_prefix_passed': raise RuntimeError('correct manager failed')
             results.append({'case': name, 'status': result['status']})
+        for dw in (32, 64):
+            lanes = dw // 8; offset = lanes - 1
+            template = root / ('strobes-' + str(dw)); shutil.copytree(EXAMPLE, template)
+            source = template / 'manager.veryl'
+            text = source.read_text().replace("assign awaddr = 8'd0;", f"assign awaddr = 8'd{offset};")
+            if dw == 64:
+                text = text.replace('bit<32>', 'bit<64>').replace("32'd42", "64'd42").replace('bit<4>', 'bit<8>').replace("4'd15", "8'd255")
+                spec = template / 'manager.hwv'; spec.write_text(spec.read_text().replace('bv<32>', 'bv<64>').replace('0u32', '0u64').replace('0u4;', '0u8;'))
+                project = replay.load_json(template / 'manager-project.json')
+                for signal, width in [('bus_wdata', 64), ('bus_rdata', 64), ('bus_wstrb', 8)]: project['signals'][signal]['type'] = {'bv': width}
+                replay.write(template / 'manager-project.json', project)
+                binding = replay.load_json(template / 'manager-binding.json'); binding['config']['data_width'] = 64
+                replay.write(template / 'manager-binding.json', binding)
+            source.write_text(text)
+            name = 'manager_illegal_strobe_' + str(dw); saved = args.out / (name + '.regression.json')
+            result = cli('search', template / 'manager-binding.json', '--out', args.out / name, '--regression', saved)
+            if result['status'] != 'reset_reachable_failure' or 'write_address_strobe' not in {v['rule'] for v in result['independent']['guarantee_violations']}: raise RuntimeError((name, result))
+            if result['independent']['environment_violations'] or result['independent']['capacity_exceeded']: raise RuntimeError('illegal strobe requires legal in-scope counterpart')
+            again = cli('replay', template / 'manager-binding.json', '--regression', saved, '--out', args.out / (name + '-replay'))
+            if again['status'] != 'reset_reachable_failure': raise RuntimeError('strobe regression lost')
+            results.append({'case': name, 'status': result['status'], 'required_rule': 'write_address_strobe'})
+            frames = [manager_row(rst=True), manager_row(start_write=True), manager_row(wready=True), manager_row(), manager_row(awready=True), manager_row(bvalid=True)]
+            stimuli = root / (name + '-w-first.json'); replay.write(stimuli, frames)
+            w_first = cli('stimulus', template / 'manager-binding.json', '--inputs', stimuli, '--out', args.out / (name + '-w-first'))
+            if w_first['status'] != 'reset_reachable_failure' or 'write_address_strobe' not in {v['rule'] for v in w_first['independent']['guarantee_violations']}: raise RuntimeError('W-first mismatch missed')
+            for mask in (0, 1 << offset):
+                legal = root / (name + '-legal-' + str(mask)); shutil.copytree(template, legal)
+                path = legal / 'manager.veryl'; path.write_text(path.read_text().replace(f"{lanes}'d{(1 << lanes)-1}", f"{lanes}'d{mask}"))
+                accepted = cli('stimulus', legal / 'manager-binding.json', '--inputs', stimuli, '--out', args.out / (name + '-legal-' + str(mask)))
+                if accepted['status'] != 'trace_no_failure' or accepted['independent']['status'] != 'sampled_prefix_passed': raise RuntimeError('legal unaligned/zero strobe rejected')
+                # The exact search-generated inputs must also pass on corrected RTL.
+                same = root / (name + '-same.json'); replay.write(same, replay.load_json(saved)['inputs'])
+                corrected = cli('stimulus', legal / 'manager-binding.json', '--inputs', same, '--out', args.out / (name + '-corrected-' + str(mask)))
+                if corrected['status'] != 'trace_no_failure' or corrected['independent']['status'] != 'sampled_prefix_passed': raise RuntimeError('corrected source failed search witness')
+                results.append({'case': name + '-legal-' + str(mask), 'status': accepted['status']})
         beyond = root / 'capacity'; shutil.copytree(EXAMPLE, beyond)
         source = beyond / 'subordinate.veryl'
         source.write_text(source.read_text().replace('assign awready = !a_full;', 'assign awready = 1;'))

@@ -18,6 +18,7 @@ def check_trace(rows, config):
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict) or rows[0].get('rst') is not True:
         raise ValueError('trace must start with a sampled reset')
     counts = {'aw': 0, 'w': 0, 'ar': 0}; held = {}; env_invalid = False; out_of_scope = False
+    addresses = []; strobes = []
     guarantees = []; environment = []; capacity = []; transfers = dict.fromkeys(payloads, 0)
     for edge, row in enumerate(rows):
         if not isinstance(row, dict) or set(row) != keys:
@@ -27,6 +28,7 @@ def check_trace(rows, config):
         violations = []
         if row['rst']:
             counts = dict.fromkeys(counts, 0); held = {}; env_invalid = False; out_of_scope = False
+            addresses = []; strobes = []
             for owner in ('manager', 'subordinate'):
                 if any(row[c + 'valid'] for c in payloads if owners[c] == owner):
                     violations.append((owner + '_reset_valid', owner))
@@ -39,6 +41,15 @@ def check_trace(rows, config):
             if row['rvalid'] and not counts['ar']: violations.append(('r_requires_ar', 'subordinate'))
             for ch in ('b', 'r'):
                 if row[ch + 'valid'] and row[ch + 'resp'] == 1: violations.append((ch + '_response_code', 'subordinate'))
+            if row['awvalid'] and row['awready']: addresses.append(row['awaddr'])
+            if row['wvalid'] and row['wready']: strobes.append(row['wstrb'])
+            if addresses and strobes:
+                offset = addresses.pop(0) % (config['data_width'] // 8)
+                strobe = strobes.pop(0)
+                if any(strobe & (1 << lane) for lane in range(offset)):
+                    violations.append(('write_address_strobe', 'manager'))
+            # Bound storage even after an already invalid/out-of-scope prefix.
+            addresses = addresses[:config['capacity']]; strobes = strobes[:config['capacity']]
         assumptions = [(n, owner) for n, owner in violations if config['role'] != 'link' and owner != config['role']]
         environment.extend({'edge': edge, 'rule': n} for n, _ in assumptions)
         if assumptions: env_invalid = True

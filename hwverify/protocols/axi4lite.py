@@ -1,4 +1,4 @@
-"""Parameterized sampled AXI4-Lite contracts; Arm IHI 0022H A3.1–A3.3/B1.1.
+"""Parameterized sampled AXI4-Lite contracts; Arm IHI 0022H A3.1–A3.4/B1.1.
 
 Pure canonical-IR generation. No DUT guarantee is an environment assumption.
 Counters are observation-only ghosts, never simulation inputs or DUT state.
@@ -43,6 +43,7 @@ def rules():
         result[name] = {'owner': 'subordinate', 'section': 'B1.1.1'}
     for owner in ('manager', 'subordinate'):
         result[owner + '_reset_valid'] = {'owner': owner, 'section': 'A3.1.2'}
+    result['write_address_strobe'] = {'owner': 'manager', 'section': 'A3.4.4/B1.1.3'}
     return result
 
 def expr(op, *args): return [op, *args]
@@ -101,6 +102,32 @@ def monitor(config, signals, reset_signals):
         up = ite(expr('ult', count, bv(width, cap)), expr('add', count, bv(width, 1)), count)
         down = ite(eq(count, bv(width, 0)), count, expr('sub', count, bv(width, 1)))
         reg(ch + '_count', {'bv': width}, bv(width, 0), ite(eq(push, pop), count, ite(push, up, down)))
+    # Pair independent accepted AW/W streams in FIFO order, not by cycle or
+    # response arrival. Empty queues can consume the current handshake directly.
+    pair_counts = {ch: s(ch + '_pair_count') for ch in ('aw', 'w')}
+    available = {ch: any_of(inv(eq(pair_counts[ch], bv(width, 0))), handshake[ch]) for ch in pair_counts}
+    pair = all_of(available['aw'], available['w'])
+    heads = {}
+    lanes = config['data_width'] // 8
+    payload = {'aw': ('awaddr', config['address_width']), 'w': ('wstrb', lanes)}
+    for ch, (field, bits) in payload.items():
+        count = pair_counts[ch]; push = handshake[ch]
+        value = signals[field]
+        if ch == 'aw': value = expr('band', value, bv(bits, min(lanes - 1, (1 << bits) - 1)))
+        heads[ch] = ite(eq(count, bv(width, 0)), value, s(ch + '_pair_0'))
+        up = ite(expr('ult', count, bv(width, cap)), expr('add', count, bv(width, 1)), count)
+        down = ite(eq(count, bv(width, 0)), count, expr('sub', count, bv(width, 1)))
+        reg(ch + '_pair_count', {'bv': width}, bv(width, 0), ite(eq(push, pair), count, ite(push, up, down)))
+        for index in range(cap):
+            # Append before shifting; this also covers full pop+push and bypass.
+            def appended(at):
+                old = s(ch + '_pair_' + str(at)) if at < cap else bv(bits, 0)
+                return ite(all_of(push, eq(count, bv(width, at))), value, old)
+            reg(ch + '_pair_' + str(index), {'bv': bits}, bv(bits, 0), ite(pair, appended(index + 1), appended(index)))
+    violations['write_address_strobe'] = all_of(pair, any_of(*(
+        all_of(eq(heads['aw'], bv(config['address_width'], offset)),
+               inv(eq(expr('band', heads['w'], bv(lanes, (1 << offset) - 1)), bv(lanes, 0))))
+        for offset in range(1, min(lanes, 1 << config['address_width'])))))
     metadata = rules()
     reset_bad = {}
     for owner in ('manager', 'subordinate'):

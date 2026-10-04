@@ -65,7 +65,8 @@
       "applicability": "manager VALID after reset release",
       "enforcement": "unchecked",
       "evidence_or_gap": "requires explicit release event/edge semantics; current source replay starts with one reset edge",
-      "tests": []
+      "tests": [],
+      "next_evidence": "Define explicit pre-edge ARESETn and post-edge output observations. A manager may first assert VALID after a rising edge that samples reset high: the pre-edge sample at the first such edge must still have AW/W/ARVALID low. Add phase-aware release evidence and repeated-reset tests before enforcement; current initial post-reset row alone cannot certify synchronous release or between-edge behavior."
     },
     {
       "id": "no_comb_path",
@@ -127,9 +128,14 @@
         "B1.1.3"
       ],
       "applicability": "manager writes, full bus width, including W-before-AW",
-      "enforcement": "unchecked",
-      "evidence_or_gap": "needs independent ordered AW/W queues then pair address low bits with WSTRB; 32-bit address 0x1 excludes lane 0",
-      "tests": []
+      "enforcement": "sampled",
+      "evidence_or_gap": "Accepted AW/W streams pair oldest-to-oldest through independent bounded queues, including W-first and same-edge handshakes. Manager-owned write_address_strobe rejects active lanes below AWADDR modulo bus bytes; zero and sparse masks are legal. Pending unmatched offers and subordinate write effects are not established.",
+      "tests": [
+        "test_address_strobe_offsets_zero_sparse_and_roles",
+        "test_ordered_pairing_w_first_capacity_shift_and_reset",
+        "manager_illegal_strobe_32",
+        "manager_illegal_strobe_64"
+      ]
     },
     {
       "id": "strobe_consumption",
@@ -151,7 +157,8 @@
       "applicability": "single fixed ID AXI4-Lite, including multiple outstanding",
       "enforcement": "unchecked",
       "evidence_or_gap": "counts do not identify responses; require source-derived transaction-origin binding or independent correspondence contract; never invent ordered tags from response order",
-      "tests": []
+      "tests": [],
+      "next_evidence": "Bind actual RTL response/effect origin to independently accepted ordered request identities; test swapped origins while preserving response counts. Queue position assigned at response time is not evidence of origin. Distinguish response order from memory/peripheral execution and byte-write effects."
     },
     {
       "id": "location_ordering",
@@ -175,7 +182,8 @@
       "applicability": "reduced/optional signal configurations",
       "enforcement": "unsupported",
       "evidence_or_gap": "current binding requires the complete explicit Lite signal set; future profiles must identify each allowed omission/default and interoperability restriction",
-      "tests": []
+      "tests": [],
+      "next_evidence": "Add explicit per-signal presence/default profiles tied to A9.3 and B1.2, validate source port absence and allowed counterpart capabilities; prove equivalence against explicit full-signal bindings. Do not silently fill unmapped required pins or infer compliance for unsupported profiles."
     },
     {
       "id": "forward_progress",

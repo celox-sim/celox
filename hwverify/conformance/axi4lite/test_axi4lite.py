@@ -55,13 +55,54 @@ class ProtocolRules(unittest.TestCase):
             self.assertEqual(result['accepted_transfers']['b'], 1)
         # Continuous VALID, distinct payloads on successive accepted beats, full-capacity pop+push.
         rows = [reset, row(awvalid=True, awready=True, wvalid=True, wready=True, arvalid=True, arready=True),
-                *[row(awvalid=True, awready=True, awaddr=k, wvalid=True, wready=True, wdata=k, wstrb=k,
+                *[row(awvalid=True, awready=True, awaddr=4*k, wvalid=True, wready=True, wdata=k, wstrb=k,
                       bvalid=True, bready=True, arvalid=True, arready=True, araddr=k, rvalid=True, rready=True, rdata=k) for k in range(1, 6)],
                 row(bvalid=True, bready=True, rvalid=True, rready=True)]
         self.compare(rows, 'sampled_prefix_passed', config={**CONFIG, 'capacity': 1})
         # No READY fairness or arbitrary completion deadline: pending/stalled prefixes are legal.
         self.compare([reset, row(arvalid=True, arready=True)] + [row(rvalid=True, rdata=42)] * 12, 'sampled_prefix_passed')
         self.compare([reset] + [row(awvalid=True, awaddr=7)] * 12, 'sampled_prefix_passed')
+
+    def test_address_strobe_offsets_zero_sparse_and_roles(self):
+        for dw in (32, 64):
+            lanes = dw // 8; config = {**CONFIG, 'data_width': dw}
+            for offset in range(lanes):
+                allowed = ((1 << lanes) - 1) ^ ((1 << offset) - 1)
+                for mask in {0, allowed, 1 << offset, 1 << (lanes - 1)}:
+                    self.compare([row(rst=True), row(awvalid=True, awready=True, awaddr=0x40+offset, wvalid=True, wready=True, wstrb=mask)], 'sampled_prefix_passed', config=config)
+                if offset:
+                    rows = [row(rst=True), row(wvalid=True, wready=True, wstrb=1 << (offset-1)), row(awvalid=True, awready=True, awaddr=offset)]
+                    self.compare(rows, 'protocol_violation', ['write_address_strobe'], config)
+            illegal = [row(rst=True), row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=1)]
+            self.compare(illegal, 'protocol_violation', ['write_address_strobe'], {**config, 'role': 'manager'})
+            self.compare(illegal, 'environment_invalid', config={**config, 'role': 'subordinate'})
+        # Narrow address ports imply zero high address bits, not a wider offset.
+        self.compare([row(rst=True), row(awvalid=True, awready=True, awaddr=1, wvalid=True, wready=True, wstrb=2)], 'sampled_prefix_passed', config={**CONFIG, 'address_width': 1})
+
+    def test_ordered_pairing_w_first_capacity_shift_and_reset(self):
+        aw = lambda address: row(awvalid=True, awready=True, awaddr=address)
+        w = lambda strobe: row(wvalid=True, wready=True, wstrb=strobe)
+        for first in ('aw', 'w'):
+            address = [aw(1), aw(0)]; data = [w(14), w(15)]
+            self.compare([row(rst=True)] + (address + data if first == 'aw' else data + address), 'sampled_prefix_passed')
+            bad = [w(15), w(14)]
+            self.compare([row(rst=True)] + (address + bad if first == 'aw' else bad + address), 'protocol_violation', ['write_address_strobe'])
+        self.compare([row(rst=True), aw(1), row(awvalid=True, awready=True, awaddr=0, wvalid=True, wready=True, wstrb=14), w(15)], 'sampled_prefix_passed')
+        # Fill every queue slot then drain, including 64-bit lane 7.
+        config = {**CONFIG, 'data_width': 64, 'capacity': 16}
+        addresses = [aw(n % 8) for n in range(16)]
+        strobes = [w(1 << (n % 8)) for n in range(16)]
+        for frames in (addresses + strobes, strobes + addresses):
+            self.compare([row(rst=True)] + frames, 'sampled_prefix_passed', config=config)
+        bad_tail = strobes[:-1] + [w(1)]
+        for frames in (addresses + bad_tail, bad_tail + addresses):
+            self.compare([row(rst=True)] + frames, 'protocol_violation', ['write_address_strobe'], config)
+        overflow = [row(rst=True), aw(1), row(awvalid=True, awready=True, wvalid=True, wready=True, wstrb=1)]
+        self.compare(overflow, 'protocol_violation', ['write_address_strobe'], {**CONFIG, 'capacity': 1})
+        pending = [row(rst=True), aw(1), row(rst=True), aw(0), w(1)]
+        self.assertEqual(check_trace(pending, CONFIG)['status'], 'sampled_prefix_passed')
+        # No completed pair: do not guess a missing address or strobe.
+        self.compare([row(rst=True), w(15)], 'sampled_prefix_passed')
 
     def test_every_channel_valid_and_payload_stability(self):
         fields = {'aw': ('awaddr', 'awprot'), 'w': ('wdata', 'wstrb'), 'b': ('bresp',), 'ar': ('araddr', 'arprot'), 'r': ('rdata', 'rresp')}
