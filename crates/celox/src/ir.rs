@@ -525,6 +525,40 @@ impl LaidOutProgram {
     pub fn into_runtime(self) -> RuntimeProgram {
         self.runtime
     }
+
+    /// Identity of the checkpointable state layout; see [`state_fingerprint`].
+    pub fn state_fingerprint(&self) -> u64 {
+        state_fingerprint(&self.layout, &self.runtime)
+    }
+}
+
+/// Identity of the stable-region layout that checkpoints copy: the path,
+/// offset, width and state kind of every state object. Two simulators with
+/// the same fingerprint can exchange checkpoints.
+pub(crate) fn state_fingerprint(
+    layout: &crate::backend::MemoryLayout,
+    program: &RuntimeProgram,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut objects: Vec<_> = layout
+        .offsets
+        .iter()
+        .map(|(address, &offset)| {
+            (
+                offset,
+                program.get_path(address),
+                layout.widths.get(address).copied(),
+                layout.is_4states.get(address).copied(),
+            )
+        })
+        .collect();
+    objects.sort_unstable();
+    let mut hasher = std::hash::DefaultHasher::new();
+    layout.total_size.hash(&mut hasher);
+    layout.four_state.hash(&mut hasher);
+    objects.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Deref for LaidOutProgram {

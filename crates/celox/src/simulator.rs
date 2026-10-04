@@ -18,7 +18,7 @@ pub use builder::{compile_frontend_to_sir, compile_to_sir};
 #[cfg(feature = "systemverilog")]
 pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
 #[cfg(feature = "host-runtime")]
-pub use checkpoint::{Checkpoint, CheckpointError};
+pub use checkpoint::{Checkpoint, CheckpointError, StateImage};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 

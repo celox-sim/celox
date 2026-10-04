@@ -16,6 +16,7 @@ import type {
 	FrontendSimulatorHandle,
 	LoopBreak,
 	NativeFrontendSimulatorHandle,
+	NativeSimulationCheckpoint,
 	NativeSimulationHandle,
 	NativeSimulatorHandle,
 	PortInfo,
@@ -49,6 +50,8 @@ export interface RawNapiSimulationHandle {
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
+	checkpoint?(): NativeSimulationCheckpoint;
+	restore?(checkpoint: NativeSimulationCheckpoint): void;
 	dispose(): void;
 }
 
@@ -810,6 +813,12 @@ export function wrapDirectSimulatorHandle(
 				.tierCompiled;
 			return value ?? null;
 		},
+		...(raw.checkpoint && raw.restore
+			? {
+					checkpoint: () => raw.checkpoint!(),
+					restore: (checkpoint) => raw.restore!(checkpoint),
+				}
+			: {}),
 	};
 }
 
@@ -847,6 +856,12 @@ export function wrapDirectSimulationHandle(
 		dispose(): void {
 			raw.dispose();
 		},
+		...(raw.checkpoint && raw.restore
+			? {
+					checkpoint: () => raw.checkpoint!(),
+					restore: (checkpoint) => raw.restore!(checkpoint),
+				}
+			: {}),
 	};
 }
 

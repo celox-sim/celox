@@ -8,13 +8,87 @@
 //! tiered simulation. The state header in front of it holds host pointers and
 //! is never copied.
 
-use std::hash::{Hash, Hasher};
-
 use celox_state_layout::STATE_HEADER_SIZE;
 use num_bigint::BigUint;
 
 use super::host::Simulator;
 use crate::backend::SimBackend;
+
+/// The design state of a memory image: the stable region after the state
+/// header, tagged with the layout fingerprint it belongs to.
+///
+/// This is the backend-level building block of [`Checkpoint`]. Hosts that
+/// drive a bare backend use it directly.
+#[derive(Clone)]
+pub struct StateImage {
+    fingerprint: u64,
+    bytes: Box<[u8]>,
+}
+
+impl StateImage {
+    /// Copy the design state out of `backend`, whose layout has `fingerprint`
+    /// (see [`Simulator::state_fingerprint`]).
+    pub fn capture<B: SimBackend>(backend: &B, fingerprint: u64) -> Self {
+        let range = state_range(backend);
+        let (ptr, len) = backend.memory_as_ptr();
+        assert!(range.end <= len, "stable region exceeds the memory image");
+        // Safety: the backend exposes `len` readable bytes at `ptr`.
+        let memory = unsafe { std::slice::from_raw_parts(ptr, len) };
+        Self {
+            fingerprint,
+            bytes: memory[range].into(),
+        }
+    }
+
+    /// Whether this image can be written into a backend whose layout has
+    /// `fingerprint`.
+    pub fn matches(&self, fingerprint: u64) -> bool {
+        self.fingerprint == fingerprint
+    }
+
+    /// Write the design state into `backend`, whose layout has `fingerprint`.
+    /// The caller must re-evaluate combinational logic afterwards.
+    pub fn restore_into<B: SimBackend>(
+        &self,
+        backend: &mut B,
+        fingerprint: u64,
+    ) -> Result<(), CheckpointError> {
+        if !self.matches(fingerprint) {
+            return Err(CheckpointError::DesignMismatch);
+        }
+        let range = state_range(backend);
+        assert_eq!(range.len(), self.bytes.len());
+        let (ptr, len) = backend.memory_as_mut_ptr();
+        assert!(range.end <= len, "stable region exceeds the memory image");
+        // Safety: the backend exposes `len` writable bytes at `ptr`, and the
+        // image is a separate allocation.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.bytes.as_ptr(), ptr.add(range.start), range.len());
+        }
+        Ok(())
+    }
+
+    /// Size of the saved design state in bytes.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl std::fmt::Debug for StateImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateImage")
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn state_range<B: SimBackend>(backend: &B) -> std::ops::Range<usize> {
+    STATE_HEADER_SIZE..backend.layout().total_size
+}
 
 /// Saved state of a [`Simulator`], created by [`Simulator::checkpoint`].
 ///
@@ -22,8 +96,7 @@ use crate::backend::SimBackend;
 /// created it or into another simulator built from the same design.
 #[derive(Clone)]
 pub struct Checkpoint {
-    fingerprint: u64,
-    state: Box<[u8]>,
+    image: StateImage,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
 }
@@ -31,14 +104,14 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Size of the saved design state in bytes.
     pub fn state_size(&self) -> usize {
-        self.state.len()
+        self.image.len()
     }
 }
 
 impl std::fmt::Debug for Checkpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Checkpoint")
-            .field("state_size", &self.state.len())
+            .field("state_size", &self.state_size())
             .finish_non_exhaustive()
     }
 }
@@ -67,14 +140,8 @@ impl<B: SimBackend> Simulator<B> {
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents);
         }
-        let range = self.checkpoint_range();
-        let (ptr, len) = self.backend.memory_as_ptr();
-        assert!(range.end <= len, "stable region exceeds the memory image");
-        // Safety: the backend exposes `len` readable bytes at `ptr`.
-        let memory = unsafe { std::slice::from_raw_parts(ptr, len) };
         Ok(Checkpoint {
-            fingerprint: self.checkpoint_fingerprint(),
-            state: memory[range].into(),
+            image: StateImage::capture(&self.backend, self.state_fingerprint()),
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
             comb_observer_initial_eval: self.comb_observer_initial_eval,
         })
@@ -87,19 +154,10 @@ impl<B: SimBackend> Simulator<B> {
     /// attached, because the waveform cannot go back in time.
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         self.validate_restore(checkpoint)?;
-        let range = self.checkpoint_range();
-        assert_eq!(range.len(), checkpoint.state.len());
-        let (ptr, len) = self.backend.memory_as_mut_ptr();
-        assert!(range.end <= len, "stable region exceeds the memory image");
-        // Safety: the backend exposes `len` writable bytes at `ptr`, and the
-        // checkpoint buffer is a separate allocation.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                checkpoint.state.as_ptr(),
-                ptr.add(range.start),
-                range.len(),
-            );
-        }
+        let fingerprint = self.state_fingerprint();
+        checkpoint
+            .image
+            .restore_into(&mut self.backend, fingerprint)?;
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
@@ -116,39 +174,17 @@ impl<B: SimBackend> Simulator<B> {
         if self.vcd_writer.is_some() {
             return Err(CheckpointError::VcdAttached);
         }
-        if checkpoint.fingerprint != self.checkpoint_fingerprint() {
+        if !checkpoint.image.matches(self.state_fingerprint()) {
             return Err(CheckpointError::DesignMismatch);
         }
         Ok(())
     }
 
-    fn checkpoint_range(&self) -> std::ops::Range<usize> {
-        STATE_HEADER_SIZE..self.backend.layout().total_size
-    }
-
-    /// Identity of the stable-region layout: every state object's path,
-    /// offset, width and state kind.
-    fn checkpoint_fingerprint(&self) -> u64 {
-        *self.checkpoint_fingerprint.get_or_init(|| {
-            let layout = self.backend.layout();
-            let mut objects: Vec<_> = layout
-                .offsets
-                .iter()
-                .map(|(address, &offset)| {
-                    (
-                        offset,
-                        self.program.get_path(address),
-                        layout.widths.get(address).copied(),
-                        layout.is_4states.get(address).copied(),
-                    )
-                })
-                .collect();
-            objects.sort_unstable();
-            let mut hasher = std::hash::DefaultHasher::new();
-            layout.total_size.hash(&mut hasher);
-            layout.four_state.hash(&mut hasher);
-            objects.hash(&mut hasher);
-            hasher.finish()
-        })
+    /// Identity of the checkpointable state layout. Simulators with equal
+    /// fingerprints can exchange checkpoints.
+    pub fn state_fingerprint(&self) -> u64 {
+        *self
+            .checkpoint_fingerprint
+            .get_or_init(|| crate::ir::state_fingerprint(self.backend.layout(), &self.program))
     }
 }

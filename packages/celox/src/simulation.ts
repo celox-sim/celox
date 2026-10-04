@@ -5,6 +5,7 @@
  * for clock-driven simulation with automatic scheduling.
  */
 
+import { SimulationCheckpoint } from "./checkpoint.js";
 import { createDut, type DirtyState, readFourState } from "./dut.js";
 import {
 	buildNapiOpts,
@@ -655,6 +656,39 @@ export class Simulation<P = Record<string, unknown>> {
 	dump(timestamp: number): void {
 		this.ensureAlive();
 		this._handle.dump(timestamp);
+	}
+
+	/**
+	 * Save the design state, simulation time, clocks and pending events.
+	 *
+	 * The checkpoint can be restored any number of times, into this simulation
+	 * or into another one created from the same design.
+	 */
+	checkpoint(): SimulationCheckpoint {
+		this.ensureAlive();
+		if (!this._handle.checkpoint) {
+			throw new Error("This simulation does not support checkpoints");
+		}
+		return new SimulationCheckpoint(this._handle.checkpoint(), this._clocks);
+	}
+
+	/**
+	 * Return to the state saved in `checkpoint`, including its simulation time.
+	 *
+	 * Throws if the checkpoint comes from another design, or if VCD output is
+	 * enabled (the waveform cannot go back in time).
+	 */
+	restore(checkpoint: SimulationCheckpoint): void {
+		this.ensureAlive();
+		if (!this._handle.restore) {
+			throw new Error("This simulation does not support checkpoints");
+		}
+		this._handle.restore(checkpoint._native);
+		this._clocks.clear();
+		for (const [name, clock] of checkpoint._clocks) {
+			this._clocks.set(name, clock);
+		}
+		this._state.dirty = false;
 	}
 
 	/** Release native resources. */

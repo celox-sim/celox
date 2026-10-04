@@ -5,6 +5,7 @@
  * for manually controlling clock edges via `tick()`.
  */
 
+import { SimulatorCheckpoint } from "./checkpoint.js";
 import { createDut, type DirtyState, readFourState } from "./dut.js";
 import {
 	buildNapiOpts,
@@ -539,6 +540,35 @@ export class Simulator<P = Record<string, unknown>> {
 	dump(timestamp: number): void {
 		this.ensureAlive();
 		this._handle.dump(timestamp);
+	}
+
+	/**
+	 * Save the design state.
+	 *
+	 * The checkpoint can be restored any number of times, into this simulator
+	 * or into another one created from the same design.
+	 */
+	checkpoint(): SimulatorCheckpoint {
+		this.ensureAlive();
+		if (!this._handle.checkpoint) {
+			throw new Error("This simulator does not support checkpoints");
+		}
+		return new SimulatorCheckpoint(this._handle.checkpoint());
+	}
+
+	/**
+	 * Return to the state saved in `checkpoint`.
+	 *
+	 * Throws if the checkpoint comes from another design, or if VCD output is
+	 * enabled (the waveform cannot go back in time).
+	 */
+	restore(checkpoint: SimulatorCheckpoint): void {
+		this.ensureAlive();
+		if (!this._handle.restore) {
+			throw new Error("This simulator does not support checkpoints");
+		}
+		this._handle.restore(checkpoint._native);
+		this._state.dirty = false;
 	}
 
 	/** Release native resources. */

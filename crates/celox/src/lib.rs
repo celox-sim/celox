@@ -37,6 +37,7 @@ pub use celox_runtime::{
     SignalDirection,
 };
 pub use celox_slt::scheduler::SchedulerError;
+pub use celox_state_layout::STATE_HEADER_SIZE;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
 pub(crate) use fxhash::FxHashMap as HashMap;
@@ -81,7 +82,7 @@ mod host_api {
     pub use crate::simulator::{
         Checkpoint, CheckpointError, DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal,
         RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder,
-        SimulatorOptions, TierPromotion,
+        SimulatorOptions, StateImage, TierPromotion,
     };
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};
     pub use celox_macros::veryl_test;
