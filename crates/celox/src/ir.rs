@@ -526,7 +526,9 @@ impl LaidOutProgram {
         self.runtime
     }
 
-    /// Identity of the checkpointable state layout; see [`state_fingerprint`].
+    /// Identity of the checkpointable state layout: the path, offset, width
+    /// and state kind of every state object. Simulators with the same
+    /// fingerprint can exchange checkpoints.
     pub fn state_fingerprint(&self) -> u64 {
         state_fingerprint(&self.layout, &self.runtime)
     }
