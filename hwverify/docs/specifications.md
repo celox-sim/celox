@@ -556,3 +556,135 @@ expressions, unknown fields, duplicate JSON fields, and project paths escaping
 the manifest directory. The existing lifter additionally rejects unsupported
 SIR and reset equations depending on arbitrary prestate. This interface retains
 the scalar two-state, one-clock, synchronous-reset scope described above.
+
+## AXI4-Lite library
+
+[protocols/axi4lite.py](../protocols/axi4lite.py) generates reusable native v3
+components and state-only bindings for sampled AXI4-Lite safety. The normative
+reference is [Arm IHI 0022H, ID040120](https://developer.arm.com/-/media/Arm%20Developer%20Community/PDF/IHI0022H_amba_axi_protocol_spec.pdf),
+not a claim to support every provision of that document. `rules()` exposes the
+same rule identifiers, owners and sections in machine-readable form.
+
+| Supported check / obligation ID | Reference | Independent regression |
+| --- | --- | --- |
+| `{aw,w,b,ar,r}_valid_stable`, `{aw,w,b,ar,r}_payload_stable` after a stalled sample, including the accepting edge | A3.2.1–A3.2.2 | Every channel and payload field; dropped VALID and changed payload |
+| `b_requires_aw_w`: previously accepted address **and** data, separately counted; consume both on B handshake | A3.3–A3.3.1 | AW-first, W-first, simultaneous; missing half, same-edge premature response, duplicate B |
+| `r_requires_ar`: previously accepted AR; consume one on R handshake | A3.3–A3.3.1 | Backpressure and continuous transfers; unsolicited, same-edge premature and duplicate R |
+| `b_response_code`, `r_response_code`: exclude EXOKAY | B1.1.1 | Reject 1; permit 0, 2, 3 |
+| `{manager,subordinate}_reset_valid`: reset-established VALID values are low | A3.1.2 | Each VALID; real reset-dependent combinational-output mutant |
+
+AW and W have independent acceptance counts. Counts represent accepted requests
+minus accepted responses; current-edge acceptance cannot justify current BVALID
+or RVALID. A full queue may accept and retire simultaneously. Outstanding work
+may remain indefinitely: **there is no READY fairness assumption or protocol
+response deadline**. These checks do not prove eventual response or lost-response
+freedom. Optional performance requirements must be separate explicit bounded
+response contracts with their own environment assumptions.
+
+Parameters are `address_width` 1–64, `data_width` 32 or 64, `capacity` 1–16 per
+AW/W/AR count, and `role` (`manager`, `subordinate`, or trace-only `link`). Capacity
+is a verification bound, not an AXI restriction. Exceeding it is reported as
+`scope_exceeded`, never silently wrapped or declared a protocol violation.
+Both data widths, all strobe bits (including zero), protection bits and response
+bits participate in stability checks. This does not validate their functional
+meaning for a particular register map.
+
+For a manager DUT, AW/W/AR source rules are guarantees and B/R source rules are
+counterpart assumptions; a subordinate swaps those roles. The generated observer
+records counterpart violations separately and stops interpreting subsequent
+samples in that reset epoch as a legal environment. A DUT violation found earlier
+is retained. No DUT-owned rule is assumed. `link` checks both ends without any
+counterpart assumptions. Composition does not discharge an environment assumption
+by referring back to the same DUT guarantee. To close an interface, check the
+complete sampled link or independently establish the counterpart contract.
+
+### AXI source binding and replay
+
+After the builds described in [User project entry point](#user-project-entry-point),
+run the checked examples:
+
+```sh
+python3 protocols/axi4lite_project.py search examples/axi4lite/binding.json --out /tmp/axi-subordinate
+python3 protocols/axi4lite_project.py search examples/axi4lite/manager-binding.json --out /tmp/axi-manager
+./conformance/axi4lite/run_ci.sh /tmp/axi-ci
+```
+
+The [subordinate](../examples/axi4lite/subordinate.veryl) has independent AW/W slots
+and one read slot; the [manager](../examples/axi4lite/manager.veryl) issues one
+transaction of each kind and holds requests under backpressure. They illustrate
+protocol control, not a functional peripheral or a certified AXI implementation.
+
+Copy the example project files into your own directory, replace the RTL, and
+provide a native v3 specification and [project manifest](../examples/axi4lite/project.json).
+The first version requires one unconditional `tick` operation. Existing
+components and bindings remain in the checked composition; event-selective and
+v4 bindings are rejected. Each protocol pin must map to a distinct typed project
+wire alias and an actual top-level port in the role's required direction.
+State mapping, reset polarity and source path validation follow the existing
+project entry point. The [AXI binding](../examples/axi4lite/binding.json) contains:
+
+```json
+{
+  "version": 1,
+  "project": "project.json",
+  "config": {"address_width": 8, "data_width": 32, "capacity": 1, "role": "subordinate"},
+  "signals": {"awvalid": "bus_awvalid", "awready": "bus_awready"}
+}
+```
+
+The short `signals` example above must be expanded to **all** names returned by
+`signal_types(config)`; the checked example supplies the complete mapping.
+Unmapped or aliased pins, wrong directions, unsupported widths and unknown
+configuration fields are errors. History/counter registers belong to the
+observer; they are never written into DUT state or accepted as simulator inputs.
+
+```sh
+python3 protocols/axi4lite_project.py search /my/project/axi.json --out /tmp/search --regression /my/project/failure.json
+python3 protocols/axi4lite_project.py replay /my/project/axi.json --out /tmp/replay --regression /my/project/failure.json
+python3 protocols/axi4lite_project.py stimulus /my/project/axi.json --out /tmp/scenario --inputs /my/project/inputs.json
+```
+
+`--out` must be fresh. `inputs.json` is an array of complete canonical external
+input objects: initial reset, then nonreset edges. Search saves a regression only
+for a reproduced failure and never overwrites a file. Replay checks source,
+specification, bindings, library/oracle code and dependency identities. Changed
+identities are rejected. A failure is replayed against the original property,
+then the actual pinned Celox source simulation; an independent integer/snapshot
+oracle checks those bus samples. Source behavior, not a chosen relational-spec
+witness, determines the comparison values.
+
+`model.json` is the generated native composition. `search.json`,
+`scope-search.json`, `axi-contract.json`, simulation samples and the independent
+oracle result retain the claim and its boundaries. Search through depth 1–32
+reports `bounded_no_failure`, `reset_reachable_failure`, `scope_exceeded`, or
+`unknown`; it does not establish unbounded induction. Capacity search uses the
+same legal-counterpart prefix, separately from DUT obligations. Search alone does
+not establish environment nonvacuity: supply a legal positive stimulus or a
+separate cover. The examples require actual handshakes, not merely idle traces. A concrete
+`stimulus` run reports environment violations explicitly. Exit 0 means the
+request completed; inspect the status. Tool/mapping/divergence errors exit 2.
+
+### AXI limits and validation
+
+The gate runs the existing Celox replay tests plus positive source scenarios,
+manager/subordinate mutants, replay and stale-identity controls. Hand-authored
+expected traces cover every supported rule, both roles and widths, simultaneous
+pop/push at capacity, indefinite stalls, and reset epochs. Exhaustive short write
+sequences and fixed-seed full-channel sequences compare the generated native
+monitor to a separately implemented procedural oracle. Actual source runs cover
+AW-first, W-first, simultaneous, continuous traffic and response backpressure;
+mutant stimuli also run on correct RTL with explicit expected transfer counts.
+
+Unchecked: input-to-output combinational paths, VALID dependence on READY or
+other channels, asynchronous reset assertion/deassertion and reset-release VALID
+timing, transaction-identity ordering and functional address/data/strobe behavior,
+fairness/liveness, X/Z, CDC, bursts, IDs and other AXI variants. Source replay uses
+a single positive-edge clock, ordinary bit synchronous reset, scalar two-state
+ports, one initial reset and the pinned Celox/Veryl subset. Standalone
+`trace_document(config)` / `bind(...)` provide the generated contract API;
+`axi4lite_reference.check_trace(...)` accepts full sampled traces, including
+explicit reset epochs. Neither constitutes an asynchronous-reset timing check.
+
+This experimental tooling is provided as-is, with no AXI certification or fitness
+claim. Review its assumptions and independently validate it for your use. This
+notice does not change the repository's licensing terms or provide legal guarantees.

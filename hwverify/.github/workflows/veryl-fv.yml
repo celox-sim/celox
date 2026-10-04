@@ -63,8 +63,8 @@ jobs:
         run: |
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           rustup override set 1.98.1
-      - name: Reproduce reachable violations in original Veryl with pinned Celox
-        run: ./conformance/celox-replay/run_ci.sh "$RUNNER_TEMP/celox-replay"
+      - name: Reproduce source violations and AXI4-Lite protocol regressions with pinned Celox
+        run: ./conformance/axi4lite/run_ci.sh "$RUNNER_TEMP/celox-replay"
       - name: Upload complete replay evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
