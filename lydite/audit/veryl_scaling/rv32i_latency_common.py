@@ -160,7 +160,7 @@ def dependencies(variant,frontend,lifter,checker):
 def run(out,variant,checker=None):
     out=Path(out);out.mkdir(parents=True,exist_ok=False)
     frontend=ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend'
-    lifter=ROOT/'../target/release/lydite-sir-lift';checker=Path(checker or ROOT/'../target/release/lydite')
+    lifter=ROOT/'../target/release/lydite-celox-lift';checker=Path(checker or ROOT/'../target/release/lydite')
     if any(k.startswith('LYDITE_') and k!='LYDITE_SOLVER' for k in os.environ):
         raise ValueError('nondefault LYDITE environment is not permitted')
     fingerprints={str(x.resolve()):sha(x) for x in dependencies(variant,frontend,lifter,checker)}

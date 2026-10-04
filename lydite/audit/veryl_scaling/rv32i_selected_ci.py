@@ -25,7 +25,7 @@ def write(path, value):
 
 def capture_provenance(out, checker):
     root = selected.ROOT
-    scope = ['../Cargo.toml', '../Cargo.lock', '../crates/lydite-ir', '../crates/lydite', '../crates/lydite-sir', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify',
+    scope = ['../Cargo.toml', '../Cargo.lock', '../crates/lydite-ir', '../crates/lydite', '../crates/lydite-celox', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify',
              'audit/veryl_scaling', 'audit/lemma_candidates',
              'conformance/veryl-symbolic', '../.github/workflows/lydite.yml',
              'examples/build_pipeline.py', 'examples/build_branch_pipeline.py',
@@ -46,7 +46,7 @@ def capture_provenance(out, checker):
         digest = hashlib.sha256(data).hexdigest()
         fingerprints[str(path.resolve())] = digest
         (snapshots / (digest + '-' + path.name)).write_bytes(data)
-    tools = [checker, root / '../target/release/lydite-sir-lift',
+    tools = [checker, root / '../target/release/lydite-celox-lift',
              root / 'conformance/veryl-proof/target/debug/veryl-proof-frontend']
     for path in tools:
         fingerprints[str(path.resolve())] = hashlib.sha256(path.read_bytes()).hexdigest()

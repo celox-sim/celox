@@ -30,5 +30,5 @@
   "crates/solver/src/quantified.rs": "fc6dabcc9c423eb6cd84825b1240337d6ec47188ad76b93bab3e3ec1e73e6829",
   "crates/solver/src/z3.rs": "9bcd0a3db90e719bc5b804914efecfb8e3e5892f16e64438e26b66c6120f2eb6",
   "target/release/lydite": "c5a41b6ce226842c53d5e7516c9f4ee4597efcb96d666d6fc6a9e09ed34cafa9",
-  "target/release/lydite-sir-lift": "1838a1ee9f0fa3da6b0f8ea2f63c5f4cdb7e29c4874e9b0980c04537f740c94c"
+  "target/release/lydite-celox-lift": "1838a1ee9f0fa3da6b0f8ea2f63c5f4cdb7e29c4874e9b0980c04537f740c94c"
 }

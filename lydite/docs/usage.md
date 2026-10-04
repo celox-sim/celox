@@ -71,7 +71,7 @@ Do not replace these gates with an old report or a reduced smoke run.
 `crates/lydite-ir` validates typed models; `crates/lydite-syntax` uses the parol grammar and
 source spans; `crates/lydite-solver` owns finite/Z3 solving and checked proof rules;
 `crates/lydite-verify` builds refinement/specification obligations; `crates/lydite` provides
-the command line. [SIR lifting](../../crates/lydite-sir/README.md) connects imported RTL.
+the command line. [SIR lifting](../../crates/lydite-celox/README.md) connects imported RTL.
 `examples/` and `audit/` contain generators, independent interpreters and tests.
 
 `python3 scripts/json_to_lyd.py INPUT.json OUTPUT.lyd` is a migration printer.

@@ -173,7 +173,7 @@ def memory_contract(count, raw):
 
 def compile_machine(count, out, frontend=None, lifter=None, fault=None):
     frontend = frontend or c.ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
-    lifter = lifter or c.ROOT / '../target/release/lydite-sir-lift'
+    lifter = lifter or c.ROOT / '../target/release/lydite-celox-lift'
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
     text = memory_source(count, fault)
@@ -237,7 +237,7 @@ def check_mutations(out, checker, frontend=None, lifter=None):
     out = Path(out)
     checker = Path(checker).resolve()
     frontend = Path(frontend or c.ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend').resolve()
-    lifter = Path(lifter or c.ROOT / '../target/release/lydite-sir-lift').resolve()
+    lifter = Path(lifter or c.ROOT / '../target/release/lydite-celox-lift').resolve()
     summary_path = out / 'memory-mutation-summary.json'
     destinations = [summary_path] + [out / f'memory-4-bad-{fault}-{kind}'
         for fault in MEMORY_FAULTS for kind in ('import', 'proof')]

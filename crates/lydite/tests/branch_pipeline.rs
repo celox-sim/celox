@@ -53,7 +53,9 @@ fn finite_branch_pipeline_proves_and_rejects_seven_faults_without_z3() {
     let mut cases = vec!["branch_pipeline_w4".to_owned()];
     cases.extend(FAULTS.map(|fault| format!("branch_pipeline_w4_bad_{fault}")));
     for name in cases {
-        let out = root().join("../target/branch-pipeline-regression").join(&name);
+        let out = root()
+            .join("../target/branch-pipeline-regression")
+            .join(&name);
         fs::create_dir_all(&out).unwrap();
         let result = Command::new(env!("CARGO_BIN_EXE_lydite"))
             .arg(root().join(format!("examples/{name}.json")))

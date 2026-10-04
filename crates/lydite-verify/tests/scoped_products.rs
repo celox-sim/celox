@@ -8,7 +8,9 @@ fn root() -> PathBuf {
 }
 
 fn output(name: &str) -> PathBuf {
-    root().join("../target/scoped-product-regression").join(name)
+    root()
+        .join("../target/scoped-product-regression")
+        .join(name)
 }
 
 fn z3() -> String {

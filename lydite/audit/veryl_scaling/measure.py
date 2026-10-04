@@ -84,7 +84,7 @@ def one(axis,n,bad,out,mutant_hint="query"):
     impl={'state':state,'outputs':{'commit':True}}
     for mode,rst in [('normal',False),('reset',True)]:
         cfg['overrides']={'rst':rst};write(mode+'-bindings.json',cfg)
-        lifted,phase=execute([ROOT/'../target/release/lydite-sir-lift',out/'compiled.json',out/(mode+'-bindings.json')]+(['--inline'] if rst else []),out/(mode+'-lift.json'))
+        lifted,phase=execute([ROOT/'../target/release/lydite-celox-lift',out/'compiled.json',out/(mode+'-bindings.json')]+(['--inline'] if rst else []),out/(mode+'-lift.json'))
         result['phases'][mode+'_lift']=phase
         if lifted is None:result['status']='lift_failed';write('summary.json',result);return result
         if rst:

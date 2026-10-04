@@ -29,7 +29,7 @@ members = [
     "crates/celox-vpi",
     "crates/lydite-ir",
     "crates/lydite",
-    "crates/lydite-sir",
+    "crates/lydite-celox",
     "crates/lydite-solver",
     "crates/lydite-syntax",
     "crates/lydite-verify",

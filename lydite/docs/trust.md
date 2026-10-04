@@ -35,7 +35,7 @@ reachable hardware bug.
 The trusted path includes Rust typing/lowering and obligation generation,
 expression normalization, the structural UNSAT kernel, the selected finite solver
 or Z3, and relevant compiler/importer and composition rules. SIR/Veryl support has
-an explicit synchronous two-state model; see [the lifter](../../crates/lydite-sir/README.md).
+an explicit synchronous two-state model; see [the lifter](../../crates/lydite-celox/README.md).
 Low-level Rust term constructors are implementation APIs, not a soundness proof.
 
 The finite backend validates SAT assignments against the original formula and

@@ -77,7 +77,7 @@ def main():
             out=args.out/(f'cpu_{n}'+('_bad_'+fault if fault else ''))
             accepted=False
             try:
-                r=runner.run_case(32,fault,out,ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend',ROOT/'../target/release/lydite-sir-lift',ROOT/'../target/release/lydite')
+                r=runner.run_case(32,fault,out,ROOT/'conformance/veryl-proof/target/debug/veryl-proof-frontend',ROOT/'../target/release/lydite-celox-lift',ROOT/'../target/release/lydite')
                 accepted=r['status']==('stuttering_refinement_verified' if fault is None else 'reset_rejected' if fault=='missing_reset' else 'counterexample')
             except RuntimeError as e:
                 report=json.load(open(out/'report.json')) if (out/'report.json').exists() else {}

@@ -2114,7 +2114,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lydite-sir"
+name = "lydite-celox"
 version = "0.10.1"
 dependencies = [
  "lydite-ir",

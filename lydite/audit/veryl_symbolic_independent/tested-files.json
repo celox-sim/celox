@@ -13,5 +13,5 @@
   "crates/sir/src/main.rs": "cde64aea15c2b634e8636fbd5405e0c4b003f38144e37ce69ff8667479550809",
   "crates/sir/src/tests.rs": "3a3fddd6782c48d99bbe22a20c0026e8f438e46f7c130c5852f28c694815df02",
   "target/release/lydite": "1d7fff25c05cb4cbd9b6c7e43e8e9709d9bb7556b89457eb77be0be10407453c",
-  "target/release/lydite-sir-lift": "676a882b88644a606f9c680b82a906e41f1557df06b78f50496f103425ae16ea"
+  "target/release/lydite-celox-lift": "676a882b88644a606f9c680b82a906e41f1557df06b78f50496f103425ae16ea"
 }

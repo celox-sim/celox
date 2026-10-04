@@ -1,4 +1,4 @@
-# lydite-sir: symbolic one-event SIR lifting
+# lydite-celox: symbolic one-event SIR lifting
 
 This reusable Rust library lifts the **compile-only** Veryl/Celox export into
 `lydite_ir::Term` expressions. It neither runs a simulator nor asks a solver
@@ -6,10 +6,11 @@ for a representative input, branch, address or state. The existing finite solver
 and refinement checker prove the resulting expressions separately.
 
 ```sh
-cargo build --locked -p lydite-sir
+# From lydite/:
+cargo build --locked -p lydite-celox
 # Compile a {top,sources,four_state:false} document with the pinned frontend.
 conformance/veryl-proof/target/debug/veryl-proof-frontend design.json > compiled.json
-../target/debug/lydite-sir-lift compiled.json bindings.json > transition.json
+../target/debug/lydite-celox-lift compiled.json bindings.json > transition.json
 ```
 
 Bindings name a selected event and explicitly map physical signals to typed

@@ -6,7 +6,7 @@ substitution changes only widths. The transition implementation is **not**
 generated from the ISA. `run.py` reuses the separately written sequential ISA,
 state binding and rank from `examples/build_branch_pipeline.py`, discards that
 file's implementation expressions, then supplies expressions lifted from actual
-Veryl → Celox ScheduledRtl/SIR by `lydite-sir`.
+Veryl → Celox ScheduledRtl/SIR by `lydite-celox`.
 
 ## Model
 

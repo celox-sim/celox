@@ -95,5 +95,5 @@
   "examples/build_branch_pipeline.py": "f2e912173b7f418fd96583fa33239dd2461dfc78a725e88a9a38fca9891ea1a2",
   "examples/build_pipeline.py": "4888c408b9c3440daeb93045ec2136a52fe5ea95862cbe0d504bbe83ad6edd9d",
   "target/release/lydite": "a5db7545b1ca4ecdd09297061332518cf3a60c9f60fced5ab5897747e3242490",
-  "target/release/lydite-sir-lift": "40497e2e99ca7511718f912dc61dfa6876783595cabe49479c376fb3979677b1"
+  "target/release/lydite-celox-lift": "40497e2e99ca7511718f912dc61dfa6876783595cabe49479c376fb3979677b1"
 }

@@ -119,7 +119,7 @@ jobs:
 
       - name: cargo clippy
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo clippy --locked -p celox-test-suite-veryl -p celox -p celox-frontend-core -p celox-frontend-sv -p celox-frontend-veryl -p celox-macros -p celox-napi -p celox-sv-analyzer -p celox-ts-gen -p celox-vpi -p lydite-ir -p lydite -p lydite-sir -p lydite-solver -p lydite-syntax -p lydite-verify --all-targets --features celox/systemverilog,celox-test-suite-veryl/verilator,celox-test-suite-veryl/icarus --no-deps
+        run: cargo clippy --locked -p celox-test-suite-veryl -p celox -p celox-frontend-core -p celox-frontend-sv -p celox-frontend-veryl -p celox-macros -p celox-napi -p celox-sv-analyzer -p celox-ts-gen -p celox-vpi -p lydite-ir -p lydite -p lydite-celox -p lydite-solver -p lydite-syntax -p lydite-verify --all-targets --features celox/systemverilog,celox-test-suite-veryl/verilator,celox-test-suite-veryl/icarus --no-deps
 
       - name: Build Rust API documentation
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'

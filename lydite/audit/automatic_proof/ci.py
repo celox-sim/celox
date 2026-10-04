@@ -265,7 +265,7 @@ def gate(out, checker):
         (out / 'provenance.json').write_text(json.dumps({'revision': revision,
             'python': sys.version, 'files': fingerprints,
             'source_snapshots': 'source-snapshots'}, indent=2) + '\n')
-        scope = ['../crates/lydite-ir', '../crates/lydite', '../crates/lydite-sir', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify', 'audit/automatic_proof', 'conformance/veryl-symbolic/run_automatic_ci.sh',
+        scope = ['../crates/lydite-ir', '../crates/lydite', '../crates/lydite-celox', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify', 'audit/automatic_proof', 'conformance/veryl-symbolic/run_automatic_ci.sh',
                  '../.github/workflows/lydite.yml', '../Cargo.toml', '../Cargo.lock']
         (out / 'dirty.patch').write_bytes(subprocess.check_output(['git', 'diff', '--binary', 'HEAD', '--', *scope], cwd=ROOT))
         (out / 'untracked-source-paths.txt').write_bytes(subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '--', *scope], cwd=ROOT))

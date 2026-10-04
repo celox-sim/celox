@@ -23,7 +23,7 @@ trap finish EXIT
 cd "$REPO"
 test -x conformance/veryl-proof/target/debug/veryl-proof-frontend
 cp conformance/veryl-proof/work/provenance.json "$OUT/frontend-provenance.json"
-cargo build --release --locked -p lydite -p lydite-sir
+cargo build --release --locked -p lydite -p lydite-celox
 export Z3_TRIPWIRE_MARKER="$OUT/z3-invoked.txt"
 mkdir "$OUT/tripwire-bin"
 cp conformance/veryl-proof/tools/z3-tripwire.sh "$OUT/tripwire-bin/z3"

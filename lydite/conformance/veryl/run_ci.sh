@@ -63,7 +63,7 @@ PY
 cd "$HERE"
 python3 generate.py
 # --locked forbids resolving newer dependencies. These are independent workspaces.
-cargo build --release --locked --manifest-path "$REPO/../Cargo.toml" -p lydite-ir -p lydite -p lydite-sir -p lydite-solver -p lydite-syntax -p lydite-verify
+cargo build --release --locked --manifest-path "$REPO/../Cargo.toml" -p lydite-ir -p lydite -p lydite-celox -p lydite-solver -p lydite-syntax -p lydite-verify
 cargo build --locked --manifest-path analyzer-probe/Cargo.toml --target-dir "$HERE/analyzer-probe/target"
 cargo build --locked --manifest-path Cargo.toml --target-dir "$HERE/target" -p extract-suite
 export LYDITE_BIN="$REPO/../target/release/lydite"

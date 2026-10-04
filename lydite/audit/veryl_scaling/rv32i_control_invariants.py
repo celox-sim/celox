@@ -55,7 +55,7 @@ def run(out, checker):
     if p.sha(checker) != CHECKER_SHA256:
         raise ValueError('checker differs from audited frozen binary')
     frontend = p.ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
-    lifter = p.ROOT / '../target/release/lydite-sir-lift'
+    lifter = p.ROOT / '../target/release/lydite-celox-lift'
     paths = [Path(__file__), Path(p.__file__), Path(c.__file__), Path(s.__file__),
              Path(c.RUNNER.__file__), Path(c.registers.__file__),
              Path(__file__).with_name('rv32i_latency_variants.py'),

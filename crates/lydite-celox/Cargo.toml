@@ -1,5 +1,5 @@
 [package]
-name = "lydite-sir"
+name = "lydite-celox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ serde_json.workspace = true
 lydite-solver.workspace = true
 
 [[bin]]
-name = "lydite-sir-lift"
+name = "lydite-celox-lift"
 path = "src/main.rs"
 
 [lints]

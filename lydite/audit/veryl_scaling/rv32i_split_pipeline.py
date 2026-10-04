@@ -36,7 +36,7 @@ def cpu_state(text=None):
 
 def compile_machine(out, frontend=None, lifter=None, text=None):
     frontend = frontend or ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
-    lifter = lifter or ROOT / '../target/release/lydite-sir-lift'
+    lifter = lifter or ROOT / '../target/release/lydite-celox-lift'
     text = source() if text is None else text
     out = Path(out); out.mkdir(parents=True, exist_ok=False)
     (out / 'source.veryl').write_text(text)

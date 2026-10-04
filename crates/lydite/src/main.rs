@@ -1,26 +1,10 @@
-use lydite_ir as ir;
-#[cfg(test)]
-use lydite_ir::lower as frontend;
-#[cfg(test)]
-use lydite_solver as solver;
-#[cfg(test)]
-use lydite_solver::kernel;
-#[cfg(test)]
-use lydite_solver::partition as program;
-use lydite_verify as checker;
-#[cfg(test)]
-mod json_input {
-    pub use lydite_syntax::parse_json as parse;
-}
-#[cfg(test)]
-use crate::checker::check;
-use crate::ir::Res;
+use lydite_ir::Res;
 use serde_json::{Value, json};
 use std::{env, fs, path::PathBuf};
 enum Input {
-    Design(ir::Design),
-    Specification(ir::Specification),
-    ScopedSpecification(ir::ScopedSpecification),
+    Design(lydite_ir::Design),
+    Specification(lydite_ir::Specification),
+    ScopedSpecification(lydite_ir::ScopedSpecification),
 }
 impl Input {
     fn document(&self) -> &Value {
@@ -142,15 +126,18 @@ fn run() -> Res<i32> {
             let doc = lydite_syntax::parse_json(&bytes)?;
             if doc["version"] == 4 {
                 Input::ScopedSpecification(
-                    ir::ScopedSpecification::from_json(&doc)
+                    lydite_ir::ScopedSpecification::from_json(&doc)
                         .map_err(|e| format!("{}: {e}", args[0]))?,
                 )
             } else if doc["kind"] == "specification" {
                 Input::Specification(
-                    ir::Specification::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?,
+                    lydite_ir::Specification::from_json(&doc)
+                        .map_err(|e| format!("{}: {e}", args[0]))?,
                 )
             } else {
-                Input::Design(ir::Design::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?)
+                Input::Design(
+                    lydite_ir::Design::from_json(&doc).map_err(|e| format!("{}: {e}", args[0]))?,
+                )
             }
         };
         if let Some(path) = lemma_source {
@@ -170,7 +157,7 @@ fn run() -> Res<i32> {
                 doc.get("proof_programs"),
             )
             .map_err(|e| e.to_string())?;
-            design = Input::Design(ir::Design::from_json(&doc).map_err(|e| e.to_string())?);
+            design = Input::Design(lydite_ir::Design::from_json(&doc).map_err(|e| e.to_string())?);
         }
         if let Input::Design(d) = &design {
             lydite_verify::validate_proof_metadata(d).map_err(|e| format!("{}: {e}", args[0]))?;
@@ -200,15 +187,15 @@ fn run() -> Res<i32> {
             )
         } else {
             match &design {
-                Input::Design(d) => checker::check_design(d, z3, out.clone()),
-                Input::Specification(s) => checker::check_specification_structural(
+                Input::Design(d) => lydite_verify::check_design(d, z3, out.clone()),
+                Input::Specification(s) => lydite_verify::check_specification_structural(
                     s,
                     z3,
                     out.clone(),
                     structural_artifact.as_ref(),
                 ),
                 Input::ScopedSpecification(s) => {
-                    checker::check_scoped_specification(s, z3, out.clone())
+                    lydite_verify::check_scoped_specification(s, z3, out.clone())
                 }
             }
         }
@@ -255,9 +242,3 @@ fn main() {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod kernel_tests;

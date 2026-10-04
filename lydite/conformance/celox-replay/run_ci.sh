@@ -23,13 +23,13 @@ python3 conformance/veryl-proof/prepare.py
 cargo build --locked --manifest-path conformance/veryl-proof/frontend/Cargo.toml --target-dir conformance/veryl-proof/target
 cargo build --locked --manifest-path "$HERE/adapter/Cargo.toml" --target-dir conformance/veryl-proof/target
 cargo fmt --manifest-path "$HERE/adapter/Cargo.toml" --check
-cargo build --release --locked -p lydite -p lydite-sir
+cargo build --release --locked -p lydite -p lydite-celox
 cargo test --release --locked -p lydite-verify reachable::tests
 cargo test --release --locked -p lydite-verify --test inductive_safety
 python3 "$HERE/test_replay.py"
 python3 - "$OUT" <<'PY'
 import hashlib,json,pathlib,subprocess,sys
-out=pathlib.Path(sys.argv[1]); paths=[pathlib.Path(p) for p in ['conformance/veryl-proof/dependencies.json','conformance/celox-replay/adapter/Cargo.lock','conformance/veryl-proof/target/debug/veryl-proof-frontend','conformance/veryl-proof/target/debug/lydite-celox-replay','../target/release/lydite-replay','../target/release/lydite-sir-lift','../target/release/lydite-structure']]
+out=pathlib.Path(sys.argv[1]); paths=[pathlib.Path(p) for p in ['conformance/veryl-proof/dependencies.json','conformance/celox-replay/adapter/Cargo.lock','conformance/veryl-proof/target/debug/veryl-proof-frontend','conformance/veryl-proof/target/debug/lydite-celox-replay','../target/release/lydite-replay','../target/release/lydite-celox-lift','../target/release/lydite-structure']]
 (out/'executables-and-pins.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},indent=2)+'\n')
 (out/'head.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
 PY

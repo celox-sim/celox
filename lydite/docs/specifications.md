@@ -472,7 +472,7 @@ from the lydite repository (Rust 1.98.1):
 python3 conformance/veryl-proof/prepare.py
 cargo build --locked --manifest-path conformance/veryl-proof/frontend/Cargo.toml --target-dir conformance/veryl-proof/target
 cargo build --locked --manifest-path conformance/celox-replay/adapter/Cargo.toml --target-dir conformance/veryl-proof/target
-cargo build --release --locked -p lydite -p lydite-sir
+cargo build --release --locked -p lydite -p lydite-celox
 ```
 
 Place a manifest in your project directory. This example maps the canonical

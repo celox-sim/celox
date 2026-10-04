@@ -1,6 +1,9 @@
-use super::*;
-use crate::{frontend::*, ir::*, solver::Check};
-use std::collections::BTreeMap;
+//! End-to-end checks of example designs through the full refinement checker.
+use lydite_ir::*;
+use lydite_solver::{Check, partition as program};
+use lydite_verify::check;
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, env, fs, path::PathBuf};
 fn fixture(name: &str) -> Value {
     serde_json::from_slice(
         &fs::read(format!(
@@ -152,12 +155,12 @@ fn memory_normalization_is_equivalent() {
 #[test]
 fn duplicate_json_keys_rejected() {
     assert!(
-        crate::json_input::parse(br#"{"version":2,"version":2}"#)
+        lydite_syntax::parse_json(br#"{"version":2,"version":2}"#)
             .unwrap_err()
             .contains("duplicate JSON key")
     );
-    assert!(crate::json_input::parse(br#"{"state":{"a":"bool","a":"bool"}}"#).is_err());
-    assert!(crate::json_input::parse(br#"{"a":[true,3,null]}"#).is_ok());
+    assert!(lydite_syntax::parse_json(br#"{"state":{"a":"bool","a":"bool"}}"#).is_err());
+    assert!(lydite_syntax::parse_json(br#"{"a":[true,3,null]}"#).is_ok());
 }
 #[cfg(unix)]
 #[test]

@@ -522,7 +522,7 @@
   "machine_sha256": "c6c04bd1b994b0e713f26185a0380b41d4fb850d7dd22d3ff35323c272606397",
   "files": {
     "/workspace/scratch/07f10565586c/lydite-git-publish/conformance/veryl-proof/target/debug/veryl-proof-frontend": "e1dd18668335c49c0ac625f6450b418443d42366c80570cf4badd798162d485a",
-    "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite-sir-lift": "2d281f131d143718f583e77d300e43f62df823b48370e7a067daae4f9bd4c281",
+    "/workspace/scratch/07f10565586c/lydite-git-publish/target/release/lydite-celox-lift": "2d281f131d143718f583e77d300e43f62df823b48370e7a067daae4f9bd4c281",
     "/tmp/rv32i-latency-frozen-checker": "17399e881e7708837abee632512b77fa10abce6e0818ab709f8d93b1415f6775",
     "/workspace/scratch/07f10565586c/lydite-git-publish/audit/veryl_scaling/test_rv32i_latency_candidate.py": "c77d9a8646338c595489cbf0b90603ec1ea99c9875fcbc5a77d9260efd7cd971",
     "/workspace/scratch/07f10565586c/lydite-git-publish/audit/interpreter.py": "995a5dbb4402c52bad5783071ffe9cfae594f8597e55ee4cf1c1cd8ee5088f9b",

@@ -1,4 +1,6 @@
-use crate::{frontend::*, ir::*, kernel, solver::Check};
+//! Kernel closure and partition inference without an external solver.
+use lydite_ir::*;
+use lydite_solver::{Check, kernel, partition as program};
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 fn dir(name: &str) -> PathBuf {

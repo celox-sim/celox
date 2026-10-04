@@ -22,17 +22,17 @@ cd "$REPO"
 FRONTEND="$REPO/conformance/veryl-proof/target/debug/veryl-proof-frontend"
 test -x "$FRONTEND"
 cp conformance/veryl-proof/work/provenance.json "$OUT/frontend-provenance.json"
-cargo build --release --locked -p lydite -p lydite-sir
-cargo fmt --check -p lydite-ir -p lydite -p lydite-sir -p lydite-solver -p lydite-syntax -p lydite-verify
+cargo build --release --locked -p lydite -p lydite-celox
+cargo fmt --check -p lydite-ir -p lydite -p lydite-celox -p lydite-solver -p lydite-syntax -p lydite-verify
 python3 - "$OUT" "$REPO" "$FRONTEND" <<'PYHASH'
 import hashlib, json, pathlib, subprocess, sys
 out, root, frontend = map(pathlib.Path, sys.argv[1:])
 # The Rust crates live in the repository-root Cargo workspace.
 repo = root.parent
 files = [repo/'Cargo.toml', repo/'Cargo.lock', frontend,
-         root/'../target/release/lydite', root/'../target/release/lydite-sir-lift']
+         root/'../target/release/lydite', root/'../target/release/lydite-celox-lift']
 for directory in ('crates/lydite-ir', 'crates/lydite-solver', 'crates/lydite-verify', 'crates/lydite-syntax',
-                  'crates/lydite', 'crates/lydite-sir', 'lydite/conformance/veryl-symbolic'):
+                  'crates/lydite', 'crates/lydite-celox', 'lydite/conformance/veryl-symbolic'):
     files.extend(p for p in (repo/directory).rglob('*') if p.is_file()
                  and '__pycache__' not in p.parts and p.suffix != '.pyc')
 files.extend((root/'audit/veryl_scaling').glob('*.py'))
@@ -46,9 +46,9 @@ cp conformance/veryl-proof/tools/z3-tripwire.sh "$OUT/tripwire-bin/z3"
 export PATH="$OUT/tripwire-bin:$PATH"
 export Z3_BIN="$OUT/tripwire-bin/z3"
 export LYDITE_SOLVER=finite
-cargo test --release --locked -p lydite-sir -p lydite-solver
+cargo test --release --locked -p lydite-celox -p lydite-solver
 python3 -m unittest discover -s "$HERE/tests" -v
-python3 "$HERE/run.py" --out "$OUT/cases" --frontend "$FRONTEND" --lifter "$REPO/../target/release/lydite-sir-lift"
+python3 "$HERE/run.py" --out "$OUT/cases" --frontend "$FRONTEND" --lifter "$REPO/../target/release/lydite-celox-lift"
 python3 "$REPO/audit/veryl_scaling/measure.py" --out "$OUT/scaling-regression" --sizes 16 32 64 --require-success
 python3 "$REPO/audit/veryl_scaling/cpu_capacity.py" --out "$OUT/cpu-capacity-regression" --sizes 8 16 32 64 --faults no_flush wrong_target no_forward no_interlock wrong_add missing_reset --require-success
 python3 "$REPO/audit/veryl_scaling/cpu_registers.py" --out "$OUT/register-scaling-regression" --sizes 8 16 32 --require-success

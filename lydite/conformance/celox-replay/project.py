@@ -16,7 +16,7 @@ FRONTEND = ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend'
 ADAPTER = ROOT / 'conformance/veryl-proof/target/debug/lydite-celox-replay'
 CORE = ROOT / '../target/release/lydite-replay'
 CHECKER = ROOT / '../target/release/lydite'
-LIFTER = ROOT / '../target/release/lydite-sir-lift'
+LIFTER = ROOT / '../target/release/lydite-celox-lift'
 
 def canonical(v):
     return json.dumps(v, sort_keys=True, separators=(',', ':')).encode()

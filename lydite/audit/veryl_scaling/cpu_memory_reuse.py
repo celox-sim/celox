@@ -267,7 +267,7 @@ def main():
     parser.add_argument('--negative-controls', action='store_true',
                         help='Check abstract wiring and ISA-relevant imported CPU mutations')
     parser.add_argument('--frontend', type=Path, default=ROOT / 'conformance/veryl-proof/target/debug/veryl-proof-frontend')
-    parser.add_argument('--lifter', type=Path, default=ROOT / '../target/release/lydite-sir-lift')
+    parser.add_argument('--lifter', type=Path, default=ROOT / '../target/release/lydite-celox-lift')
     parser.add_argument('--checker', type=Path, default=ROOT / '../target/release/lydite')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
