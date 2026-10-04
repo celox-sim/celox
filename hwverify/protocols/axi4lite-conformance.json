@@ -5,7 +5,7 @@
   "source": "https://developer.arm.com/-/media/Arm%20Developer%20Community/PDF/IHI0022H_amba_axi_protocol_spec.pdf",
   "inventory_status": "partial; pending independent normative completeness audit",
   "overall_compliance": "not_established",
-  "profile": "explicit full Lite signal set, no IDs/bursts/extensions; capacities are tool bounds",
+  "profile": "full Lite signal set or explicit subordinate_no_error_responses profile with both response-code outputs absent; no IDs/bursts/extensions; capacities are tool bounds",
   "rules": [
     {
       "id": "channel_stability",
@@ -197,10 +197,21 @@
         "B1.2"
       ],
       "applicability": "reduced/optional signal configurations",
-      "enforcement": "unsupported",
-      "evidence_or_gap": "current binding requires the complete explicit Lite signal set; future profiles must identify each allowed omission/default and interoperability restriction",
-      "tests": [],
-      "next_evidence": "Add explicit per-signal presence/default profiles tied to A9.3 and B1.2, validate source port absence and allowed counterpart capabilities; prove equivalence against explicit full-signal bindings. Do not silently fill unmapped required pins or infer compliance for unsupported profiles."
+      "enforcement": "partial",
+      "evidence_or_gap": "Version 2 subordinate_no_error_responses requires explicit false exclusive/error capabilities, both BRESP/RRESP declared absent with bv<2> type, frontend absence checks, and complete remaining top-level output coverage. Typed OKAY defaults are disclosed; capability declarations and physical default integration are not proved. Partial omission, additional outputs and other profiles remain unsupported.",
+      "tests": [
+        "optional_response_equivalence_32",
+        "optional_response_equivalence_64",
+        "optional_response_mutant_32",
+        "optional_response_mutant_64",
+        "profile_reject_missing_valid",
+        "profile_present_False",
+        "profile_present_True",
+        "profile_reject_wrong_width",
+        "profile_reject_wrong_direction",
+        "profile_implicit_defaults"
+      ],
+      "next_evidence": "Represent exact direction/capability conditions and integration evidence before adding any other omission/default. Do not infer functional error behavior from absence or invent response transaction origins."
     },
     {
       "id": "forward_progress",

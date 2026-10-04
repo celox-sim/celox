@@ -27,20 +27,55 @@ def expand(term, impl, reset=False, visiting=None):
     return term
 
 
+def response_profile(binding, config, types):
+    """Strict first optional profile; never infer capabilities from absent pins."""
+    version = binding.get('version')
+    if type(version) is not int or version not in (1, 2): raise ValueError('AXI binding version must be 1 or 2')
+    replay.exact(binding, ['version', 'project', 'config', 'signals'] + (['profile'] if version == 2 else []), 'AXI binding')
+    if version == 1:
+        return {}, {'name': 'explicit_full_signal_set', 'defaults': {}, 'capabilities': {}}
+    profile = binding['profile']
+    replay.exact(profile, ['name', 'capabilities', 'omitted'], 'AXI optional profile')
+    if profile['name'] != 'subordinate_no_error_responses' or config['role'] != 'subordinate':
+        raise ValueError('unsupported optional profile or role; only subordinate_no_error_responses is supported')
+    replay.exact(profile['capabilities'], ['supports_exclusive_accesses', 'generates_error_responses'], 'profile capabilities')
+    if any(value is not False for value in profile['capabilities'].values()):
+        raise ValueError('optional response profile requires explicit false exclusive/error capabilities')
+    replay.exact(profile['omitted'], ['bresp', 'rresp'], 'omitted response pair')
+    defaults = {}; ports = []
+    for name, entry in profile['omitted'].items():
+        replay.exact(entry, ['port', 'type'], 'omitted response declaration')
+        replay.identifier(entry['port']); ports.append(entry['port'])
+        if entry['type'] != types[name] or type(entry['type'].get('bv')) is not int:
+            raise ValueError('omitted response type must be bv<2>: ' + name)
+        defaults[name] = {'port': entry['port'], 'type': types[name], 'value': 0, 'encoding': 'OKAY', 'origin': 'Arm IHI 0022H A9.3 Tables A9-2/A9-4; A9.3.6'}
+    if len(set(ports)) != 2: raise ValueError('omitted response ports must be distinct')
+    return defaults, {'name': profile['name'], 'defaults': defaults, 'capabilities': profile['capabilities'],
+                      'capability_evidence': 'explicit user declaration; functional error behavior is not inferred from port absence',
+                      'scope': 'both subordinate response-code outputs omitted; all remaining top-level outputs must be mapped AXI ports',
+                      'physical_default_wiring': 'not verified; integration must supply the declared OKAY defaults'}
+
+
 def prepare(path, out):
     binding = replay.load_json(path)
-    replay.exact(binding, ['version', 'project', 'config', 'signals'], 'AXI binding')
-    if type(binding['version']) is not int or binding['version'] != 1: raise ValueError('AXI binding version must be 1')
     config = parameters(binding['config']); types = signal_types(config)
+    defaults, profile = response_profile(binding, config, types)
+    required = set(types) - set(defaults)
     if config['role'] == 'link': raise ValueError('source binding needs manager or subordinate role; link is for complete sampled traces')
-    if not isinstance(binding['signals'], dict) or set(binding['signals']) != set(types) or any(not isinstance(n, str) for n in binding['signals'].values()) or len(set(binding['signals'].values())) != len(types):
-        raise ValueError('map each protocol signal to a distinct project wire alias')
+    if not isinstance(binding['signals'], dict) or set(binding['signals']) != required or any(not isinstance(n, str) for n in binding['signals'].values()) or len(set(binding['signals'].values())) != len(required):
+        raise ValueError('map each required protocol signal to a distinct project wire alias; no implicit defaults')
     project_path = replay.project_file(path.resolve().parent, binding['project'])
     project = replay.prepare_project(project_path, out)
     if project['goal'] != 'safety': raise ValueError('AXI protocol guarantees use safety; declare optional response contracts separately')
     impl = project['document']['implementation']
     compiled = json.loads((out / 'compiled.json').read_text())
     top = {s['path'][0]: s for s in compiled['signals'] if not s['instances'] and len(s['path']) == 1}
+    for name, entry in defaults.items():
+        if entry['port'] in top:
+            raise ValueError('declared omitted response signal is present in frontend reflection: ' + entry['port'])
+    if defaults:
+        profile['absence_evidence'] = {'status': 'checked_against_frontend_reflection', 'ports': sorted(entry['port'] for entry in defaults.values()),
+                                       'compiled_sha256': replay.sha(replay.canonical(compiled))}
     manager_outputs = {'awvalid', 'awaddr', 'awprot', 'wvalid', 'wdata', 'wstrb', 'arvalid', 'araddr', 'arprot', 'bready', 'rready'}
     physical = []
     for name, alias in binding['signals'].items():
@@ -51,12 +86,20 @@ def prepare(path, out):
         if top[mapped['signal']]['kind'] != ('Output' if dut_output else 'Input'):
             raise ValueError('AXI role/direction mismatch: ' + name)
     if len(set(physical)) != len(physical): raise ValueError('AXI physical mappings alias each other')
+    if defaults:
+        actual_outputs = {name for name, row in top.items() if row['kind'] == 'Output'}
+        mapped_outputs = {name for name in physical if top[name]['kind'] == 'Output'}
+        if actual_outputs != mapped_outputs:
+            raise ValueError('optional response profile requires every top-level output mapped; extra/unmapped outputs are unsupported')
     signals = {n: expand('w.' + alias, impl) for n, alias in binding['signals'].items()}
+    # Standard typed native constants, only after explicit profile/absence checks.
+    signals.update({name: ['bv', 2, entry['value']] for name, entry in defaults.items()})
     # Reset combinational outputs must come from the reset lowering, not the
     # normal lowering (which has already substituted reset=False).
     reset_lift = replay.invoke([replay.LIFTER, out / 'compiled.json', out / 'reset-bindings.json', '--inline'])
     reset_impl = {'wires': reset_lift['wires'], 'reset': impl['reset']}
     reset_signals = {n: expand(reset_lift['outputs'][alias], reset_impl, reset=True) for n, alias in binding['signals'].items()}
+    reset_signals.update({name: ['bv', 2, entry['value']] for name, entry in defaults.items()})
     # Generic native structural obligations; no AXI-specific graph checker.
     structural = json.loads(json.dumps(project['document']))
     structural['components']['AxiStructure'] = {'state': {}, 'init': True, 'invariant': True, 'steps': {'tick': True}, 'examples': {}, 'structure': {'no_comb_path': {}}}
@@ -88,6 +131,9 @@ def prepare(path, out):
     project['document'] = bind(base, config, signals, reset_signals)
     project['scope_document'] = bind(base, config, signals, reset_signals, 'scope')
     project['axi'] = binding
+    profile['source_sampled_signals'] = sorted(binding['signals'])
+    project['axi_profile'] = profile
+    replay.write(out / 'axi-profile.json', profile)
     project['identity']['axi_binding_sha256'] = replay.sha(replay.canonical(binding))
     project['identity']['sampled_phase_library_sha256'] = replay.sha((ROOT / 'protocols/sampled_phase.py').read_bytes())
     project['identity']['axi_library_sha256'] = replay.sha((ROOT / 'protocols/axi4lite.py').read_bytes())
@@ -96,8 +142,8 @@ def prepare(path, out):
     project['identity']['document_sha256'] = replay.sha(replay.canonical(project['document']))
     replay.write(out / 'model.json', project['document'])
     replay.write(out / 'project-identity.json', project['identity'])
-    replay.write(out / 'axi-contract.json', {'config': config, 'rules': rules(), 'normative_source': SOURCE, 'unchecked': UNCHECKED,
-                 'assumptions': 'Only counterpart protocol rules on this prefix; no DUT guarantees, READY fairness or deadlines assumed',
+    replay.write(out / 'axi-contract.json', {'config': config, 'rules': rules(), 'normative_source': SOURCE, 'unchecked': UNCHECKED, 'profile': profile,
+                 'assumptions': 'Counterpart protocol rules on this prefix plus any explicit signal-profile capability declarations; no DUT guarantees, READY fairness or deadlines assumed',
                  'capacity': 'tool bound, not a protocol rule; overflow is reported separately'})
     return project
 
@@ -112,8 +158,10 @@ def simulate(project, inputs, out):
         for name, alias in project['axi']['signals'].items():
             value = int(sample[project['manifest']['signals'][alias]['signal']])
             row[name] = bool(value) if signal_types(project['axi']['config'])[name] == 'bool' else value
+        row.update({name: entry['value'] for name, entry in project['axi_profile']['defaults'].items()})
         rows.append(row)
     independent = check_trace(rows, project['axi']['config'])
+    independent['signal_profile'] = project['axi_profile']
     independent['reset_release']['source_phases'] = [
         {'edge': frame['edge'], 'reset_active': frame['edge'] == 0,
          **{phase: {ch: bool(int(frame[phase][project['manifest']['signals'][project['axi']['signals'][ch + 'valid']]['signal']])) for ch in ('aw', 'w', 'ar', 'b', 'r')} for phase in ('before', 'after')}}
@@ -177,6 +225,7 @@ def main():
             summary = {'status': (independent['status'] if status == 'trace_no_failure' and independent['status'] != 'sampled_prefix_passed' else status), 'independent': independent, 'identity': project['identity'], 'unchecked': UNCHECKED}
         summary['write_pairing'] = summary.get('independent', {}).get('write_pairing', {'status': 'not_established_by_bounded_search', 'scope': 'Known-pair safety only; counterpart arrival and completion are not established'})
         summary['reset_release'] = summary.get('independent', {}).get('reset_release', {'status': 'included_in_bounded_conditional_checks', 'scope': 'one initial reset; manager pre-edge obligation only; no physical timing claim'})
+        summary['signal_profile'] = project['axi_profile']
         summary['structural'] = project['structural']
         if project['structural']['status'] == 'verified':
             summary['unchecked'] = ['synthesized-netlist/physical combinational paths'] + [item for item in UNCHECKED if item != 'input-to-output combinational paths']
@@ -186,6 +235,8 @@ def main():
             summary['status'] = 'unknown'
         summary['environment_nonvacuity'] = ('Not established by search; provide a legal positive stimulus or separate cover' if args.mode == 'search' else 'Concrete prefix only; inspect independent environment violations and accepted transfer counts')
         summary['claim'] = 'Bounded sampled safety conditional on a legal counterpart prefix and declared capacity; not complete AXI compliance'
+        if project['axi_profile']['defaults']:
+            summary['claim'] += '; additionally conditional on declared optional-profile capabilities and correct default integration'
         replay.write(args.out / 'result.json', summary)
         print(json.dumps(summary))
     except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.SubprocessError) as error:
