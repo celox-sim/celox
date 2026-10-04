@@ -153,3 +153,14 @@ def memory_write(document, name, address_width, data_width, locations, initial, 
                            ite('n.read_valid',all_of(eq('n.read_data',ite(read_push,read_value,'s.read_data')),eq('n.read_response',ite(read_push,read_code,'s.read_response'))),True))),
     }
     return {key: _attach(document, name + '_' + key, types, bindings, *parts) for key, parts in obligations.items()}
+
+
+def memory_induction_candidates(bindings):
+    """Propose a source-state lifecycle invariant; this function proves nothing.
+
+    The native induction engine must establish reset and preservation before
+    using the proposal. No original contract invariant is a candidate premise.
+    """
+    return [{'name':'applied_owns_accepted_pair',
+             'predicate':any_of(inv(bindings['applied']),all_of(bindings['aw_pending'],bindings['w_pending'])),
+             'depends_on':[]}]

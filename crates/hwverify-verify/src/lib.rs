@@ -19,6 +19,7 @@ pub mod proof_program;
 mod acceptance_cover;
 mod progress;
 
+pub mod induction;
 pub mod reachable;
 
 pub mod structure;

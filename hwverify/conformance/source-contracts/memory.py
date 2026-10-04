@@ -80,9 +80,18 @@ def run(root, good, cli, axi, out):
         path = root / ('byte-memory-'+str(width)); shutil.copytree(good,path)
         if width == 64: upgrade64(path)
         binding = path / 'memory-contract.json'; contract = replay.load_json(binding)['contract']; lanes = width//8
+        empty=path/'no-candidates.json';replay.write(empty,[])
+        baseline_statuses={}
         for obligation in OBLIGATIONS:
             result = cli(f'memory-{width}-search-{obligation}','search',binding,obligation)
             if result['status'] != 'bounded_no_failure': raise RuntimeError(result)
+            proved=cli(f'memory-{width}-induct-{obligation}','induct',binding,obligation)
+            if proved['status']!='inductive_safety_verified':raise RuntimeError(proved)
+            baseline=cli(f'memory-{width}-induct-baseline-{obligation}','induct',binding,obligation,'--candidates',empty)
+            expected='induction_counterexample' if obligation=='requests' else 'inductive_safety_verified'
+            if baseline['status']!=expected:raise RuntimeError(baseline)
+            baseline_statuses[obligation]=baseline['status']
+        results.append({'case':f'memory_{width}_all_inductive_obligations','status':'passed','obligations':list(OBLIGATIONS),'baseline':baseline_statuses,'strengthening':'freshly checked applied_owns_accepted_pair','environment_assumptions':[]})
         protocol = axi(f'memory-{width}-axi-search','search',path/'memory-axi.json')
         if protocol['status'] != 'bounded_no_failure' or protocol['capacity_search'] != 'bounded_no_failure' or protocol['structural']['status'] != 'verified': raise RuntimeError(protocol)
         results.append({'case':f'memory_{width}_all_searches','status':'passed','depth':10,'obligations':list(OBLIGATIONS),'axi':'bounded_no_failure'})
@@ -129,6 +138,8 @@ def run(root, good, cli, axi, out):
         for obligation in OBLIGATIONS:
             result=cli(f'memory-{width}-idle-clear-search-{obligation}','search',cleared/'memory-contract.json',obligation)
             if result['status']!='bounded_no_failure':raise RuntimeError(result)
+            proved=cli(f'memory-{width}-idle-clear-induct-{obligation}','induct',cleared/'memory-contract.json',obligation)
+            if proved['status']!='inductive_safety_verified':raise RuntimeError(proved)
         file=cleared/'idle-clear.json';replay.write(file,[z,row(),row(arvalid=True),row(),row(rready=True),row(),row(arvalid=True,araddr=lanes*2),row(),row(rready=True),row()])
         result=cli(f'memory-{width}-idle-clear-readback','stimulus',cleared/'memory-contract.json','readback','--inputs',file)
         if result['status']!='trace_no_failure':raise RuntimeError(result)
@@ -142,6 +153,8 @@ def run(root, good, cli, axi, out):
         overwrite=root/('memory-read-overwrite-'+str(width));shutil.copytree(path,overwrite)
         source=overwrite/'memory.veryl';source.write_text(source.read_text().replace('assign arready = !rvalid;','assign arready = 1;').replace('if rvalid && rready { rvalid = 0; }','if rvalid && rready && !(arvalid && arready) { rvalid = 0; }'))
         for obligation in ('capacity','readback'):
+            proved=cli(f'memory-{width}-read-overwrite-induct-{obligation}','induct',overwrite/'memory-contract.json',obligation)
+            if proved['status']!='induction_counterexample':raise RuntimeError(proved)
             saved=out/f'memory-{width}-read-overwrite-{obligation}.regression.json'
             result=cli(f'memory-{width}-read-overwrite-search-{obligation}','search',overwrite/'memory-contract.json',obligation,'--regression',saved)
             if result['status']!='reset_reachable_failure':raise RuntimeError(result)
@@ -175,6 +188,8 @@ def run(root, good, cli, axi, out):
         results.append({'case':f'memory_{width}_read_retire_refill','status':'passed'})
         if width!=32: continue
         overflow=root/'memory-overrun';shutil.copytree(path,overflow);source=overflow/'memory.veryl';source.write_text(source.read_text().replace('assign awready = !a_full;','assign awready = 1;'))
+        proved=cli('memory-overrun-induct','induct',overflow/'memory-contract.json','capacity')
+        if proved['status']!='induction_counterexample':raise RuntimeError(proved)
         result=cli('memory-overrun-search','search',overflow/'memory-contract.json','capacity')
         if result['status']!='reset_reachable_failure':raise RuntimeError(result)
         result=cli('memory-overrun-concrete','stimulus',overflow/'memory-contract.json','capacity','--inputs',overflow/'pending_aw_backpressure.json')
@@ -198,6 +213,8 @@ def run(root, good, cli, axi, out):
             bad = root/('memory-mutant-'+name); shutil.copytree(path,bad); source = bad/'memory.veryl'; original=source.read_text(); modified=mutate(original)
             if modified==original: raise RuntimeError('memory mutation drift: '+name)
             source.write_text(modified); saved=out/('memory-'+name+'.regression.json')
+            proved=cli('memory-'+name+'-induct','induct',bad/'memory-contract.json',obligation)
+            if proved['status']!='induction_counterexample':raise RuntimeError(proved)
             result=cli('memory-'+name+'-search','search',bad/'memory-contract.json',obligation,'--regression',saved)
             if result['status']!='reset_reachable_failure':raise RuntimeError(result)
             again=cli('memory-'+name+'-replay','replay',bad/'memory-contract.json',obligation,'--regression',saved)

@@ -14,6 +14,14 @@ fn run(v: &Value) -> Result<Value, String> {
     };
     let spec = hwverify_ir::Specification::from_json(&doc).map_err(|e| e.to_string())?;
     match v["mode"].as_str() {
+        Some("induct") => hwverify_verify::induction::check_inductive_safety(
+            &spec,
+            v.get("candidates").ok_or("missing candidates")?,
+            v["out"]
+                .as_str()
+                .ok_or("missing proof output directory")?
+                .into(),
+        ),
         Some("search") => hwverify_verify::reachable::search_reachable(
             &spec,
             v["goal"].as_str().ok_or("missing goal")?,
@@ -43,7 +51,7 @@ fn run(v: &Value) -> Result<Value, String> {
             )
         }
         Some("replay") => hwverify_verify::reachable::validate_reachable(&spec, &v["witness"]),
-        _ => Err("mode must be search or replay".into()),
+        _ => Err("mode must be search, check_stimulus, replay or induct".into()),
     }
 }
 fn main() {

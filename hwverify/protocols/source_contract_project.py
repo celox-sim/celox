@@ -13,7 +13,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from protocols.axi4lite_project import replay, expand
-from protocols.source_contracts import fifo_read, idle_offer_step, memory_write
+from protocols.source_contracts import fifo_read, idle_offer_step, memory_write, memory_induction_candidates
 
 
 def prepare(path, out, obligation):
@@ -22,6 +22,7 @@ def prepare(path, out, obligation):
     if type(config['version']) is not int or config['version'] != 1: raise ValueError('source contract version must be 1')
     project = replay.prepare_project(replay.project_file(path.resolve().parent, config['project']), out)
     if project['goal'] != 'safety': raise ValueError('source contract requires safety project')
+    project['induction_candidates'] = []
     doc = project['document']; imp = doc['implementation']; contract = config['contract']; manifest = project['manifest']
     # Native state bindings have no phase-dependent output expression. Validate
     # their settled reset values against a separate reset=True source lowering.
@@ -103,6 +104,7 @@ def prepare(path, out, obligation):
         bindings.update({name:output(contract['signals'][name],ty,require_port=name!='apply') for name,ty in signal_types.items()})
         inputs = {name:inp(contract['inputs'][name],ty) for name,ty in input_types.items()}
         documents = memory_write(doc,contract['name'],aw,dw,addresses,initial,bindings,inputs)
+        project['induction_candidates'] = memory_induction_candidates(bindings)
         evidence = {'kind':'explicit_source_memory_effects','semantics':'little-endian byte strobes, aligned word decode, declared reset contents; unmapped writes have no effect and return DECERR; readback is one-edge read-before-write',
                     'origin_evidence':'actual accepted AW/W storage, actual apply/applied signals, actual memory-register transitions and response pins; no monitor response identities',
                     'limits':'single outstanding paired write; no eventual application/response, no general peripheral side-effect claim; source semantics and effect-event meaning are declared'}
@@ -175,15 +177,29 @@ def simulate(project, inputs, out):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('mode', choices=['search', 'stimulus', 'replay']); p.add_argument('binding', type=Path)
+    p.add_argument('mode', choices=['search', 'stimulus', 'replay', 'induct']); p.add_argument('binding', type=Path)
     p.add_argument('--obligation', required=True); p.add_argument('--out', type=Path, required=True)
     p.add_argument('--inputs', type=Path); p.add_argument('--regression', type=Path)
+    p.add_argument('--candidates', type=Path, help='induct only: replace default state-predicate proposals; never proof receipts')
     args = p.parse_args()
     try:
         replay.check_dependencies(); args.out.mkdir(parents=True, exist_ok=False)
         project = prepare(args.binding, args.out, args.obligation)
         result = {'identity': project['identity'], 'contract': project['contract_evidence']}
-        if args.mode == 'search':
+        if args.candidates is not None and args.mode != 'induct': raise ValueError('--candidates requires induct mode')
+        if args.mode == 'induct':
+            candidates = replay.load_json(args.candidates) if args.candidates else project['induction_candidates']
+            project['identity']['induction_candidates_sha256'] = replay.sha(replay.canonical(candidates))
+            project['identity']['induction_engine_sha256'] = replay.sha(replay.CORE.read_bytes())
+            replay.write(args.out / 'project-identity.json', project['identity'])
+            replay.write(args.out / 'induction-candidates.json', candidates)
+            checked = replay.core(project['document'], 'induct', candidates=candidates, out=str(args.out / 'proofs'))
+            replay.write(args.out / 'induction.json', checked)
+            result.update(status=checked['status'], failed_stage=checked['failed_stage'], proof_scope='unbounded scalar reset-inductive safety; no environment assumptions, liveness or whole-AXI claim', candidates=checked['candidates'])
+            result['contract']['proof_scope'] = result['proof_scope']
+            result['contract']['limits'] = result['contract']['limits'].replace('bounded safety;', 'reset-inductive safety;')
+            replay.write(args.out / 'contract-evidence.json', result['contract'])
+        elif args.mode == 'search':
             checked = replay.core(project['document'], 'search', goal='safety', depth=project['depth'])
             replay.write(args.out / 'search.json', checked); result['status'] = checked['status']; result['depth'] = project['depth']
             if checked.get('reason') is not None: result['reason'] = checked['reason']

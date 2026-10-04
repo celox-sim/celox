@@ -25,6 +25,7 @@ cargo build --locked --manifest-path "$HERE/adapter/Cargo.toml" --target-dir con
 cargo fmt --manifest-path "$HERE/adapter/Cargo.toml" --check
 cargo build --release --locked -p hwverify-rs -p hwverify-sir
 cargo test --release --locked -p hwverify-verify reachable::tests
+cargo test --release --locked -p hwverify-verify --test inductive_safety
 python3 "$HERE/test_replay.py"
 python3 - "$OUT" <<'PY'
 import hashlib,json,pathlib,subprocess,sys

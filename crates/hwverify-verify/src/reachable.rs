@@ -73,7 +73,7 @@ fn raw_inputs(v: &BTreeMap<String, Scalar>) -> Value {
         ))
         .collect::<BTreeMap<_, _>>())
 }
-fn supported(s: &Specification) -> Res<()> {
+pub(crate) fn supported(s: &Specification) -> Res<()> {
     if crate::structure::check(s, None)?["status"] != "not_requested" {
         return Err("behavioral replay cannot discharge structural contracts; use the source structural checker separately".into());
     }
