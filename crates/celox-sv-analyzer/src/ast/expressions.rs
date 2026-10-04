@@ -443,15 +443,14 @@ pub(super) fn expr_from_function_subroutine_call(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
-    if packed_dimensions.constant_indexed_base
-        && let Some(ty) = dimensions::size_system_function_call_type(
-            call,
-            syntax_tree,
-            &packed_dimensions.const_env,
-            &packed_dimensions.type_aliases,
-            Some(packed_dimensions),
-        )
-    {
+    // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
+    if let Some(ty) = dimensions::size_system_function_call_type(
+        call,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        &packed_dimensions.type_aliases,
+        Some(packed_dimensions),
+    ) {
         return Some(Expr::Literal(ty.width.to_string()));
     }
     if let sv_parser::SubroutineCall::SystemTfCall(call) = &call.nodes.0 {
@@ -473,6 +472,23 @@ pub(super) fn expr_from_function_subroutine_call(
                 width,
                 signed: name == "$signed",
             });
+        }
+        // `$clog2` of a constant is a constant.
+        if name == "$clog2"
+            && args.len() == 1
+            && let Some(argument) = args[0].as_ref()
+            && let Some(argument) =
+                expr_from_expression_with_types(argument, syntax_tree, packed_dimensions)
+                    .and_then(expr_to_const)
+            && let Some(value) = eval_ast_const_expr(
+                &ConstExpr::Function {
+                    name: name.to_string(),
+                    args: vec![argument],
+                },
+                &packed_dimensions.const_env,
+            )
+        {
+            return Some(Expr::Literal(value.to_string()));
         }
         let constant_clog2 =
             packed_dimensions.constant_indexed_base && name == "$clog2" && args.len() == 1;
