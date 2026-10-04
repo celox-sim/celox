@@ -449,6 +449,9 @@ jobs:
       - name: Build packages
         run: pnpm run build
 
+      - name: Type-check tests and playground
+        run: pnpm run typecheck
+
       - name: Prepare template for local package validation
         working-directory: examples/template
         run: |

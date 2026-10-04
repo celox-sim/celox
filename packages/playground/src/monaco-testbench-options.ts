@@ -5,12 +5,14 @@ type TypeScriptDefaultsApi = Pick<
 	"ScriptTarget" | "ModuleKind" | "ModuleResolutionKind"
 >;
 
-function pickEnumValue<T extends Record<string, string | number | undefined>>(
+function pickEnumValue<T extends object>(
 	enumObject: T,
 	keys: readonly string[],
-): string | number {
+): T[keyof T] {
+	// Older Monaco runtimes lack some members, so look keys up dynamically.
+	const members = enumObject as Record<string, T[keyof T] | undefined>;
 	for (const key of keys) {
-		const value = enumObject[key];
+		const value = members[key];
 		if (value !== undefined) return value;
 	}
 	throw new Error(`Missing Monaco enum value for ${keys.join(" / ")}`);
