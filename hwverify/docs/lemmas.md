@@ -311,3 +311,18 @@ Stalled-read overwrite controls include indistinguishable equal-data requests.
 Native adversarial tests reject false/uninitialized/unpreserved candidates,
 missing dependencies, target-to-candidate circular reasoning, forged reports,
 input/next-state predicates, source changes and insufficient strengthening.
+
+The trust-boundary regression suite also deliberately exhausts the unchanged
+200,000-variable budget with an oversized strengthening predicate. Its reset
+initialization succeeds, preservation returns `unknown` with no proof root, its
+dependent proposal is not attempted, and no target use is issued—even though the
+original target alone is valid. This is a deterministic encoding-budget control,
+not a timing-dependent test or a reduced test-only solver limit.
+
+Input-dependent reset controls prove a relation for both reset-input values and
+reject a candidate which holds for only one of them. A feasible reset valuation
+cannot substitute for universal reset establishment. The original typed
+reset/next expressions are also evaluated over all 2,048 six-edge patterns
+starting in reset, including 1,984 patterns with later resets. A reset mutation
+that breaks only one input valuation is rejected before candidate establishment.
+These controls do not change the bounded replay format's single-reset rule.

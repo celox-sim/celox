@@ -172,3 +172,187 @@ fn induction_requires_finite_mode_without_external_fallback() {
     assert!(error.contains("finite-only"));
     fs::remove_dir_all(out).unwrap();
 }
+
+#[test]
+fn budget_unknown_candidate_releases_no_induction_authority() {
+    if std::env::var("HWVERIFY_INDUCTION_BUDGET_CHILD").is_err() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_unknown_candidate_releases_no_induction_authority",
+                "--nocapture",
+            ])
+            .env("HWVERIFY_INDUCTION_BUDGET_CHILD", "1")
+            .env("HWVERIFY_SOLVER", "finite")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let mut d = document();
+    d["components"]["Check"]["steps"]["tick"] = json!(true);
+    // Fresh unconstrained words make this deliberately oversized proposal hit
+    // the unchanged variable budget while encoding, not a timing threshold.
+    // Reset folds the predicate to true; initialization must actually succeed.
+    for i in 0..128 {
+        let name = format!("word_{i}");
+        d["inputs"][&name] = json!({"bv":64});
+        d["implementation"]["state"][&name] = json!({"bv":64});
+        d["implementation"]["reset"][&name] = json!(["bv", 64, 0]);
+        d["implementation"]["next"][&name] = json!(format!("i.{name}"));
+    }
+    fn sum(terms: &[Value]) -> Value {
+        if terms.len() == 1 {
+            terms[0].clone()
+        } else {
+            let middle = terms.len() / 2;
+            json!(["add", sum(&terms[..middle]), sum(&terms[middle..])])
+        }
+    }
+    let terms = (0..64)
+        .map(|i| {
+            json!([
+                "mul",
+                format!("s.word_{}", 2 * i),
+                format!("s.word_{}", 2 * i + 1)
+            ])
+        })
+        .collect::<Vec<_>>();
+    let proposals = json!([
+        candidate(
+            "oversized",
+            json!(["eq", sum(&terms), ["bv", 64, 0]]),
+            vec![]
+        ),
+        candidate("dependent", json!(true), vec!["oversized"])
+    ]);
+    let out =
+        std::env::temp_dir().join(format!("hwverify-induction-budget-{}", std::process::id()));
+    let s = Specification::from_json(&d).unwrap();
+    // A valid original target does not let a failed candidate masquerade as an
+    // established invariant or permit the rest of this proposed proof to run.
+    assert_eq!(
+        check_inductive_safety(&s, &json!([]), out.join("bare")).unwrap()["status"],
+        "inductive_safety_verified"
+    );
+    let r = check_inductive_safety(&s, &proposals, out.join("oversized")).unwrap();
+    assert_eq!(r["status"], "unknown");
+    assert_eq!(r["failed_stage"], "induction_candidate_0_preservation");
+    assert_eq!(r["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(r["candidates"][0]["initialization_checked"], true);
+    assert_eq!(r["candidates"][0]["preservation_checked"], false);
+    assert_eq!(r["candidates"][0]["status"], "not_established");
+    assert_eq!(r["target_uses"], json!([]));
+    let failed = r["proofs"].as_array().unwrap().last().unwrap();
+    assert_eq!(failed["status"], "unknown");
+    assert!(failed["root"].is_null());
+    assert_eq!(
+        failed["children"][0]["finite"]["reason"],
+        "finite solver variable budget exhausted"
+    );
+    assert_eq!(
+        hwverify_solver::finite::Limits::default().max_variables,
+        200_000
+    );
+    fs::remove_dir_all(out).unwrap();
+}
+
+#[test]
+fn input_dependent_and_repeated_reset_preserve_induction() {
+    if std::env::var("HWVERIFY_INDUCTION_RESET_CHILD").is_err() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "input_dependent_and_repeated_reset_preserve_induction",
+                "--nocapture",
+            ])
+            .env("HWVERIFY_INDUCTION_RESET_CHILD", "1")
+            .env("HWVERIFY_SOLVER", "finite")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let mut d = document();
+    d["implementation"]["reset"] = json!({"a":"i.input","b":"i.input"});
+    d["implementation"]["next"] = json!({"a":["xor","s.a","i.input"],"b":["xor","s.b","i.input"]});
+    d["components"]["Check"]["init"] = json!(["eq", "s.a", "s.b"]);
+    d["components"]["Check"]["steps"]["tick"] = json!(["eq", "n.a", "n.b"]);
+    let s = Specification::from_json(&d).unwrap();
+    let out = std::env::temp_dir().join(format!("hwverify-induction-reset-{}", std::process::id()));
+    let p = json!([candidate("equal", json!(["eq", "s.a", "s.b"]), vec![])]);
+    let proved = check_inductive_safety(&s, &p, out.join("good")).unwrap();
+    assert_eq!(proved["status"], "inductive_safety_verified");
+    assert_eq!(proved["environment_assumptions"], json!([]));
+    // Feasible reset inputs cannot substitute for universal initialization:
+    // this predicate holds for reset/input=false but fails for input=true.
+    let bad = check_inductive_safety(
+        &s,
+        &json!([candidate("only_false_input", json!(["not", "s.a"]), vec![])]),
+        out.join("bad-candidate"),
+    )
+    .unwrap();
+    assert_eq!(bad["status"], "induction_counterexample");
+    assert_eq!(bad["candidates"][0]["initialization_checked"], false);
+    assert_eq!(bad["target_uses"], json!([]));
+    let input_symbol = s.inputs()["input"].0.op.strip_prefix('@').unwrap();
+    assert_eq!(
+        bad["proofs"].as_array().unwrap().last().unwrap()["children"][0]["finite"]["assignments"]
+            [input_symbol]["value"],
+        true
+    );
+    // Independently enumerate every six-edge reset/input pattern beginning in
+    // reset (2,048 sequences), using the ORIGINAL typed reset/next expressions.
+    // This does not relax the bounded replay format's single-reset restriction.
+    use hwverify_solver::finite::{evaluate_scalar_terms, Limits, Scalar};
+    use std::collections::BTreeMap;
+    let m = &s.implementation().unwrap().machine;
+    let mut repeated = 0;
+    for bits in 0..4096u32 {
+        if bits & 1 == 0 {
+            continue;
+        }
+        let (mut a, mut b) = (false, false);
+        let mut resets = 0;
+        for edge in 0..6 {
+            let rst = bits & (1 << (2 * edge)) != 0;
+            let input = bits & (1 << (2 * edge + 1)) != 0;
+            let values = BTreeMap::from([
+                (s.inputs()["rst"].0.op[1..].to_owned(), Scalar::Bool(rst)),
+                (
+                    s.inputs()["input"].0.op[1..].to_owned(),
+                    Scalar::Bool(input),
+                ),
+                (m.state["a"].0.op[1..].to_owned(), Scalar::Bool(a)),
+                (m.state["b"].0.op[1..].to_owned(), Scalar::Bool(b)),
+            ]);
+            let post = evaluate_scalar_terms(
+                if rst { &m.reset } else { &m.next },
+                &values,
+                Limits::default(),
+            )
+            .unwrap();
+            let expected = if rst { input } else { a ^ input };
+            assert_eq!(post["a"], Scalar::Bool(expected));
+            assert_eq!(post["b"], Scalar::Bool(expected));
+            a = expected;
+            b = expected;
+            resets += usize::from(rst);
+        }
+        repeated += usize::from(resets > 1);
+    }
+    assert_eq!(repeated, 1984);
+    // A defective reset on just one input valuation must fail the original
+    // target reset before any strengthening is established.
+    d["implementation"]["reset"]["b"] = json!(false);
+    let r = check_inductive_safety(
+        &Specification::from_json(&d).unwrap(),
+        &p,
+        out.join("bad-reset"),
+    )
+    .unwrap();
+    assert_eq!(r["status"], "induction_counterexample");
+    assert_eq!(r["failed_stage"], "reset_establishment");
+    assert_eq!(r["candidates"], json!([]));
+    fs::remove_dir_all(out).unwrap();
+}
