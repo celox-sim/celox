@@ -37,7 +37,7 @@ jobs:
         run: |
           npm ci --prefix editor/vscode --ignore-scripts --no-audit --no-fund
           node --check editor/vscode/extension.js
-          node editor/vscode/test-extension.js
+          npm run test:unit --prefix editor/vscode
       - name: Install Extension Host display dependencies
         run: |
           sudo apt-get update

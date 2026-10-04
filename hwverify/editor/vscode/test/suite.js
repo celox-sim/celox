@@ -2,6 +2,9 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const vscode = require('vscode');
+const {hoverMarkdown, assertExactHoverLines} = require('./hover-contract');
+// LSP plaintext is escaped by languageclient via MarkdownString.appendText.
+const encodePlainHover = text => new vscode.MarkdownString().appendText(text).value;
 
 async function until(description, check, timeout = 15000) {
   const deadline = Date.now() + timeout;
@@ -18,9 +21,7 @@ async function replace(document, text) {
   assert(await vscode.workspace.applyEdit(edit));
   assert(document.isDirty, 'must exercise an unsaved buffer');
 }
-function hoverText(items) {
-  return items.flatMap(h => h.contents).map(c => typeof c === 'string' ? c : c.value).join('\n');
-}
+
 
 function onNextProofStarted(api, uri, version, interrupt) {
   let subscription;
@@ -93,14 +94,15 @@ exports.run = async function run() {
     const expectedStatus = 'Lemma step: proved; target closed.';
     await until('exact proof diagnostic reaches VS Code', () => diagnostics().some(d => d.message === expectedStatus && d.code === 'target_closed'));
     const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, proofAt());
-    const proofHoverLines = hoverText(hovers).split('\n');
-    assert(proofHoverLines.includes(expectedStatus));
-    assert(proofHoverLines.includes(`Proof request identity: ${result.requestIdentity}`));
-    assert(proofHoverLines.includes(`Document version: ${result.documentVersion}`));
+    assertExactHoverLines(hovers, [
+      expectedStatus,
+      `Proof request identity: ${result.requestIdentity}`,
+      `Document version: ${result.documentVersion}`
+    ], encodePlainHover, {uri: uri.toString(), position: proofAt(), documentVersion: doc.version, requestIdentity: result.requestIdentity});
 
     await replace(doc, source + '\n// invalidate checked snapshot\n');
     await until('proof status cleared on unsaved edit', () => !diagnostics().some(d => d.message.includes('proved')));
-    await until('hover does not reuse a stale proof', async () => hoverText(await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, proofAt())).includes('not checked'));
+    await until('hover does not reuse a stale proof', async () => hoverMarkdown(await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, proofAt())).split('\n').includes(encodePlainHover('Proof status: not checked for this document version. Run an explicit proof command.')));
 
     const hard = source.replace('    forall word: bv<8>;', '    mode shared_query;\n    forall a: bv<64>; forall b: bv<64>; forall c: bv<64>;').replace("claim impl.x' == spec.x';", 'claim a * (b + c) == a * b + a * c;');
     await replace(doc, hard);
@@ -131,10 +133,11 @@ exports.run = async function run() {
     const failed = await api.checkProof(options);
     assert(Object.keys(failed.witnesses).length > 0);
     const untouchedAt = doc.positionAt(doc.getText().indexOf('lemma untouched') + 'lemma '.length);
-    const unrelated = hoverText(await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, untouchedAt));
-    assert(unrelated.includes('not checked'));
-    assert(!unrelated.includes('Checked target query'));
-    assert(!unrelated.includes('Witnesses for'));
+    const unrelatedHovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', uri, untouchedAt);
+    assertExactHoverLines(unrelatedHovers, ['Proof status: not checked for this document version. Run an explicit proof command.'], encodePlainHover, {target: 'other', declaration: 'untouched'});
+    const unrelated = hoverMarkdown(unrelatedHovers);
+    assert(!unrelated.includes(encodePlainHover('Checked target query')), JSON.stringify({unexpectedQuery: unrelated}));
+    assert(!unrelated.includes(encodePlainHover('Witnesses for')), JSON.stringify({unexpectedWitness: unrelated}));
     console.log('PASS: real VS Code Extension Host activation, diagnostics, providers, checked command, Unknown, cancellation and stale-result invalidation');
   } finally {
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');

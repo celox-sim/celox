@@ -79,6 +79,6 @@
   },
   "scripts": {
     "test": "node test/run-extension-host.js",
-    "test:unit": "node test-extension.js"
+    "test:unit": "node test-extension.js && node test/hover-contract.test.js"
   }
 }
