@@ -19,7 +19,7 @@ async function run(t, mode, env = {}) {
 url="\${@: -1}"
 case "$url" in
   */0.8.0) printf '%s' "\${VERSION_STATUS:-200}" ;;
-  */celox-test-suite-veryl) printf '%s' "\${CRATE_STATUS:-200}" ;;
+  */celox-test-suite) printf '%s' "\${CRATE_STATUS:-200}" ;;
   *) printf '200' ;;
 esac
 exit "\${CURL_EXIT:-0}"
@@ -27,8 +27,8 @@ exit "\${CURL_EXIT:-0}"
     cargo: `#!/usr/bin/env bash
 echo "$*" >> cargo.log
 if [[ "$1" == package ]]; then
-  mkdir -p target/package/celox-test-suite-veryl-0.8.0
-  touch target/package/celox-test-suite-veryl-0.8.0/Cargo.toml
+  mkdir -p target/package/celox-test-suite-0.8.0
+  touch target/package/celox-test-suite-0.8.0/Cargo.toml
 elif [[ "$1" == publish ]]; then
   echo 'the remote server responded with an error (status 403 Forbidden): Trusted Publishing tokens do not support creating new crates. Publish the crate manually, first'
   exit 1
@@ -60,7 +60,7 @@ test("preflight accepts registered crates without invoking Cargo", async (t) => 
 test("missing crate stops publication before any Cargo command", async (t) => {
   const result = await run(t, "publish", { CRATE_STATUS: "404" });
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /celox-test-suite-veryl has not been bootstrapped/);
+  assert.match(result.stderr, /celox-test-suite has not been bootstrapped/);
   assert.match(result.stderr, /local bootstrap/);
   await assert.rejects(readFile(join(result.root, "cargo.log")), { code: "ENOENT" });
 });

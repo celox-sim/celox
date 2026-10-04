@@ -42,6 +42,8 @@ pub enum AnalyzerError {
     DuplicateParameter { module: String, name: String },
     #[error("Duplicate instance declaration in module `{module}`: {name}")]
     DuplicateInstance { module: String, name: String },
+    #[error("Generate block `{name}` in module `{module}` has the name of another declaration")]
+    DuplicateGenerateScope { module: String, name: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

@@ -1,0 +1,663 @@
+(group generate (category control_flow))
+
+(case counts_only_known_ones_in_generate_system_functions
+  (source "generate_onehot_unknowns.sv" #"
+                module Top(output logic [6:0] y);
+                    if ($onehot(2'bx0)) begin initial $fatal; end else assign y[0]=1;
+                    if ($onehot(2'bx1)) assign y[1]=1; else begin initial $fatal; end
+                    if ($onehot(3'bz11)) begin initial $fatal; end else assign y[2]=1;
+                    if ($onehot0(2'bz0)) assign y[3]=1; else begin initial $fatal; end
+                    if ($onehot0(2'bz1)) assign y[4]=1; else begin initial $fatal; end
+                    if ($onehot0(3'bx11)) begin initial $fatal; end else assign y[5]=1;
+                    if ($onehot('1)) assign y[6]=1; else begin initial $fatal; end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 127))
+
+(case uses_self_determined_unbased_shift_counts_in_generate_cases
+  (source "generate_unbased_shift_counts.sv" #"
+                module Top(output logic [3:0] y);
+                    case (8'h1 << '1) 8'h2: assign y[0]=1; default: initial $fatal; endcase
+                    case (8'h4 >> '1) 8'h2: assign y[1]=1; default: initial $fatal; endcase
+                    case (8'sh80 >>> '1) 8'shc0: assign y[2]=1; default: initial $fatal; endcase
+                    case (8'h1 << 'x) 8'bxxxxxxxx: assign y[3]=1; default: initial $fatal; endcase
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 15))
+
+(case freezes_typedef_ranges_before_generate_parameter_shadowing
+  (source "generate_typedef_definition_scope.sv" #"
+                module Child #(parameter P=8)(input logic [7:0] a, output logic [7:0] y);
+                    typedef logic [P-1:0] T;
+                    if (1) begin : g
+                        localparam P=4;
+                        T x;
+                        assign x=a;
+                        assign y=x;
+                    end
+                endmodule
+                module Top(input logic [7:0] a, output logic [15:0] y);
+                    Child #(.P(8)) full(.a(a), .y(y[7:0]));
+                    Child #(.P(6)) narrow(.a(a), .y(y[15:8]));
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 16 63 128 255)
+    (modify (set a value))
+    (assert_eq y (| value (trunc 16 (<< (& value 63) 8))))))
+
+(case preserves_unsigned_rhs_in_compound_genvar_updates
+  (source "generate_unsigned_compound_updates.sv" #"
+                module Top(output logic [1:0] y);
+                    function automatic logic [31:0] step(); return 2; endfunction
+                    for (genvar i=-1; i!=1; i%=step()) begin : remainder
+                        assign y[0]=1;
+                    end
+                    for (genvar i=-1; i!=0; i/=step()) begin : quotient
+                        if (i==2147483647) assign y[1]=1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 3))
+
+(case coerces_genvar_values_to_signed_32_bits
+  (source "generate_genvar_coercion.sv" #"
+                module Top(output logic [2:0] y);
+                    for (genvar i=32'hffffffff; i!=0; i/=2) begin : negative
+                        if (i == -1) assign y[0]=1;
+                        else begin initial $fatal; end
+                    end
+                    for (genvar i=2147483647; i!=-2147483647; i++) begin : wrapping
+                        if (i == 2147483647) assign y[1]=1;
+                        else if (i == -2147483648) assign y[2]=1;
+                        else begin initial $fatal; end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 7))
+
+(case restricts_generate_size_queries_to_visible_functions
+  (source "generate_visible_function_metadata.sv" #"
+                module Top(output logic [3:0] y);
+                    function automatic bit f(); return 1; endfunction
+                    if (0) begin : inactive
+                        function automatic logic [7:0] f(); return 0; endfunction
+                    end
+                    for (genvar i=0; i<0; i++) begin : empty
+                        function automatic logic [31:0] f(); return 0; endfunction
+                    end
+                    case ($bits(f()))
+                        1: assign y[0]=1;
+                        default: initial $fatal;
+                    endcase
+                    if (1) begin : active
+                        if ($bits(f()) == 12) assign y[1]=1;
+                        else begin initial $fatal; end
+                        if ($size(f()) == 3) assign y[2]=1;
+                        else begin initial $fatal; end
+                        if ($bits(h()) == 4) assign y[3]=1;
+                        else begin initial $fatal; end
+                        function automatic logic [2:0][3:0] f(); return 0; endfunction
+                        function automatic logic [3:0] h(); return 0; endfunction
+                    end
+                    if (1) begin : sibling
+                        function automatic logic [15:0] f(); return 0; endfunction
+                    end
+                    function automatic bit h(); return 1; endfunction
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 15))
+
+(case predeclares_generate_signals_and_functions
+  (source "generate_forward_names.sv" #"
+                module Top(input logic a, output logic [2:0] y);
+                    logic tmp;
+                    assign tmp = 0;
+                    function automatic logic f(input logic x); return x; endfunction
+                    if (1) begin : g
+                        assign y[0] = tmp;
+                        if (1) begin : nested assign y[1] = tmp; end
+                        assign y[2] = f(a);
+                        logic tmp;
+                        assign tmp = a;
+                        function automatic logic f(input logic x); return ~x; endfunction
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 2)
+    (modify (set a value))
+    (assert_eq y (? (== value 0) 4 3))))
+
+(case binds_generate_parameter_declarations_as_localparams
+  (source "generate_parameter_declarations.sv" #"
+                module Child #(parameter P=0)(output logic [7:0] y); assign y=P; endmodule
+                module Top #(parameter P=0)(output logic [7:0] y);
+                    if (1) begin : g
+                        Child #(.P(P)) child(.y(y));
+                        parameter logic [7:0] P = Q + 1;
+                        parameter Q = 2;
+                        if (P != 3) begin initial $fatal; end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 3))
+
+(case expands_constant_functions_in_genvar_updates
+  (source "generate_function_updates.sv" #"
+                module Top(output logic [3:0] y);
+                    for (genvar i=0; i<2; i=bump(i)) begin : plain
+                        assign y[i]=1;
+                    end
+                    for (genvar j=2; j<4; j+=step()) begin : compound
+                        assign y[j]=1;
+                    end
+                    function automatic int bump(input int x); return x+step(); endfunction
+                    function automatic int step(); return 1; endfunction
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 15))
+
+(case ignores_type_aliases_in_inactive_generate_branches
+  (source "inactive_generate_aliases.sv" #"
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    typedef logic T;
+                    if (0) begin : inactive_typedef typedef logic [7:0] T; end
+                    if (0) begin : inactive_parameter parameter type T = logic [7:0]; end
+                    if (0) begin : inactive_localparam localparam type T = logic [7:0]; end
+                    T tmp;
+                    assign tmp = a;
+                    assign y = tmp;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 1 2 255)
+    (modify (set a value))
+    (assert_eq y (& value 1))))
+
+(case distinguishes_escaped_generate_scope_components
+  ; `\a` names the same block as `a` (IEEE 1800-2023 5.6.1), but `\a.b` and
+  ; `\g[0]` are names of their own.
+  (source "escaped_generate_components.sv" #"
+                module Child(input logic a, output logic y); assign y = a; endmodule
+                module Top(input logic [3:0] d, output logic [3:0] y);
+                    if (1) begin : \a.b
+                        logic tmp;
+                        function automatic logic f(input logic x); return x; endfunction
+                        Child child(.a(f(d[0])), .y(tmp));
+                        assign y[0] = tmp;
+                    end
+                    if (1) begin : \a
+                        if (1) begin : b
+                            logic tmp;
+                            function automatic logic f(input logic x); return ~x; endfunction
+                            Child child(.a(f(d[1])), .y(tmp));
+                            assign y[1] = tmp;
+                        end
+                    end
+                    if (1) begin : \g[0]
+                        logic tmp;
+                        Child child(.a(d[2]), .y(tmp));
+                        assign y[2] = tmp;
+                    end
+                    for (genvar i=0; i<1; i++) begin : \g
+                        logic tmp;
+                        Child child(.a(d[3]), .y(tmp));
+                        assign y[3] = tmp;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 16)
+    (modify (set d value))
+    (assert_eq y (^ value 2))))
+
+(case rejects_an_escaped_generate_block_named_like_a_port
+  ; `\a` is the identifier `a` (IEEE 1800-2023 5.6.1), so the block's name
+  ; collides with the port's.
+  (source "escaped_generate_collision.sv" #"
+                module Top(input logic a, output logic y);
+                    if (1) begin : \a
+                        assign y = 1'b0;
+                        logic tmp;
+                        assign tmp = 1'b0;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case prefers_function_local_types_over_generate_signals
+  (source "generate_function_local_types.sv" #"
+                module Top(input logic [3:0] a, output logic [31:0] y);
+                    if (1) begin : g
+                        logic [7:0] x;
+                        assign x = 0;
+                        function automatic int formal_bits(input logic [3:0] x);
+                            return {~$bits(x)'(0)};
+                        endfunction
+                        function automatic int formal_size(input logic [1:0][2:0] x);
+                            return {~$size(x)'(0)};
+                        endfunction
+                        function automatic int local_bits();
+                            logic [2:0] x;
+                            return {~$bits(x)'(0)};
+                        endfunction
+                        function automatic int local_size();
+                            logic [4:0][1:0] x;
+                            return {~$size(x)'(0)};
+                        endfunction
+                        assign y = formal_bits(a) + 10*formal_size(a)
+                                 + 100*local_bits() + 1000*local_size();
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 31745))
+
+(case evaluates_module_constant_functions_in_generate_schemes
+  (source "generate_constant_functions.sv" #"
+                module Top #(parameter LIMIT=3)(output logic [3:0] y);
+                    if (enabled()) begin : active
+                        localparam LIMIT=0;
+                        for (genvar i=start(); below_limit(i); i++) begin : lane
+                            assign y[i] = 1;
+                        end
+                    end else begin initial $fatal; end
+                    case (choice())
+                        2: assign y[3] = 1;
+                        default: initial $fatal;
+                    endcase
+                    function automatic bit enabled(); return yes(); endfunction
+                    function automatic bit yes(); return 1'b1; endfunction
+                    function automatic int start(); return 0; endfunction
+                    function automatic bit below_limit(input int x); return x < LIMIT; endfunction
+                    function automatic logic [1:0] choice(); return 2; endfunction
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 15))
+
+(case permits_functions_in_escaped_conditional_generate_labels
+  (source "escaped_generate_label.sv" #"
+                module Top(input logic a, output logic y);
+                    if (1) begin : \decode[fast]
+                        function automatic logic invert(input logic x); return ~x; endfunction
+                        assign y = invert(a);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 2)
+    (modify (set a value))
+    (assert_eq y (^ value 1))))
+
+(case resolves_each_generate_signal_declarator_independently
+  (source "generate_declarator_dependencies.sv" #"
+                module Top(input logic [1:0] x, output logic [1:0] y);
+                    if (1) begin : g
+                        localparam N = $size(a);
+                        localparam W = 2;
+                        logic a[W-1:0], b[N-1:0];
+                        assign a[0] = x[0];
+                        assign a[1] = x[1];
+                        assign b[0] = a[0];
+                        assign b[1] = a[1];
+                        assign y = {b[1], b[0]};
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 4)
+    (modify (set x value))
+    (assert_eq y value)))
+
+(case uses_scoped_function_return_metadata_for_comb_completeness
+  (four_state)
+  (source "generate_function_metadata.sv" #"
+                module Top(input logic a, output logic y, z);
+                    function automatic logic f(input logic x); return x; endfunction
+                    if (1) begin : g
+                        function automatic bit f(input logic x); return x; endfunction
+                        always_comb if (f(a) || !f(a)) y = a;
+                        if (1) begin : nested
+                            always_comb if (f(a) || !f(a)) z = ~a;
+                        end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 2)
+    (modify (set a value))
+    (assert_eq y value)
+    (assert_eq z (^ value 1))))
+
+(case preserves_generate_localparam_types_in_child_overrides
+  (source "generate_override_types.sv" #"
+                module Child #(parameter P=0)(output logic [7:0] y);
+                    localparam WIDTH = $bits(P);
+                    localparam NEGATIVE = (P < 0);
+                    assign y = WIDTH | (NEGATIVE << 6);
+                endmodule
+                module Top(output logic [31:0] y);
+                    for (genvar i=0; i<2; i++) begin : g
+                        localparam logic [3+i:0] P = '1;
+                        localparam logic signed [3+i:0] Q = '1;
+                        Child #(.P(P)) u(.y(y[16*i+7:16*i]));
+                        Child #(.P(Q)) s(.y(y[16*i+15:16*i+8]));
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x45054404))
+
+(case treats_unknown_generate_truth_as_false
+  (four_state)
+  (source "generate_unknown_truth.sv" #"
+                module Top #(parameter logic P = 1'bx)(output logic [4:0] y);
+                    if (1'bx) begin initial $fatal; end
+                    if (P) begin initial $fatal; end
+                    else assign y[0] = 1;
+                    if (1'bz) begin initial $fatal; end
+                    else assign y[1] = 1;
+                    if (2'b1x) assign y[2] = 1;
+                    else begin initial $fatal; end
+                    if (1) begin : g
+                        localparam logic [1:0] X = 2'b0x;
+                        if (X) begin initial $fatal; end
+                        else assign y[3] = 1;
+                        for (genvar i=0; X; i++) begin initial $fatal; end
+                        for (genvar i=0; (i==0) ? 2'b1z : X; i++) begin
+                            assign y[4] = 1;
+                        end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 31))
+
+(case resolves_generate_signal_size_parameter_dependencies
+  (source "generate_signal_size.sv" #"
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [1:0] data;
+                    assign data = 0;
+                    for (genvar i=0; i<2; i++) begin : g
+                        localparam W = $bits(data);
+                        localparam S = $size(data);
+                        logic [W-1:0] copy;
+                        logic [N-1:0] data;
+                        localparam N = 8;
+                        assign data = a[8*i+7:8*i];
+                        assign copy = data;
+                        if (W == 8 && S == 8) assign y[8*i+7:8*i] = copy;
+                        else begin initial $fatal; end
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 0x1234 0xfedc)
+    (modify (set a value))
+    (assert_eq y value)))
+
+(case resolves_generate_function_names_lexically
+  (source "generate_function_scopes.sv" #"
+                module Top(input logic clk, input logic a, output logic [5:0] y);
+                    function automatic logic f(input logic x); return x; endfunction
+                    function automatic logic outer(input logic x); return f(x); endfunction
+                    if (1) begin : first
+                        function automatic logic f(input logic x); return ~x; endfunction
+                        function automatic logic wrapper(input logic x); return f(x); endfunction
+                        assign y[0] = wrapper(a);
+                        always_comb y[1] = f(a);
+                        always_ff @(posedge clk) y[2] <= f(a);
+                        if (1) begin : nested
+                            assign y[3] = wrapper(a);
+                        end
+                        assign y[4] = outer(a);
+                    end
+                    if (1) begin : second
+                        function automatic logic f(input logic x); return x; endfunction
+                        assign y[5] = f(a);
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 2)
+    (modify (set a value))
+    (tick clk)
+    (assert_eq y (? (== value 0) 15 48))))
+
+(case resolves_forward_generate_localparam_dependencies
+  (source "generate_forward_parameters.sv" #"
+                module Top(input logic clk, output logic [7:0] y, output logic [3:0] q);
+                    localparam B = 99;
+                    if (1) begin : constants
+                        localparam logic [WIDTH-1:0] A = B + 1;
+                        localparam B = C + 1, C = 1;
+                        localparam WIDTH = 4;
+                        logic [A:0] tmp;
+                        assign tmp = A;
+                        assign y[3:0] = tmp;
+                        always_ff @(posedge clk) q <= A;
+                    end
+                    for (genvar i = 0; i < 2; i++) begin : lanes
+                        localparam A = B;
+                        localparam B = C;
+                        localparam C = i + 1;
+                        assign y[5+2*i:4+2*i] = A;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (tick clk)
+  (assert_eq y 0x93)
+  (assert_eq q 3))
+
+(case elaborates_generate_lanes_with_local_state_and_instances
+  (source "generate_lanes.sv" #"
+                module Child #(parameter INDEX = 0)(input logic a, output logic y);
+                    assign y = a ^ (INDEX % 2);
+                endmodule
+                module Top(input logic clk, rst_n, input logic [3:0] a, output logic [3:0] y);
+                    for (genvar i = 0; i < 4; i++) begin : lanes
+                        localparam INDEX = i;
+                        logic tmp;
+                        logic q;
+                        Child #(.INDEX(INDEX)) child(.a(a[i]), .y(tmp));
+                        always_ff @(posedge clk or negedge rst_n)
+                            if (!rst_n) q <= 0;
+                            else q <= tmp;
+                        assign y[i] = q;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify
+    (set rst_n 0)
+    (set a 0))
+  (tick clk)
+  (assert_eq y 0)
+  (modify
+    (set rst_n 1)
+    (set a 3))
+  (tick clk)
+  (assert_eq y 9)
+  (modify (set a 12))
+  (tick clk)
+  (assert_eq y 6))
+
+(case elaborates_nested_generate_and_case_branches
+  (source "nested_generate.sv" #"
+                module Top(input logic [3:0] a, output logic [3:0] y);
+                    for (genvar row = 1; row >= 0; row--) begin : rows
+                        for (genvar col = 0; col < 2; col++) begin : columns
+                            localparam INDEX = row * 2 + col;
+                            case (INDEX)
+                                0, 3: begin : selected
+                                    logic tmp;
+                                    assign tmp = ~a[INDEX];
+                                    assign y[INDEX] = tmp;
+                                end
+                                default: begin : selected
+                                    logic tmp;
+                                    always_comb tmp = a[INDEX];
+                                    assign y[INDEX] = tmp;
+                                end
+                            endcase
+                        end
+                    end
+                    for (genvar skipped = 0; skipped < 0; skipped++) begin
+                        initial $fatal;
+                    end
+                    if (0) begin
+                        initial $fatal;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 16)
+    (modify (set a value))
+    (assert_eq y (^ value 9))))
+
+(case specializes_generate_scopes_for_each_child_parameter
+  (source "specialized_generate.sv" #"
+                module Child #(parameter MODE = 0)(input logic a, output logic y);
+                    case (MODE)
+                        0: begin : branch
+                            logic tmp;
+                            assign tmp = a;
+                            assign y = tmp;
+                        end
+                        1: begin : branch
+                            logic tmp;
+                            assign tmp = ~a;
+                            assign y = tmp;
+                        end
+                        default: begin
+                            initial $fatal;
+                        end
+                    endcase
+                endmodule
+                module Top(input logic a, output logic [1:0] y);
+                    for (genvar i = 0; i < 2; i++) begin : lanes
+                        Child #(.MODE(i)) child(.a(a), .y(y[i]));
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq y 2)
+  (modify (set a 1))
+  (assert_eq y 1))
+
+(case elaborates_generate_declaration_widths_and_shadowing
+  (source "generate_widths.sv" #"
+                module Top(input logic [3:0] a, output logic [3:0] y);
+                    logic tmp;
+                    assign tmp = 1'b0;
+                    for (genvar i = 0; i < 4; i++) begin : lanes
+                        logic [i:0] tmp;
+                        assign tmp = a[i:0];
+                        assign y[i] = tmp[i];
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 16)
+    (modify (set a value))
+    (assert_eq y value)))
+
+(case preserves_generate_constant_scopes_and_masks
+  (four_state)
+  (source "generate_constants.sv" #"
+                module Child(input logic a, output logic y); assign y = a; endmodule
+                module Top(output logic [3:0] y);
+                    localparam logic MASK = 0;
+                    for (genvar i = 0; i < 2; i++) begin : lanes
+                        localparam logic MASK = 1'bx;
+                        if (i == 0) begin
+                            assign y[i] = (MASK === 1'bx);
+                        end else begin
+                            Child child(.a(MASK === 1'bx), .y(y[i]));
+                        end
+                    end
+                    if (1) begin : first
+                        logic tmp;
+                        assign tmp = 1'b0;
+                        assign y[2] = tmp;
+                    end
+                    if (1) begin : second
+                        logic tmp;
+                        assign tmp = 1'b1;
+                        assign y[3] = tmp;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 11))
+
+(case connects_generated_outputs_to_ascending_packed_slices
+  (source "generate_slices.sv" #"
+                module Child #(parameter VALUE=0)(output logic [1:0] y); assign y = VALUE; endmodule
+                module Top(output logic [0:7] y);
+                    wire [0:7] bus;
+                    for (genvar i=0; i<4; i++) begin : lanes
+                        Child #(.VALUE(i)) child(.y(bus[2*i:2*i+1]));
+                    end
+                    assign y = bus;
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x1b))
+
+(case selects_case_generate_with_four_state_parameter_and_local_labels
+  (four_state)
+  (source "generate_case_masks.sv" #"
+                module Top #(parameter logic [3:0] SELECT=4'bxz01)(output logic y);
+                    if (1) begin : scope
+                        localparam logic [3:0] LABEL=4'bxz01;
+                        case (SELECT)
+                            LABEL: assign y = 1;
+                            default: initial $fatal;
+                        endcase
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 1))
+
+(case uses_one_width_and_sign_context_for_generate_case
+  (source "generate_case_context.sv" #"
+                module Top(output logic y);
+                    case (4'shf)
+                        8'shff: assign y = 1;
+                        8'h00: assign y = 1;
+                        default: assign y = 0;
+                    endcase
+                endmodule
+            "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0))

@@ -361,7 +361,24 @@ pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
 
 pub(super) fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
     let locate = identifier_locate(node)?;
-    syntax_tree.get_str(&locate).map(str::to_string)
+    syntax_tree.get_str(&locate).map(normalize_identifier)
+}
+
+/// An escaped identifier is the same identifier as its text without the
+/// backslash (IEEE 1800-2023 5.6.1): `\a` names `a`. One that cannot be written
+/// without escaping, such as `\a.b`, keeps its backslash.
+pub(super) fn normalize_identifier(text: &str) -> String {
+    match text.strip_prefix('\\') {
+        Some(name)
+            if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') =>
+        {
+            name.to_string()
+        }
+        _ => text.to_string(),
+    }
 }
 
 /// The source text a node spans, from its first to its last token.

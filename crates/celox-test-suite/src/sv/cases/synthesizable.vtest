@@ -1,0 +1,445 @@
+(group synthesizable (category combinational))
+
+(case enum_members_without_values_follow_their_predecessor
+  (source "enum_implicit.sv" #"
+                module Top(input logic [2:0] a, output logic [3:0] y);
+                    typedef enum logic [2:0] { W = 2, X = 5, Y, Z, V = 0, U } e_t;
+                    always_comb begin
+                        y = 4'hf;
+                        if (a == W) y = 4'd0;
+                        if (a == X) y = 4'd1;
+                        if (a == Y) y = 4'd2;
+                        if (a == Z) y = 4'd3;
+                        if (a == V) y = 4'd4;
+                        if (a == U) y = 4'd5;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  ; W=2, X=5, Y=6, Z=7, V=0, U=1; values 3 and 4 name no member.
+  (for (value expected) (list (2 0) (5 1) (6 2) (7 3) (0 4) (1 5) (3 15) (4 15))
+    (modify (set a value))
+    (assert_eq y expected)))
+
+(case always_star_and_edge_sensitive_always_match_the_systemverilog_keywords
+  (source "verilog_always.sv" #"
+                module Top(input logic clk, input logic [7:0] a, b,
+                           output logic [7:0] sum, q);
+                    always @(*) sum = a + b;
+                    always @(posedge clk) q <= a ^ b;
+                endmodule
+            "#)
+  (top Top)
+  (for (x y) (list (1 2) (250 10) (0 0))
+    (modify
+      (set a x)
+      (set b y))
+    (assert_eq sum (trunc 8 (+ x y)))
+    (tick clk)
+    (assert_eq q (^ x y))))
+
+(case net_declaration_assignment_drives_the_net
+  (source "wire_init.sv" #"
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    wire [7:0] w = a + 8'd1;
+                    assign y = w;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 1 254 255)
+    (modify (set a value))
+    (assert_eq y (trunc 8 (+ value 1)))))
+
+(case casez_and_casex_treat_wildcard_bits_as_dont_care
+  (source "casez_casex.sv" #"
+                module Top(input logic [3:0] a, input logic [7:0] wide,
+                           output logic [1:0] z, x, w);
+                    always_comb casez (a)
+                        4'b1???: z = 3;
+                        4'b01??: z = 2;
+                        4'b001?: z = 1;
+                        default: z = 0;
+                    endcase
+                    always_comb casex (a)
+                        4'b1xxx: x = 3;
+                        4'b01xx: x = 2;
+                        default: x = 0;
+                    endcase
+                    // Bits of the selector above the pattern must still match.
+                    always_comb casez (wide)
+                        4'b1???: w = 3;
+                        default: w = 0;
+                    endcase
+                endmodule
+            "#)
+  (top Top)
+  (for value (range 0 16)
+    (modify
+      (set a value)
+      (set wide value))
+    (let z (? (!= (& value 8) 0) 3 (? (!= (& value 4) 0) 2 (? (!= (& value 2) 0) 1 0))))
+    (let x (? (!= (& value 8) 0) 3 (? (!= (& value 4) 0) 2 0)))
+    (assert_eq z z "casez")
+    (assert_eq x x "casex")
+    (assert_eq w (* (!= (& value 8) 0) 3)))
+  (modify (set wide 0x18))
+  (assert_eq w 0 "an upper selector bit must not match"))
+
+(case instance_arrays_broadcast_and_slice_connections
+  (source "array.sv" #"
+                module Inv(input logic [3:0] a, input logic en, output logic [3:0] y);
+                    assign y = en ? ~a : a;
+                endmodule
+                module Top(input logic [7:0] a, input logic en, output logic [7:0] y);
+                    Inv u[1:0](.a(a), .en(en), .y(y));
+                endmodule
+            "#)
+  (top Top)
+  (for (value enable) (list (0x3c 1) (0xa5 0) (0xff 1))
+    (modify
+      (set a value)
+      (set en enable))
+    (let expected (? (!= enable 0) (trunc 8 (~ value)) value))
+    (assert_eq y expected)
+    ; `u[1]`, the leftmost element, takes the most significant slice.
+    (assert_eq u[1].a (>> value 4))))
+
+(case instance_arrays_with_ascending_range
+  (source "asc.sv" #"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [7:0] a, output logic [7:0] y);
+                    Inv u[0:1](.a(a), .y(y));
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0x3c 0xa5 0xff 0x01)
+    (modify (set a value))
+    (assert_eq y (trunc 8 (~ value)))
+    ; The leftmost element, `u[0]`, takes the most significant slice.
+    (assert_eq u[0].a (>> value 4))
+    (assert_eq u[1].a (& value 0xf))))
+
+(case instance_array_unpacked_connection_descending_to_descending
+  (source "unpacked.sv" #"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [3:0];
+                    Inv u[3:0](.a(a), .y(lanes));
+                    assign y = {lanes[3], lanes[2], lanes[1], lanes[0]};
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0x1234 0xa5c3 0xffff)
+    (modify (set a value))
+    (assert_eq y (trunc 16 (~ value)))))
+
+(case instance_array_unpacked_connection_descending_to_ascending
+  (source "unpacked.sv" #"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [0:3];
+                    Inv u[3:0](.a(a), .y(lanes));
+                    assign y = {lanes[0], lanes[1], lanes[2], lanes[3]};
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0x1234 0xa5c3 0xffff)
+    (modify (set a value))
+    (assert_eq y (trunc 16 (~ value)))))
+
+(case instance_array_unpacked_connection_ascending_to_descending
+  (source "unpacked.sv" #"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [3:0];
+                    Inv u[0:3](.a(a), .y(lanes));
+                    assign y = {lanes[3], lanes[2], lanes[1], lanes[0]};
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0x1234 0xa5c3 0xffff)
+    (modify (set a value))
+    (assert_eq y (trunc 16 (~ value)))))
+
+(case instance_array_unpacked_connection_offset_ranges
+  (source "unpacked.sv" #"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [15:0] a, output logic [15:0] y);
+                    logic [3:0] lanes [1:4];
+                    Inv u[4:7](.a(a), .y(lanes));
+                    assign y = {lanes[1], lanes[2], lanes[3], lanes[4]};
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0x1234 0xa5c3 0xffff)
+    (modify (set a value))
+    (assert_eq y (trunc 16 (~ value)))))
+
+(case typedef_unpacked_arrays_are_not_instance_arrays
+  (source "typedef_array.sv" #"
+                module Top(input logic clk, input logic [12:0] addr, input logic [7:0] d,
+                           input logic we, output logic [7:0] q, output logic [7:0] m);
+                    typedef logic [7:0] byte_t;
+                    byte_t mem [0:8191];
+                    byte_t grid [2][3];
+                    always_ff @(posedge clk) if (we) mem[addr] <= d;
+                    assign q = mem[addr];
+                    assign grid[1][2] = d;
+                    assign m = grid[1][2];
+                endmodule
+            "#)
+  (top Top)
+  (modify
+    (set addr 5000)
+    (set d 0x5a)
+    (set we 1))
+  (tick clk)
+  (assert_eq q 0x5a)
+  (assert_eq m 0x5a))
+
+(case instance_arrays_reject_a_fill_literal_tie_off
+  ; A connection to an instance array must be as wide as the port or as all
+  ; of them (IEEE 1800-2023 23.3.3.5); '0 is one bit wide here.
+  (source "tie.sv" #"
+                module Pass(input logic [7:0] a, input logic [7:0] b, output logic [7:0] y);
+                    assign y = a | b;
+                endmodule
+                module Top(input logic [7:0] a, output logic [15:0] y);
+                    Pass u[1:0](.a(a), .b('0), .y(y));
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case instance_arrays_reject_an_unsized_constant_tie_off
+  ; An unsized constant is 32 bits wide, neither the port's 8 nor 16
+  ; (IEEE 1800-2023 5.7.1, 23.3.3.5).
+  (source "tie.sv" #"
+                module Pass(input logic [7:0] a, input logic [7:0] b, output logic [7:0] y);
+                    assign y = a | b;
+                endmodule
+                module Top(input logic [7:0] a, output logic [15:0] y);
+                    Pass u[1:0](.a(a), .b(0), .y(y));
+                endmodule
+            "#)
+  (top Top)
+  (expect reject))
+
+(case exponentiation_works_in_constant_expressions
+  (source "pow.sv" #"
+                module Pass #(parameter W = 1)(input logic [W-1:0] a, output logic [W-1:0] y);
+                    assign y = a;
+                endmodule
+                module Top #(parameter N = 3)(input logic [2**N-1:0] a, output logic [7:0] y,
+                           output logic [3:0] lanes, output logic eq);
+                    localparam int D = 2**4 + 3**2;
+                    Pass #(.W(2**3)) u(.a(a), .y(y));
+                    for (genvar i = 0; i < 2**2; i++) begin : g
+                        assign lanes[i] = ~a[i];
+                    end
+                    if (2**2 == 4) begin : g4
+                        assign eq = (a == D);
+                    end else begin : other
+                        assign eq = 1'b0;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 5 25 200)
+    (modify (set a value))
+    (assert_eq y value)
+    (assert_eq lanes (& (trunc 8 (~ value)) 0xf))
+    (assert_eq eq (== value 25))))
+
+(case packages_provide_types_parameters_functions_and_enums
+  (source "packages.sv" #"
+                package base_pkg;
+                    localparam int BASE = 5;
+                endpackage
+                package math_pkg;
+                    import base_pkg::*;
+                    parameter int WIDTH = 8;
+                    localparam int OFFSET = BASE + 1;
+                    typedef logic [WIDTH-1:0] word_t;
+                    typedef enum logic [1:0] { IDLE, RUN, DONE } state_t;
+                    function automatic word_t bump(input word_t x);
+                        return x + OFFSET;
+                    endfunction
+                endpackage
+                module Top import math_pkg::*; (
+                    input word_t a, input logic [1:0] code,
+                    output word_t bumped, output logic running, output logic done,
+                    output logic [math_pkg::WIDTH-1:0] scoped);
+                    state_t state;
+                    always_comb begin
+                        state = state_t'(code);
+                        running = (state == RUN);
+                        done = (code == math_pkg::DONE);
+                    end
+                    assign bumped = bump(a);
+                    assign scoped = a ^ math_pkg::OFFSET;
+                endmodule
+            "#)
+  (top Top)
+  (for (value state) (list (0 0) (10 1) (250 2) (255 3))
+    (modify
+      (set a value)
+      (set code state))
+    (assert_eq bumped (trunc 8 (+ value 6)))
+    (assert_eq running (== state 1))
+    (assert_eq done (== state 2))
+    (assert_eq scoped (^ value 6))))
+
+(case struct_assignment_patterns_follow_the_target_layout
+  (source "struct_patterns.sv" #"
+                module Top(input logic clk, input logic [7:0] a, output logic [11:0] named,
+                           output logic [11:0] positional, output logic [11:0] filled,
+                           output logic [11:0] registered);
+                    typedef struct packed { logic [3:0] p; logic q; logic [6:0] r; } t_t;
+                    t_t from_assign, from_comb, from_default, in_ff;
+                    assign from_assign = '{p: a[3:0], q: a[7], r: a[6:0]};
+                    always_comb from_comb = '{a[3:0], a[7], a[6:0]};
+                    always_comb from_default = '{q: 1'b1, default: '0};
+                    always_ff @(posedge clk) in_ff <= '{r: a[6:0], q: a[0], p: a[7:4]};
+                    assign named = from_assign;
+                    assign positional = from_comb;
+                    assign filled = from_default;
+                    assign registered = in_ff;
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 0xd5 0x2a 0xff)
+    (modify (set a value))
+    (let low (& value 0x7f))
+    (let expected (| (| (trunc 16 (<< (& value 0xf) 8)) (trunc 16 (<< (>> value 7) 7))) low))
+    (assert_eq named expected)
+    (assert_eq positional expected)
+    (assert_eq filled 0x080)
+    (tick clk)
+    (let registered (| (| (trunc 16 (<< (>> value 4) 8)) (trunc 16 (<< (& value 1) 7))) low))
+    (assert_eq registered registered)))
+
+(case function_output_and_inout_arguments_are_written_back
+  (source "function_outputs.sv" #"
+                module Top(input logic clk, input logic [7:0] a, b,
+                           output logic [7:0] sum, diff, lo, hi, twice, part, q);
+                    function automatic void sum_diff(input logic [7:0] x, y,
+                                                     output logic [7:0] s, d);
+                        s = x + y;
+                        d = x - y;
+                    endfunction
+                    function automatic void clamp(input logic [7:0] x, output logic [7:0] l, h);
+                        if (x > 8'd10) begin l = 8'd10; h = x; end
+                        else begin l = x; h = 8'd10; end
+                    endfunction
+                    function automatic void bump(inout logic [7:0] v);
+                        v = v + 1;
+                    endfunction
+                    function automatic void invert(input logic [3:0] x, output logic [3:0] z);
+                        z = ~x;
+                    endfunction
+                    function automatic void shift(input logic [7:0] x, output logic [7:0] z);
+                        z = x << 1;
+                    endfunction
+                    always_comb begin
+                        sum_diff(a, b, sum, diff);
+                        clamp(a, lo, hi);
+                        twice = a;
+                        bump(twice);
+                        bump(twice);
+                        part = 8'h00;
+                        invert(a[3:0], part[7:4]);
+                    end
+                    always_ff @(posedge clk) shift(a, q);
+                endmodule
+            "#)
+  (top Top)
+  (for (x y) (list (3 4) (50 7) (255 255) (0 1))
+    (modify
+      (set a x)
+      (set b y))
+    (assert_eq sum (trunc 8 (+ x y)))
+    (assert_eq diff (trunc 8 (- x y)))
+    (assert_eq lo (min x 10))
+    (assert_eq hi (max x 10))
+    (assert_eq twice (trunc 8 (+ x 2)))
+    (assert_eq part (trunc 8 (<< (& (trunc 8 (~ x)) 0xf) 4)))
+    (tick clk)
+    (assert_eq q (trunc 8 (<< x 1)))))
+
+(case tasks_without_timing_write_their_outputs
+  (source "tasks.sv" #"
+                module Top(input logic clk, input logic [7:0] a,
+                           output logic [7:0] sum, mask, q);
+                    task automatic stats(input logic [7:0] x, output logic [7:0] s, m);
+                        logic [7:0] t;
+                        t = x + 3;
+                        s = t * 2;
+                        m = t & 8'h0f;
+                    endtask
+                    task automatic load(input logic [7:0] x, output logic [7:0] z);
+                        z = ~x;
+                    endtask
+                    always_comb stats(a, sum, mask);
+                    always_ff @(posedge clk) load(a, q);
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 1 100 255)
+    (modify (set a value))
+    (let t (trunc 8 (+ value 3)))
+    (assert_eq sum (trunc 8 (* t 2)))
+    (assert_eq mask (& t 0xf))
+    (tick clk)
+    (assert_eq q (trunc 8 (~ value)))))
+
+(case type_parameters_are_bound_by_instantiations
+  (source "type_parameters.sv" #"
+                module Inc #(parameter type T = logic [7:0])(input T a, output T y);
+                    assign y = a + 1;
+                endmodule
+                module Shift #(parameter type T = logic [7:0], parameter int N = 2)(
+                    input T a, output T y);
+                    assign y = a << N;
+                endmodule
+                module Mid #(parameter type U = logic [7:0])(input U a, output U y);
+                    Inc #(.T(U)) inner(.a(a), .y(y));
+                endmodule
+                module Neg #(parameter type T = logic [7:0])(input T a, output logic neg);
+                    assign neg = (a < 0);
+                endmodule
+                module Top(input logic [11:0] a, output logic [7:0] y8, output logic [3:0] y4,
+                           output logic [3:0] named, output logic [3:0] forwarded,
+                           output logic [11:0] shifted, output logic signed_neg, output logic unsigned_neg);
+                    typedef logic [3:0] nibble_t;
+                    Inc default_width(.a(a[7:0]), .y(y8));
+                    Inc #(.T(logic [3:0])) literal(.a(a[3:0]), .y(y4));
+                    Inc #(.T(nibble_t)) by_name(.a(a[3:0]), .y(named));
+                    Mid #(.U(logic [3:0])) through(.a(a[3:0]), .y(forwarded));
+                    Shift #(logic [11:0], 3) positional(a, shifted);
+                    Neg #(.T(logic signed [7:0])) signed_neg_u(.a(a[7:0]), .neg(signed_neg));
+                    Neg unsigned_neg_u(.a(a[7:0]), .neg(unsigned_neg));
+                endmodule
+            "#)
+  (top Top)
+  (for value (list 0 5 15 200 255 1000)
+    (modify (set a value))
+    (let low (trunc 8 value))
+    (let bumped (+ low 1))
+    (assert_eq y8 (trunc 8 (+ low 1)))
+    (assert_eq y4 (& bumped 0xf))
+    (assert_eq named (& bumped 0xf))
+    (assert_eq forwarded (& bumped 0xf))
+    (assert_eq shifted (& (trunc 16 (<< value 3)) 0xfff))
+    (assert_eq signed_neg (>= low 128))
+    (assert_eq unsigned_neg 0)))

@@ -103,22 +103,20 @@ fn shared_concurrent_initial_fixtures_match_veryl() {
     // about their order. See the timing audit linked from LIMITATIONS.md.
     for source in [
         include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_shared_clock.veryl"
+            "../../celox-test-suite/fixtures/testbench/concurrent_initial_shared_clock.veryl"
         ),
         include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_control_flow.veryl"
+            "../../celox-test-suite/fixtures/testbench/concurrent_initial_control_flow.veryl"
         ),
         include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_clock_periods.veryl"
+            "../../celox-test-suite/fixtures/testbench/concurrent_initial_clock_periods.veryl"
         ),
         include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_simultaneous_edges.veryl"
+            "../../celox-test-suite/fixtures/testbench/concurrent_initial_simultaneous_edges.veryl"
         ),
+        include_str!("../../celox-test-suite/fixtures/testbench/concurrent_initial_reset.veryl"),
         include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_reset.veryl"
-        ),
-        include_str!(
-            "../../celox-test-suite-veryl/fixtures/testbench/concurrent_initial_hierarchy.veryl"
+            "../../celox-test-suite/fixtures/testbench/concurrent_initial_hierarchy.veryl"
         ),
     ] {
         for asynchronous in [false, true] {
