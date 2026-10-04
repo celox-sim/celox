@@ -2,6 +2,8 @@ mod builder;
 #[cfg(feature = "host-runtime")]
 mod checkpoint;
 mod error;
+#[cfg(feature = "host-runtime")]
+mod state_file;
 
 #[cfg(all(
     feature = "host-runtime",
@@ -21,6 +23,8 @@ pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
 pub use checkpoint::{Checkpoint, CheckpointError, StateImage};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
+#[cfg(feature = "host-runtime")]
+pub use state_file::{StateError, StateMismatch};
 
 #[cfg(feature = "host-runtime")]
 mod host {
@@ -551,7 +555,7 @@ mod host {
 
     // ── Generic methods available for any backend ────────────────────────
     impl<B: SimBackend> Simulator<B> {
-        fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
+        pub(super) fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
             match err {
                 RuntimeErrorCode::DetectedTrueLoopCode(code) => {
                     let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {
@@ -1024,7 +1028,7 @@ mod host {
             eval_result
         }
 
-        fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
+        pub(super) fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
             self.program
                 .runtime_schema
                 .comb_observers

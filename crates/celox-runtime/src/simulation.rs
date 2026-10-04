@@ -515,6 +515,79 @@ impl<B: SimBackend> SimulationState<B> {
     }
 }
 
+/// Scheduling state expressed with the event handles of one backend, so a
+/// caller can translate it to and from names.
+pub struct ScheduleParts<B: SimBackend> {
+    pub time: u64,
+    /// Periodic clocks and their periods.
+    pub clocks: Vec<(B::Event, u64)>,
+    /// Pending events, including those of periodic clocks.
+    pub events: Vec<SimEvent<B>>,
+    /// Pending events that a periodic clock re-schedules when they fire, with
+    /// the number of identical such events.
+    pub periodic: Vec<(SimEvent<B>, u64)>,
+    /// Events whose signal was high when edge detection last sampled it.
+    pub high_events: Vec<B::Event>,
+}
+
+impl<B: SimBackend> SimulationState<B> {
+    /// Express the scheduling state with `backend`'s event handles.
+    pub fn export_schedule(&self, backend: &B) -> ScheduleParts<B> {
+        let events = backend.id_to_event_slice();
+        ScheduleParts {
+            time: self.scheduler.time,
+            clocks: self
+                .scheduler
+                .clocks
+                .iter()
+                .enumerate()
+                .filter_map(|(id, clock)| Some((events[id], clock.as_ref()?.period)))
+                .collect(),
+            events: self.scheduler.event_queue.iter().cloned().collect(),
+            periodic: self
+                .periodic_events
+                .iter()
+                .map(|(key, &count)| {
+                    (
+                        SimEvent {
+                            time: key.time,
+                            event_ref: events[key.event_id],
+                            signal: key.signal,
+                            next_val: key.next_val,
+                        },
+                        count as u64,
+                    )
+                })
+                .collect(),
+            high_events: self.last_clock_values.iter().map(|id| events[id]).collect(),
+        }
+    }
+
+    /// Replace the scheduling state with `parts`, whose handles belong to
+    /// this state's backend.
+    pub fn import_schedule(&mut self, parts: ScheduleParts<B>) {
+        self.scheduler.time = parts.time;
+        self.scheduler.clocks.clear();
+        for (event, period) in parts.clocks {
+            let id = event.id();
+            if id >= self.scheduler.clocks.len() {
+                self.scheduler.clocks.resize(id + 1, None);
+            }
+            self.scheduler.clocks[id] = Some(ClockDef { period });
+        }
+        self.scheduler.event_queue = parts.events.into_iter().collect();
+        self.periodic_events = parts
+            .periodic
+            .into_iter()
+            .map(|(event, count)| (PeriodicEventKey::from_event(&event), count as usize))
+            .collect();
+        self.last_clock_values.make_empty();
+        for event in parts.high_events {
+            self.last_clock_values.insert(event.id());
+        }
+    }
+}
+
 /// Scheduling state captured by [`SimulationState::snapshot`].
 pub struct SimulationSnapshot<B: SimBackend> {
     time: u64,

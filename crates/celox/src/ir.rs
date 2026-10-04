@@ -617,6 +617,9 @@ impl OptimizedSir {
         }
         crate::optimizer::sir::retain_final_identity_aliases(&mut program, four_state);
         let layout = crate::backend::MemoryLayout::build(&program, four_state, mode);
+        // Classify before alias stores disappear: an identity alias is a
+        // combinational copy even once it only shares its source's storage.
+        collect_comb_writes(&mut program);
 
         // Remove identity Stores for aliases validated by the layout
         if !program.layout_requirements.is_empty() {
@@ -655,6 +658,29 @@ impl OptimizedSir {
             layout,
         }
     }
+}
+
+/// Record the state objects written by combinational logic, including
+/// identity aliases, whose stores are about to be removed.
+fn collect_comb_writes(program: &mut OptimizedSir) {
+    let mut comb_writes: crate::HashSet<AbsoluteAddr> = program
+        .layout_requirements
+        .state_aliases()
+        .keys()
+        .copied()
+        .collect();
+    for unit in &program.sir.eval_comb {
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                if let SIRInstruction::Store(address, ..) | SIRInstruction::Commit(_, address, ..) =
+                    instruction
+                {
+                    comb_writes.insert(address.absolute_addr());
+                }
+            }
+        }
+    }
+    program.runtime.runtime_schema.comb_writes = comb_writes;
 }
 
 fn rebuild_rtl_writes(program: &mut OptimizedSir) {

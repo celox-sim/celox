@@ -56,7 +56,8 @@ sim.time(); // 100
   go back in time.
 - `$display` output and assertion messages emitted after the checkpoint are
   not withdrawn. Running the same cycles again emits them again.
-- Checkpoints live in memory. They cannot be saved to a file yet.
+- Checkpoints live in memory. To keep state across processes, use a state
+  file.
 
 ## Rust API
 
@@ -68,6 +69,43 @@ sim.restore(&checkpoint)?;
 ```
 
 Both return a `CheckpointError` for the cases above.
+
+## State Files
+
+A state file saves the state in a binary file that records every value by
+its signal path. Because it does not depend on the memory layout, a file
+saved by one simulator loads into another one built with a different backend
+or optimization level. This lets you, for example, capture the state of an
+optimized native build just before a failure and replay it on the
+interpreter at `O0`.
+
+The Rust API saves to and loads from a `StateFile`:
+
+```rust
+let file = sim.save_state()?;
+file.write_to(std::fs::File::create("before_failure.state")?)?;
+
+let file = StateFile::read_from(std::fs::File::open("before_failure.state")?)?;
+other.load_state(&file)?;
+```
+
+Loading needs every register, memory and input of the design to be present
+with the same width. If any is missing, nothing is changed and the error lists
+the differences. Combinational signals are recomputed after loading, so they
+need not match. A `Simulation` state file also records the time, clocks and
+pending events by name.
+
+The `celox` command line tool inspects state files:
+
+```bash
+celox state dump before_failure.state
+celox state diff native.state interpreter.state
+```
+
+`diff` exits with status 1 when the files differ. Both commands skip
+combinational signals unless you pass `--comb`. Dead store elimination at
+`O2` leaves unread combinational signals unwritten, so their saved values are
+stale.
 
 ## Further Reading
 

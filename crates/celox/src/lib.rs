@@ -34,7 +34,8 @@ pub use celox_frontend_sdk::FrontendArtifact;
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
-    SignalDirection,
+    ScheduleRecord, ScheduledEvent, SignalDirection, StateDifference, StateFile, StateFileError,
+    StateObject, StateRole, format_state_value,
 };
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
@@ -82,7 +83,7 @@ mod host_api {
     pub use crate::simulator::{
         Checkpoint, CheckpointError, DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal,
         RuntimeEvent, RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder,
-        SimulatorOptions, StateImage, TierPromotion,
+        SimulatorOptions, StateError, StateImage, StateMismatch, TierPromotion,
     };
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};
     pub use celox_macros::veryl_test;

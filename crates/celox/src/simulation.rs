@@ -2,7 +2,9 @@ use crate::{
     RuntimeErrorCode, Simulator,
     backend::{EventHandle, MemoryLayout, SimBackend},
     ir::SignalRef,
-    simulator::{Checkpoint, CheckpointError, InstanceHierarchy, NamedEvent, NamedSignal},
+    simulator::{
+        Checkpoint, CheckpointError, InstanceHierarchy, NamedEvent, NamedSignal, StateError,
+    },
 };
 use celox_runtime::{EventInfo, SimulationExecutor, SimulationSnapshot, SimulationState};
 
@@ -240,6 +242,26 @@ impl<B: SimBackend> Simulation<B> {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
         })
+    }
+
+    /// Save the value of every state object by path, together with the
+    /// simulation time, clocks and pending events by name.
+    pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
+        let mut file = self.simulator.save_state()?;
+        let parts = self.state.export_schedule(&self.simulator.backend);
+        file.schedule = Some(self.simulator.name_schedule(parts));
+        Ok(file)
+    }
+
+    /// Load a state file saved from a `Simulation`, including its time,
+    /// clocks and pending events. See [`Simulator::load_state`] for how
+    /// objects are matched.
+    pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
+        let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
+        let parts = self.simulator.resolve_schedule(record)?;
+        self.simulator.load_state(file)?;
+        self.state.import_schedule(parts);
+        Ok(())
     }
 
     /// Return to the state saved in `checkpoint`, including its simulation

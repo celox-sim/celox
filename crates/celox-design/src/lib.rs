@@ -127,6 +127,10 @@ pub struct RuntimeSchema<A> {
     /// Bit ranges written by RTL execution units. External component outputs
     /// may not overlap these ranges because that would create multiple drivers.
     pub rtl_writes: HashSet<VarAtomBase<A>>,
+    /// State objects written by combinational logic. Their values are
+    /// derived from the other state, so state files recompute rather than
+    /// compare them.
+    pub comb_writes: HashSet<A>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -137,6 +141,7 @@ impl<A> Default for RuntimeSchema<A> {
             comb_observers: Vec::new(),
             testbench_read_roots: HashSet::default(),
             rtl_writes: HashSet::default(),
+            comb_writes: HashSet::default(),
         }
     }
 }

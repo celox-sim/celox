@@ -1,0 +1,381 @@
+//! Saving and loading layout-independent state files.
+//!
+//! Unlike a [`super::Checkpoint`], a [`StateFile`] identifies every state
+//! object by its path, so it can move between simulators built with different
+//! backends, optimization levels or memory layouts. Only objects that hold
+//! state across evaluations must match; combinational objects are recomputed
+//! after loading.
+
+use std::collections::BTreeMap;
+
+use crate::HashMap;
+
+use celox_runtime::scheduler::SimEvent;
+use celox_runtime::{
+    ScheduleParts, ScheduleRecord, ScheduledEvent, StateFile, StateObject, StateRole,
+};
+use num_bigint::BigUint;
+
+use super::checkpoint::CheckpointError;
+use super::host::Simulator;
+use crate::RuntimeErrorCode;
+use crate::backend::{EventHandle, SimBackend};
+use crate::ir::SignalRef;
+
+/// Why a state file could not be saved or loaded.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointError),
+    #[error("the state file does not match the design: {0}")]
+    Mismatch(StateMismatch),
+    #[error("the state file has no simulation schedule; it was saved from a Simulator")]
+    MissingSchedule,
+    #[error("evaluating combinational logic failed: {0}")]
+    Runtime(RuntimeErrorCode),
+}
+
+/// Differences between a state file and the design it is loaded into.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateMismatch {
+    /// State objects of the design that the file does not contain.
+    pub missing_in_file: Vec<String>,
+    /// State objects of the file that the design does not declare.
+    pub missing_in_design: Vec<String>,
+    /// Objects declared with another width, as (path, file width, design width).
+    pub width_mismatches: Vec<(String, usize, usize)>,
+    /// Event or signal names of the schedule that the design does not declare.
+    pub unknown_names: Vec<String>,
+}
+
+impl StateMismatch {
+    fn is_empty(&self) -> bool {
+        self.missing_in_file.is_empty()
+            && self.missing_in_design.is_empty()
+            && self.width_mismatches.is_empty()
+            && self.unknown_names.is_empty()
+    }
+}
+
+impl std::fmt::Display for StateMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn list(
+            f: &mut std::fmt::Formatter<'_>,
+            label: &str,
+            items: &[String],
+        ) -> std::fmt::Result {
+            const SHOWN: usize = 10;
+            if items.is_empty() {
+                return Ok(());
+            }
+            write!(
+                f,
+                "\n  {label}: {}",
+                items[..items.len().min(SHOWN)].join(", ")
+            )?;
+            if items.len() > SHOWN {
+                write!(f, " and {} more", items.len() - SHOWN)?;
+            }
+            Ok(())
+        }
+        list(f, "missing in file", &self.missing_in_file)?;
+        list(f, "missing in design", &self.missing_in_design)?;
+        let widths: Vec<_> = self
+            .width_mismatches
+            .iter()
+            .map(|(path, file, design)| format!("{path} (file {file}, design {design})"))
+            .collect();
+        list(f, "width differs", &widths)?;
+        list(f, "unknown in schedule", &self.unknown_names)
+    }
+}
+
+/// A state object of the design, by the path a state file uses for it.
+struct NamedObject {
+    path: String,
+    signal: SignalRef,
+    role: StateRole,
+}
+
+impl<B: SimBackend> Simulator<B> {
+    /// Save the value of every state object, by path.
+    ///
+    /// Combinational values are settled first, so the file shows the values
+    /// a read would return.
+    pub fn save_state(&mut self) -> Result<StateFile, StateError> {
+        if !self.components.is_empty() {
+            return Err(CheckpointError::ExternalComponents.into());
+        }
+        if self.dirty {
+            self.eval_comb_checked().map_err(StateError::Runtime)?;
+            self.dirty = false;
+        }
+        let four_state = self.backend.layout().four_state;
+        let objects = self
+            .named_state_objects()
+            .into_iter()
+            .map(|object| {
+                let width = object.signal.width;
+                let size = width.div_ceil(8);
+                let bytes = |value: BigUint| {
+                    let mut bytes = value.to_bytes_le();
+                    bytes.resize(size, 0);
+                    bytes
+                };
+                let (value, mask) = if four_state && object.signal.is_4state {
+                    let (value, mask) = self.backend.get_four_state(object.signal);
+                    (bytes(value), Some(bytes(mask)))
+                } else {
+                    (bytes(self.backend.get(object.signal)), None)
+                };
+                StateObject {
+                    path: object.path,
+                    width,
+                    role: object.role,
+                    is_4state: object.signal.is_4state,
+                    value,
+                    mask,
+                }
+            })
+            .collect();
+        Ok(StateFile {
+            four_state,
+            objects,
+            schedule: None,
+        })
+    }
+
+    /// Load the state saved in `file`, matching objects by path.
+    ///
+    /// Every object that holds state in this design must be present with the
+    /// same width; otherwise nothing is changed and the differences are
+    /// returned. Combinational objects are recomputed. Runtime events do not
+    /// fire for the jump to the loaded state. A schedule in the file is
+    /// ignored. Loading is rejected while a VCD writer is attached.
+    pub fn load_state(&mut self, file: &StateFile) -> Result<(), StateError> {
+        let writes = self.match_state_file(file)?;
+        self.write_state(file, writes)
+    }
+
+    /// Check `file` against the design and pair each state object with its
+    /// saved value.
+    fn match_state_file(&self, file: &StateFile) -> Result<Vec<(SignalRef, usize)>, StateError> {
+        if !self.components.is_empty() {
+            return Err(CheckpointError::ExternalComponents.into());
+        }
+        if self.vcd_writer.is_some() {
+            return Err(CheckpointError::VcdAttached.into());
+        }
+        let saved: BTreeMap<&str, usize> = file
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| (object.path.as_str(), index))
+            .collect();
+        let objects = self.named_state_objects();
+        let mut mismatch = StateMismatch::default();
+        let mut writes = Vec::new();
+        for object in &objects {
+            if object.role == StateRole::Comb {
+                continue;
+            }
+            match saved.get(object.path.as_str()) {
+                None => mismatch.missing_in_file.push(object.path.clone()),
+                Some(&index) if file.objects[index].width != object.signal.width => {
+                    mismatch.width_mismatches.push((
+                        object.path.clone(),
+                        file.objects[index].width,
+                        object.signal.width,
+                    ));
+                }
+                Some(&index) => writes.push((object.signal, index)),
+            }
+        }
+        let declared: std::collections::BTreeSet<&str> =
+            objects.iter().map(|object| object.path.as_str()).collect();
+        for object in &file.objects {
+            if object.role == StateRole::State && !declared.contains(object.path.as_str()) {
+                mismatch.missing_in_design.push(object.path.clone());
+            }
+        }
+        if mismatch.is_empty() {
+            Ok(writes)
+        } else {
+            Err(StateError::Mismatch(mismatch))
+        }
+    }
+
+    fn write_state(
+        &mut self,
+        file: &StateFile,
+        writes: Vec<(SignalRef, usize)>,
+    ) -> Result<(), StateError> {
+        let four_state = self.backend.layout().four_state;
+        for (signal, index) in writes {
+            let object = &file.objects[index];
+            let value = BigUint::from_bytes_le(&object.value);
+            let mask = object
+                .mask
+                .as_deref()
+                .map(BigUint::from_bytes_le)
+                .unwrap_or_default();
+            if four_state && signal.is_4state {
+                self.backend.set_four_state(signal, value, mask);
+            } else {
+                // A two-state simulation reads unknown bits as zero.
+                let unknown = &value & &mask;
+                self.backend.set_wide(signal, value - unknown);
+            }
+        }
+        // The loaded state replaces the simulation history, so combinational
+        // observers take it as their baseline instead of reporting changes.
+        self.backend
+            .eval_comb()
+            .map_err(|error| StateError::Runtime(self.decorate_runtime_error(error)))?;
+        self.comb_observer_snapshots = self.snapshot_all_comb_observers();
+        self.comb_observer_initial_eval = false;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// State objects with the paths state files use: the hierarchical path,
+    /// followed by `#n` when several objects share it.
+    fn named_state_objects(&self) -> Vec<NamedObject> {
+        let comb_writes = &self.program.runtime_schema.comb_writes;
+        let mut objects: Vec<_> = self
+            .backend
+            .layout()
+            .offsets
+            .keys()
+            .map(|&address| (self.program.get_path(&address), address))
+            .collect();
+        objects.sort_unstable();
+        let mut named = Vec::with_capacity(objects.len());
+        let mut index = 0;
+        while index < objects.len() {
+            let path = &objects[index].0;
+            let end = objects[index..]
+                .iter()
+                .position(|(other, _)| other != path)
+                .map_or(objects.len(), |offset| index + offset);
+            for (ordinal, (path, address)) in objects[index..end].iter().enumerate() {
+                named.push(NamedObject {
+                    path: if end - index == 1 {
+                        path.clone()
+                    } else {
+                        format!("{path}#{ordinal}")
+                    },
+                    signal: self.backend.resolve_signal(address),
+                    role: if comb_writes.contains(address) {
+                        StateRole::Comb
+                    } else {
+                        StateRole::State
+                    },
+                });
+            }
+            index = end;
+        }
+        named
+    }
+
+    /// Express a schedule by event and signal names.
+    pub(crate) fn name_schedule(&self, parts: ScheduleParts<B>) -> ScheduleRecord {
+        let signal_paths: HashMap<usize, String> = self
+            .named_state_objects()
+            .into_iter()
+            .rev()
+            .map(|object| (object.signal.offset, object.path))
+            .collect();
+        let event_path = |event: B::Event| self.program.get_path(&event.addr());
+        let named = |event: &SimEvent<B>| ScheduledEvent {
+            time: event.time,
+            event: event_path(event.event_ref),
+            signal: signal_paths
+                .get(&event.signal.offset)
+                .cloned()
+                .unwrap_or_default(),
+            value: event.next_val,
+        };
+        ScheduleRecord {
+            time: parts.time,
+            clocks: parts
+                .clocks
+                .into_iter()
+                .map(|(event, period)| (event_path(event), period))
+                .collect(),
+            events: parts.events.iter().map(named).collect(),
+            periodic: parts
+                .periodic
+                .iter()
+                .map(|(event, count)| (named(event), *count))
+                .collect(),
+            high_events: parts.high_events.into_iter().map(event_path).collect(),
+        }
+    }
+
+    /// Resolve a named schedule into this design's handles. Fails with the
+    /// names the design does not declare.
+    pub(crate) fn resolve_schedule(
+        &self,
+        record: &ScheduleRecord,
+    ) -> Result<ScheduleParts<B>, StateError> {
+        let events: HashMap<String, B::Event> = self
+            .backend
+            .id_to_event_slice()
+            .iter()
+            .map(|&event| (self.program.get_path(&event.addr()), event))
+            .collect();
+        let signals: HashMap<String, SignalRef> = self
+            .named_state_objects()
+            .into_iter()
+            .map(|object| (object.path, object.signal))
+            .collect();
+        let scheduled = record
+            .events
+            .iter()
+            .chain(record.periodic.iter().map(|(event, _)| event));
+        let mut unknown: Vec<String> = record
+            .clocks
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&record.high_events)
+            .chain(scheduled.clone().map(|event| &event.event))
+            .filter(|name| !events.contains_key(*name))
+            .chain(
+                scheduled
+                    .map(|event| &event.signal)
+                    .filter(|name| !signals.contains_key(*name)),
+            )
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            unknown.sort();
+            unknown.dedup();
+            return Err(StateError::Mismatch(StateMismatch {
+                unknown_names: unknown,
+                ..Default::default()
+            }));
+        }
+        let resolve = |event: &ScheduledEvent| SimEvent {
+            time: event.time,
+            event_ref: events[&event.event],
+            signal: signals[&event.signal],
+            next_val: event.value,
+        };
+        Ok(ScheduleParts {
+            time: record.time,
+            clocks: record
+                .clocks
+                .iter()
+                .map(|(name, period)| (events[name], *period))
+                .collect(),
+            events: record.events.iter().map(resolve).collect(),
+            periodic: record
+                .periodic
+                .iter()
+                .map(|(event, count)| (resolve(event), *count))
+                .collect(),
+            high_events: record.high_events.iter().map(|name| events[name]).collect(),
+        })
+    }
+}

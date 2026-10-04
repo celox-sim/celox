@@ -338,6 +338,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
+    #[serde(default)]
+    pub(crate) comb_writes: HashSet<AbsoluteAddr>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -427,6 +429,7 @@ impl NativeProgramImage {
                 comb_observers: self.runtime_schema.comb_observers.clone(),
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
+                comb_writes: self.runtime_schema.comb_writes.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -2108,6 +2111,7 @@ fn compile_program(
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
                 testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
+                comb_writes: sir.runtime().runtime_schema.comb_writes.clone(),
             },
             layout: layout.clone(),
             native_memory_size,
