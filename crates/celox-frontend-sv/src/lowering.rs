@@ -1263,6 +1263,25 @@ fn array_element_connections(
                     connection.formal
                 )));
             };
+            let unpacked = parent_signal_names
+                .get(name)
+                .and_then(|id| parent_variables.get(id))
+                .is_some_and(|variable| variable.array_dims == [count]);
+            if unpacked && actual_width == port_width * count {
+                // An unpacked array of `count` elements: element `i` of the
+                // instance array takes array element `i`.
+                let lsb = position * port_width;
+                return Ok(LoweredSvPortConnection {
+                    formal: connection.formal.clone(),
+                    actual: connection.actual.clone(),
+                    actual_expr: Some(sv::ir::Expr::Select {
+                        expr: Box::new(actual_expr.clone()),
+                        msb: sv::ir::ConstExpr::Literal((lsb + port_width - 1).to_string()),
+                        lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
+                        signed: false,
+                    }),
+                });
+            }
             let zero_based = parent_signal_names
                 .get(name)
                 .and_then(|id| parent_variables.get(id))

@@ -68,6 +68,13 @@ o_data: top_out[i],
         @case "hierarchy::test_instance_unpacked_array_slice_output";
     }
 
+    fn test_instance_array_broadcast_and_unpacked_array_connection(sim) {
+        // Neither veryl-simulator nor the Veryl frontend supports instance
+        // arrays; the emitted SystemVerilog does.
+        @ignore_on(native, cranelift, wasm, interp, veryl);
+        @case "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection";
+    }
+
     fn test_instance_input_function_output_writeback(sim) {
         @ignore_on(sv);
         @case "hierarchy::test_instance_input_function_output_writeback";
