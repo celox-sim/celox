@@ -49,6 +49,9 @@ mod host {
         /// The index of this instance under its name: its element index in
         /// an instance array or generate loop, 0 otherwise.
         pub index: usize,
+        /// Whether this instance's name takes an index (an instance array or
+        /// generate loop), even when it is the only instance under the name.
+        pub indexed: bool,
         pub signals: Vec<NamedSignal>,
         pub children: Vec<(String, Vec<InstanceHierarchy>)>,
     }
@@ -1463,6 +1466,10 @@ mod host {
                 .instance_at_path(&InstancePath(current_path.to_vec()))
                 .expect("instance not found");
             let module_name = instance.module_name.clone();
+            let indexed = instance
+                .display_path
+                .last()
+                .is_some_and(|segment| segment.ends_with(']'));
 
             let signals = self.build_signals_for_instance(instance.id);
 
@@ -1496,6 +1503,7 @@ mod host {
             InstanceHierarchy {
                 module_name,
                 index: current_path.last().map_or(0, |(_, index)| *index),
+                indexed,
                 signals,
                 children,
             }

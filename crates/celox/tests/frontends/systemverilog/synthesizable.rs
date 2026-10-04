@@ -389,6 +389,50 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("m")), 0x5au8.into());
     }
 
+    fn instance_arrays_share_fill_literals_and_unsized_constants(sim) {
+        @setup {
+            let source = r#"
+                module Pass(input logic [7:0] a, input logic [7:0] b, input logic [7:0] c,
+                            output logic [7:0] y);
+                    assign y = a | b | c;
+                endmodule
+                module Top(input logic [7:0] a, output logic [15:0] y);
+                    Pass u[1:0](.a(a), .b('0), .c(0), .y(y));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("tie.sv"))], "Top");
+        let a = sim.signal("a");
+        for value in [0u8, 0x5a, 0xff] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            let expected = (u16::from(value) << 8) | u16::from(value);
+            assert_eq!(sim.get(sim.signal("y")), expected.into(), "a={value}");
+        }
+    }
+
+    fn single_element_instance_arrays_are_indexed_in_the_hierarchy(sim) {
+        @setup {
+            let source = r#"
+                module Inv(input logic [3:0] a, output logic [3:0] y);
+                    assign y = ~a;
+                endmodule
+                module Top(input logic [3:0] a, output logic [3:0] y);
+                    Inv u[0:0](.a(a), .y(y));
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("one.sv"))], "Top");
+        let hierarchy = sim.named_hierarchy();
+        let (_, elements) = hierarchy
+            .children
+            .iter()
+            .find(|(name, _)| name == "u")
+            .expect("instance array `u`");
+        assert_eq!(elements.len(), 1);
+        assert!(elements[0].indexed);
+        assert_eq!(elements[0].index, 0);
+    }
+
     fn exponentiation_works_in_constant_expressions(sim) {
         @setup {
             let source = r#"
